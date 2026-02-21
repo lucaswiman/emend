@@ -1,0 +1,13 @@
+start: pattern
+
+pattern: (code_chunk | metavar)+
+
+metavar: DOLLAR (ELLIPSIS)? METAVAR_NAME TYPE_CONSTRAINT?
+       | DOLLAR UNDERSCORE
+
+DOLLAR: "$"
+ELLIPSIS: "..."
+UNDERSCORE: "_"
+METAVAR_NAME: /[A-Z][A-Z0-9_]*/
+TYPE_CONSTRAINT: /:!?(?:expr|stmt|identifier|int|str|float|call|attr|any)/
+code_chunk: /[^$:]+/ | ":"

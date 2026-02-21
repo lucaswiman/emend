@@ -1,0 +1,36 @@
+[project]
+name = "emend"
+version = "0.1.0"
+description = "A Python refactoring CLI tool with structured edits and pattern transforms"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MPL-2.0"}
+authors = [{name = "Lucas Wiman", email = "lucas.wiman@gmail.com"}]
+keywords = ["refactoring", "python", "code-transformation", "libcst"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["typer", "libcst", "lark", "pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-xdist", "sphinx", "myst-parser"]
+
+[project.urls]
+Homepage = "https://github.com/lucaswiman/pysect"
+Repository = "https://github.com/lucaswiman/pysect"
+Issues = "https://github.com/lucaswiman/pysect/issues"
+
+[project.scripts]
+emend = "emend.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
