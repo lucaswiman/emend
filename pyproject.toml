@@ -25,6 +25,7 @@ dev = ["pytest", "pytest-xdist", "sphinx", "furo", "myst-parser"]
 
 [project.urls]
 Homepage = "https://github.com/lucaswiman/emend"
+Documentation = "https://lucaswiman.github.io/emend/"
 Repository = "https://github.com/lucaswiman/emend"
 Issues = "https://github.com/lucaswiman/emend/issues"
 
