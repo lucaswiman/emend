@@ -9,13 +9,6 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
-    'myst_parser',
-]
-
-# MyST settings
-myst_enable_extensions = [
-    'colon_fence',
-    'deflist',
 ]
 
 templates_path = ['_templates']
@@ -31,9 +24,3 @@ autodoc_member_order = 'bysource'
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 napoleon_include_init_with_doc = True
-
-# Source suffix - support both rst and md
-source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
-}
