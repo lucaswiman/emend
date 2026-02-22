@@ -8,6 +8,7 @@ release = '0.0.1'
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.napoleon',
+    'sphinx.ext.viewcode',
     'myst_parser',
 ]
 
@@ -20,7 +21,16 @@ myst_enable_extensions = [
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
-html_theme = 'alabaster'
+# Use furo theme for modern, responsive documentation
+html_theme = 'furo'
+
+# Autodoc settings
+autodoc_member_order = 'bysource'
+
+# Napoleon settings for Google-style docstrings
+napoleon_google_docstring = True
+napoleon_numpy_docstring = False
+napoleon_include_init_with_doc = True
 
 # Source suffix - support both rst and md
 source_suffix = {
