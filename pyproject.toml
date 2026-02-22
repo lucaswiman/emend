@@ -1,6 +1,6 @@
 [project]
 name = "emend"
-version = "0.1.0"
+version = "0.0.1"
 description = "A Python refactoring CLI tool with structured edits and pattern transforms"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,9 +24,9 @@ dependencies = ["typer", "libcst", "lark", "pyyaml"]
 dev = ["pytest", "pytest-xdist", "sphinx", "myst-parser"]
 
 [project.urls]
-Homepage = "https://github.com/lucaswiman/pysect"
-Repository = "https://github.com/lucaswiman/pysect"
-Issues = "https://github.com/lucaswiman/pysect/issues"
+Homepage = "https://github.com/lucaswiman/emend"
+Repository = "https://github.com/lucaswiman/emend"
+Issues = "https://github.com/lucaswiman/emend/issues"
 
 [project.scripts]
 emend = "emend.cli:main"
