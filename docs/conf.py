@@ -3,7 +3,7 @@
 project = 'emend'
 copyright = '2024, emend contributors'
 author = 'emend contributors'
-release = '0.1.0'
+release = '0.0.1'
 
 extensions = [
     'sphinx.ext.autodoc',
