@@ -170,6 +170,80 @@ Rules that include a ``replace`` field can be auto-fixed:
 When ``--fix`` is used, emend applies the replacement pattern and reports how many replacements were made per file. Rules without a ``replace`` field are skipped during fix mode.
 
 
+Inline suppression (``# noqa``)
+-------------------------------
+
+You can suppress lint violations on individual statements with ``# noqa`` comments. emend uses the ``emend:`` prefix to avoid collisions with other linters (flake8, ruff, etc.).
+
+Suppress all emend rules on a line:
+
+.. code-block:: python
+
+   print("debug info")  # noqa
+
+Suppress a specific rule:
+
+.. code-block:: python
+
+   print("debug info")  # noqa: emend:no-print
+
+Suppress multiple rules:
+
+.. code-block:: python
+
+   print("debug info")  # noqa: emend:no-print, emend:no-debug
+
+Mix with other linters (only ``emend:``-prefixed entries affect emend):
+
+.. code-block:: python
+
+   x = some_long_expression  # noqa: E501, emend:no-print
+
+A bare ``# noqa: E501`` with no ``emend:`` entries has no effect on emend.
+
+Suppression is case-insensitive -- ``# NOQA`` and ``# Noqa`` work too.
+
+Multi-line statements
+~~~~~~~~~~~~~~~~~~~~~
+
+A ``# noqa`` comment on the first line of a multi-line simple statement suppresses matches on all lines of that statement:
+
+.. code-block:: python
+
+   result = (  # noqa: emend:no-print
+       print("hello")
+   )
+
+For compound statements (``if``, ``for``, ``def``, ``class``), a ``# noqa`` on the header line covers only that line, not the entire body.
+
+How it works
+~~~~~~~~~~~~
+
+emend uses Python's ``tokenize`` module to find ``# noqa`` comments. This correctly ignores ``#`` characters inside string literals:
+
+.. code-block:: python
+
+   x = "# noqa"  # this does NOT suppress anything
+   print("hello")  # this violation is still reported
+
+Interaction with ``--fix``
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--fix`` is used, lines suppressed by ``# noqa`` are left unchanged while other violations are still fixed:
+
+.. code-block:: python
+
+   # Before --fix
+   print("keep this")  # noqa
+   print("fix this")
+
+   # After --fix
+   print("keep this")  # noqa
+   logger.info("fix this")
+
+If all matches in a file are suppressed, the file is not modified at all.
+
+
 CLI reference
 -------------
 
