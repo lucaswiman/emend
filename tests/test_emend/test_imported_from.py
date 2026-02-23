@@ -131,7 +131,7 @@ class TestImportedFromCLI:
 
         result = run_emend_cmd([
             "search", "json.loads($X)", str(file),
-            "--imported-from", "json", "--count"
+            "--imported-from", "json", "--output", "count"
         ], check=False)
         # Should find 0 matches
         assert result.stdout.strip() == "0"

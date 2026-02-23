@@ -68,6 +68,41 @@ def parse_scope_in(scope_in: str | None, default_path: str | None = None) -> tup
 
     return scope_in.split("."), None
 
+
+_STRUCTURAL_KEYWORDS = (
+    "def", "async def", "class", "for", "while", "try", "with", "if", "except"
+)
+
+
+def parse_where_clause(values: list[str]) -> dict:
+    """Parse --where values into internal API params.
+
+    Detects syntax from each value:
+    - "not ..." prefix → not_inside constraint
+    - "@..." prefix → decorator filter (matching for lookup, or passed through)
+    - contains "$" → body pattern match (matching)
+    - structural keyword (def, class, etc.) → inside constraint
+    - otherwise → dotted scope path
+
+    Returns dict with keys: scope, inside, not_inside, matching
+    """
+    result: dict = {}
+    for value in values:
+        if value.startswith("not "):
+            result["not_inside"] = value[4:].strip()
+        elif value.startswith("@"):
+            result["matching"] = value
+        elif "$" in value:
+            result["matching"] = value
+        elif any(
+            value == kw or value.startswith(kw + " ") or value.startswith(kw + ":")
+            for kw in _STRUCTURAL_KEYWORDS
+        ):
+            result["inside"] = value
+        else:
+            result["scope"] = value.split(".")
+    return result
+
 # Create app with emend commands
 app = typer.Typer(
     help="Python refactoring CLI",
@@ -92,21 +127,13 @@ def search(
         Optional[list[str]],
         typer.Option("--name", help="Name pattern filter (glob or /regex/)")
     ] = None,
-    has_decorator: Annotated[
-        Optional[list[str]],
-        typer.Option("--has-decorator", help="Decorator filter")
-    ] = None,
     returns: Annotated[
         Optional[list[str]],
         typer.Option("--returns", help="Return type filter")
     ] = None,
-    in_class: Annotated[
-        Optional[list[str]],
-        typer.Option("--in-class", help="Restrict to methods of named class")
-    ] = None,
     depth: Annotated[
         Optional[list[str]],
-        typer.Option("--depth", help="Nesting depth filter")
+        typer.Option("--depth", help="Nesting depth filter (lookup mode) or display depth limit (summary mode)")
     ] = None,
     has_param: Annotated[
         Optional[list[str]],
@@ -120,45 +147,21 @@ def search(
         bool,
         typer.Option("--smart-case", help="Match naming convention variants")
     ] = False,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json", help="Output as JSON")
-    ] = False,
-    count: Annotated[
-        bool,
-        typer.Option("--count", help="Output only count of matches")
-    ] = False,
-    dedent: Annotated[
-        bool,
-        typer.Option("--dedent", help="Dedent the source code")
-    ] = False,
     output: Annotated[
         Optional[str],
-        typer.Option("--output", "-o", help="Output format: code, location, selector, summary, metadata")
-    ] = None,
-    flat: Annotated[
-        bool,
-        typer.Option("--flat", help="Flat output with full dotted paths (summary mode)")
-    ] = False,
-    tree_depth: Annotated[
-        Optional[int],
-        typer.Option("--tree-depth", help="Nesting depth limit for summary mode")
-    ] = None,
-    scope_in: Annotated[
-        Optional[str],
-        typer.Option("--in", help="Limit search to within a symbol (e.g., 'MyClass' or 'my_func')")
-    ] = None,
-    inside: Annotated[
-        Optional[str],
-        typer.Option("--inside", help="Only match inside this structure (def, class, for, while, try, with, if)")
-    ] = None,
-    not_inside: Annotated[
-        Optional[str],
-        typer.Option("--not-inside", help="Only match outside this structure")
+        typer.Option("--output", "-o", help=(
+            "Output format: code, location, selector, summary, metadata, json, count, "
+            "summary::flat, code::dedent"
+        ))
     ] = None,
     where: Annotated[
-        Optional[str],
-        typer.Option("--where", help="Only match inside structures matching this pattern (e.g., 'class MyClass', 'def test_*')")
+        Optional[list[str]],
+        typer.Option("--where", help=(
+            "Filter/scope constraint. Syntax auto-detected: "
+            "'def test_*' (structural), 'not class' (negation), "
+            "'MyClass.method' (scope), '@decorator' (decorator), "
+            "'print($X)' (body pattern), 'class Foo' (in-class lookup)"
+        ))
     ] = None,
     imported_from: Annotated[
         Optional[str],
@@ -168,10 +171,6 @@ def search(
         bool,
         typer.Option("--scope-local", help="Only match locally-defined names, exclude imports (pattern mode)")
     ] = False,
-    matching: Annotated[
-        Optional[str],
-        typer.Option("--matching", help="Filter to symbols whose body matches this pattern (lookup mode)")
-    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -180,33 +179,76 @@ def search(
     A bare file/dir path with no filters shows a symbol summary (like list-symbols).
 
     Output formats (--output):
-        code      Full source of matched symbol(s) [default for selector]
-        location  file.py:line [default for pattern mode]
-        selector  file.py::Symbol.path
-        summary   Symbol tree with signatures [default for bare file/dir]
-        metadata  Per-symbol detail: lines, offset, kind, decorators, params
+        code          Full source of matched symbol(s) [default for selector]
+        location      file.py:line [default for pattern mode]
+        selector      file.py::Symbol.path
+        summary       Symbol tree with signatures [default for bare file/dir]
+        metadata      Per-symbol detail: lines, offset, kind, decorators, params
+        json          Structured JSON output
+        count         Number of matches only
+        summary::flat Flat list with full dotted paths (summary mode)
+        code::dedent  Dedented source code (lookup mode)
+
+    --where syntax:
+        'def test_*'      Structural containment (pattern mode)
+        'not class'       Exclude structural container (pattern mode)
+        'MyClass.method'  Limit to named scope (pattern mode)
+        '@decorator'      Decorator filter (lookup mode)
+        'print($X)'       Body pattern filter (lookup mode)
+        'class MyClass'   In-class filter (lookup mode) or containment (pattern mode)
 
     Examples:
         # Pattern mode (has $):
         emend search 'print($X)' file.py
-        emend search 'assertEqual($A, $B)' tests/ --count
+        emend search 'assertEqual($A, $B)' tests/ --output count
 
         # Lookup mode (has :: or file path):
         emend search file.py::func[params]
-        emend search src/ --kind function --has-decorator pytest
+        emend search src/ --kind function --where '@app.command'
 
         # Summary mode (list symbols):
         emend search file.py
         emend search file.py::MyClass --output summary
-        emend search file.py --output summary --flat
+        emend search file.py --output summary::flat
     """
     import re as _re
+
+    # Parse --where values
+    where_params = parse_where_clause(where or [])
+    where_scope = where_params.get("scope")
+    where_inside = where_params.get("inside")
+    where_not_inside = where_params.get("not_inside")
+    where_matching = where_params.get("matching")
+
+    # Parse --output for :: modifier
+    output_base = output
+    output_modifier = None
+    if output and "::" in output:
+        parts = output.split("::", 1)
+        output_base = parts[0]
+        output_modifier = parts[1]
 
     # Detect query shape
     is_pattern_mode = "$" in query
     is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
     has_selector = '::' in query and not is_pattern_mode
-    has_filters = bool(kind or name or has_decorator or returns or in_class or depth or has_param or matching)
+
+    # Build lookup-mode filters from --where
+    lookup_has_decorator: Optional[list[str]] = None
+    lookup_in_class: Optional[list[str]] = None
+    lookup_matching: Optional[str] = None
+    if where_matching is not None:
+        if where_matching.startswith("@"):
+            lookup_has_decorator = [where_matching[1:]]
+        else:
+            lookup_matching = where_matching
+    if where_inside is not None and where_inside.startswith("class "):
+        lookup_in_class = [where_inside[6:].strip()]
+
+    has_filters = bool(
+        kind or name or lookup_has_decorator or returns or lookup_in_class
+        or depth or has_param or lookup_matching
+    )
 
     # Check if selector has a component (file::sym[comp])
     has_component = False
@@ -218,10 +260,14 @@ def search(
             pass
 
     # Determine effective output format
-    if output is not None:
-        effective_output = output
-    elif json_output or count:
-        # json/count are orthogonal modifiers; don't change the underlying mode
+    json_output = (output_base == "json")
+    count_output = (output_base == "count")
+    dedent_output = (output_modifier == "dedent")
+    flat_output = (output_modifier == "flat")
+
+    if output_base is not None and output_base not in ("json", "count"):
+        effective_output = output_base
+    elif json_output or count_output:
         effective_output = "code"
     elif is_pattern_mode:
         effective_output = "location"
@@ -238,19 +284,18 @@ def search(
         # ---- SUMMARY MODE ----
         if effective_output == "summary" and not is_pattern_mode:
             unsupported = []
-            if has_decorator:
-                unsupported.append("--has-decorator")
             if returns:
                 unsupported.append("--returns")
             if has_param:
                 unsupported.append("--has-param")
-            if in_class:
-                unsupported.append("--in-class")
             if unsupported:
                 raise ValueError(
                     f"Filter(s) {', '.join(unsupported)} not supported with --output=summary. "
                     "Use --output=selector instead."
                 )
+
+            # depth in summary mode = tree_depth
+            tree_depth = int(depth[0]) if depth else None
 
             file_for_summary = query
             selector_for_summary = None
@@ -269,7 +314,7 @@ def search(
                         )
                         print(f"\nModule: {fp}")
                         if symbols:
-                            if flat:
+                            if flat_output:
                                 ast_commands._print_symbol_flat(symbols)
                             else:
                                 ast_commands._print_symbol_tree(symbols, indent=1)
@@ -281,7 +326,7 @@ def search(
                 )
                 print(f"\nModule: {file_for_summary}")
                 if symbols:
-                    if flat:
+                    if flat_output:
                         ast_commands._print_symbol_flat(symbols)
                     else:
                         ast_commands._print_symbol_tree(symbols, indent=1)
@@ -292,17 +337,20 @@ def search(
             target_path = path or "."
             import libcst as cst
 
-            scope, scope_file_override = parse_scope_in(scope_in, target_path)
-            if scope_file_override:
-                target_path = scope_file_override
-
             files, is_multi_file = resolve_files(target_path)
 
             all_matches = []
             for file_path in files:
                 file_path_str = str(file_path)
                 try:
-                    file_matches = find_pattern(query, file_path_str, scope=scope, inside=inside, not_inside=not_inside, imported_from=imported_from, where=where, scope_local=scope_local)
+                    file_matches = find_pattern(
+                        query, file_path_str,
+                        scope=where_scope,
+                        inside=where_inside,
+                        not_inside=where_not_inside,
+                        imported_from=imported_from,
+                        scope_local=scope_local,
+                    )
                     for match in file_matches:
                         all_matches.append((file_path_str, match))
                 except FileNotFoundError:
@@ -310,7 +358,7 @@ def search(
                         raise
                     continue
 
-            if count:
+            if count_output:
                 print(len(all_matches))
             elif json_output:
                 import json
@@ -375,7 +423,7 @@ def search(
                 if m:
                     file_or_pattern = m.group(1)
 
-        use_paths_only = (effective_output == "selector") and not json_output and not count
+        use_paths_only = (effective_output == "selector") and not json_output and not count_output
         use_metadata = (effective_output == "metadata")
 
         result = cmd_lookup(
@@ -383,9 +431,9 @@ def search(
             selector_str=selector_str,
             kind=kind,
             name=name,
-            has_decorator=has_decorator,
+            has_decorator=lookup_has_decorator,
             returns=returns,
-            in_class=in_class,
+            in_class=lookup_in_class,
             depth=depth,
             has_param=has_param,
             case_insensitive=case_insensitive,
@@ -393,9 +441,9 @@ def search(
             json_output=json_output,
             metadata=use_metadata,
             paths_only=use_paths_only,
-            count=count,
-            dedent=dedent,
-            matching=matching,
+            count=count_output,
+            dedent=dedent_output,
+            matching=lookup_matching,
         )
         print(result, end='')
 
@@ -551,21 +599,13 @@ def replace_cmd(
         bool,
         typer.Option("--apply", help="Apply changes to file (default is dry-run)")
     ] = False,
-    scope_in: Annotated[
-        Optional[str],
-        typer.Option("--in", help="Limit replacements to within a symbol (e.g., 'MyClass' or 'my_func')")
-    ] = None,
-    inside: Annotated[
-        Optional[str],
-        typer.Option("--inside", help="Only replace inside this structure (def, class, for, while, try, with, if)")
-    ] = None,
-    not_inside: Annotated[
-        Optional[str],
-        typer.Option("--not-inside", help="Only replace outside this structure")
-    ] = None,
     where: Annotated[
-        Optional[str],
-        typer.Option("--where", help="Only replace inside structures matching this pattern (e.g., 'class MyClass', 'def test_*')")
+        Optional[list[str]],
+        typer.Option("--where", help=(
+            "Filter/scope constraint. Syntax auto-detected: "
+            "'def test_*' (structural), 'not class' (negation), "
+            "'MyClass.method' (scope)"
+        ))
     ] = None,
 ):
     """Replace pattern matches with replacement in Python file(s).
@@ -579,14 +619,18 @@ def replace_cmd(
     Examples:
         emend replace 'print($X)' 'logger.info($X)' file.py
         emend replace 'assertEqual($A, $B)' 'assert $A == $B' tests/ --apply
-        emend replace 'old_name' 'new_name' file.py --in my_func --apply
-        emend replace 'print($X)' 'logger.info($X)' file.py --inside def --apply
-        emend replace 'print($X)' 'logger.info($X)' file.py --inside 'def test_*' --apply
-        emend replace '$X = $Y' '$X: int = $Y' src/*.py --not-inside class --apply
+        emend replace 'old_name' 'new_name' file.py --where my_func --apply
+        emend replace 'print($X)' 'logger.info($X)' file.py --where def --apply
+        emend replace 'print($X)' 'logger.info($X)' file.py --where 'def test_*' --apply
+        emend replace '$X = $Y' '$X: int = $Y' src/*.py --where 'not class' --apply
     """
     try:
-        scope, scope_file_override = parse_scope_in(scope_in, path)
-        search_path = scope_file_override or path
+        where_params = parse_where_clause(where or [])
+        scope = where_params.get("scope")
+        inside = where_params.get("inside")
+        not_inside = where_params.get("not_inside")
+
+        search_path = path
         files, is_multi_file = resolve_files(search_path)
 
         # Collect diffs and count across all files
@@ -595,10 +639,14 @@ def replace_cmd(
         for file_path in files:
             file_path_str = str(file_path)
             try:
-                diff, count = replace_pattern(pattern, replacement, file_path_str, scope=scope, apply=apply, inside=inside, not_inside=not_inside, where=where)
+                diff, cnt = replace_pattern(
+                    pattern, replacement, file_path_str,
+                    scope=scope, apply=apply,
+                    inside=inside, not_inside=not_inside,
+                )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)
-                total_count += count
+                total_count += cnt
             except FileNotFoundError:
                 # For multi-file operations, skip missing files silently
                 # For single file, let the exception propagate

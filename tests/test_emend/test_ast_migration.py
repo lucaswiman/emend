@@ -349,7 +349,7 @@ def func():
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "search", str(filepath), "--output", "summary", "--tree-depth", "2"],
+            [EMEND, "search", str(filepath), "--output", "summary", "--depth", "2"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0
@@ -369,7 +369,7 @@ def outer():
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "search", str(filepath), "--output", "summary", "--tree-depth", "3"],
+            [EMEND, "search", str(filepath), "--output", "summary", "--depth", "3"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0

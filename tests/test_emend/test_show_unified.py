@@ -309,7 +309,7 @@ class Builder:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "search", "--output", "metadata", "--dedent", f"{temp_py_file.name}::Builder.nested_method"],
+            [emend_cmd, "search", "--output", "metadata", f"{temp_py_file.name}::Builder.nested_method"],
             capture_output=True,
             text=True,
         )

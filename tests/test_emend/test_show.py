@@ -37,7 +37,7 @@ def test_show_with_dedent(emend_cmd, tmp_path: Path):
 """)
 
     result = subprocess.run(
-        [emend_cmd, "search", "--dedent", f"{test_file}::Calculator.add.validate"],
+        [emend_cmd, "search", "--output", "code::dedent", f"{test_file}::Calculator.add.validate"],
         capture_output=True,
         text=True,
     )
@@ -87,7 +87,7 @@ def bar():
 """)
 
     result = subprocess.run(
-        [emend_cmd, "search", "--dedent", f"{test_file}:2-4"],
+        [emend_cmd, "search", "--output", "code::dedent", f"{test_file}:2-4"],
         capture_output=True,
         text=True,
     )

@@ -695,7 +695,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--count"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "count"])
 
         assert result.exit_code == 0
         assert "2" in result.stdout
@@ -716,7 +716,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--json"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "json"])
 
         assert result.exit_code == 0
         # Parse JSON output
@@ -747,7 +747,7 @@ class TestFindCommand:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--in", "my_func"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "my_func"])
 
         assert result.exit_code == 0
         # Should find only the print inside my_func (line 3)
@@ -768,7 +768,7 @@ class TestFindCommand:
             "    print('in func')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--in", "MyClass.method"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "MyClass.method"])
 
         assert result.exit_code == 0
         # Should find only the print inside MyClass.method (line 3)
@@ -876,7 +876,7 @@ class TestReplaceCommand:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--in", "my_func", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "my_func", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -898,7 +898,7 @@ class TestReplaceCommand:
             "    print('in func')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--in", "MyClass.method", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "MyClass.method", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -923,7 +923,7 @@ class TestFindReplaceConstraints:
             "        print('inside method')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--inside", "def"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "def"])
 
         assert result.exit_code == 0
         # Should find prints inside functions only (2 matches)
@@ -942,7 +942,7 @@ class TestFindReplaceConstraints:
             "print('after')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--not-inside", "if"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "not if"])
 
         assert result.exit_code == 0
         # Should find prints outside if blocks only (2 matches)
@@ -958,7 +958,7 @@ class TestFindReplaceConstraints:
             "    print('inside func')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--inside", "def", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "def", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -976,7 +976,7 @@ class TestFindReplaceConstraints:
             "z = 3\n"
         )
 
-        result = runner.invoke(app, ["replace", "$NAME = $VALUE", "$NAME: int = $VALUE", str(test_file), "--not-inside", "class", "--apply"])
+        result = runner.invoke(app, ["replace", "$NAME = $VALUE", "$NAME: int = $VALUE", str(test_file), "--where", "not class", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -990,7 +990,7 @@ class TestFindReplaceConstraints:
         test_file = tmp_path / "test.py"
         test_file.write_text("x = 1\n")
 
-        result = runner.invoke(app, ["search", "$X = $Y", str(test_file), "--inside", "def", "--not-inside", "class"])
+        result = runner.invoke(app, ["search", "$X = $Y", str(test_file), "--where", "def", "--where", "not class"])
 
         assert result.exit_code == 2
         assert "Cannot specify both" in result.stdout or "Cannot specify both" in result.stderr

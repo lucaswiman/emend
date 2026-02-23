@@ -100,7 +100,7 @@ class TestQueryKind:
 
     def test_query_kind_function(self, sample_file):
         """--kind function returns only top-level functions."""
-        result = run_emend(["search", str(sample_file), "--kind", "function", "--json"])
+        result = run_emend(["search", str(sample_file), "--kind", "function", "--output", "json"])
         assert result.returncode == 0
 
         # Parse JSON output
@@ -216,28 +216,28 @@ class TestQueryDecorator:
 
     def test_query_has_decorator(self, sample_file):
         """--has-decorator matches decorated symbols."""
-        result = run_emend(["search", str(sample_file), "--has-decorator", "property"])
+        result = run_emend(["search", str(sample_file), "--where", "@property"])
         assert result.returncode == 0
         assert "name" in result.stdout
         assert "regular_method" not in result.stdout
 
     def test_query_has_decorator_staticmethod(self, sample_file):
         """--has-decorator staticmethod finds static methods."""
-        result = run_emend(["search", str(sample_file), "--has-decorator", "staticmethod"])
+        result = run_emend(["search", str(sample_file), "--where", "@staticmethod"])
         assert result.returncode == 0
         assert "static_method" in result.stdout
         assert "class_method" not in result.stdout
 
     def test_query_has_decorator_glob(self, sample_file):
         """--has-decorator with glob pattern."""
-        result = run_emend(["search", str(sample_file), "--has-decorator", "*method"])
+        result = run_emend(["search", str(sample_file), "--where", "@*method"])
         assert result.returncode == 0
         assert "static_method" in result.stdout
         assert "class_method" in result.stdout
 
     def test_query_has_decorator_pytest(self, sample_file):
         """--has-decorator matches pytest decorators."""
-        result = run_emend(["search", str(sample_file), "--has-decorator", "pytest.*"])
+        result = run_emend(["search", str(sample_file), "--where", "@pytest.*"])
         assert result.returncode == 0
         assert "test_helper" in result.stdout
 
@@ -271,7 +271,7 @@ class TestQueryInClass:
 
     def test_query_in_class(self, sample_file):
         """--in-class restricts to methods of named class."""
-        result = run_emend(["search", str(sample_file), "--in-class", "MyClass"])
+        result = run_emend(["search", str(sample_file), "--where", "class MyClass"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
         assert "async_method" in result.stdout
@@ -283,7 +283,7 @@ class TestQueryInClass:
 
     def test_query_in_class_testsuite(self, sample_file):
         """--in-class TestSuite shows only test methods."""
-        result = run_emend(["search", str(sample_file), "--in-class", "TestSuite"])
+        result = run_emend(["search", str(sample_file), "--where", "class TestSuite"])
         assert result.returncode == 0
         assert "test_create" in result.stdout
         assert "test_update" in result.stdout
@@ -415,7 +415,7 @@ class TestQueryFilterComposition:
         result = run_emend([
             "search", str(sample_file),
             "--kind", "method",
-            "--in-class", "MyClass"
+            "--where", "class MyClass"
         ])
         assert result.returncode == 0
         # MyClass methods only
@@ -429,7 +429,7 @@ class TestQueryFilterComposition:
         result = run_emend([
             "search", str(sample_file),
             "--kind", "method",
-            "--has-decorator", "property"
+            "--where", "@property"
         ])
         assert result.returncode == 0
         assert "name" in result.stdout
@@ -442,7 +442,7 @@ class TestQueryOutput:
 
     def test_query_json_output(self, sample_file):
         """--json returns structured output."""
-        result = run_emend(["search", str(sample_file), "--kind", "class", "--json"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "json"])
         assert result.returncode == 0
         data = json.loads(result.stdout)
         assert isinstance(data, list)
@@ -467,7 +467,7 @@ class TestQueryOutput:
 
     def test_query_count(self, sample_file):
         """--count returns match count."""
-        result = run_emend(["search", str(sample_file), "--kind", "class", "--count"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "count"])
         assert result.returncode == 0
         assert result.stdout.strip() == "2"
 
@@ -500,7 +500,7 @@ class TestQueryEdgeCases:
 
     def test_query_no_filters(self, sample_file):
         """No filters returns all symbols."""
-        result = run_emend(["search", f"{sample_file}::*", "--count"])
+        result = run_emend(["search", f"{sample_file}::*", "--output", "count"])
         assert result.returncode == 0
         count = int(result.stdout.strip())
         # Should have many symbols
@@ -532,8 +532,8 @@ class TestQueryJsonStructure:
         """JSON output includes decorators."""
         result = run_emend([
             "search", str(sample_file),
-            "--has-decorator", "property",
-            "--json"
+            "--where", "@property",
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -552,7 +552,7 @@ class TestQueryJsonStructure:
         result = run_emend([
             "search", str(sample_file),
             "--name", "standalone_func",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -572,7 +572,7 @@ class TestQueryJsonStructure:
         result = run_emend([
             "search", str(sample_file),
             "--name", "standalone_func",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -584,9 +584,9 @@ class TestQueryJsonStructure:
         """JSON output includes parent for nested symbols."""
         result = run_emend([
             "search", str(sample_file),
-            "--in-class", "MyClass",
+            "--where", "class MyClass",
             "--name", "regular_method",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -715,7 +715,7 @@ def processRequest():
             "search", str(filepath),
             "--name", "process_request",
             "--smart-case",
-            "--has-decorator", "property",
+            "--where", "@property",
             "--output", "selector"
         ])
         assert result.returncode == 0

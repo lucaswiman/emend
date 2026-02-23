@@ -351,7 +351,7 @@ class TestScopeLocal:
             "y = my_join('a', 'b')\n"
         )
         result = run_emend_cmd([
-            "search", "$FUNC($A, $B)", str(f), "--scope-local", "--count"
+            "search", "$FUNC($A, $B)", str(f), "--scope-local", "--output", "count"
         ])
         # Should only count locally-defined calls (my_join), not join
         count = int(result.stdout.strip())
