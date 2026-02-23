@@ -85,7 +85,7 @@ def foo(x: int) -> List[str]:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "1"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "1"],
             capture_output=True,
             text=True,
         )
@@ -130,7 +130,7 @@ def foo(x: int) -> List[str]:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -187,7 +187,7 @@ def process(data: dict[str, int], flag: bool = True) -> list[str]:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "2"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "2"],
             capture_output=True,
             text=True,
         )
@@ -232,7 +232,7 @@ def outer():
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -294,7 +294,7 @@ class Calculator:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -349,7 +349,7 @@ def simple(x):
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -397,7 +397,7 @@ def foo():
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -446,7 +446,7 @@ class Calculator:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3", "--flat"],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary", "--tree-depth", "3", "--flat"],
             capture_output=True,
             text=True,
         )
@@ -511,7 +511,7 @@ class Processor:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3", "--selector", "Calculator"],
+            [emend_cmd, "search", f"{temp_py_file.name}::Calculator", "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -567,7 +567,7 @@ def other():
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3", "--selector", "outer.inner"],
+            [emend_cmd, "search", f"{temp_py_file.name}::outer.inner", "--output", "summary", "--tree-depth", "3"],
             capture_output=True,
             text=True,
         )
@@ -615,7 +615,7 @@ class Processor:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name, "--tree-depth", "3", "--selector", "Calculator", "--flat"],
+            [emend_cmd, "search", f"{temp_py_file.name}::Calculator", "--output", "summary", "--tree-depth", "3", "--flat"],
             capture_output=True,
             text=True,
         )

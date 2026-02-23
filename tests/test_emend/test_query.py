@@ -309,7 +309,7 @@ class OuterClass:
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["search", str(filepath), "--depth", "1", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "1", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have exactly 2 top-level symbols
@@ -333,7 +333,7 @@ class OuterClass:
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["search", str(filepath), "--depth", "2", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "2", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have nested_func and method_one (both at depth 2)
@@ -353,7 +353,7 @@ def top_level_func():
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["search", str(filepath), "--depth", "2+", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "2+", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have nested_func (depth 2) and deeply_nested (depth 3)
@@ -458,7 +458,7 @@ class TestQueryOutput:
 
     def test_query_paths_only(self, sample_file):
         """--paths-only returns just selector paths."""
-        result = run_emend(["search", str(sample_file), "--kind", "class", "--paths-only"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         assert len(lines) == 2
@@ -617,7 +617,7 @@ def ProcessRequest():
             "search", str(filepath),
             "--name", "process_request",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -650,7 +650,7 @@ def ProcessRequest():
             "search", str(filepath),
             "--name", "processRequest",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -683,7 +683,7 @@ def ProcessRequest():
             "search", str(filepath),
             "--name", "ProcessRequest",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -716,7 +716,7 @@ def processRequest():
             "--name", "process_request",
             "--smart-case",
             "--has-decorator", "property",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -745,7 +745,7 @@ def other_function(data):
             "--name", "process_request",
             "--smart-case",
             "--has-param", "user_id",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -779,7 +779,7 @@ def GetHttpResponse():
             "search", str(filepath),
             "--name", "get_http_response",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -812,7 +812,7 @@ def PROCESS():
             "search", str(filepath),
             "--name", "process",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")

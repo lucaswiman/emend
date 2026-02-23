@@ -480,14 +480,12 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
         _print_symbol_flat(sym.children, full_path)
 
 
-def cmd_list_symbols(
+def collect_symbols(
     file: str,
-    project: Optional[str] = None,
     tree_depth: int | None = None,
-    flat: bool = False,
     selector: Optional[str] = None,
-):
-    """List symbols in a module using LibCST."""
+) -> list[TreeSymbol]:
+    """Collect symbols from a file, returning list of TreeSymbol objects."""
     file_path = Path(file)
     code = file_path.read_text()
 
@@ -498,7 +496,18 @@ def cmd_list_symbols(
     wrapper = MetadataWrapper(module)
     visitor = _ListSymbolsVisitor(max_depth=max_depth, selector_path=selector_path)
     wrapper.visit(visitor)
-    symbols = visitor.symbols
+    return visitor.symbols
+
+
+def cmd_list_symbols(
+    file: str,
+    project: Optional[str] = None,
+    tree_depth: int | None = None,
+    flat: bool = False,
+    selector: Optional[str] = None,
+):
+    """List symbols in a module using LibCST."""
+    symbols = collect_symbols(file, tree_depth=tree_depth, selector=selector)
 
     print(f"\nModule: {file}")
     if symbols:

@@ -88,12 +88,12 @@ Add a parameter to every method in a class
 .. code-block:: bash
 
    # Preview
-   emend search api.py::MyClass --kind method --paths-only | while read sel; do
+   emend search api.py::MyClass --kind method --output selector | while read sel; do
        emend add "$sel[params]" "ctx: Context" --after self
    done
 
    # Apply
-   emend search api.py::MyClass --kind method --paths-only | while read sel; do
+   emend search api.py::MyClass --kind method --output selector | while read sel; do
        emend add "$sel[params]" "ctx: Context" --after self --apply
    done
 
@@ -165,7 +165,7 @@ Understand what a function depends on
 .. code-block:: bash
 
    # What functions does main() call?
-   emend search src/app.py::main --callees
+   emend graph src/app.py::main
 
    # Who calls process()?
    emend refs src/app.py::process --calls-only
@@ -208,7 +208,7 @@ Batch-add a decorator to all async functions
 
 .. code-block:: bash
 
-   emend search src/ --kind async_function --paths-only | while read sel; do
+   emend search src/ --kind async_function --output selector | while read sel; do
        emend add "$sel[decorators]" "@trace" --at 0 --apply
    done
 

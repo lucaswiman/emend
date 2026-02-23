@@ -13,7 +13,7 @@ from emend.transform import (
     find_pattern, replace_pattern,
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
-    find_callers, find_callees, generate_graph,
+    find_callers, generate_graph,
 )
 from emend import ast_commands
 
@@ -82,8 +82,8 @@ app = typer.Typer(
 
 @app.command("search")
 def search(
-    query: Annotated[str, typer.Argument(help="Pattern with $X metavars, or selector path (file.py::sym[component])")],
-    path: Annotated[Optional[str], typer.Argument(help="File, glob, or directory to search")] = None,
+    query: Annotated[str, typer.Argument(help="Pattern with $X metavars, selector (file.py::sym), or file/dir path")],
+    path: Annotated[Optional[str], typer.Argument(help="File, glob, or directory to search (pattern mode)")] = None,
     kind: Annotated[
         Optional[list[str]],
         typer.Option("--kind", help="Symbol kind filter (function, method, class, async_*)")
@@ -124,14 +124,6 @@ def search(
         bool,
         typer.Option("--json", help="Output as JSON")
     ] = False,
-    metadata: Annotated[
-        bool,
-        typer.Option("--metadata", help="Include location metadata")
-    ] = False,
-    paths_only: Annotated[
-        bool,
-        typer.Option("--paths-only", help="Output only selector paths")
-    ] = False,
     count: Annotated[
         bool,
         typer.Option("--count", help="Output only count of matches")
@@ -140,6 +132,18 @@ def search(
         bool,
         typer.Option("--dedent", help="Dedent the source code")
     ] = False,
+    output: Annotated[
+        Optional[str],
+        typer.Option("--output", "-o", help="Output format: code, location, selector, summary, metadata")
+    ] = None,
+    flat: Annotated[
+        bool,
+        typer.Option("--flat", help="Flat output with full dotted paths (summary mode)")
+    ] = False,
+    tree_depth: Annotated[
+        Optional[int],
+        typer.Option("--tree-depth", help="Nesting depth limit for summary mode")
+    ] = None,
     scope_in: Annotated[
         Optional[str],
         typer.Option("--in", help="Limit search to within a symbol (e.g., 'MyClass' or 'my_func')")
@@ -156,10 +160,6 @@ def search(
         Optional[str],
         typer.Option("--where", help="Only match inside structures matching this pattern (e.g., 'class MyClass', 'def test_*')")
     ] = None,
-    output_selectors: Annotated[
-        bool,
-        typer.Option("--output-selectors", help="Output file.py::ContainingSymbol instead of file.py:line")
-    ] = False,
     imported_from: Annotated[
         Optional[str],
         typer.Option("--imported-from", help="Only match when root name is imported from this module (pattern mode)")
@@ -172,20 +172,19 @@ def search(
         Optional[str],
         typer.Option("--matching", help="Filter to symbols whose body matches this pattern (lookup mode)")
     ] = None,
-    callees_mode: Annotated[
-        bool,
-        typer.Option("--callees", help="List all functions/methods called by the target function (query must be a selector with ::)")
-    ] = False,
-    project: Annotated[
-        Optional[str],
-        typer.Option("--project", "-p", help="Project root directory (callees mode)")
-    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
     If the query contains metavariables ($X, $...Y), uses pattern matching mode.
     If the query contains :: or is a plain file path, uses symbol lookup mode.
-    With --callees, lists all functions/methods called by the target function.
+    A bare file/dir path with no filters shows a symbol summary (like list-symbols).
+
+    Output formats (--output):
+        code      Full source of matched symbol(s) [default for selector]
+        location  file.py:line [default for pattern mode]
+        selector  file.py::Symbol.path
+        summary   Symbol tree with signatures [default for bare file/dir]
+        metadata  Per-symbol detail: lines, offset, kind, decorators, params
 
     Examples:
         # Pattern mode (has $):
@@ -196,51 +195,101 @@ def search(
         emend search file.py::func[params]
         emend search src/ --kind function --has-decorator pytest
 
-        # Callees mode:
-        emend search src/module.py::main --callees
-        emend search src/module.py::main --callees --json
+        # Summary mode (list symbols):
+        emend search file.py
+        emend search file.py::MyClass --output summary
+        emend search file.py --output summary --flat
     """
-    if callees_mode:
-        try:
-            _reject_file_glob(query, "search --callees")
-            parsed_selector = parse_extended_selector(query)
-            callees = find_callees(parsed_selector, project_path=project)
+    import re as _re
 
-            if json_output:
-                import json
-                data = [
-                    {
-                        "name": c.name,
-                        "qualified_name": c.qualified_name,
-                        "line": c.line,
-                    }
-                    for c in callees
-                ]
-                print(json.dumps(data, indent=2))
-            else:
-                for c in callees:
-                    if c.qualified_name:
-                        print(f"{c.name} ({c.qualified_name})")
-                    else:
-                        print(c.name)
-        except FileNotFoundError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(3)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(2)
-        except Exception as e:
-            print(f"Error: {e!r}", file=sys.stderr)
-            raise typer.Exit(1)
-        return
-
-    # Detect mode: $ in query → pattern matching, otherwise → lookup
+    # Detect query shape
     is_pattern_mode = "$" in query
+    is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
+    has_selector = '::' in query and not is_pattern_mode
+    has_filters = bool(kind or name or has_decorator or returns or in_class or depth or has_param or matching)
 
-    if is_pattern_mode:
-        # Pattern matching mode (delegates to find logic)
-        target_path = path or "."
+    # Check if selector has a component (file::sym[comp])
+    has_component = False
+    if has_selector:
         try:
+            _parsed_sel = parse_extended_selector(query)
+            has_component = _parsed_sel.component is not None
+        except Exception:
+            pass
+
+    # Determine effective output format
+    if output is not None:
+        effective_output = output
+    elif json_output or count:
+        # json/count are orthogonal modifiers; don't change the underlying mode
+        effective_output = "code"
+    elif is_pattern_mode:
+        effective_output = "location"
+    elif has_component:
+        effective_output = "component"
+    elif has_selector or is_line_selector:
+        effective_output = "code"
+    elif not has_filters:
+        effective_output = "summary"
+    else:
+        effective_output = "selector"
+
+    try:
+        # ---- SUMMARY MODE ----
+        if effective_output == "summary" and not is_pattern_mode:
+            unsupported = []
+            if has_decorator:
+                unsupported.append("--has-decorator")
+            if returns:
+                unsupported.append("--returns")
+            if has_param:
+                unsupported.append("--has-param")
+            if in_class:
+                unsupported.append("--in-class")
+            if unsupported:
+                raise ValueError(
+                    f"Filter(s) {', '.join(unsupported)} not supported with --output=summary. "
+                    "Use --output=selector instead."
+                )
+
+            file_for_summary = query
+            selector_for_summary = None
+            if has_selector:
+                parts = query.split('::', 1)
+                file_for_summary = parts[0]
+                selector_for_summary = parts[1] or None
+
+            file_path_obj = Path(file_for_summary)
+            if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
+                files, _ = resolve_files(file_for_summary)
+                for fp in files:
+                    try:
+                        symbols = ast_commands.collect_symbols(
+                            str(fp), tree_depth=tree_depth, selector=selector_for_summary
+                        )
+                        print(f"\nModule: {fp}")
+                        if symbols:
+                            if flat:
+                                ast_commands._print_symbol_flat(symbols)
+                            else:
+                                ast_commands._print_symbol_tree(symbols, indent=1)
+                    except Exception:
+                        continue
+            else:
+                symbols = ast_commands.collect_symbols(
+                    file_for_summary, tree_depth=tree_depth, selector=selector_for_summary
+                )
+                print(f"\nModule: {file_for_summary}")
+                if symbols:
+                    if flat:
+                        ast_commands._print_symbol_flat(symbols)
+                    else:
+                        ast_commands._print_symbol_tree(symbols, indent=1)
+            return
+
+        # ---- PATTERN MODE ----
+        if is_pattern_mode:
+            target_path = path or "."
             import libcst as cst
 
             scope, scope_file_override = parse_scope_in(scope_in, target_path)
@@ -267,7 +316,7 @@ def search(
                 import json
                 serialized_matches = []
                 for file_path_str, match in all_matches:
-                    code = cst.Module([]).code_for_node(match.node).strip()
+                    code_str = cst.Module([]).code_for_node(match.node).strip()
                     captures = {}
                     for cap_name, captured in match.captures.items():
                         if isinstance(captured, tuple):
@@ -280,13 +329,13 @@ def search(
                     serialized_matches.append({
                         "file": file_path_str,
                         "line": match.line,
-                        "code": code,
+                        "code": code_str,
                         "captures": captures
                     })
                 print(json.dumps({"count": len(all_matches), "matches": serialized_matches}))
             else:
                 if all_matches:
-                    if output_selectors:
+                    if effective_output == "selector":
                         from emend.ast_utils import find_nested_definitions, find_symbol_by_line
                         _defs_cache: dict[str, list] = {}
                         seen: set[str] = set()
@@ -310,64 +359,62 @@ def search(
                                 print(f"{file_path_str}:{match.line}")
                             else:
                                 print(f"{file_path_str}:?")
-        except FileNotFoundError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(3)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(2)
-        except Exception as e:
-            print(f"Error: {e!r}", file=sys.stderr)
-            raise typer.Exit(1)
-    else:
-        # Lookup mode
-        try:
-            import re
-            file_or_pattern = query
-            selector_str = None
+            return
 
-            line_selector_pattern = r':\d+(-\d+)?$'
-            is_line_selector = re.search(line_selector_pattern, query) is not None
+        # ---- LOOKUP MODE ----
+        file_or_pattern = query
+        selector_str = None
 
-            if '::' in query or is_line_selector:
-                selector_str = query
-                if '::' in query:
-                    parts = query.split('::', 1)
-                    file_or_pattern = parts[0]
-                elif is_line_selector:
-                    match = re.search(r'^(.+?):\d+', query)
-                    if match:
-                        file_or_pattern = match.group(1)
+        if has_selector or is_line_selector:
+            selector_str = query
+            if has_selector:
+                parts = query.split('::', 1)
+                file_or_pattern = parts[0]
+            elif is_line_selector:
+                m = _re.search(r'^(.+?):\d+', query)
+                if m:
+                    file_or_pattern = m.group(1)
 
-            result = cmd_lookup(
-                file_or_pattern=file_or_pattern,
-                selector_str=selector_str,
-                kind=kind,
-                name=name,
-                has_decorator=has_decorator,
-                returns=returns,
-                in_class=in_class,
-                depth=depth,
-                has_param=has_param,
-                case_insensitive=case_insensitive,
-                smart_case=smart_case,
-                json_output=json_output,
-                metadata=metadata,
-                paths_only=paths_only,
-                count=count,
-                dedent=dedent,
-                matching=matching,
-            )
-            print(result, end='')
-        except FileNotFoundError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(3)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            raise typer.Exit(2)
-        except Exception as e:
-            print(f"Error: {e!r}", file=sys.stderr)
-            raise typer.Exit(1)
+        use_paths_only = (effective_output == "selector") and not json_output and not count
+        use_metadata = (effective_output == "metadata")
+
+        result = cmd_lookup(
+            file_or_pattern=file_or_pattern,
+            selector_str=selector_str,
+            kind=kind,
+            name=name,
+            has_decorator=has_decorator,
+            returns=returns,
+            in_class=in_class,
+            depth=depth,
+            has_param=has_param,
+            case_insensitive=case_insensitive,
+            smart_case=smart_case,
+            json_output=json_output,
+            metadata=use_metadata,
+            paths_only=use_paths_only,
+            count=count,
+            dedent=dedent,
+            matching=matching,
+        )
+        print(result, end='')
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+app.command("query", hidden=True)(search)
+app.command("show", hidden=True)(search)
+app.command("get", hidden=True)(search)
+app.command("lookup", hidden=True)(search)
+app.command("find", hidden=True)(search)
 
 
 
@@ -890,20 +937,6 @@ def move_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
-
-
-@app.command("list-symbols")
-def list_symbols(
-    file: Annotated[str, typer.Argument(help="Module file")],
-    tree_depth: Annotated[Optional[int], typer.Option("--tree-depth", help="Nesting depth (default: unlimited)")] = None,
-    flat: Annotated[bool, typer.Option("--flat", help="Flat output with full paths")] = False,
-    selector: Annotated[Optional[str], typer.Option("--selector", "-s", help="Filter to symbol path (e.g., 'Calculator.add')")] = None,
-    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
-):
-    """List symbols (classes, functions, variables) in a module."""
-    from emend.ast_commands import cmd_list_symbols
-    cmd_list_symbols(file, project, tree_depth, flat, selector)
-
 
 
 

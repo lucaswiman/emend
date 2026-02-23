@@ -4,7 +4,9 @@ Commands Reference
 search
 ------
 
-Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. Otherwise, it uses **symbol lookup** mode. With ``--callees``, lists all functions/methods called by the target function.
+Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary** (like the old ``list-symbols``). Otherwise, it uses **symbol lookup** mode.
+
+Hidden aliases: ``query``, ``show``, ``get``, ``lookup``, ``find``.
 
 .. code-block:: text
 
@@ -12,20 +14,43 @@ Unified search command that auto-detects the mode from the query. If the query c
 
 **Arguments:**
 
-- ``QUERY`` -- A pattern with ``$X`` metavars (pattern mode) or a selector path like ``file.py::sym`` (lookup mode)
-- ``PATH`` -- File, glob, or directory to search (required for pattern mode, optional for lookup mode)
+- ``QUERY`` -- A pattern with ``$X`` metavars (pattern mode), a selector like ``file.py::sym`` (lookup mode), or a bare file/dir path (summary/lookup mode)
+- ``PATH`` -- File, glob, or directory to search (pattern mode only)
+
+**Output format (--output / -o):**
+
+Auto-detected when not specified:
+
++---------------------+----------------------------------------+
+| Mode                | Default when...                        |
++=====================+========================================+
+| ``code``            | Selector without component             |
++---------------------+----------------------------------------+
+| ``location``        | Pattern mode (``$`` in query)          |
++---------------------+----------------------------------------+
+| ``selector``        | Bare file/dir path with filters        |
++---------------------+----------------------------------------+
+| ``summary``         | Bare file/dir path, no filters         |
++---------------------+----------------------------------------+
+| ``metadata``        | Explicit only                          |
++---------------------+----------------------------------------+
 
 **Options (shared):**
 
-+-----------+-----------------------------------+
-| Option    | Description                       |
-+===========+===================================+
-| ``--json``| Output as JSON                    |
-+-----------+-----------------------------------+
-| ``--count`` | Output only count of matches      |
-+-----------+-----------------------------------+
++-----------------------+-------------------------------------------+
+| Option                | Description                               |
++=======================+===========================================+
+| ``--output``, ``-o``  | Output format: code, location, selector,  |
+|                       | summary, metadata                         |
++-----------------------+-------------------------------------------+
+| ``--json``            | Output as JSON (orthogonal modifier)      |
++-----------------------+-------------------------------------------+
+| ``--count``           | Output only count of matches              |
++-----------------------+-------------------------------------------+
+| ``--dedent``          | Dedent source code in output              |
++-----------------------+-------------------------------------------+
 
-**Options (lookup mode):**
+**Options (lookup/summary mode):**
 
 +---------------------+----------------------------------------+
 | Option              | Description                            |
@@ -48,13 +73,11 @@ Unified search command that auto-detects the mode from the query. If the query c
 +---------------------+----------------------------------------+
 | ``--smart-case``    | Match naming convention variants       |
 +---------------------+----------------------------------------+
-| ``--metadata``      | Include location metadata              |
-+---------------------+----------------------------------------+
-| ``--paths-only``    | Output only selector paths             |
-+---------------------+----------------------------------------+
-| ``--dedent``        | Dedent source code in output           |
-+---------------------+----------------------------------------+
 | ``--matching TEXT`` | Filter by body pattern match           |
++---------------------+----------------------------------------+
+| ``--flat``          | Flat output (summary mode)             |
++---------------------+----------------------------------------+
+| ``--tree-depth N``  | Nesting depth limit (summary mode)     |
 +---------------------+----------------------------------------+
 
 **Options (pattern mode):**
@@ -68,23 +91,11 @@ Unified search command that auto-detects the mode from the query. If the query c
 +---------------------+----------------------------------------+
 | ``--not-inside STRUCTURE`` | Only match outside this structure |
 +---------------------+----------------------------------------+
-| ``--where PATTERN`` | Alias for --inside with patterns       |
+| ``--where PATTERN`` | Only match inside structures matching this pattern |
 +---------------------+----------------------------------------+
 | ``--imported-from MODULE`` | Only when imported from given module |
 +---------------------+----------------------------------------+
 | ``--scope-local``   | Only match locally-defined names       |
-+---------------------+----------------------------------------+
-| ``--output-selectors`` | Output file.py::Symbol instead of file.py:line |
-+---------------------+----------------------------------------+
-
-**Options (callees mode):**
-
-+---------------------+----------------------------------------+
-| Option              | Description                            |
-+=====================+========================================+
-| ``--callees``       | List functions/methods called by the target |
-+---------------------+----------------------------------------+
-| ``--project``, ``-p`` | Project root directory               |
 +---------------------+----------------------------------------+
 
 **Examples:**
@@ -94,14 +105,20 @@ Unified search command that auto-detects the mode from the query. If the query c
    # Pattern mode (has $):
    emend search 'print($X)' src/
    emend search 'assertEqual($A, $B)' tests/ --count
+   emend search '$X = $Y' src/ --output selector
 
    # Lookup mode (has :: or file path):
    emend search file.py::func[params]
    emend search src/ --kind function --has-decorator pytest
 
-   # Callees mode (replaces: emend callees src/module.py::main):
-   emend search src/module.py::main --callees
-   emend search src/module.py::main --callees --json
+   # Summary mode (bare file/dir, no filters):
+   emend search api.py
+   emend search api.py --flat
+   emend search api.py::MyClass --output summary
+   emend search api.py --output summary --tree-depth 2
+
+   # Metadata mode:
+   emend search api.py::my_func --output metadata
 
 ---
 
@@ -603,34 +620,7 @@ Move a symbol to another file, updating all imports.
 
 ---
 
-list-symbols
-------------
+.. note::
 
-List all symbols in a module.
-
-.. code-block:: text
-
-   emend list-symbols FILE [OPTIONS]
-
-**Options:**
-
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--tree-depth N``  | Maximum nesting depth                         |
-+---------------------+-----------------------------------------------+
-| ``--flat``          | Flat output with full dotted paths            |
-+---------------------+-----------------------------------------------+
-| ``--selector``, ``-s`` | Filter to a symbol subtree                 |
-+---------------------+-----------------------------------------------+
-| ``--project``, ``-p`` | Project root directory                      |
-+---------------------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend list-symbols api.py
-   emend list-symbols api.py --flat
-   emend list-symbols api.py --selector MyClass
+   ``list-symbols`` has been merged into ``search``. Use ``emend search FILE`` (auto-detects summary mode) or ``emend search FILE --output summary``. The ``--selector`` option is replaced by putting the selector in the query: ``emend search FILE::Symbol --output summary``.
 
