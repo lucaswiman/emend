@@ -8,13 +8,22 @@ Built on two complementary systems:
 
 ## Installation
 
-```bash
-# Create virtual environment and install
-make venv
+### Using uv (recommended)
 
-# Or manually:
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+```bash
+uv tool install emend
+```
+
+### Using pip
+
+```bash
+pip install emend
+```
+
+Verify the installation:
+
+```bash
+emend --help
 ```
 
 ## Usage
@@ -310,6 +319,22 @@ The `code_chunk` rule excludes colons (`/[^$:]+/`) to prevent consuming colons t
 Lines prefixed with `-` are matched; corresponding `+` lines are the replacement. Blank lines separate rules.
 
 ## Development
+
+### Installing from Source
+
+Clone the repository and install for development:
+
+```bash
+git clone https://github.com/anthropics/emend
+cd emend
+
+# Using make (creates virtual environment)
+make venv
+
+# Or manually:
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
 
 ### Running Tests
 
