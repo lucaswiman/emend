@@ -362,6 +362,14 @@ emend lint src/ --fix
 emend lint src/ --rule no-print
 ```
 
+Suppress violations inline with `# noqa` comments:
+
+```python
+print("keep this")  # noqa
+print("keep this")  # noqa: emend:no-print
+print("keep this")  # noqa: E501, emend:no-print  # mixed with other linters
+```
+
 ### pre-commit integration
 
 emend can run as a [pre-commit](https://pre-commit.com/) hook. Add to your `.pre-commit-config.yaml`:
