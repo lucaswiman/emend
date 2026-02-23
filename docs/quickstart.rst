@@ -27,7 +27,7 @@ Example: Find and replace a pattern
 .. code-block:: bash
 
    # Find all print() calls in src/
-   emend find 'print($X)' src/
+   emend search 'print($X)' src/
 
    # Replace them with logger.info()
    emend replace 'print($X)' 'logger.info($X)' src/ --apply
@@ -38,10 +38,10 @@ Example: Look up symbol information
 .. code-block:: bash
 
    # Show a function's source code
-   emend lookup api.py::get_user
+   emend search api.py::get_user
 
    # Get return type
-   emend lookup api.py::get_user[returns]
+   emend search api.py::get_user[returns]
 
    # List all functions in a file
-   emend lookup api.py --kind function
+   emend search api.py --kind function

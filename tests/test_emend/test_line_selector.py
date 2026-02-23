@@ -32,7 +32,7 @@ class Builder:
 
     try:
         # show --metadata for line 7 should find the build method
-        result = run_emend_cmd(["lookup", "--metadata", f"{temp_file}:7"])
+        result = run_emend_cmd(["search", "--metadata", f"{temp_file}:7"])
 
         assert result.returncode == 0, f"Command failed: {result.stderr}"
         output = result.stdout
@@ -68,7 +68,7 @@ class Builder:
 
     try:
         # show --metadata for lines 11-14 should find the process method
-        result = run_emend_cmd(["lookup", "--metadata", f"{temp_file}:11-14"])
+        result = run_emend_cmd(["search", "--metadata", f"{temp_file}:11-14"])
 
         assert result.returncode == 0, f"Command failed: {result.stderr}"
         output = result.stdout
@@ -132,7 +132,7 @@ def func():
 
     try:
         # show --metadata for line 3 (module-level assignment) should fail
-        result = run_emend_cmd(["lookup", "--metadata", f"{temp_file}:3"], check=False)
+        result = run_emend_cmd(["search", "--metadata", f"{temp_file}:3"], check=False)
 
         # Should exit with error code for module-level code
         assert result.returncode == 1, \
@@ -156,7 +156,7 @@ def func():
 
     try:
         # show --metadata for line 3 (inside func) should succeed
-        result = run_emend_cmd(["lookup", "--metadata", f"{temp_file}:3"], check=False)
+        result = run_emend_cmd(["search", "--metadata", f"{temp_file}:3"], check=False)
 
         # Should succeed and show symbol info
         assert result.returncode == 0, \

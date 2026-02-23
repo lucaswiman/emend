@@ -134,7 +134,7 @@ def my_func(x, y):
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}::my_func"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}::my_func"],
             capture_output=True,
             text=True,
         )
@@ -180,7 +180,7 @@ def bar(a, b):
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}:4"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}:4"],
             capture_output=True,
             text=True,
         )
@@ -217,7 +217,7 @@ def decorated():
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}::decorated"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}::decorated"],
             capture_output=True,
             text=True,
         )
@@ -245,7 +245,7 @@ class Builder:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}::Builder._build.nested"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}::Builder._build.nested"],
             capture_output=True,
             text=True,
         )
@@ -278,7 +278,7 @@ class MyClass:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}::MyClass"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}::MyClass"],
             capture_output=True,
             text=True,
         )
@@ -309,7 +309,7 @@ class Builder:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", "--dedent", f"{temp_py_file.name}::Builder.nested_method"],
+            [emend_cmd, "search", "--metadata", "--dedent", f"{temp_py_file.name}::Builder.nested_method"],
             capture_output=True,
             text=True,
         )
@@ -327,7 +327,7 @@ class Builder:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", "--metadata", f"{temp_py_file.name}::nonexistent"],
+            [emend_cmd, "search", "--metadata", f"{temp_py_file.name}::nonexistent"],
             capture_output=True,
             text=True,
         )
@@ -346,7 +346,7 @@ def greet(name):
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{temp_py_file.name}::greet"],
+            [emend_cmd, "search", f"{temp_py_file.name}::greet"],
             capture_output=True,
             text=True,
         )

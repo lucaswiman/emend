@@ -1,7 +1,7 @@
 """Tests for module-level refactoring commands.
 
 This module tests module refactoring commands:
-- move-module: Move module to another package
+- move (module mode): Move module to another package
 """
 
 import tempfile
@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class TestMoveModule:
-    """Tests for move-module command."""
+    """Tests for move command (module mode)."""
 
     def test_move_module_to_subpackage(self, run_emend_cmd):
         """Move module from root to a subpackage."""
@@ -27,7 +27,7 @@ class TestMoveModule:
 
             # Run move command with --apply
             result = run_emend_cmd([
-                "move-module",
+                "move",
                 str(utils),
                 "pkg",
                 "--project", str(tmpdir),
@@ -66,7 +66,7 @@ class TestMoveModule:
 
             # Run move command with --apply
             result = run_emend_cmd([
-                "move-module",
+                "move",
                 str(utils),
                 "pkg",
                 "--project", str(tmpdir),
@@ -98,7 +98,7 @@ class TestMoveModule:
 
             # Run move command with dotted destination
             result = run_emend_cmd([
-                "move-module",
+                "move",
                 str(utils),
                 "pkg.subpkg",
                 "--project", str(tmpdir),
@@ -130,7 +130,7 @@ class TestMoveModule:
 
             # Run move command in dry-run mode (default)
             result = run_emend_cmd([
-                "move-module",
+                "move",
                 str(utils),
                 "pkg",
                 "--project", str(tmpdir),

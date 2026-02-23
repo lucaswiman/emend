@@ -1,4 +1,4 @@
-"""Tests for rename-module command."""
+"""Tests for rename command (module mode)."""
 import pytest
 
 
@@ -12,7 +12,7 @@ def helper():
 
     # Apply rename
     result = run_emend_cmd([
-        "rename-module", str(old_file), "new_name",
+        "rename", str(old_file), "--to", "new_name",
         "--project", str(tmp_path), "--apply"
     ])
     assert result.returncode == 0
@@ -43,7 +43,7 @@ func()
 
     # Apply rename
     result = run_emend_cmd([
-        "rename-module", str(module), "new_module",
+        "rename", str(module), "--to", "new_module",
         "--project", str(tmp_path), "--apply"
     ])
     assert result.returncode == 0
@@ -69,7 +69,7 @@ def test():
 
     # Dry-run (no --apply)
     result = run_emend_cmd([
-        "rename-module", str(test_file), "new",
+        "rename", str(test_file), "--to", "new",
         "--project", str(tmp_path)
     ])
     assert result.returncode == 0

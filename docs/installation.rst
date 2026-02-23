@@ -24,7 +24,7 @@ Or manually:
 Dependencies
 ------------
 
-emend uses LibCST as its sole AST backend -- all parsing, traversal, and transformation (including ``list-symbols``, ``lookup``, ``find``, ``rename``, and scope analysis) go through LibCST.
+emend uses LibCST as its sole AST backend -- all parsing, traversal, and transformation (including ``list-symbols``, ``search``, ``rename``, and scope analysis) go through LibCST.
 
 Runtime dependencies:
 

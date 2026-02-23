@@ -39,7 +39,7 @@ def foo():
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -92,7 +92,7 @@ def bar():
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -164,7 +164,7 @@ def bar():
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -210,7 +210,7 @@ import json
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -257,7 +257,7 @@ def main():
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -296,7 +296,7 @@ import sys
 
         # Get imports from source
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )
@@ -339,7 +339,7 @@ def bar():
 
         # Get imports from source (should be empty)
         result = subprocess.run(
-            [emend_cmd, "lookup", f"{source_file.name}::[imports]"],
+            [emend_cmd, "search", f"{source_file.name}::[imports]"],
             capture_output=True,
             text=True,
         )

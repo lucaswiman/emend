@@ -61,20 +61,15 @@
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified find/lookup: auto-detects pattern mode (if `$` in query) vs symbol lookup mode. `--output-selectors` |
-| `lookup` | Read symbol information. File globs in selectors (`**/*.py::func`). `--matching PATTERN` filter |
-| `find` | Search for code patterns using metavariables (`--where`, `--scope-local`, `--imported-from`, `--output-selectors`) |
+| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode. `--output-selectors`, `--imported-from`, `--scope-local`, `--matching` |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |
 | `copy-to` | Copy a symbol to another file |
-| `move` | Move a symbol to another file, updating imports |
-| `rename` | Rename a symbol across the project |
+| `move` | Move a symbol to another file or a module to another package, updating imports |
+| `rename` | Rename a symbol or module across the project (`--docs`, `--no-hierarchy`, `--unsure` for symbols; auto-detects mode by `::` in selector) |
 | `find-references` | Find all references to a symbol (`--writes-only`, `--reads-only`, enhanced `--inside`/`--not-inside` with patterns) |
 | `list-symbols` | List all symbols in a module |
-| `move-module` | Move a module file to another package, updating imports |
-| `rename-module` | Rename a module file, updating imports |
-| `rename-symbol` | Rename a symbol (alias for `rename`) |
 | `callers` | Find all call sites of a function across the project |
 | `callees` | Find all functions/methods called by a function |
 | `graph` | Generate a call graph in plain/json/dot format |
@@ -136,7 +131,7 @@ make test TESTS="-k default"
 
 ## Code Conventions
 
-- Most commands follow the dry-run by default pattern (except read-only commands like `lookup`, `list-symbols`, `find`, `callers`, `callees`, `graph`)
+- Most commands follow the dry-run by default pattern (except read-only commands like `search`, `list-symbols`, `callers`, `callees`, `graph`)
 - Selectors use the `ExtendedSelector` type from `component_selector.py`
 - Tests use `tmp_path` fixture for file operations
 - Test functions use descriptive names: `test_<command>_<scenario>`

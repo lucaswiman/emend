@@ -214,27 +214,3 @@ class TestSearchEdgeCases:
 
         assert result.exit_code == 0
         assert result.stdout.strip() == ""
-
-
-class TestFindCommand:
-    """Verify find command works correctly."""
-
-    def test_find_still_works(self, tmp_path):
-        """The find command should still function identically."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("print('hello')\n")
-
-        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
-
-        assert result.exit_code == 0
-        assert f"{test_file}:1" in result.stdout
-
-    def test_lookup_still_works(self, tmp_path):
-        """The lookup command should still function identically."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def func() -> int:\n    pass\n")
-
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[returns]"])
-
-        assert result.exit_code == 0
-        assert "int" in result.stdout
