@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 TESTS ?=
 
-.PHONY: venv test docs clean
+.PHONY: venv test docs docs-html clean
 
 $(VENV)/bin/activate: pyproject.toml
 	python3 -m venv $(VENV) --without-pip
@@ -14,8 +14,10 @@ $(VENV)/bin/activate: pyproject.toml
 test: $(VENV)/bin/activate
 	$(VENV)/bin/pytest --tb=short -n 8 $(if $(TESTS),$(TESTS),tests/)
 
-docs: $(VENV)/bin/activate
-	$(VENV)/bin/sphinx-build -b html docs docs/_build
+docs: docs-html
+
+docs-html: $(VENV)/bin/activate
+	$(VENV)/bin/sphinx-build -b html docs docs/_build/html
 
 clean:
-	rm -rf $(VENV) build *.egg-info src/*.egg-info
+	rm -rf $(VENV) build *.egg-info src/*.egg-info docs/_build
