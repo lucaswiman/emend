@@ -1,6 +1,6 @@
 [project]
 name = "emend"
-version = "0.0.1"
+dynamic = ["version"]
 description = "A Python refactoring CLI tool with structured edits and pattern transforms"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ classifiers = [
 dependencies = ["typer", "libcst", "lark", "pyyaml"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-xdist", "sphinx", "furo"]
+dev = ["pytest", "pytest-xdist", "sphinx", "furo", "hatch-vcs"]
 
 [project.urls]
 Homepage = "https://github.com/lucaswiman/emend"
@@ -33,5 +33,11 @@ Issues = "https://github.com/lucaswiman/emend/issues"
 emend = "emend.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/emend/_version.py"
