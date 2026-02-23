@@ -4,7 +4,7 @@ Commands Reference
 search
 ------
 
-Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. Otherwise, it uses **symbol lookup** mode.
+Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. Otherwise, it uses **symbol lookup** mode. With ``--callees``, lists all functions/methods called by the target function.
 
 .. code-block:: text
 
@@ -77,6 +77,16 @@ Unified search command that auto-detects the mode from the query. If the query c
 | ``--output-selectors`` | Output file.py::Symbol instead of file.py:line |
 +---------------------+----------------------------------------+
 
+**Options (callees mode):**
+
++---------------------+----------------------------------------+
+| Option              | Description                            |
++=====================+========================================+
+| ``--callees``       | List functions/methods called by the target |
++---------------------+----------------------------------------+
+| ``--project``, ``-p`` | Project root directory               |
++---------------------+----------------------------------------+
+
 **Examples:**
 
 .. code-block:: bash
@@ -88,6 +98,10 @@ Unified search command that auto-detects the mode from the query. If the query c
    # Lookup mode (has :: or file path):
    emend search file.py::func[params]
    emend search src/ --kind function --has-decorator pytest
+
+   # Callees mode (replaces: emend callees src/module.py::main):
+   emend search src/module.py::main --callees
+   emend search src/module.py::main --callees --json
 
 ---
 
@@ -402,62 +416,6 @@ Apply batch refactoring operations from a YAML or JSON file. Dry-run by default;
 
 ---
 
-callers
--------
-
-Find all call sites of a function across the project. Unlike ``find-references``, this only returns places where the function is actually called (not mere references or imports).
-
-.. code-block:: text
-
-   emend callers SELECTOR [OPTIONS]
-
-**Options:**
-
-+-----------+-----------------------------------------------+
-| Option    | Description                                   |
-+===========+===============================================+
-| ``--project``, ``-p`` | Project root directory              |
-+-----------+-----------------------------------------------+
-| ``--json``| Output as JSON                                |
-+-----------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend callers src/module.py::process
-   emend callers src/module.py::process --json
-
----
-
-callees
--------
-
-Find all functions/methods called inside a function. Analyzes the body of the target function and lists all calls made.
-
-.. code-block:: text
-
-   emend callees SELECTOR [OPTIONS]
-
-**Options:**
-
-+-----------+-----------------------------------------------+
-| Option    | Description                                   |
-+===========+===============================================+
-| ``--project``, ``-p`` | Project root directory              |
-+-----------+-----------------------------------------------+
-| ``--json``| Output as JSON                                |
-+-----------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend callees src/module.py::main
-   emend callees src/module.py::main --json
-
----
-
 graph
 -----
 
@@ -523,14 +481,15 @@ Copy a symbol to another file.
 
 ---
 
-find-references
----------------
+refs
+----
 
 Find all references to a symbol across the project using LibCST's scope analysis.
+With ``--calls-only``, only returns actual call sites (replaces the former ``callers`` command).
 
 .. code-block:: text
 
-   emend find-references SELECTOR [OPTIONS]
+   emend refs SELECTOR [OPTIONS]
 
 **Options:**
 
@@ -545,6 +504,10 @@ Find all references to a symbol across the project using LibCST's scope analysis
 +---------------------+-----------------------------------------------+
 | ``--reads-only``    | Only show read (load) references              |
 +---------------------+-----------------------------------------------+
+| ``--calls-only``    | Only show call sites (not mere references)    |
++---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory (used with ``--calls-only``) |
++---------------------+-----------------------------------------------+
 | ``--json``          | Output as JSON                                |
 +---------------------+-----------------------------------------------+
 
@@ -552,12 +515,16 @@ Find all references to a symbol across the project using LibCST's scope analysis
 
 .. code-block:: bash
 
-   emend find-references src/emend/transform.py::get_component
-   emend find-references api.py::MyClass --exclude-imports --json
+   emend refs src/emend/transform.py::get_component
+   emend refs api.py::MyClass --exclude-imports --json
 
    # Filter by read/write context
-   emend find-references file.py::config --writes-only
-   emend find-references file.py::config --reads-only
+   emend refs file.py::config --writes-only
+   emend refs file.py::config --reads-only
+
+   # Only call sites (replaces: emend callers src/module.py::process)
+   emend refs src/module.py::process --calls-only
+   emend refs src/module.py::process --calls-only --json
 
 ---
 

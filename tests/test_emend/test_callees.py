@@ -125,10 +125,10 @@ class TestFindCallees:
 
 
 class TestCalleesCommand:
-    """Tests for the callees CLI command."""
+    """Tests for the search --callees CLI command."""
 
     def test_callees_command_basic(self, tmp_path, run_emend_cmd):
-        """CLI callees command works."""
+        """CLI search --callees command works."""
         project = tmp_path / "project"
         project.mkdir()
 
@@ -142,14 +142,15 @@ class TestCalleesCommand:
         )
 
         result = run_emend_cmd([
-            "callees", f"{module}::main",
+            "search", f"{module}::main",
+            "--callees",
             "--project", str(project),
         ], check=False)
         assert result.returncode == 0
         assert "helper" in result.stdout
 
     def test_callees_command_json(self, tmp_path, run_emend_cmd):
-        """CLI callees command with --json."""
+        """CLI search --callees command with --json."""
         project = tmp_path / "project"
         project.mkdir()
 
@@ -163,7 +164,8 @@ class TestCalleesCommand:
         )
 
         result = run_emend_cmd([
-            "callees", f"{module}::main",
+            "search", f"{module}::main",
+            "--callees",
             "--project", str(project),
             "--json",
         ], check=False)

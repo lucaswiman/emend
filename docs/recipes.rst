@@ -157,7 +157,7 @@ Find all places a function is called
    emend search 'process_request($X)' src/ --json
 
    # Scope-aware callers analysis (uses LibCST scope analysis)
-   emend callers src/api.py::process_request
+   emend refs src/api.py::process_request --calls-only
 
 Understand what a function depends on
 -------------------------------------
@@ -165,10 +165,10 @@ Understand what a function depends on
 .. code-block:: bash
 
    # What functions does main() call?
-   emend callees src/app.py::main
+   emend search src/app.py::main --callees
 
    # Who calls process()?
-   emend callers src/app.py::process
+   emend refs src/app.py::process --calls-only
 
    # Visualize the call graph for the whole file
    emend graph src/app.py --format dot | dot -Tsvg > deps.svg
@@ -179,10 +179,10 @@ Find where a variable is mutated
 .. code-block:: bash
 
    # Only write references (assignments)
-   emend find-references config.py::settings --writes-only
+   emend refs config.py::settings --writes-only
 
    # Only read references (loads)
-   emend find-references config.py::settings --reads-only
+   emend refs config.py::settings --reads-only
 
 Extract and move a nested function
 ----------------------------------

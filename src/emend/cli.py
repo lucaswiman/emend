@@ -172,11 +172,20 @@ def search(
         Optional[str],
         typer.Option("--matching", help="Filter to symbols whose body matches this pattern (lookup mode)")
     ] = None,
+    callees_mode: Annotated[
+        bool,
+        typer.Option("--callees", help="List all functions/methods called by the target function (query must be a selector with ::)")
+    ] = False,
+    project: Annotated[
+        Optional[str],
+        typer.Option("--project", "-p", help="Project root directory (callees mode)")
+    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
     If the query contains metavariables ($X, $...Y), uses pattern matching mode.
     If the query contains :: or is a plain file path, uses symbol lookup mode.
+    With --callees, lists all functions/methods called by the target function.
 
     Examples:
         # Pattern mode (has $):
@@ -186,7 +195,45 @@ def search(
         # Lookup mode (has :: or file path):
         emend search file.py::func[params]
         emend search src/ --kind function --has-decorator pytest
+
+        # Callees mode:
+        emend search src/module.py::main --callees
+        emend search src/module.py::main --callees --json
     """
+    if callees_mode:
+        try:
+            _reject_file_glob(query, "search --callees")
+            parsed_selector = parse_extended_selector(query)
+            callees = find_callees(parsed_selector, project_path=project)
+
+            if json_output:
+                import json
+                data = [
+                    {
+                        "name": c.name,
+                        "qualified_name": c.qualified_name,
+                        "line": c.line,
+                    }
+                    for c in callees
+                ]
+                print(json.dumps(data, indent=2))
+            else:
+                for c in callees:
+                    if c.qualified_name:
+                        print(f"{c.name} ({c.qualified_name})")
+                    else:
+                        print(c.name)
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise typer.Exit(3)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise typer.Exit(2)
+        except Exception as e:
+            print(f"Error: {e!r}", file=sys.stderr)
+            raise typer.Exit(1)
+        return
+
     # Detect mode: $ in query → pattern matching, otherwise → lookup
     is_pattern_mode = "$" in query
 
@@ -604,29 +651,58 @@ def copy_to_cmd(
 
 
 
-@app.command("find-references")
-def find_references_cmd(
+@app.command("refs")
+def refs_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
     exclude_definition: Annotated[bool, typer.Option("--exclude-definition", help="Exclude the definition itself")] = False,
     exclude_imports: Annotated[bool, typer.Option("--exclude-imports", help="Exclude import statements")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
     writes_only: Annotated[bool, typer.Option("--writes-only", help="Only show write (assignment) references")] = False,
     reads_only: Annotated[bool, typer.Option("--reads-only", help="Only show read (load) references")] = False,
+    calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (equivalent to former callers command)")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory (used with --calls-only)")] = None,
 ):
     """Find all references to a symbol across the project.
 
     Uses LibCST to find usages, not just text matches.
+    With --calls-only, only returns actual call sites (not mere references or imports).
 
     Examples:
-        emend find-references src/emend/transform.py::get_component
-        emend find-references src/emend/transform.py::get_component --json
-        emend find-references file.py::MyClass --exclude-imports
-        emend find-references file.py::config --writes-only
-        emend find-references file.py::config --reads-only
+        emend refs src/emend/transform.py::get_component
+        emend refs src/emend/transform.py::get_component --json
+        emend refs file.py::MyClass --exclude-imports
+        emend refs file.py::config --writes-only
+        emend refs file.py::config --reads-only
+        emend refs src/module.py::process --calls-only
+        emend refs src/module.py::process --calls-only --project src/
     """
     try:
-        _reject_file_glob(selector, "find-references")
+        _reject_file_glob(selector, "refs")
         parsed_selector = parse_extended_selector(selector)
+
+        if calls_only:
+            if writes_only or reads_only or exclude_definition or exclude_imports:
+                raise ValueError(
+                    "--calls-only is incompatible with --writes-only, --reads-only, "
+                    "--exclude-definition, and --exclude-imports"
+                )
+            callers = find_callers(parsed_selector, project_path=project)
+            if json_output:
+                import json
+                data = [
+                    {
+                        "file_path": ref.file_path,
+                        "line": ref.line,
+                        "column": ref.column,
+                    }
+                    for ref in callers
+                ]
+                print(json.dumps(data, indent=2))
+            else:
+                for ref in callers:
+                    print(f"{ref.file_path}:{ref.line}")
+            return
+
         references = find_references(
             parsed_selector,
             include_definition=not exclude_definition,
@@ -1010,98 +1086,6 @@ def batch_cmd(
                 print("\n\nRun with --apply to write changes.")
             print()
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
-
-
-@app.command("callers")
-def callers_cmd(
-    selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
-    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-):
-    """Find all call sites of a function across the project.
-
-    Unlike find-references, this only returns places where the function
-    is actually called, not mere references or imports.
-
-    Examples:
-        emend callers src/module.py::process
-        emend callers src/module.py::process --json
-    """
-    try:
-        _reject_file_glob(selector, "callers")
-        parsed_selector = parse_extended_selector(selector)
-        callers = find_callers(parsed_selector, project_path=project)
-
-        if json_output:
-            import json
-            data = [
-                {
-                    "file_path": ref.file_path,
-                    "line": ref.line,
-                    "column": ref.column,
-                }
-                for ref in callers
-            ]
-            print(json.dumps(data, indent=2))
-        else:
-            for ref in callers:
-                print(f"{ref.file_path}:{ref.line}")
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
-
-
-@app.command("callees")
-def callees_cmd(
-    selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
-    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-):
-    """Find all functions/methods called inside a function.
-
-    Analyzes the body of the target function and lists all calls made.
-
-    Examples:
-        emend callees src/module.py::main
-        emend callees src/module.py::main --json
-    """
-    try:
-        _reject_file_glob(selector, "callees")
-        parsed_selector = parse_extended_selector(selector)
-        callees = find_callees(parsed_selector, project_path=project)
-
-        if json_output:
-            import json
-            data = [
-                {
-                    "name": c.name,
-                    "qualified_name": c.qualified_name,
-                    "line": c.line,
-                }
-                for c in callees
-            ]
-            print(json.dumps(data, indent=2))
-        else:
-            for c in callees:
-                if c.qualified_name:
-                    print(f"{c.name} ({c.qualified_name})")
-                else:
-                    print(c.name)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)

@@ -61,17 +61,15 @@
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode. `--output-selectors`, `--imported-from`, `--scope-local`, `--matching` |
+| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode. `--output-selectors`, `--imported-from`, `--scope-local`, `--matching`, `--callees` |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |
 | `copy-to` | Copy a symbol to another file |
 | `move` | Move a symbol to another file or a module to another package, updating imports |
 | `rename` | Rename a symbol or module across the project (`--docs`, `--no-hierarchy`, `--unsure` for symbols; auto-detects mode by `::` in selector) |
-| `find-references` | Find all references to a symbol (`--writes-only`, `--reads-only`, enhanced `--inside`/`--not-inside` with patterns) |
+| `refs` | Find all references to a symbol (`--writes-only`, `--reads-only`, `--calls-only` for call sites only) |
 | `list-symbols` | List all symbols in a module |
-| `callers` | Find all call sites of a function across the project |
-| `callees` | Find all functions/methods called by a function |
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` |
