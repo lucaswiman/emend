@@ -3,7 +3,14 @@
 import pytest
 import yaml
 
-from emend.lint import load_rules, expand_macros, LintRule, LintViolation, run_lint
+from emend.lint import (
+    load_rules,
+    expand_macros,
+    LintRule,
+    LintViolation,
+    run_lint,
+    parse_noqa_comments,
+)
 
 
 def _write_config(tmp_path, config_dict):
@@ -302,3 +309,243 @@ def test_lint_violation_fields(tmp_path):
     assert v.file_path == str(test_file)
     assert v.line == 1
     assert "print" in v.match_text
+
+
+# --- parse_noqa_comments unit tests ---
+
+
+def test_parse_noqa_bare():
+    """Bare # noqa returns None (suppress all)."""
+    result = parse_noqa_comments("x = 1  # noqa\n")
+    assert result == {1: None}
+
+
+def test_parse_noqa_specific_emend_rule():
+    """# noqa: emend:rule-name extracts rule name."""
+    result = parse_noqa_comments("x = 1  # noqa: emend:no-print\n")
+    assert result == {1: {"no-print"}}
+
+
+def test_parse_noqa_multiple_emend_rules():
+    """# noqa: emend:r1, emend:r2 extracts both rules."""
+    result = parse_noqa_comments("x = 1  # noqa: emend:no-print, emend:no-assert\n")
+    assert result == {1: {"no-print", "no-assert"}}
+
+
+def test_parse_noqa_mixed_only_emend():
+    """# noqa: E501, emend:no-print only picks up emend-prefixed rules."""
+    result = parse_noqa_comments("x = 1  # noqa: E501, emend:no-print\n")
+    assert result == {1: {"no-print"}}
+
+
+def test_parse_noqa_non_emend_only():
+    """# noqa: E501 alone has no effect on emend (not in result)."""
+    result = parse_noqa_comments("x = 1  # noqa: E501\n")
+    assert result == {}
+
+
+def test_parse_noqa_inside_string():
+    """# noqa inside a string literal is NOT detected."""
+    result = parse_noqa_comments('x = "# noqa"\n')
+    assert result == {}
+
+
+def test_parse_noqa_case_insensitive():
+    """# NOQA and # Noqa work too."""
+    result = parse_noqa_comments("x = 1  # NOQA\n")
+    assert result == {1: None}
+
+    result2 = parse_noqa_comments("x = 1  # Noqa: emend:my-rule\n")
+    assert result2 == {1: {"my-rule"}}
+
+
+def test_parse_noqa_spacing_variations():
+    """Various spacing around noqa is handled."""
+    result = parse_noqa_comments("x = 1  #noqa\n")
+    assert result == {1: None}
+
+    result2 = parse_noqa_comments("x = 1  #  noqa:emend:r1\n")
+    assert result2 == {1: {"r1"}}
+
+
+# --- Integration tests (find mode) ---
+
+
+def test_noqa_suppresses_all_rules(tmp_path):
+    """Bare # noqa suppresses all lint rules on that line."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "print('hello')  # noqa\n"
+        "print('world')\n"
+    )
+
+    rules = [
+        LintRule(
+            name="no-print",
+            find="print($...ARGS)",
+            message="No print",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+    assert violations[0].line == 2
+
+
+def test_noqa_suppresses_specific_rule(tmp_path):
+    """# noqa: emend:rule-name suppresses only that rule."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "print('hello')  # noqa: emend:no-print\n"
+        "assert x == 1\n"
+    )
+
+    rules = [
+        LintRule(name="no-print", find="print($...ARGS)", message="No print"),
+        LintRule(name="no-assert", find="assert $X", message="No assert"),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    # print suppressed by noqa, assert not suppressed
+    assert len(violations) == 1
+    assert violations[0].rule_name == "no-assert"
+
+
+def test_noqa_specific_rule_does_not_suppress_other(tmp_path):
+    """# noqa: emend:no-print does NOT suppress no-assert on the same line."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "print('hello')  # noqa: emend:other-rule\n"
+    )
+
+    rules = [
+        LintRule(name="no-print", find="print($...ARGS)", message="No print"),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+    assert violations[0].rule_name == "no-print"
+
+
+def test_noqa_partial_suppression(tmp_path):
+    """One line noqa'd, another not — only unsuppressed line reported."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "print('a')  # noqa: emend:no-print\n"
+        "x = 1\n"
+        "print('b')\n"
+    )
+
+    rules = [
+        LintRule(name="no-print", find="print($...ARGS)", message="No print"),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+    assert violations[0].line == 3
+
+
+def test_noqa_multiline_statement(tmp_path):
+    """# noqa on a multi-line statement suppresses matches on inner lines."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "result = (  # noqa: emend:no-print\n"
+        "    print('hello')\n"
+        ")\n"
+    )
+
+    rules = [
+        LintRule(name="no-print", find="print($...ARGS)", message="No print"),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 0
+
+
+def test_noqa_inside_string_not_suppressed(tmp_path):
+    """# noqa inside a string literal does NOT suppress violations."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        'x = "# noqa"\n'
+        "print('hello')\n"
+    )
+
+    rules = [
+        LintRule(name="no-print", find="print($...ARGS)", message="No print"),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+    assert violations[0].line == 2
+
+
+# --- Integration tests (fix mode) ---
+
+
+def test_noqa_fix_suppresses_line(tmp_path):
+    """# noqa prevents fix on that line; other lines still fixed."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "print('keep')  # noqa\n"
+        "print('fix')\n"
+    )
+
+    rules = [
+        LintRule(
+            name="no-print",
+            find="print($...ARGS)",
+            message="No print",
+            replace="logger.info($...ARGS)",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    content = test_file.read_text()
+    assert "print('keep')  # noqa" in content
+    assert "logger.info('fix')" in content
+    assert "print('fix')" not in content
+
+
+def test_noqa_fix_all_suppressed(tmp_path):
+    """When all matches are suppressed, file is unchanged."""
+    test_file = tmp_path / "example.py"
+    original = "print('a')  # noqa\nprint('b')  # noqa\n"
+    test_file.write_text(original)
+
+    rules = [
+        LintRule(
+            name="no-print",
+            find="print($...ARGS)",
+            message="No print",
+            replace="logger.info($...ARGS)",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert test_file.read_text() == original
+    assert len(violations) == 0
+
+
+def test_noqa_fix_no_noqa_unchanged(tmp_path):
+    """Existing fix behavior unchanged when no noqa comments present."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "x = 1\n"
+        "print('hello')\n"
+        "y = 2\n"
+    )
+
+    rules = [
+        LintRule(
+            name="no-print",
+            find="print($...ARGS)",
+            message="No print",
+            replace="logger.info($...ARGS)",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) == 1
+    content = test_file.read_text()
+    assert "logger.info('hello')" in content
+    assert "print('hello')" not in content
