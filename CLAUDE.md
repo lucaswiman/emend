@@ -61,7 +61,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`. Hidden aliases: `query`, `show`, `get`, `lookup`, `find` |
+| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`. Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |

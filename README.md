@@ -110,75 +110,93 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ## Commands
 
-### Read Commands
+### Search & Read
 
-#### `lookup` - Unified read command
-Combines `get`, `query`, and `show` with smart mode detection:
-- **Component extraction** (like `get`): `emend lookup file.py::func[params]`
-- **Filtering** (like `query`): `emend lookup file.py --kind function --name test_*`
-- **Display source** (like `show`): `emend lookup file.py::func`
-- **Wildcard support**: `emend lookup 'file.py::*[params]'` for bulk extraction
-- **Output modes**: `--json`, `--metadata`, `--paths-only`, `--count`
+**`search`** - Unified search with auto-detection
+- Pattern mode: `emend search 'print($X)' file.py`
+- Lookup mode: `emend search file.py::func`
+- Summary mode: `emend search file.py` (list symbols)
+- Filters: `--kind`, `--name`, `--returns`, `--depth`, `--has-param`, `--output`, `--where`, `--imported-from`, `--scope-local`
+- Output formats: `code`, `location`, `selector`, `summary`, `metadata`, `json`, `count`, `summary::flat`, `code::dedent`
+- Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows
 
-#### `edit` - Unified write command
-Combines `set`, `add`, and `rm` with location control:
-- **Replace** (like `set`): `emend edit file.py::func[returns] "int" --apply`
-- **Insert** (like `add`): `emend edit file.py::func[params] "new_param" --before ctx --apply`
-- **Remove** (like `rm`): `emend edit file.py::func[params][old_param] --rm --apply`
-- **Position flags**: `--before`, `--after`, `--at` for precise insertion
-- **Pseudo-class support**: `:KEYWORD_ONLY`, `:POSITIONAL_ONLY` for parameters
+### Edit & Transform
 
-### Alternate Structured Edit Commands
-- `get` - Read component value (alias for `lookup`)
-- `set` - Replace component value (alias for `edit`)
-- `add` - Insert into list component (alias for `edit`)
-- `rm` - Remove symbol or component (alias for `edit`)
+**`edit`** - Modify or remove existing symbol components
+- Replace: `emend edit file.py::func[returns] "int" --apply`
+- Insert: `emend edit file.py::func[params] "new_param" --before ctx --apply`
+- Remove: `emend edit file.py::func[params][old_param] --rm --apply`
+- Wildcards: `emend edit 'file.py::*[decorators]' "@dataclass" --apply`
 
-### Pattern Transform Commands
-- `find` - Find pattern matches
-- `replace` - Simple pattern substitution
-- `batch` - Run multiple operations from JSON
+**`add`** - Insert new items into list components (alternative to `edit`)
+- `emend add file.py::func[params] "timeout: int = 30" --apply`
+- `emend add "file.py::func[params]:KEYWORD_ONLY" "debug: bool" --apply`
+
+**`replace`** - Replace pattern matches with pattern-based substitution
+- `emend replace 'print($X)' 'logger.info($X)' file.py --apply`
+- Scope constraints: `--in`, `--inside`, `--not-inside`, `--where`
 
 ### Symbol Management
-- `query` - Find symbols with filters → use `lookup` instead
-- `show` - Display symbol source code → use `lookup` instead
-- `list-symbols` - List symbols in a module
-- `find-references` - Find all references to a symbol
-- `rename` - Rename a symbol across the project
-- `move` - Move a symbol to another file with import updates
-- `copy-to` - Copy a symbol to another file
 
-### Module Operations
-- `move-module` - Move a module to another package
-- `rename-module` - Rename a module file
+**`refs`** - Find all references to a symbol across the project
+- `emend refs models.py::User`
+- Filters: `--writes-only`, `--reads-only`, `--calls-only`
+- Output: `--output json`, `--output location`
 
+**`rename`** - Rename a symbol or module across the project
+- Symbol: `emend rename models.py::User --to Account --apply`
+- Module: `emend rename models.py --to accounts.py --apply`
+- Filters: `--docs`, `--no-hierarchy`, `--unsure`
 
-### Utility
-- `batch` - Run multiple operations from JSON
+**`move`** - Move a symbol or module with automatic import updates
+- Symbol: `emend move utils.py::parse_date helpers/dates.py --apply`
+- Module: `emend move utils.py helpers/utils.py --apply`
+
+**`copy-to`** - Copy a symbol to another file
+- `emend copy-to workflow.py::Builder._build.helper tasks.py --dedent --apply`
+
+### Utilities
+
+**`batch`** - Apply multiple refactoring operations from YAML/JSON file
+- `emend batch rules.json --apply`
+
+**`lint`** - Lint files using pattern rules from `.emend/patterns.yaml`
+- `emend lint src/`
+- `emend lint src/ --fix --apply` to auto-fix issues
+
+**`graph`** - Generate a call graph for functions in a file
+- `emend graph src/module.py --format plain`
+- Formats: `plain`, `json`, `dot`
 
 ## Examples
 
-### Read and Edit Examples
+### Search & Read Examples
 
-#### Using `lookup`
 ```bash
+# Search by pattern (pattern mode)
+emend search 'print($X)' src/
+emend search 'assertEqual($A, $B)' tests/ --output count
+
+# Search by symbol (lookup mode)
+emend search file.py::func
+emend search src/ --kind function --name test_*
+emend search file.py --output json
+
 # Extract function parameters
-emend lookup api.py::handler[params]
+emend search api.py::handler[params]
+emend search 'api.py::*[params]'  # Wildcard: all function params in file
 
-# Extract all function parameters from a file (wildcard)
-emend lookup 'api.py::*[params]'
+# Get return types
+emend search 'src/**/*.py::*[returns]' --output metadata
 
-# Query functions by name pattern
-emend lookup src/ --kind function --name test_*
-
-# Show function source code
-emend lookup api.py::handler
-
-# Get return types as JSON
-emend lookup 'src/**/*.py::*[returns]' --json
+# List symbols in a module
+emend search file.py                          # Tree view
+emend search file.py --output summary::flat   # Flat list
+emend search file.py --depth 2                # Limit nesting depth
 ```
 
-#### Using `edit`
+### Edit Examples
+
 ```bash
 # Update return type
 emend edit api.py::handler[returns] "Response" --apply
@@ -186,7 +204,7 @@ emend edit api.py::handler[returns] "Response" --apply
 # Add parameter with default value
 emend edit api.py::handler[params] "timeout: int = 30" --apply
 
-# Add keyword-only parameter using pseudo-class
+# Add keyword-only parameter
 emend edit "api.py::handler[params]:KEYWORD_ONLY" "debug: bool" --apply
 
 # Insert parameter before specific param
@@ -194,18 +212,12 @@ emend edit api.py::handler[params] "ctx: Context" --before user_id --apply
 
 # Remove a specific parameter
 emend edit api.py::handler[params][deprecated_arg] --rm --apply
+
+# Edit multiple symbols at once (wildcards)
+emend edit 'file.py::*[decorators]' "@dataclass" --apply
 ```
 
-### Alternate Structured Edits
-
-```bash
-# These alternate commands also work:
-emend add api.py::handler[params] "timeout: int = 30" --apply
-emend set api.py::handler[returns] "Response" --apply
-emend rm api.py::handler[params][deprecated_arg] --apply
-```
-
-### Pattern Transforms
+### Pattern Transform Examples
 
 ```bash
 # Simple find and replace (dry-run by default)
@@ -217,27 +229,20 @@ emend replace 'old_var' 'new_var' api.py --in process --apply
 # Replace with pattern capture
 emend replace 'get_field($N)' 'field$N' api.py --in process --apply
 
-# Find pattern matches
-emend find 'print($X)' src/
+# Find all pattern matches
+emend search 'print($X)' src/ --output location
 
 # Multi-rule batch operations
 emend batch rules.json --apply
-
-# Or use shell loop for multiple replacements
-for pattern in "pattern1:replacement1" "pattern2:replacement2"; do
-  IFS=: read -r from to <<< "$pattern"
-  emend replace "$from" "$to" file.py --apply
-done
 ```
 
-### Advanced Operations
+### Symbol Management Examples
 
 ```bash
-# List symbols with full nesting
-emend list-symbols workflow.py --tree-depth 3
-
-# Extract nested function to another file
-emend copy-to workflow.py::Builder._build.helper tasks.py --dedent --apply
+# Find all references to a symbol
+emend refs models.py::User --output json
+emend refs models.py::User --writes-only    # Only write references
+emend refs models.py::User --calls-only     # Only function calls
 
 # Rename a symbol project-wide
 emend rename models.py::User --to Account --apply
@@ -245,13 +250,11 @@ emend rename models.py::User --to Account --apply
 # Move a symbol to another file (updates imports)
 emend move utils.py::parse_date helpers/dates.py --apply
 
-# Find all references to a symbol
-emend find-references models.py::User --json
+# Copy a symbol to another file
+emend copy-to workflow.py::Builder._build.helper tasks.py --dedent --apply
 
-# Copy imports from one file to another (using primitives)
-emend get source.py::[imports] | while read import_line; do
-  emend add dest.py::[imports] "$import_line" --apply
-done
+# List symbols using search
+emend search workflow.py --depth 3
 ```
 
 ### Pattern Syntax

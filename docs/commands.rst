@@ -6,7 +6,7 @@ search
 
 Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary** (like the old ``list-symbols``). Otherwise, it uses **symbol lookup** mode.
 
-Hidden aliases: ``query``, ``show``, ``get``, ``lookup``, ``find``.
+Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuitive workflows.
 
 .. code-block:: text
 
@@ -622,5 +622,11 @@ Move a symbol to another file, updating all imports.
 
 .. note::
 
-   ``list-symbols`` has been merged into ``search``. Use ``emend search FILE`` (auto-detects summary mode) or ``emend search FILE --output summary``. The ``--selector`` option is replaced by putting the selector in the query: ``emend search FILE::Symbol --output summary``.
+   **Command consolidations:**
+
+   - ``list-symbols`` → Use ``emend search FILE`` (auto-detects summary mode) or ``emend search FILE --output summary``
+   - ``find-references``, ``callers``, ``callees`` → Use ``emend refs SELECTOR`` with ``--writes-only``, ``--reads-only``, ``--calls-only`` filters
+   - ``rename-symbol``, ``rename-module`` → Use ``emend rename SELECTOR --to NEW_NAME`` (auto-detects mode)
+   - ``move-module`` → Use ``emend move MODULE DESTINATION`` (auto-detects mode)
+   - ``lookup``, ``query``, ``show``, ``find`` → Use ``emend search`` (also available as aliases)
 
