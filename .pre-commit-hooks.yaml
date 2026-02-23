@@ -1,0 +1,7 @@
+- id: emend-lint
+  name: emend lint
+  description: Lint Python files using emend pattern rules from .emend/patterns.yaml
+  entry: emend lint
+  language: python
+  types: [python]
+  require_serial: true

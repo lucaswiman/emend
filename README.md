@@ -162,7 +162,9 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 **`lint`** - Lint files using pattern rules from `.emend/patterns.yaml`
 - `emend lint src/`
-- `emend lint src/ --fix --apply` to auto-fix issues
+- `emend lint src/ --fix` to auto-fix issues
+- `emend lint src/ --rule no-print` to run a single rule
+- See [Linting documentation](https://lucaswiman.github.io/emend/linting.html) for full details
 
 **`graph`** - Generate a call graph for functions in a file
 - `emend graph src/module.py --format plain`
@@ -320,6 +322,55 @@ The `code_chunk` rule excludes colons (`/[^$:]+/`) to prevent consuming colons t
 ```
 
 Lines prefixed with `-` are matched; corresponding `+` lines are the replacement. Blank lines separate rules.
+
+## Linting
+
+emend includes a pattern-based linter. Define rules in `.emend/patterns.yaml` and check your code for violations:
+
+```yaml
+# .emend/patterns.yaml
+macros:
+  print_call: "print($...ARGS)"
+
+rules:
+  no-print:
+    find: "{print_call}"
+    not-inside: "def test_*"
+    message: "Use logger instead of print"
+    replace: "logger.info($...ARGS)"
+
+  no-open-without-encoding:
+    find: "open($PATH)"
+    message: "Specify encoding when calling open()"
+    replace: "open($PATH, encoding='utf-8')"
+```
+
+```bash
+# Check for violations
+emend lint src/
+
+# Auto-fix violations that have a replace rule
+emend lint src/ --fix
+
+# Run only a specific rule
+emend lint src/ --rule no-print
+```
+
+### pre-commit integration
+
+emend can run as a [pre-commit](https://pre-commit.com/) hook. Add to your `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/lucaswiman/emend
+    rev: v0.1.0  # replace with desired version tag
+    hooks:
+      - id: emend-lint
+```
+
+This runs `emend lint` on staged Python files using your `.emend/patterns.yaml` config.
+
+To auto-fix violations, add `args: ["--fix"]` to the hook configuration.
 
 ## Development
 

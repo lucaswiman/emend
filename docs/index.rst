@@ -15,6 +15,7 @@ A Python refactoring CLI tool built on `LibCST <https://github.com/Instagram/Lib
    selectors
    commands
    patterns
+   linting
    recipes
 
 Indices and tables
