@@ -161,10 +161,10 @@ class TestFindCallers:
 
 
 class TestCallersCommand:
-    """Tests for the callers CLI command."""
+    """Tests for the refs --calls-only CLI command."""
 
     def test_callers_command_basic(self, tmp_path, run_emend_cmd):
-        """CLI callers command works."""
+        """CLI refs --calls-only command works."""
         project = tmp_path / "project"
         project.mkdir()
 
@@ -183,14 +183,15 @@ class TestCallersCommand:
         )
 
         result = run_emend_cmd([
-            "callers", f"{target}::process",
+            "refs", f"{target}::process",
+            "--calls-only",
             "--project", str(project),
         ], check=False)
         assert result.returncode == 0
         assert "caller.py" in result.stdout
 
     def test_callers_command_json(self, tmp_path, run_emend_cmd):
-        """CLI callers command with --json."""
+        """CLI refs --calls-only command with --json."""
         project = tmp_path / "project"
         project.mkdir()
 
@@ -209,7 +210,8 @@ class TestCallersCommand:
         )
 
         result = run_emend_cmd([
-            "callers", f"{target}::process",
+            "refs", f"{target}::process",
+            "--calls-only",
             "--project", str(project),
             "--json",
         ], check=False)

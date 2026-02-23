@@ -13,7 +13,7 @@ def test_show_simple_function(emend_cmd, tmp_path: Path):
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", f"{test_file}::greet"],
+        [emend_cmd, "search", f"{test_file}::greet"],
         capture_output=True,
         text=True,
     )
@@ -37,7 +37,7 @@ def test_show_with_dedent(emend_cmd, tmp_path: Path):
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", "--dedent", f"{test_file}::Calculator.add.validate"],
+        [emend_cmd, "search", "--output", "code::dedent", f"{test_file}::Calculator.add.validate"],
         capture_output=True,
         text=True,
     )
@@ -63,7 +63,7 @@ def bar():
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", f"{test_file}:2-4"],
+        [emend_cmd, "search", f"{test_file}:2-4"],
         capture_output=True,
         text=True,
     )
@@ -87,7 +87,7 @@ def bar():
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", "--dedent", f"{test_file}:2-4"],
+        [emend_cmd, "search", "--output", "code::dedent", f"{test_file}:2-4"],
         capture_output=True,
         text=True,
     )
@@ -109,7 +109,7 @@ def test_show_symbol_not_found(emend_cmd, tmp_path: Path):
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", f"{test_file}::nonexistent"],
+        [emend_cmd, "search", f"{test_file}::nonexistent"],
         capture_output=True,
         text=True,
     )
@@ -129,7 +129,7 @@ def test_show_function_with_decorators(emend_cmd, tmp_path: Path):
 """)
 
     result = subprocess.run(
-        [emend_cmd, "lookup", f"{test_file}::MyClass.expensive_property"],
+        [emend_cmd, "search", f"{test_file}::MyClass.expensive_property"],
         capture_output=True,
         text=True,
     )

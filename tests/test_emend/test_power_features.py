@@ -63,7 +63,7 @@ class TestWhereFlag:
             "def test_foo():\n"
             "    print('test foo')\n"
         )
-        result = run_emend_cmd(["find", "print($X)", str(f), "--where", "def test_*"])
+        result = run_emend_cmd(["search", "print($X)", str(f), "--where", "def test_*"])
         assert ":4" in result.stdout
 
 
@@ -351,7 +351,7 @@ class TestScopeLocal:
             "y = my_join('a', 'b')\n"
         )
         result = run_emend_cmd([
-            "find", "$FUNC($A, $B)", str(f), "--scope-local", "--count"
+            "search", "$FUNC($A, $B)", str(f), "--scope-local", "--output", "count"
         ])
         # Should only count locally-defined calls (my_join), not join
         count = int(result.stdout.strip())

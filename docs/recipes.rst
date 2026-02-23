@@ -73,7 +73,7 @@ First find all functions missing return types:
 
 .. code-block:: bash
 
-   emend lookup src/ --kind function --json | grep -v returns
+   emend search src/ --kind function --json | grep -v returns
 
 Then add them one at a time:
 
@@ -88,12 +88,12 @@ Add a parameter to every method in a class
 .. code-block:: bash
 
    # Preview
-   emend lookup api.py::MyClass --kind method --paths-only | while read sel; do
+   emend search api.py::MyClass --kind method --output selector | while read sel; do
        emend add "$sel[params]" "ctx: Context" --after self
    done
 
    # Apply
-   emend lookup api.py::MyClass --kind method --paths-only | while read sel; do
+   emend search api.py::MyClass --kind method --output selector | while read sel; do
        emend add "$sel[params]" "ctx: Context" --after self --apply
    done
 
@@ -134,7 +134,7 @@ Find all functions that raise a specific exception
 
 .. code-block:: bash
 
-   emend find 'raise ValueError($MSG)' src/ --json
+   emend search 'raise ValueError($MSG)' src/ --json
 
 Audit all open() calls (check for missing encoding)
 ---------------------------------------------------
@@ -142,8 +142,8 @@ Audit all open() calls (check for missing encoding)
 .. code-block:: bash
 
    # Find open() calls without encoding kwarg
-   emend find 'open($PATH)' src/
-   emend find 'open($PATH, $MODE)' src/
+   emend search 'open($PATH)' src/
+   emend search 'open($PATH, $MODE)' src/
 
    # Add encoding where missing
    emend replace 'open($PATH)' 'open($PATH, encoding="utf-8")' src/ --apply
@@ -154,10 +154,10 @@ Find all places a function is called
 .. code-block:: bash
 
    # Pattern-based search (text matching)
-   emend find 'process_request($X)' src/ --json
+   emend search 'process_request($X)' src/ --json
 
    # Scope-aware callers analysis (uses LibCST scope analysis)
-   emend callers src/api.py::process_request
+   emend refs src/api.py::process_request --calls-only
 
 Understand what a function depends on
 -------------------------------------
@@ -165,10 +165,10 @@ Understand what a function depends on
 .. code-block:: bash
 
    # What functions does main() call?
-   emend callees src/app.py::main
+   emend graph src/app.py::main
 
    # Who calls process()?
-   emend callers src/app.py::process
+   emend refs src/app.py::process --calls-only
 
    # Visualize the call graph for the whole file
    emend graph src/app.py --format dot | dot -Tsvg > deps.svg
@@ -179,10 +179,10 @@ Find where a variable is mutated
 .. code-block:: bash
 
    # Only write references (assignments)
-   emend find-references config.py::settings --writes-only
+   emend refs config.py::settings --writes-only
 
    # Only read references (loads)
-   emend find-references config.py::settings --reads-only
+   emend refs config.py::settings --reads-only
 
 Extract and move a nested function
 ----------------------------------
@@ -201,14 +201,14 @@ Rename a module
 .. code-block:: bash
 
    # Rename the file and update all imports
-   emend rename-module old_utils.py new_utils --apply
+   emend rename old_utils.py --to new_utils --apply
 
 Batch-add a decorator to all async functions
 ---------------------------------------------
 
 .. code-block:: bash
 
-   emend lookup src/ --kind async_function --paths-only | while read sel; do
+   emend search src/ --kind async_function --output selector | while read sel; do
        emend add "$sel[decorators]" "@trace" --at 0 --apply
    done
 
@@ -256,7 +256,7 @@ Find imports from a specific module
 .. code-block:: bash
 
    # Only match when json is actually imported from the json module
-   emend find 'json.loads($X)' src/ --imported-from json
+   emend search 'json.loads($X)' src/ --imported-from json
 
 Scope-aware pattern searching
 -----------------------------
@@ -264,16 +264,16 @@ Scope-aware pattern searching
 .. code-block:: bash
 
    # Find prints only inside test functions
-   emend find 'print($X)' tests/ --inside 'def test_*'
+   emend search 'print($X)' tests/ --inside 'def test_*'
 
    # Find awaits only inside async fetch functions
-   emend find 'await $X' src/ --where 'async def fetch_*'
+   emend search 'await $X' src/ --where 'async def fetch_*'
 
    # Find locally-defined config variables (not imported ones)
-   emend find 'config' src/ --scope-local
+   emend search 'config' src/ --scope-local
 
    # Find prints NOT inside try blocks
-   emend find 'print($X)' src/ --not-inside 'try:'
+   emend search 'print($X)' src/ --not-inside 'try:'
 
 Find dict literals with specific keys
 --------------------------------------
@@ -281,10 +281,10 @@ Find dict literals with specific keys
 .. code-block:: bash
 
    # Find all dicts with a 'type' key set to 'user'
-   emend find "{'type': 'user', ...}" src/
+   emend search "{'type': 'user', ...}" src/
 
    # Find exact dict structures
-   emend find "{'name': \$NAME, 'age': \$AGE}" src/
+   emend search "{'name': \$NAME, 'age': \$AGE}" src/
 
 Find walrus operator usage
 --------------------------
@@ -292,7 +292,7 @@ Find walrus operator usage
 .. code-block:: bash
 
    # Find walrus in if conditions
-   emend find 'if ($VAR := $EXPR):' src/
+   emend search 'if ($VAR := $EXPR):' src/
 
 Find chained comparisons
 ------------------------
@@ -300,4 +300,4 @@ Find chained comparisons
 .. code-block:: bash
 
    # Find range checks
-   emend find '$A < $B < $C' src/
+   emend search '$A < $B < $C' src/

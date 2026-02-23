@@ -330,7 +330,7 @@ class Bar:
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "list-symbols", str(filepath)],
+            [EMEND, "search", str(filepath), "--output", "summary"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0
@@ -349,7 +349,7 @@ def func():
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "list-symbols", str(filepath), "--tree-depth", "2"],
+            [EMEND, "search", str(filepath), "--output", "summary", "--depth", "2"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0
@@ -369,7 +369,7 @@ def outer():
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "list-symbols", str(filepath), "--tree-depth", "3"],
+            [EMEND, "search", str(filepath), "--output", "summary", "--depth", "3"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0
@@ -385,7 +385,7 @@ async def handler(request: Request, *, timeout: int = 30) -> Response:
         filepath.write_text(code)
 
         result = subprocess.run(
-            [EMEND, "list-symbols", str(filepath)],
+            [EMEND, "search", str(filepath), "--output", "summary"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0

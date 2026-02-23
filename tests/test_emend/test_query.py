@@ -100,7 +100,7 @@ class TestQueryKind:
 
     def test_query_kind_function(self, sample_file):
         """--kind function returns only top-level functions."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "function", "--json"])
+        result = run_emend(["search", str(sample_file), "--kind", "function", "--output", "json"])
         assert result.returncode == 0
 
         # Parse JSON output
@@ -140,7 +140,7 @@ class TestQueryKind:
 
     def test_query_kind_method(self, sample_file):
         """--kind method returns only methods."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "method"])
+        result = run_emend(["search", str(sample_file), "--kind", "method"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
         assert "_private_method" in result.stdout
@@ -150,7 +150,7 @@ class TestQueryKind:
 
     def test_query_kind_async_function(self, sample_file):
         """--kind async_function returns async standalone functions."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "async_function"])
+        result = run_emend(["search", str(sample_file), "--kind", "async_function"])
         assert result.returncode == 0
         assert "async_standalone" in result.stdout
         assert "async_method" not in result.stdout
@@ -158,14 +158,14 @@ class TestQueryKind:
 
     def test_query_kind_async_method(self, sample_file):
         """--kind async_method returns async methods."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "async_method"])
+        result = run_emend(["search", str(sample_file), "--kind", "async_method"])
         assert result.returncode == 0
         assert "async_method" in result.stdout
         assert "async_standalone" not in result.stdout
 
     def test_query_kind_class(self, sample_file):
         """--kind class returns only classes."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "class"])
+        result = run_emend(["search", str(sample_file), "--kind", "class"])
         assert result.returncode == 0
         assert "MyClass" in result.stdout
         assert "TestSuite" in result.stdout
@@ -173,7 +173,7 @@ class TestQueryKind:
 
     def test_query_kind_async_wildcard(self, sample_file):
         """--kind async_* matches both async functions and async methods."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "async_*"])
+        result = run_emend(["search", str(sample_file), "--kind", "async_*"])
         assert result.returncode == 0
         assert "async_standalone" in result.stdout
         assert "async_method" in result.stdout
@@ -186,7 +186,7 @@ class TestQueryName:
 
     def test_query_name_glob(self, sample_file):
         """--name with glob pattern matches names."""
-        result = run_emend(["lookup", str(sample_file), "--name", "test_*"])
+        result = run_emend(["search", str(sample_file), "--name", "test_*"])
         assert result.returncode == 0
         assert "test_create" in result.stdout
         assert "test_update" in result.stdout
@@ -196,7 +196,7 @@ class TestQueryName:
 
     def test_query_name_regex(self, sample_file):
         """--name with regex pattern (slash-delimited) matches names."""
-        result = run_emend(["lookup", str(sample_file), "--name", "/^test_.*_async$/"])
+        result = run_emend(["search", str(sample_file), "--name", "/^test_.*_async$/"])
         assert result.returncode == 0
         assert "test_delete_async" in result.stdout
         assert "test_create" not in result.stdout
@@ -204,7 +204,7 @@ class TestQueryName:
 
     def test_query_name_matches_alias(self, sample_file):
         """--name-matches is an alias for --name."""
-        result = run_emend(["lookup", str(sample_file), "--name", "helper_*"])
+        result = run_emend(["search", str(sample_file), "--name", "helper_*"])
         assert result.returncode == 0
         assert "helper_one" in result.stdout
         assert "helper_two" in result.stdout
@@ -216,28 +216,28 @@ class TestQueryDecorator:
 
     def test_query_has_decorator(self, sample_file):
         """--has-decorator matches decorated symbols."""
-        result = run_emend(["lookup", str(sample_file), "--has-decorator", "property"])
+        result = run_emend(["search", str(sample_file), "--where", "@property"])
         assert result.returncode == 0
         assert "name" in result.stdout
         assert "regular_method" not in result.stdout
 
     def test_query_has_decorator_staticmethod(self, sample_file):
         """--has-decorator staticmethod finds static methods."""
-        result = run_emend(["lookup", str(sample_file), "--has-decorator", "staticmethod"])
+        result = run_emend(["search", str(sample_file), "--where", "@staticmethod"])
         assert result.returncode == 0
         assert "static_method" in result.stdout
         assert "class_method" not in result.stdout
 
     def test_query_has_decorator_glob(self, sample_file):
         """--has-decorator with glob pattern."""
-        result = run_emend(["lookup", str(sample_file), "--has-decorator", "*method"])
+        result = run_emend(["search", str(sample_file), "--where", "@*method"])
         assert result.returncode == 0
         assert "static_method" in result.stdout
         assert "class_method" in result.stdout
 
     def test_query_has_decorator_pytest(self, sample_file):
         """--has-decorator matches pytest decorators."""
-        result = run_emend(["lookup", str(sample_file), "--has-decorator", "pytest.*"])
+        result = run_emend(["search", str(sample_file), "--where", "@pytest.*"])
         assert result.returncode == 0
         assert "test_helper" in result.stdout
 
@@ -247,7 +247,7 @@ class TestQueryReturns:
 
     def test_query_returns_str(self, sample_file):
         """--returns str matches functions returning str."""
-        result = run_emend(["lookup", str(sample_file), "--returns", "str"])
+        result = run_emend(["search", str(sample_file), "--returns", "str"])
         assert result.returncode == 0
         assert "standalone_func" in result.stdout
         assert "name" in result.stdout  # property returning str
@@ -255,13 +255,13 @@ class TestQueryReturns:
 
     def test_query_returns_optional_wildcard(self, sample_file):
         """--returns with Optional pattern."""
-        result = run_emend(["lookup", str(sample_file), "--returns", "Optional[*]"])
+        result = run_emend(["search", str(sample_file), "--returns", "Optional[*]"])
         assert result.returncode == 0
         assert "async_method" in result.stdout
 
     def test_query_returns_none(self, sample_file):
         """--returns None matches functions with no return value."""
-        result = run_emend(["lookup", str(sample_file), "--returns", "None"])
+        result = run_emend(["search", str(sample_file), "--returns", "None"])
         assert result.returncode == 0
         assert "async_standalone" in result.stdout
 
@@ -271,7 +271,7 @@ class TestQueryInClass:
 
     def test_query_in_class(self, sample_file):
         """--in-class restricts to methods of named class."""
-        result = run_emend(["lookup", str(sample_file), "--in-class", "MyClass"])
+        result = run_emend(["search", str(sample_file), "--where", "class MyClass"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
         assert "async_method" in result.stdout
@@ -283,7 +283,7 @@ class TestQueryInClass:
 
     def test_query_in_class_testsuite(self, sample_file):
         """--in-class TestSuite shows only test methods."""
-        result = run_emend(["lookup", str(sample_file), "--in-class", "TestSuite"])
+        result = run_emend(["search", str(sample_file), "--where", "class TestSuite"])
         assert result.returncode == 0
         assert "test_create" in result.stdout
         assert "test_update" in result.stdout
@@ -309,7 +309,7 @@ class OuterClass:
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["lookup", str(filepath), "--depth", "1", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "1", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have exactly 2 top-level symbols
@@ -333,7 +333,7 @@ class OuterClass:
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["lookup", str(filepath), "--depth", "2", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "2", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have nested_func and method_one (both at depth 2)
@@ -353,7 +353,7 @@ def top_level_func():
         filepath = tmp_path / "nested.py"
         filepath.write_text(code)
 
-        result = run_emend(["lookup", str(filepath), "--depth", "2+", "--paths-only"])
+        result = run_emend(["search", str(filepath), "--depth", "2+", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         # Should have nested_func (depth 2) and deeply_nested (depth 3)
@@ -367,7 +367,7 @@ class TestQueryHasParam:
 
     def test_query_has_param_self(self, sample_file):
         """--has-param self matches methods."""
-        result = run_emend(["lookup", str(sample_file), "--has-param", "self"])
+        result = run_emend(["search", str(sample_file), "--has-param", "self"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
         assert "async_method" in result.stdout
@@ -377,14 +377,14 @@ class TestQueryHasParam:
 
     def test_query_has_param_request(self, sample_file):
         """--has-param request matches functions with request param."""
-        result = run_emend(["lookup", str(sample_file), "--has-param", "request"])
+        result = run_emend(["search", str(sample_file), "--has-param", "request"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
         assert "async_method" not in result.stdout
 
     def test_query_has_param_with_type(self, sample_file):
         """--has-param with type annotation pattern."""
-        result = run_emend(["lookup", str(sample_file), "--has-param", "request: Request"])
+        result = run_emend(["search", str(sample_file), "--has-param", "request: Request"])
         assert result.returncode == 0
         assert "regular_method" in result.stdout
 
@@ -395,7 +395,7 @@ class TestQueryFilterComposition:
     def test_query_multiple_kinds_or(self, sample_file):
         """Multiple --kind uses OR logic."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--kind", "function",
             "--kind", "method"
         ])
@@ -413,9 +413,9 @@ class TestQueryFilterComposition:
     def test_query_different_filters_and(self, sample_file):
         """Different filter types use AND logic."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--kind", "method",
-            "--in-class", "MyClass"
+            "--where", "class MyClass"
         ])
         assert result.returncode == 0
         # MyClass methods only
@@ -427,9 +427,9 @@ class TestQueryFilterComposition:
     def test_query_kind_and_decorator(self, sample_file):
         """Combine --kind and --has-decorator."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--kind", "method",
-            "--has-decorator", "property"
+            "--where", "@property"
         ])
         assert result.returncode == 0
         assert "name" in result.stdout
@@ -442,7 +442,7 @@ class TestQueryOutput:
 
     def test_query_json_output(self, sample_file):
         """--json returns structured output."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "class", "--json"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "json"])
         assert result.returncode == 0
         data = json.loads(result.stdout)
         assert isinstance(data, list)
@@ -458,7 +458,7 @@ class TestQueryOutput:
 
     def test_query_paths_only(self, sample_file):
         """--paths-only returns just selector paths."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "class", "--paths-only"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "selector"])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
         assert len(lines) == 2
@@ -467,13 +467,13 @@ class TestQueryOutput:
 
     def test_query_count(self, sample_file):
         """--count returns match count."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "class", "--count"])
+        result = run_emend(["search", str(sample_file), "--kind", "class", "--output", "count"])
         assert result.returncode == 0
         assert result.stdout.strip() == "2"
 
     def test_query_default_output(self, sample_file):
         """Default output is human-readable."""
-        result = run_emend(["lookup", str(sample_file), "--kind", "class"])
+        result = run_emend(["search", str(sample_file), "--kind", "class"])
         assert result.returncode == 0
         # Should include class names and line numbers
         assert "MyClass" in result.stdout or "TestSuite" in result.stdout
@@ -490,7 +490,7 @@ class TestQueryEdgeCases:
     def test_query_no_matches(self, sample_file):
         """No matches returns empty result, exit 0."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--name", "nonexistent_symbol"
         ], check=False)
         assert result.returncode == 0
@@ -500,7 +500,7 @@ class TestQueryEdgeCases:
 
     def test_query_no_filters(self, sample_file):
         """No filters returns all symbols."""
-        result = run_emend(["lookup", f"{sample_file}::*", "--count"])
+        result = run_emend(["search", f"{sample_file}::*", "--output", "count"])
         assert result.returncode == 0
         count = int(result.stdout.strip())
         # Should have many symbols
@@ -509,7 +509,7 @@ class TestQueryEdgeCases:
     def test_query_case_insensitive(self, sample_file):
         """-i flag enables case-insensitive matching."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--name", "MYCLASS",
             "-i"
         ])
@@ -519,7 +519,7 @@ class TestQueryEdgeCases:
     def test_query_file_not_found(self, tmp_path):
         """Non-existent file returns error."""
         result = run_emend([
-            "lookup", str(tmp_path / "nonexistent.py"),
+            "search", str(tmp_path / "nonexistent.py"),
             "--kind", "function"
         ], check=False)
         assert result.returncode != 0
@@ -531,9 +531,9 @@ class TestQueryJsonStructure:
     def test_query_json_includes_decorators(self, sample_file):
         """JSON output includes decorators."""
         result = run_emend([
-            "lookup", str(sample_file),
-            "--has-decorator", "property",
-            "--json"
+            "search", str(sample_file),
+            "--where", "@property",
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -550,9 +550,9 @@ class TestQueryJsonStructure:
     def test_query_json_includes_parameters(self, sample_file):
         """JSON output includes parameters for functions."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--name", "standalone_func",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -570,9 +570,9 @@ class TestQueryJsonStructure:
     def test_query_json_includes_returns(self, sample_file):
         """JSON output includes return type."""
         result = run_emend([
-            "lookup", str(sample_file),
+            "search", str(sample_file),
             "--name", "standalone_func",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -583,10 +583,10 @@ class TestQueryJsonStructure:
     def test_query_json_includes_parent(self, sample_file):
         """JSON output includes parent for nested symbols."""
         result = run_emend([
-            "lookup", str(sample_file),
-            "--in-class", "MyClass",
+            "search", str(sample_file),
+            "--where", "class MyClass",
             "--name", "regular_method",
-            "--json"
+            "--output", "json"
         ])
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -614,10 +614,10 @@ def ProcessRequest():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "process_request",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -647,10 +647,10 @@ def ProcessRequest():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "processRequest",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -680,10 +680,10 @@ def ProcessRequest():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "ProcessRequest",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -712,11 +712,11 @@ def processRequest():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "process_request",
             "--smart-case",
-            "--has-decorator", "property",
-            "--paths-only"
+            "--where", "@property",
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -741,11 +741,11 @@ def other_function(data):
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "process_request",
             "--smart-case",
             "--has-param", "user_id",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -776,10 +776,10 @@ def GetHttpResponse():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "get_http_response",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")
@@ -809,10 +809,10 @@ def PROCESS():
         filepath.write_text(code)
 
         result = run_emend([
-            "lookup", str(filepath),
+            "search", str(filepath),
             "--name", "process",
             "--smart-case",
-            "--paths-only"
+            "--output", "selector"
         ])
         assert result.returncode == 0
         lines = result.stdout.strip().split("\n")

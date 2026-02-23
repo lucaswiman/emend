@@ -4,7 +4,9 @@ Commands Reference
 search
 ------
 
-Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. Otherwise, it uses **symbol lookup** mode.
+Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary** (like the old ``list-symbols``). Otherwise, it uses **symbol lookup** mode.
+
+Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuitive workflows.
 
 .. code-block:: text
 
@@ -12,20 +14,43 @@ Unified search command that auto-detects the mode from the query. If the query c
 
 **Arguments:**
 
-- ``QUERY`` -- A pattern with ``$X`` metavars (pattern mode) or a selector path like ``file.py::sym`` (lookup mode)
-- ``PATH`` -- File, glob, or directory to search (required for pattern mode, optional for lookup mode)
+- ``QUERY`` -- A pattern with ``$X`` metavars (pattern mode), a selector like ``file.py::sym`` (lookup mode), or a bare file/dir path (summary/lookup mode)
+- ``PATH`` -- File, glob, or directory to search (pattern mode only)
+
+**Output format (--output / -o):**
+
+Auto-detected when not specified:
+
++---------------------+----------------------------------------+
+| Mode                | Default when...                        |
++=====================+========================================+
+| ``code``            | Selector without component             |
++---------------------+----------------------------------------+
+| ``location``        | Pattern mode (``$`` in query)          |
++---------------------+----------------------------------------+
+| ``selector``        | Bare file/dir path with filters        |
++---------------------+----------------------------------------+
+| ``summary``         | Bare file/dir path, no filters         |
++---------------------+----------------------------------------+
+| ``metadata``        | Explicit only                          |
++---------------------+----------------------------------------+
 
 **Options (shared):**
 
-+-----------+-----------------------------------+
-| Option    | Description                       |
-+===========+===================================+
-| ``--json``| Output as JSON                    |
-+-----------+-----------------------------------+
-| ``--count`` | Output only count of matches      |
-+-----------+-----------------------------------+
++-----------------------+-------------------------------------------+
+| Option                | Description                               |
++=======================+===========================================+
+| ``--output``, ``-o``  | Output format: code, location, selector,  |
+|                       | summary, metadata                         |
++-----------------------+-------------------------------------------+
+| ``--json``            | Output as JSON (orthogonal modifier)      |
++-----------------------+-------------------------------------------+
+| ``--count``           | Output only count of matches              |
++-----------------------+-------------------------------------------+
+| ``--dedent``          | Dedent source code in output              |
++-----------------------+-------------------------------------------+
 
-**Options (lookup mode):**
+**Options (lookup/summary mode):**
 
 +---------------------+----------------------------------------+
 | Option              | Description                            |
@@ -48,11 +73,29 @@ Unified search command that auto-detects the mode from the query. If the query c
 +---------------------+----------------------------------------+
 | ``--smart-case``    | Match naming convention variants       |
 +---------------------+----------------------------------------+
-| ``--metadata``      | Include location metadata              |
+| ``--matching TEXT`` | Filter by body pattern match           |
 +---------------------+----------------------------------------+
-| ``--paths-only``    | Output only selector paths             |
+| ``--flat``          | Flat output (summary mode)             |
 +---------------------+----------------------------------------+
-| ``--dedent``        | Dedent source code in output           |
+| ``--tree-depth N``  | Nesting depth limit (summary mode)     |
++---------------------+----------------------------------------+
+
+**Options (pattern mode):**
+
++---------------------+----------------------------------------+
+| Option              | Description                            |
++=====================+========================================+
+| ``--in SCOPE``      | Limit to within a named symbol         |
++---------------------+----------------------------------------+
+| ``--inside STRUCTURE`` | Only match inside this structure type |
++---------------------+----------------------------------------+
+| ``--not-inside STRUCTURE`` | Only match outside this structure |
++---------------------+----------------------------------------+
+| ``--where PATTERN`` | Only match inside structures matching this pattern |
++---------------------+----------------------------------------+
+| ``--imported-from MODULE`` | Only when imported from given module |
++---------------------+----------------------------------------+
+| ``--scope-local``   | Only match locally-defined names       |
 +---------------------+----------------------------------------+
 
 **Examples:**
@@ -62,90 +105,20 @@ Unified search command that auto-detects the mode from the query. If the query c
    # Pattern mode (has $):
    emend search 'print($X)' src/
    emend search 'assertEqual($A, $B)' tests/ --count
+   emend search '$X = $Y' src/ --output selector
 
    # Lookup mode (has :: or file path):
    emend search file.py::func[params]
    emend search src/ --kind function --has-decorator pytest
 
----
+   # Summary mode (bare file/dir, no filters):
+   emend search api.py
+   emend search api.py --flat
+   emend search api.py::MyClass --output summary
+   emend search api.py --output summary --tree-depth 2
 
-lookup
-------
-
-Read symbol information -- never modifies files.
-
-.. code-block:: text
-
-   emend lookup SELECTOR [OPTIONS]
-
-**Arguments:**
-
-- ``SELECTOR`` -- A file path, glob, or full selector like ``file.py::Symbol[component]``
-
-**Options:**
-
-+---------------------+----------------------------------------+
-| Option              | Description                            |
-+=====================+========================================+
-| ``--kind TEXT``     | Filter by symbol kind                  |
-+---------------------+----------------------------------------+
-| ``--name TEXT``     | Filter by name (glob or ``/regex/``)  |
-+---------------------+----------------------------------------+
-| ``--has-decorator TEXT`` | Filter to symbols with decorator      |
-+---------------------+----------------------------------------+
-| ``--returns TEXT``  | Filter by return type annotation       |
-+---------------------+----------------------------------------+
-| ``--in-class TEXT`` | Restrict to methods of this class      |
-+---------------------+----------------------------------------+
-| ``--depth TEXT``    | Filter by nesting depth                |
-+---------------------+----------------------------------------+
-| ``--has-param TEXT`` | Filter by parameter name              |
-+---------------------+----------------------------------------+
-| ``-i``              | Case-insensitive name matching         |
-+---------------------+----------------------------------------+
-| ``--smart-case``    | Match naming convention variants       |
-+---------------------+----------------------------------------+
-| ``--json``          | Output as JSON                         |
-+---------------------+----------------------------------------+
-| ``--metadata``      | Include location metadata              |
-+---------------------+----------------------------------------+
-| ``--paths-only``    | Output only selector paths             |
-+---------------------+----------------------------------------+
-| ``--count``         | Output only the count of matches       |
-+---------------------+----------------------------------------+
-| ``--dedent``        | Dedent source code in output           |
-+---------------------+----------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   # Show function source
-   emend lookup api.py::get_user
-
-   # Get return annotation
-   emend lookup api.py::get_user[returns]
-
-   # Get all parameters
-   emend lookup api.py::get_user[params]
-
-   # Get a specific parameter
-   emend lookup api.py::get_user[params][user_id]
-
-   # Get all decorators
-   emend lookup api.py::MyClass.method[decorators]
-
-   # List all functions in a file
-   emend lookup api.py --kind function
-
-   # List all async methods across a directory
-   emend lookup src/ --kind async_method --paths-only
-
-   # Find all functions with a specific decorator
-   emend lookup src/ --has-decorator pytest.mark.parametrize
-
-   # JSON output with metadata
-   emend lookup api.py::get_user[params] --json --metadata
+   # Metadata mode:
+   emend search api.py::my_func --output metadata
 
 ---
 
@@ -274,78 +247,6 @@ Insert new items into list components (params, decorators, bases). Shows a diff 
 
    # Add a base class
    emend add models.py::User[bases] "TimestampMixin" --apply
-
----
-
-find
-----
-
-Search for code patterns using metavariables.
-
-.. code-block:: text
-
-   emend find PATTERN PATH [OPTIONS]
-
-**Arguments:**
-
-- ``PATTERN`` -- A Python expression/statement pattern. Use ``$NAME`` for metavariables.
-- ``PATH`` -- A file, glob (``*.py``), or directory (searches recursively).
-
-**Options:**
-
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--in SCOPE``      | Limit to within a named symbol                |
-+---------------------+-----------------------------------------------+
-| ``--inside STRUCTURE`` | Only match inside this structure type       |
-+---------------------+-----------------------------------------------+
-| ``--not-inside STRUCTURE`` | Only match outside this structure type |
-+---------------------+-----------------------------------------------+
-| ``--where PATTERN`` | Alias for ``--inside`` with pattern support   |
-+---------------------+-----------------------------------------------+
-| ``--scope-local``   | Only match locally-defined names              |
-+---------------------+-----------------------------------------------+
-| ``--imported-from MODULE`` | Only when imported from given module    |
-+---------------------+-----------------------------------------------+
-| ``--json``          | Output matches as JSON with captures          |
-+---------------------+-----------------------------------------------+
-| ``--count``         | Output only the count of matches              |
-+---------------------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   # Find all print() calls
-   emend find 'print($X)' src/
-
-   # Find assertEqual calls with count
-   emend find 'assertEqual($A, $B)' tests/ --count
-
-   # Find print calls only inside functions
-   emend find 'print($X)' src/ --inside def
-
-   # Find print calls outside try blocks
-   emend find 'print($X)' src/ --not-inside try
-
-   # Use pattern-based inside constraint
-   emend find 'print($X)' src/ --inside 'def test_*'
-
-   # Use --where (alias for --inside with patterns)
-   emend find 'await $X' src/ --where 'async def fetch_*'
-
-   # Only match locally-defined names
-   emend find 'config' src/ --scope-local
-
-   # Limit search to a specific function
-   emend find 'log($MSG)' app.py --in process_request
-
-   # JSON output with captures
-   emend find 'raise $EXC($MSG)' src/ --json
-
-   # Find calls only when imported from a specific module
-   emend find 'json.loads($X)' src/ --imported-from json
 
 ---
 
@@ -532,62 +433,6 @@ Apply batch refactoring operations from a YAML or JSON file. Dry-run by default;
 
 ---
 
-callers
--------
-
-Find all call sites of a function across the project. Unlike ``find-references``, this only returns places where the function is actually called (not mere references or imports).
-
-.. code-block:: text
-
-   emend callers SELECTOR [OPTIONS]
-
-**Options:**
-
-+-----------+-----------------------------------------------+
-| Option    | Description                                   |
-+===========+===============================================+
-| ``--project``, ``-p`` | Project root directory              |
-+-----------+-----------------------------------------------+
-| ``--json``| Output as JSON                                |
-+-----------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend callers src/module.py::process
-   emend callers src/module.py::process --json
-
----
-
-callees
--------
-
-Find all functions/methods called inside a function. Analyzes the body of the target function and lists all calls made.
-
-.. code-block:: text
-
-   emend callees SELECTOR [OPTIONS]
-
-**Options:**
-
-+-----------+-----------------------------------------------+
-| Option    | Description                                   |
-+===========+===============================================+
-| ``--project``, ``-p`` | Project root directory              |
-+-----------+-----------------------------------------------+
-| ``--json``| Output as JSON                                |
-+-----------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend callees src/module.py::main
-   emend callees src/module.py::main --json
-
----
-
 graph
 -----
 
@@ -653,14 +498,15 @@ Copy a symbol to another file.
 
 ---
 
-find-references
----------------
+refs
+----
 
 Find all references to a symbol across the project using LibCST's scope analysis.
+With ``--calls-only``, only returns actual call sites (replaces the former ``callers`` command).
 
 .. code-block:: text
 
-   emend find-references SELECTOR [OPTIONS]
+   emend refs SELECTOR [OPTIONS]
 
 **Options:**
 
@@ -675,6 +521,10 @@ Find all references to a symbol across the project using LibCST's scope analysis
 +---------------------+-----------------------------------------------+
 | ``--reads-only``    | Only show read (load) references              |
 +---------------------+-----------------------------------------------+
+| ``--calls-only``    | Only show call sites (not mere references)    |
++---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory (used with ``--calls-only``) |
++---------------------+-----------------------------------------------+
 | ``--json``          | Output as JSON                                |
 +---------------------+-----------------------------------------------+
 
@@ -682,12 +532,16 @@ Find all references to a symbol across the project using LibCST's scope analysis
 
 .. code-block:: bash
 
-   emend find-references src/emend/transform.py::get_component
-   emend find-references api.py::MyClass --exclude-imports --json
+   emend refs src/emend/transform.py::get_component
+   emend refs api.py::MyClass --exclude-imports --json
 
    # Filter by read/write context
-   emend find-references file.py::config --writes-only
-   emend find-references file.py::config --reads-only
+   emend refs file.py::config --writes-only
+   emend refs file.py::config --reads-only
+
+   # Only call sites (replaces: emend callers src/module.py::process)
+   emend refs src/module.py::process --calls-only
+   emend refs src/module.py::process --calls-only --json
 
 ---
 
@@ -715,6 +569,8 @@ Rename a symbol across the entire project.
 +---------------------+-----------------------------------------------+
 | ``--unsure``        | Rename uncertain occurrences                  |
 +---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory                      |
++---------------------+-----------------------------------------------+
 
 **Examples:**
 
@@ -723,6 +579,9 @@ Rename a symbol across the entire project.
    emend rename api.py::get_user --to fetch_user
    emend rename api.py::OldClass --to NewClass --apply
    emend rename utils.py::helper --to _helper --docs --apply
+
+   # Module rename mode (no :: in selector):
+   emend rename old_utils.py --to new_utils --apply
 
 ---
 
@@ -746,6 +605,8 @@ Move a symbol to another file, updating all imports.
 +---------------------+-----------------------------------------------+
 | ``--apply``         | Write changes to disk                         |
 +---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory                      |
++---------------------+-----------------------------------------------+
 
 **Examples:**
 
@@ -754,89 +615,18 @@ Move a symbol to another file, updating all imports.
    emend move utils.py::helper other.py
    emend move utils.py::MyClass models.py --apply
 
----
-
-list-symbols
-------------
-
-List all symbols in a module.
-
-.. code-block:: text
-
-   emend list-symbols FILE [OPTIONS]
-
-**Options:**
-
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--tree-depth N``  | Maximum nesting depth                         |
-+---------------------+-----------------------------------------------+
-| ``--flat``          | Flat output with full dotted paths            |
-+---------------------+-----------------------------------------------+
-| ``--selector``, ``-s`` | Filter to a symbol subtree                 |
-+---------------------+-----------------------------------------------+
-| ``--project``, ``-p`` | Project root directory                      |
-+---------------------+-----------------------------------------------+
-
-**Examples:**
-
-.. code-block:: bash
-
-   emend list-symbols api.py
-   emend list-symbols api.py --flat
-   emend list-symbols api.py --selector MyClass
+   # Module move mode (no :: in selector):
+   emend move utils.py pkg --project . --apply
 
 ---
 
-move-module
------------
+.. note::
 
-Move a module file to another package, updating imports.
+   **Command consolidations:**
 
-.. code-block:: text
+   - ``list-symbols`` → Use ``emend search FILE`` (auto-detects summary mode) or ``emend search FILE --output summary``
+   - ``find-references``, ``callers``, ``callees`` → Use ``emend refs SELECTOR`` with ``--writes-only``, ``--reads-only``, ``--calls-only`` filters
+   - ``rename-symbol``, ``rename-module`` → Use ``emend rename SELECTOR --to NEW_NAME`` (auto-detects mode)
+   - ``move-module`` → Use ``emend move MODULE DESTINATION`` (auto-detects mode)
+   - ``lookup``, ``query``, ``show``, ``find`` → Use ``emend search`` (also available as aliases)
 
-   emend move-module SOURCE DESTINATION [OPTIONS]
-
-**Options:**
-
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--project``, ``-p`` | Project root                                |
-+---------------------+-----------------------------------------------+
-| ``--apply``         | Write changes to disk                         |
-+---------------------+-----------------------------------------------+
-
-**Example:**
-
-.. code-block:: bash
-
-   emend move-module utils/helpers.py pkg --apply
-
----
-
-rename-module
--------------
-
-Rename a module file, updating imports across the project.
-
-.. code-block:: text
-
-   emend rename-module FILE NEW_NAME [OPTIONS]
-
-**Options:**
-
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--project``, ``-p`` | Project root                                |
-+---------------------+-----------------------------------------------+
-| ``--apply``         | Write changes to disk                         |
-+---------------------+-----------------------------------------------+
-
-**Example:**
-
-.. code-block:: bash
-
-   emend rename-module utils/old_helpers.py new_helpers --apply

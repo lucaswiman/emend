@@ -1,7 +1,7 @@
 Pattern Syntax
 ==============
 
-emend's ``find``, ``replace``, and ``search`` commands use a pattern language based on Python syntax extended with **metavariables**.
+emend's ``search`` and ``replace`` commands use a pattern language based on Python syntax extended with **metavariables**.
 
 Metavariables
 -------------
@@ -11,10 +11,10 @@ A metavariable is a placeholder that matches any single expression or statement.
 .. code-block:: bash
 
    # $X matches any single expression
-   emend find 'print($X)' src/
+   emend search 'print($X)' src/
 
    # Multiple metavariables
-   emend find 'assertEqual($A, $B)' tests/
+   emend search 'assertEqual($A, $B)' tests/
 
 Metavariable rules
 ~~~~~~~~~~~~~~~~~~~
@@ -31,10 +31,10 @@ Constrain what a metavariable can match by adding a type suffix:
 .. code-block:: bash
 
    # Match only when argument is a string literal
-   emend find 'print($X:str)' src/
+   emend search 'print($X:str)' src/
 
    # Match only when argument is an integer literal
-   emend find 'range($X:int)' src/
+   emend search 'range($X:int)' src/
 
 Negated type constraints
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -44,10 +44,10 @@ Prefix the type with ``!`` to match anything *except* that type:
 .. code-block:: bash
 
    # Match range() calls with non-integer arguments
-   emend find 'range($X:!int)' src/
+   emend search 'range($X:!int)' src/
 
    # Match addition where left side is NOT a function call
-   emend find '$A:!call + $B' src/
+   emend search '$A:!call + $B' src/
 
 Basic patterns
 --------------
@@ -58,13 +58,13 @@ Function calls
 .. code-block:: bash
 
    # Match any call to print() with one argument
-   emend find 'print($X)' src/
+   emend search 'print($X)' src/
 
    # Match any call to print() with two arguments
-   emend find 'print($A, $B)' src/
+   emend search 'print($A, $B)' src/
 
    # Match any call to open() regardless of arguments
-   emend find 'open($...)' src/
+   emend search 'open($...)' src/
 
 Assignments
 ~~~~~~~~~~~
@@ -72,43 +72,43 @@ Assignments
 .. code-block:: bash
 
    # Match any simple assignment
-   emend find '$NAME = $VALUE' src/
+   emend search '$NAME = $VALUE' src/
 
    # Match augmented assignment
-   emend find '$NAME += $VALUE' src/
+   emend search '$NAME += $VALUE' src/
 
 Attribute access
 ~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   emend find '$OBJ.method($X)' src/
-   emend find 'self.$ATTR' src/
+   emend search '$OBJ.method($X)' src/
+   emend search 'self.$ATTR' src/
 
 Return statements
 ~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   emend find 'return $X' src/
-   emend find 'return None' src/
+   emend search 'return $X' src/
+   emend search 'return None' src/
 
 Raise statements
 ~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   emend find 'raise $EXC($MSG)' src/
-   emend find 'raise ValueError($X)' src/
+   emend search 'raise $EXC($MSG)' src/
+   emend search 'raise ValueError($X)' src/
 
 Comparisons
 ~~~~~~~~~~~
 
 .. code-block:: bash
 
-   emend find '$A == $B' src/
-   emend find '$X is None' src/
-   emend find '$X is not None' src/
+   emend search '$A == $B' src/
+   emend search '$X is None' src/
+   emend search '$X is not None' src/
 
 Compound statement patterns
 ---------------------------
@@ -121,10 +121,10 @@ If statements
 .. code-block:: bash
 
    # Match any if statement with a specific condition pattern
-   emend find 'if $COND:' src/
+   emend search 'if $COND:' src/
 
    # Match if-checks for None
-   emend find 'if $X is None:' src/
+   emend search 'if $X is None:' src/
 
 For loops
 ~~~~~~~~~
@@ -132,18 +132,18 @@ For loops
 .. code-block:: bash
 
    # Match any for loop
-   emend find 'for $VAR in $ITER:' src/
+   emend search 'for $VAR in $ITER:' src/
 
    # Match enumerate loops
-   emend find 'for $I, $V in enumerate($X):' src/
+   emend search 'for $I, $V in enumerate($X):' src/
 
 While loops
 ~~~~~~~~~~~
 
 .. code-block:: bash
 
-   emend find 'while $COND:' src/
-   emend find 'while True:' src/
+   emend search 'while $COND:' src/
+   emend search 'while True:' src/
 
 With statements
 ~~~~~~~~~~~~~~~
@@ -151,10 +151,10 @@ With statements
 .. code-block:: bash
 
    # With context and alias
-   emend find 'with $CTX as $VAR:' src/
+   emend search 'with $CTX as $VAR:' src/
 
    # With just context (no alias)
-   emend find 'with $CTX:' src/
+   emend search 'with $CTX:' src/
 
 Try/except statements
 ~~~~~~~~~~~~~~~~~~~~~
@@ -162,11 +162,11 @@ Try/except statements
 .. code-block:: bash
 
    # Match any try block
-   emend find 'try:' src/
+   emend search 'try:' src/
 
    # Match except clauses
-   emend find 'except $EXC:' src/
-   emend find 'except $EXC as $VAR:' src/
+   emend search 'except $EXC:' src/
+   emend search 'except $EXC as $VAR:' src/
 
 Async compound statements
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -174,11 +174,11 @@ Async compound statements
 .. code-block:: bash
 
    # Match async for loops
-   emend find 'async for $VAR in $ITER:' src/
+   emend search 'async for $VAR in $ITER:' src/
 
    # Match async with statements
-   emend find 'async with $CTX as $VAR:' src/
-   emend find 'async with $CTX:' src/
+   emend search 'async with $CTX as $VAR:' src/
+   emend search 'async with $CTX:' src/
 
 Decorator patterns
 ------------------
@@ -188,16 +188,16 @@ Match decorated function definitions using multi-line patterns:
 .. code-block:: bash
 
    # Find functions with any decorator
-   emend find '@$DEC\ndef $FUNC($...ARGS):' src/
+   emend search '@$DEC\ndef $FUNC($...ARGS):' src/
 
    # Find functions with a specific decorator
-   emend find '@property\ndef $FUNC($...ARGS):' src/
+   emend search '@property\ndef $FUNC($...ARGS):' src/
 
    # Multiple decorators
-   emend find '@$DEC1\n@$DEC2\ndef $FUNC($...ARGS):' src/
+   emend search '@$DEC1\n@$DEC2\ndef $FUNC($...ARGS):' src/
 
    # Async decorated functions
-   emend find '@$DEC\nasync def $FUNC($...ARGS):' src/
+   emend search '@$DEC\nasync def $FUNC($...ARGS):' src/
 
 Lambda patterns
 ---------------
@@ -207,16 +207,16 @@ Match lambda expressions:
 .. code-block:: bash
 
    # Match single-argument lambdas
-   emend find 'lambda $X: $EXPR' src/
+   emend search 'lambda $X: $EXPR' src/
 
    # Match multi-argument lambdas
-   emend find 'lambda $X, $Y: $EXPR' src/
+   emend search 'lambda $X, $Y: $EXPR' src/
 
    # Match lambdas with star args
-   emend find 'lambda *$ARGS: $EXPR' src/
+   emend search 'lambda *$ARGS: $EXPR' src/
 
    # Match lambdas that return a specific pattern
-   emend find 'lambda $X: $X + 1' src/
+   emend search 'lambda $X: $X + 1' src/
 
 Star expression patterns
 ------------------------
@@ -226,13 +226,13 @@ Match star and double-star unpacking expressions:
 .. code-block:: bash
 
    # Match star unpacking
-   emend find '*$X' src/
+   emend search '*$X' src/
 
    # Match double-star dict unpacking
-   emend find '**$X' src/
+   emend search '**$X' src/
 
    # Match function calls with star/double-star args
-   emend find 'func(*$ARGS, **$KWARGS)' src/
+   emend search 'func(*$ARGS, **$KWARGS)' src/
 
 Dict patterns
 -------------
@@ -242,10 +242,10 @@ Match dictionary literals with specific keys:
 .. code-block:: bash
 
    # Exact dict match (all keys must be present, no extras)
-   emend find "{'name': \$NAME, 'age': \$AGE}" src/
+   emend search "{'name': \$NAME, 'age': \$AGE}" src/
 
    # Partial dict match (extra keys allowed)
-   emend find "{'type': 'user', ...}" src/
+   emend search "{'type': 'user', ...}" src/
 
 Chained comparison patterns
 ---------------------------
@@ -255,10 +255,10 @@ Match chained comparisons:
 .. code-block:: bash
 
    # Two-operator chain
-   emend find '$A < $B < $C' src/
+   emend search '$A < $B < $C' src/
 
    # Mixed operators
-   emend find '$A <= $B < $C' src/
+   emend search '$A <= $B < $C' src/
 
 Walrus operator patterns
 ------------------------
@@ -268,10 +268,10 @@ Match walrus operator (``:=``) in various contexts:
 .. code-block:: bash
 
    # Walrus in if conditions
-   emend find 'if ($VAR := $EXPR):' src/
+   emend search 'if ($VAR := $EXPR):' src/
 
    # Walrus in comprehension filters
-   emend find '[$X for $VAR in $ITER if ($TARGET := $EXPR)]' src/
+   emend search '[$X for $VAR in $ITER if ($TARGET := $EXPR)]' src/
 
 Replacements
 -----------
@@ -303,10 +303,10 @@ Restrict matches to within a named symbol:
 .. code-block:: bash
 
    # Only match inside the process_request function
-   emend find 'print($X)' app.py --in process_request
+   emend search 'print($X)' app.py --in process_request
 
    # Only match inside MyClass.method
-   emend find 'self.$ATTR' app.py --in MyClass.method
+   emend search 'self.$ATTR' app.py --in MyClass.method
 
 ``--where PATTERN`` (alias for ``--inside``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -316,7 +316,7 @@ Scope filtering using a pattern. Alias for ``--inside`` with pattern support:
 .. code-block:: bash
 
    # Only match inside async functions named fetch_*
-   emend find 'await $X' src/ --where 'async def fetch_*'
+   emend search 'await $X' src/ --where 'async def fetch_*'
 
 ``--scope-local``
 ~~~~~~~~~~~~~~~~~
@@ -326,7 +326,7 @@ Only match names that are locally defined (excludes imports):
 .. code-block:: bash
 
    # Find local variables named 'config', not imported ones
-   emend find 'config' src/ --scope-local
+   emend search 'config' src/ --scope-local
 
 ``--inside STRUCTURE``
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -354,16 +354,16 @@ Only match inside a particular kind of block. Accepts both keywords and patterns
 .. code-block:: bash
 
    # Only inside functions (keyword)
-   emend find 'print($X)' src/ --inside def
+   emend search 'print($X)' src/ --inside def
 
    # Only inside try blocks (keyword)
-   emend find 'raise $E' src/ --inside try
+   emend search 'raise $E' src/ --inside try
 
    # Only inside functions matching a name pattern
-   emend find 'print($X)' src/ --inside 'def test_*'
+   emend search 'print($X)' src/ --inside 'def test_*'
 
    # Only inside async functions
-   emend find 'await $X' src/ --inside 'async def fetch_*'
+   emend search 'await $X' src/ --inside 'async def fetch_*'
 
 ``--not-inside STRUCTURE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -376,10 +376,10 @@ Only match outside a particular kind of block. Also accepts patterns:
    emend replace '$X = $Y' '$X: int = $Y' src/ --not-inside class --apply
 
    # Not inside try blocks (pattern)
-   emend find 'open($PATH)' src/ --not-inside 'try:'
+   emend search 'open($PATH)' src/ --not-inside 'try:'
 
    # Not inside test functions (name pattern)
-   emend find 'print($X)' src/ --not-inside 'def test_*'
+   emend search 'print($X)' src/ --not-inside 'def test_*'
 
 ``--imported-from MODULE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -389,10 +389,10 @@ Only match when the root name in the pattern is imported from a specific module:
 .. code-block:: bash
 
    # Match json.loads() only when json is actually imported from the json module
-   emend find 'json.loads($X)' src/ --imported-from json
+   emend search 'json.loads($X)' src/ --imported-from json
 
    # Match datetime usage only when from the datetime module
-   emend find 'datetime.now()' src/ --imported-from datetime
+   emend search 'datetime.now()' src/ --imported-from datetime
 
 Multi-file search
 -----------------
@@ -406,10 +406,10 @@ The ``PATH`` argument accepts:
 .. code-block:: bash
 
    # Search all test files
-   emend find 'assertEqual($A, $B)' tests/
+   emend search 'assertEqual($A, $B)' tests/
 
    # Search with glob
-   emend find 'print($X)' 'src/**/*.py'
+   emend search 'print($X)' 'src/**/*.py'
 
 JSON output
 -----------
@@ -418,7 +418,7 @@ Use ``--json`` to get structured output including captured metavariables:
 
 .. code-block:: bash
 
-   emend find 'raise $EXC($MSG)' src/ --json
+   emend search 'raise $EXC($MSG)' src/ --json
 
 Output:
 

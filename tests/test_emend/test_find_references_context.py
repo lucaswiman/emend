@@ -1,4 +1,4 @@
-"""Tests for --writes-only and --reads-only flags on find-references."""
+"""Tests for --writes-only and --reads-only flags on refs."""
 from pathlib import Path
 
 import pytest
@@ -181,7 +181,7 @@ class TestFindReferencesContextCLI:
         )
 
         result = run_emend_cmd([
-            "find-references", f"{file}::config",
+            "refs", f"{file}::config",
             "--writes-only"
         ])
         lines = result.stdout.strip().split("\n")
@@ -202,7 +202,7 @@ class TestFindReferencesContextCLI:
         )
 
         result = run_emend_cmd([
-            "find-references", f"{file}::config",
+            "refs", f"{file}::config",
             "--reads-only"
         ])
         lines = result.stdout.strip().split("\n")

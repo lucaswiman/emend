@@ -1,4 +1,4 @@
-"""Tests for rename-symbol command."""
+"""Tests for rename command (symbol mode)."""
 import pytest
 
 
@@ -14,7 +14,7 @@ result = old_func()
 
     # Dry-run
     result = run_emend_cmd([
-        "rename-symbol", str(test_file), "old_func", "new_func",
+        "rename", f"{test_file}::old_func", "--to", "new_func",
         "--project", str(tmp_path)
     ])
     assert result.returncode == 0
@@ -23,7 +23,7 @@ result = old_func()
 
     # Apply
     result = run_emend_cmd([
-        "rename-symbol", str(test_file), "old_func", "new_func",
+        "rename", f"{test_file}::old_func", "--to", "new_func",
         "--project", str(tmp_path), "--apply"
     ])
     assert result.returncode == 0
@@ -53,7 +53,7 @@ obj = OldClass()
 
     # Apply
     result = run_emend_cmd([
-        "rename-symbol", str(main_file), "OldClass", "NewClass",
+        "rename", f"{main_file}::OldClass", "--to", "NewClass",
         "--project", str(tmp_path), "--apply"
     ])
     assert result.returncode == 0
@@ -92,7 +92,7 @@ obj = OldClass()
 
     # Dry-run
     result = run_emend_cmd([
-        "rename-symbol", str(main_file), "OldClass", "NewClass",
+        "rename", f"{main_file}::OldClass", "--to", "NewClass",
         "--project", str(tmp_path)
     ])
     assert result.returncode == 0
@@ -121,7 +121,7 @@ result = helper()
 
     # Apply rename
     result = run_emend_cmd([
-        "rename-symbol", str(module), "helper", "utility",
+        "rename", f"{module}::helper", "--to", "utility",
         "--project", str(tmp_path), "--apply"
     ])
     assert result.returncode == 0
@@ -154,7 +154,7 @@ result = helper()
 
     # Dry-run
     result = run_emend_cmd([
-        "rename-symbol", str(module), "helper", "utility",
+        "rename", f"{module}::helper", "--to", "utility",
         "--project", str(tmp_path)
     ])
     assert result.returncode == 0
@@ -179,7 +179,7 @@ def old_name():
 
     # Dry-run (no --apply)
     result = run_emend_cmd([
-        "rename-symbol", str(test_file), "old_name", "new_name",
+        "rename", f"{test_file}::old_name", "--to", "new_name",
         "--project", str(tmp_path)
     ])
     assert result.returncode == 0

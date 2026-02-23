@@ -330,7 +330,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -353,7 +353,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -374,7 +374,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -394,7 +394,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -412,7 +412,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )
@@ -430,7 +430,7 @@ class TestListSymbolsCompleteSignatures:
         temp_py_file.flush()
 
         result = subprocess.run(
-            [emend_cmd, "list-symbols", temp_py_file.name],
+            [emend_cmd, "search", temp_py_file.name, "--output", "summary"],
             capture_output=True,
             text=True,
         )

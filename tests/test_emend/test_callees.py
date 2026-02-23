@@ -1,5 +1,4 @@
 """Tests for the callees command."""
-import json
 import pytest
 
 from emend.component_selector import ExtendedSelector
@@ -124,50 +123,3 @@ class TestFindCallees:
             f"Expected method calls in callees, got {callee_names}"
 
 
-class TestCalleesCommand:
-    """Tests for the callees CLI command."""
-
-    def test_callees_command_basic(self, tmp_path, run_emend_cmd):
-        """CLI callees command works."""
-        project = tmp_path / "project"
-        project.mkdir()
-
-        module = project / "module.py"
-        module.write_text(
-            "def helper():\n"
-            "    return 42\n"
-            "\n"
-            "def main():\n"
-            "    return helper()\n"
-        )
-
-        result = run_emend_cmd([
-            "callees", f"{module}::main",
-            "--project", str(project),
-        ], check=False)
-        assert result.returncode == 0
-        assert "helper" in result.stdout
-
-    def test_callees_command_json(self, tmp_path, run_emend_cmd):
-        """CLI callees command with --json."""
-        project = tmp_path / "project"
-        project.mkdir()
-
-        module = project / "module.py"
-        module.write_text(
-            "def helper():\n"
-            "    return 42\n"
-            "\n"
-            "def main():\n"
-            "    return helper()\n"
-        )
-
-        result = run_emend_cmd([
-            "callees", f"{module}::main",
-            "--project", str(project),
-            "--json",
-        ], check=False)
-        assert result.returncode == 0
-        data = json.loads(result.stdout)
-        assert isinstance(data, list)
-        assert len(data) > 0

@@ -38,7 +38,7 @@ class TestSearchPatternMode:
             "print('c')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--count"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "count"])
 
         assert result.exit_code == 0
         assert "3" in result.stdout
@@ -52,7 +52,7 @@ class TestSearchPatternMode:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--json"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "json"])
 
         assert result.exit_code == 0
         data = json.loads(result.stdout)
@@ -70,7 +70,7 @@ class TestSearchPatternMode:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--in", "my_func"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "my_func"])
 
         assert result.exit_code == 0
         lines = result.stdout.strip().split("\n")
@@ -158,7 +158,7 @@ class TestSearchLookupMode:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["search", str(test_file), "--kind", "function", "--json"])
+        result = runner.invoke(app, ["search", str(test_file), "--kind", "function", "--output", "json"])
 
         assert result.exit_code == 0
         # JSON output should be valid JSON
@@ -177,7 +177,7 @@ class TestSearchLookupMode:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["search", str(test_file), "--kind", "function", "--count"])
+        result = runner.invoke(app, ["search", str(test_file), "--kind", "function", "--output", "count"])
 
         assert result.exit_code == 0
         assert "2" in result.stdout
@@ -214,27 +214,3 @@ class TestSearchEdgeCases:
 
         assert result.exit_code == 0
         assert result.stdout.strip() == ""
-
-
-class TestFindCommand:
-    """Verify find command works correctly."""
-
-    def test_find_still_works(self, tmp_path):
-        """The find command should still function identically."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("print('hello')\n")
-
-        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
-
-        assert result.exit_code == 0
-        assert f"{test_file}:1" in result.stdout
-
-    def test_lookup_still_works(self, tmp_path):
-        """The lookup command should still function identically."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def func() -> int:\n    pass\n")
-
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[returns]"])
-
-        assert result.exit_code == 0
-        assert "int" in result.stdout

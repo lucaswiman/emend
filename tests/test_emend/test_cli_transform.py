@@ -10,7 +10,7 @@ runner = CliRunner()
 
 
 class TestGetCommand:
-    """Tests for 'lookup' command."""
+    """Tests for 'search' command (lookup mode)."""
 
     def test_get_params_all(self, tmp_path):
         """Get all parameters from a function."""
@@ -20,7 +20,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[params]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[params]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "self, x: int, y: str = 'default', *args, **kwargs"
@@ -33,7 +33,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[returns]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[returns]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "str | None"
@@ -48,7 +48,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[decorators]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[decorators]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "@property\n@lru_cache"
@@ -61,7 +61,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[params][ctx]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[params][ctx]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "ctx"
@@ -74,7 +74,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[params][0]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[params][0]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "ctx"
@@ -87,7 +87,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::MyClass[bases]"])
+        result = runner.invoke(app, ["search", f"{test_file}::MyClass[bases]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == "BaseClass, Protocol"
@@ -101,7 +101,7 @@ class TestGetCommand:
             "    return x + 2\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[body]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[body]"])
 
         assert result.exit_code == 0
         assert "x = 1" in result.stdout
@@ -109,7 +109,7 @@ class TestGetCommand:
 
     def test_get_nonexistent_file(self, tmp_path):
         """Error when file doesn't exist."""
-        result = runner.invoke(app, ["lookup", f"{tmp_path}/nonexistent.py::func[returns]"])
+        result = runner.invoke(app, ["search", f"{tmp_path}/nonexistent.py::func[returns]"])
 
         assert result.exit_code != 0
         assert "does not exist" in result.stderr.lower() or "cannot find" in result.stderr.lower() or "error" in result.stderr.lower()
@@ -122,7 +122,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::nonexistent[returns]"])
+        result = runner.invoke(app, ["search", f"{test_file}::nonexistent[returns]"])
 
         assert result.exit_code != 0
         assert "Error" in result.stdout or "Error" in result.stderr
@@ -135,7 +135,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[returns]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[returns]"])
 
         assert result.exit_code != 0
         assert "no return annotation" in result.stderr.lower()
@@ -148,7 +148,7 @@ class TestGetCommand:
             "    pass\n"
         )
 
-        result = runner.invoke(app, ["lookup", f"{test_file}::func[decorators]"])
+        result = runner.invoke(app, ["search", f"{test_file}::func[decorators]"])
 
         assert result.exit_code == 0
         assert result.stdout.strip() == ""
@@ -635,10 +635,10 @@ class TestRmCommand:
 
 
 class TestFindCommand:
-    """Tests for 'find' command."""
+    """Tests for 'search' command (pattern mode)."""
 
     def test_find_simple_pattern(self, tmp_path):
-        """Find a simple pattern without metavariables."""
+        """Find a pattern with metavariable."""
         test_file = tmp_path / "test.py"
         test_file.write_text(
             "print('hello')\n"
@@ -646,7 +646,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["find", "print('hello')", str(test_file)])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should show file:line format
@@ -660,7 +660,7 @@ class TestFindCommand:
             "y = 10\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should indicate no matches (empty output)
@@ -676,7 +676,7 @@ class TestFindCommand:
             "print('test')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should show 3 matches (3 lines of output)
@@ -695,14 +695,14 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--count"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "count"])
 
         assert result.exit_code == 0
         assert "2" in result.stdout
 
     def test_find_nonexistent_file(self, tmp_path):
         """Error when file doesn't exist."""
-        result = runner.invoke(app, ["find", "print($X)", f"{tmp_path}/nonexistent.py"])
+        result = runner.invoke(app, ["search", "print($X)", f"{tmp_path}/nonexistent.py"])
 
         assert result.exit_code != 0
         assert "does not exist" in result.stderr.lower() or "cannot find" in result.stderr.lower() or "error" in result.stderr.lower()
@@ -716,7 +716,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--json"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "json"])
 
         assert result.exit_code == 0
         # Parse JSON output
@@ -747,7 +747,7 @@ class TestFindCommand:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--in", "my_func"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "my_func"])
 
         assert result.exit_code == 0
         # Should find only the print inside my_func (line 3)
@@ -768,7 +768,7 @@ class TestFindCommand:
             "    print('in func')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--in", "MyClass.method"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "MyClass.method"])
 
         assert result.exit_code == 0
         # Should find only the print inside MyClass.method (line 3)
@@ -876,7 +876,7 @@ class TestReplaceCommand:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--in", "my_func", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "my_func", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -898,7 +898,7 @@ class TestReplaceCommand:
             "    print('in func')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--in", "MyClass.method", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "MyClass.method", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -909,7 +909,7 @@ class TestReplaceCommand:
 
 
 class TestFindReplaceConstraints:
-    """Tests for find/replace with --inside/--not-inside constraints."""
+    """Tests for search/replace with --inside/--not-inside constraints."""
 
     def test_find_inside_cli(self, tmp_path):
         """Test find with --inside constraint."""
@@ -923,7 +923,7 @@ class TestFindReplaceConstraints:
             "        print('inside method')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--inside", "def"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "def"])
 
         assert result.exit_code == 0
         # Should find prints inside functions only (2 matches)
@@ -942,7 +942,7 @@ class TestFindReplaceConstraints:
             "print('after')\n"
         )
 
-        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--not-inside", "if"])
+        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "not if"])
 
         assert result.exit_code == 0
         # Should find prints outside if blocks only (2 matches)
@@ -958,7 +958,7 @@ class TestFindReplaceConstraints:
             "    print('inside func')\n"
         )
 
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--inside", "def", "--apply"])
+        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--where", "def", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -976,7 +976,7 @@ class TestFindReplaceConstraints:
             "z = 3\n"
         )
 
-        result = runner.invoke(app, ["replace", "$NAME = $VALUE", "$NAME: int = $VALUE", str(test_file), "--not-inside", "class", "--apply"])
+        result = runner.invoke(app, ["replace", "$NAME = $VALUE", "$NAME: int = $VALUE", str(test_file), "--where", "not class", "--apply"])
 
         assert result.exit_code == 0
         content = test_file.read_text()
@@ -990,14 +990,14 @@ class TestFindReplaceConstraints:
         test_file = tmp_path / "test.py"
         test_file.write_text("x = 1\n")
 
-        result = runner.invoke(app, ["find", "$X = $Y", str(test_file), "--inside", "def", "--not-inside", "class"])
+        result = runner.invoke(app, ["search", "$X = $Y", str(test_file), "--where", "def", "--where", "not class"])
 
         assert result.exit_code == 2
         assert "Cannot specify both" in result.stdout or "Cannot specify both" in result.stderr
 
 
 class TestFindReplaceMultiFile:
-    """Tests for find/replace across multiple files using globs."""
+    """Tests for search/replace across multiple files using globs."""
 
     def test_find_glob_pattern(self, tmp_path):
         """Test find with glob pattern matching multiple files."""
@@ -1010,7 +1010,7 @@ class TestFindReplaceMultiFile:
         file3.write_text("print('other')\n")
 
         # Use glob pattern to match test*.py
-        result = runner.invoke(app, ["find", "print($X)", str(tmp_path / "test*.py")])
+        result = runner.invoke(app, ["search", "print($X)", str(tmp_path / "test*.py")])
 
         assert result.exit_code == 0
         output = result.stdout
@@ -1032,7 +1032,7 @@ class TestFindReplaceMultiFile:
         non_py = tmp_path / "file3.txt"
         non_py.write_text("print('not py')\n")
 
-        result = runner.invoke(app, ["find", "print($X)", str(tmp_path)])
+        result = runner.invoke(app, ["search", "print($X)", str(tmp_path)])
 
         assert result.exit_code == 0
         output = result.stdout
