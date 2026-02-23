@@ -1,13 +1,12 @@
-# Publish emend to PyPI and TestPyPI using OIDC trusted publishing.
+# Publish emend to PyPI using OIDC trusted publishing.
 #
 # Setup requirements:
-#   1. Configure trusted publishing on pypi.org and test.pypi.org:
-#      - Go to each site's "Publishing" settings for the "emend" project
+#   1. Configure trusted publishing on pypi.org:
+#      - Go to "Publishing" settings for the "emend" project
 #      - Add a new "pending publisher" (or "trusted publisher" if project exists)
 #      - Set the GitHub repository owner/name, workflow name "publish.yml",
-#        and the environment name ("pypi" or "testpypi" respectively)
-#   2. Create two GitHub environments in your repository settings:
-#      - "testpypi" - no special protection rules needed
+#        and the environment name ("pypi")
+#   2. Create a GitHub environment in your repository settings:
 #      - "pypi" - add required reviewers for manual approval before publishing
 
 name: Publish to PyPI
@@ -38,27 +37,6 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
-
-  publish-testpypi:
-    name: Publish to TestPyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/emend
-    permissions:
-      id-token: write
-    steps:
-      - name: Download distribution artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
     name: Publish to PyPI
