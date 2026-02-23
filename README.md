@@ -26,6 +26,12 @@ Verify the installation:
 emend --help
 ```
 
+For detailed installation options, see the [Installation documentation](https://lucaswiman.github.io/emend/installation.html).
+
+## Documentation
+
+Full documentation is available at [https://lucaswiman.github.io/emend/](https://lucaswiman.github.io/emend/).
+
 ## Usage
 
 ```bash
@@ -134,14 +140,14 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 **`replace`** - Replace pattern matches with pattern-based substitution
 - `emend replace 'print($X)' 'logger.info($X)' file.py --apply`
-- Scope constraints: `--in`, `--inside`, `--not-inside`, `--where`
+- Scope constraints: `--where` (syntax: 'def', 'class', 'MyClass.method', 'not ...')
 
 ### Symbol Management
 
 **`refs`** - Find all references to a symbol across the project
 - `emend refs models.py::User`
 - Filters: `--writes-only`, `--reads-only`, `--calls-only`
-- Output: `--output json`, `--output location`
+- Output: `--json` for JSON output (default shows file:line)
 
 **`rename`** - Rename a symbol or module across the project
 - Symbol: `emend rename models.py::User --to Account --apply`

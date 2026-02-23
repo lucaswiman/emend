@@ -4,7 +4,7 @@ Commands Reference
 search
 ------
 
-Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary** (like the old ``list-symbols``). Otherwise, it uses **symbol lookup** mode.
+Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary**. Otherwise, it uses **symbol lookup** mode.
 
 Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuitive workflows.
 
@@ -19,7 +19,7 @@ Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuit
 
 **Output format (--output / -o):**
 
-Auto-detected when not specified:
+Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MODIFIER``:
 
 +---------------------+----------------------------------------+
 | Mode                | Default when...                        |
@@ -34,23 +34,36 @@ Auto-detected when not specified:
 +---------------------+----------------------------------------+
 | ``metadata``        | Explicit only                          |
 +---------------------+----------------------------------------+
+| ``json``            | JSON structured output                 |
++---------------------+----------------------------------------+
+| ``count``           | Count of matches only                  |
++---------------------+----------------------------------------+
 
-**Options (shared):**
+**Output modifiers (appended with ``::`` to base format):**
+
++---------------------+----------------------------------------+
+| Modifier            | Description                            |
++=====================+========================================+
+| ``flat``            | Flat list (summary mode)               |
++---------------------+----------------------------------------+
+| ``dedent``          | Dedent source code (code mode)         |
++---------------------+----------------------------------------+
+
+**Options (all modes):**
 
 +-----------------------+-------------------------------------------+
 | Option                | Description                               |
 +=======================+===========================================+
 | ``--output``, ``-o``  | Output format: code, location, selector,  |
-|                       | summary, metadata                         |
+|                       | summary, metadata, json, count, with      |
+|                       | optional modifiers (::flat, ::dedent)     |
 +-----------------------+-------------------------------------------+
-| ``--json``            | Output as JSON (orthogonal modifier)      |
+| ``--imported-from MODULE`` | Only when imported from given module  |
 +-----------------------+-------------------------------------------+
-| ``--count``           | Output only count of matches              |
-+-----------------------+-------------------------------------------+
-| ``--dedent``          | Dedent source code in output              |
+| ``--scope-local``   | Only match locally-defined names       |
 +-----------------------+-------------------------------------------+
 
-**Options (lookup/summary mode):**
+**Options (lookup/filter mode):**
 
 +---------------------+----------------------------------------+
 | Option              | Description                            |
@@ -59,11 +72,7 @@ Auto-detected when not specified:
 +---------------------+----------------------------------------+
 | ``--name TEXT``     | Filter by name (glob or ``/regex/``)  |
 +---------------------+----------------------------------------+
-| ``--has-decorator TEXT`` | Filter to symbols with decorator      |
-+---------------------+----------------------------------------+
 | ``--returns TEXT``  | Filter by return type annotation       |
-+---------------------+----------------------------------------+
-| ``--in-class TEXT`` | Restrict to methods of this class      |
 +---------------------+----------------------------------------+
 | ``--depth TEXT``    | Filter by nesting depth                |
 +---------------------+----------------------------------------+
@@ -73,29 +82,15 @@ Auto-detected when not specified:
 +---------------------+----------------------------------------+
 | ``--smart-case``    | Match naming convention variants       |
 +---------------------+----------------------------------------+
-| ``--matching TEXT`` | Filter by body pattern match           |
-+---------------------+----------------------------------------+
-| ``--flat``          | Flat output (summary mode)             |
-+---------------------+----------------------------------------+
-| ``--tree-depth N``  | Nesting depth limit (summary mode)     |
-+---------------------+----------------------------------------+
 
-**Options (pattern mode):**
+**Options (pattern mode only):**
 
 +---------------------+----------------------------------------+
 | Option              | Description                            |
 +=====================+========================================+
-| ``--in SCOPE``      | Limit to within a named symbol         |
-+---------------------+----------------------------------------+
-| ``--inside STRUCTURE`` | Only match inside this structure type |
-+---------------------+----------------------------------------+
-| ``--not-inside STRUCTURE`` | Only match outside this structure |
-+---------------------+----------------------------------------+
-| ``--where PATTERN`` | Only match inside structures matching this pattern |
-+---------------------+----------------------------------------+
-| ``--imported-from MODULE`` | Only when imported from given module |
-+---------------------+----------------------------------------+
-| ``--scope-local``   | Only match locally-defined names       |
+| ``--where EXPR``    | Filter/scope constraint (syntax:       |
+|                     | 'def test_*', 'not class', 'MyClass',  |
+|                     | '@decorator', 'print($X)')             |
 +---------------------+----------------------------------------+
 
 **Examples:**
@@ -104,18 +99,18 @@ Auto-detected when not specified:
 
    # Pattern mode (has $):
    emend search 'print($X)' src/
-   emend search 'assertEqual($A, $B)' tests/ --count
+   emend search 'assertEqual($A, $B)' tests/ --output count
    emend search '$X = $Y' src/ --output selector
 
    # Lookup mode (has :: or file path):
    emend search file.py::func[params]
-   emend search src/ --kind function --has-decorator pytest
+   emend search src/ --kind function
 
    # Summary mode (bare file/dir, no filters):
    emend search api.py
-   emend search api.py --flat
+   emend search api.py --output summary::flat
    emend search api.py::MyClass --output summary
-   emend search api.py --output summary --tree-depth 2
+   emend search api.py --output code::dedent
 
    # Metadata mode:
    emend search api.py::my_func --output metadata
@@ -270,13 +265,10 @@ Replace code patterns. Dry-run by default; use ``--apply`` to write.
 +---------------------+-----------------------------------------------+
 | Option              | Description                                   |
 +=====================+===============================================+
-| ``--apply``         | Write changes to disk                         |
+| ``--apply``         | Write changes to disk (default is dry-run)   |
 +---------------------+-----------------------------------------------+
-| ``--in SCOPE``      | Limit to within a named symbol                |
-+---------------------+-----------------------------------------------+
-| ``--inside STRUCTURE`` | Only replace inside this structure type    |
-+---------------------+-----------------------------------------------+
-| ``--not-inside STRUCTURE`` | Only replace outside this structure type |
+| ``--where EXPR``    | Filter by scope/structure (syntax:            |
+|                     | 'def', 'class', 'MyClass.method', 'not ...')  |
 +---------------------+-----------------------------------------------+
 
 **Examples:**
@@ -289,14 +281,17 @@ Replace code patterns. Dry-run by default; use ``--apply`` to write.
    # Apply the replacement
    emend replace 'print($X)' 'logger.info($X)' src/ --apply
 
-   # Replace only inside functions
-   emend replace 'old_api($X)' 'new_api($X)' src/ --inside def --apply
+   # Replace only inside functions (structural constraint)
+   emend replace 'old_api($X)' 'new_api($X)' src/ --where 'def' --apply
 
    # Replace unittest assertions
    emend replace 'assertEqual($A, $B)' 'assert $A == $B' tests/ --apply
 
-   # Replace only inside a specific method
-   emend replace 'log($X)' 'logger.info($X)' app.py --in MyClass.process --apply
+   # Replace only inside a specific method (scope constraint)
+   emend replace 'log($X)' 'logger.info($X)' app.py --where 'MyClass.process' --apply
+
+   # Replace outside a structure
+   emend replace '$X = $Y' '$X: int = $Y' src/ --where 'not class' --apply
 
 ---
 
@@ -502,7 +497,7 @@ refs
 ----
 
 Find all references to a symbol across the project using LibCST's scope analysis.
-With ``--calls-only``, only returns actual call sites (replaces the former ``callers`` command).
+With ``--calls-only``, only returns actual call sites.
 
 .. code-block:: text
 
@@ -539,7 +534,7 @@ With ``--calls-only``, only returns actual call sites (replaces the former ``cal
    emend refs file.py::config --writes-only
    emend refs file.py::config --reads-only
 
-   # Only call sites (replaces: emend callers src/module.py::process)
+   # Only call sites
    emend refs src/module.py::process --calls-only
    emend refs src/module.py::process --calls-only --json
 
@@ -619,14 +614,4 @@ Move a symbol to another file, updating all imports.
    emend move utils.py pkg --project . --apply
 
 ---
-
-.. note::
-
-   **Command consolidations:**
-
-   - ``list-symbols`` → Use ``emend search FILE`` (auto-detects summary mode) or ``emend search FILE --output summary``
-   - ``find-references``, ``callers``, ``callees`` → Use ``emend refs SELECTOR`` with ``--writes-only``, ``--reads-only``, ``--calls-only`` filters
-   - ``rename-symbol``, ``rename-module`` → Use ``emend rename SELECTOR --to NEW_NAME`` (auto-detects mode)
-   - ``move-module`` → Use ``emend move MODULE DESTINATION`` (auto-detects mode)
-   - ``lookup``, ``query``, ``show``, ``find`` → Use ``emend search`` (also available as aliases)
 
