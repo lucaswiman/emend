@@ -176,7 +176,7 @@ def search(
 
     If the query contains metavariables ($X, $...Y), uses pattern matching mode.
     If the query contains :: or is a plain file path, uses symbol lookup mode.
-    A bare file/dir path with no filters shows a symbol summary (like list-symbols).
+    A bare file/dir path with no filters shows a symbol summary.
 
     Output formats (--output):
         code          Full source of matched symbol(s) [default for selector]
@@ -754,7 +754,7 @@ def refs_cmd(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
     writes_only: Annotated[bool, typer.Option("--writes-only", help="Only show write (assignment) references")] = False,
     reads_only: Annotated[bool, typer.Option("--reads-only", help="Only show read (load) references")] = False,
-    calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (equivalent to former callers command)")] = False,
+    calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (not mere references)")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory (used with --calls-only)")] = None,
 ):
     """Find all references to a symbol across the project.
