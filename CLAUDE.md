@@ -15,6 +15,7 @@
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
+| `grammars/pattern.lark` | Lark grammar for pattern syntax |
 
 ### Tests (`tests/test_emend/`)
 
@@ -46,6 +47,7 @@
 | `test_regressions.py` | Regression tests (scope-aware rename, --docs, signatures) |
 | `test_rename_module.py` | `rename-module` command |
 | `test_rename_symbol.py` | `rename` / `rename-symbol` command |
+| `test_rope_commands.py` | Module-level refactoring commands (move module mode) |
 | `test_search.py` | `search` command (unified find/lookup) |
 | `test_show.py` | `show` command |
 | `test_show_unified.py` | Unified show output |

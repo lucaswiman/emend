@@ -295,25 +295,21 @@ In ``replace``, the replacement string can reference captured metavariables:
 Scope constraints
 -----------------
 
-``--in SCOPE``
-~~~~~~~~~~~~~~
+All scope constraints are passed via the ``--where`` flag. The syntax is auto-detected:
 
-Restrict matches to within a named symbol:
+- A dotted name like ``MyClass.method`` restricts to that scope
+- A structural keyword like ``def`` or ``class`` restricts to inside that block type
+- A pattern like ``def test_*`` or ``async def fetch_*`` restricts to matching blocks
+- A ``not`` prefix (e.g., ``not class``) excludes matches inside that structure
+- A ``@decorator`` restricts to symbols with that decorator (lookup mode)
 
 .. code-block:: bash
 
    # Only match inside the process_request function
-   emend search 'print($X)' app.py --in process_request
+   emend search 'print($X)' app.py --where process_request
 
    # Only match inside MyClass.method
-   emend search 'self.$ATTR' app.py --in MyClass.method
-
-``--where PATTERN`` (alias for ``--inside``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Scope filtering using a pattern. Alias for ``--inside`` with pattern support:
-
-.. code-block:: bash
+   emend search 'self.$ATTR' app.py --where MyClass.method
 
    # Only match inside async functions named fetch_*
    emend search 'await $X' src/ --where 'async def fetch_*'
@@ -328,8 +324,8 @@ Only match names that are locally defined (excludes imports):
    # Find local variables named 'config', not imported ones
    emend search 'config' src/ --scope-local
 
-``--inside STRUCTURE``
-~~~~~~~~~~~~~~~~~~~~~~
+``--where`` structural keywords
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Only match inside a particular kind of block. Accepts both keywords and patterns:
 
@@ -354,32 +350,32 @@ Only match inside a particular kind of block. Accepts both keywords and patterns
 .. code-block:: bash
 
    # Only inside functions (keyword)
-   emend search 'print($X)' src/ --inside def
+   emend search 'print($X)' src/ --where def
 
    # Only inside try blocks (keyword)
-   emend search 'raise $E' src/ --inside try
+   emend search 'raise $E' src/ --where try
 
    # Only inside functions matching a name pattern
-   emend search 'print($X)' src/ --inside 'def test_*'
+   emend search 'print($X)' src/ --where 'def test_*'
 
    # Only inside async functions
-   emend search 'await $X' src/ --inside 'async def fetch_*'
+   emend search 'await $X' src/ --where 'async def fetch_*'
 
-``--not-inside STRUCTURE``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Negation (``not``) syntax
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Only match outside a particular kind of block. Also accepts patterns:
+Prefix with ``not`` to exclude matches inside a block type:
 
 .. code-block:: bash
 
-   # Not inside class bodies (keyword)
-   emend replace '$X = $Y' '$X: int = $Y' src/ --not-inside class --apply
+   # Not inside class bodies
+   emend replace '$X = $Y' '$X: int = $Y' src/ --where 'not class' --apply
 
-   # Not inside try blocks (pattern)
-   emend search 'open($PATH)' src/ --not-inside 'try:'
+   # Not inside try blocks
+   emend search 'open($PATH)' src/ --where 'not try'
 
-   # Not inside test functions (name pattern)
-   emend search 'print($X)' src/ --not-inside 'def test_*'
+   # Not inside test functions
+   emend search 'print($X)' src/ --where 'not def test_*'
 
 ``--imported-from MODULE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

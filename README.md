@@ -1,10 +1,8 @@
 # emend
 
-A Python refactoring CLI tool built on [LibCST](https://github.com/Instagram/LibCST), with AST-based commands for handling nested functions and closures.
+A Python refactoring CLI built on [LibCST](https://github.com/Instagram/LibCST). The name means "to make corrections to a text" — which is what it does, but with AST-aware precision instead of find-and-replace.
 
-Built on two complementary systems:
-- **Structured Edits** - Precise changes to symbol metadata using selectors like `file.py::func[params][0]`
-- **Pattern Transforms** - Code-pattern search and replace with capture variables like `print($X)` → `logger.info($X)`
+Two complementary systems: **structured edits** use selectors like `file.py::func[params][0]` for precise changes to symbol metadata, and **pattern transforms** use capture variables like `print($X)` → `logger.info($X)` for code-pattern search and replace.
 
 ## Installation
 
@@ -20,17 +18,7 @@ uv tool install emend
 pip install emend
 ```
 
-Verify the installation:
-
-```bash
-emend --help
-```
-
-For detailed installation options, see the [Installation documentation](https://lucaswiman.github.io/emend/installation.html).
-
-## Documentation
-
-Full documentation is available at [https://lucaswiman.github.io/emend/](https://lucaswiman.github.io/emend/).
+Run `emend --help` to verify. Full documentation at [lucaswiman.github.io/emend](https://lucaswiman.github.io/emend/).
 
 ## Usage
 
@@ -40,11 +28,7 @@ emend <command> [options]
 
 ### Workflow
 
-1. **Preview changes**: Run with `--dry-run` (default) to see what will change
-2. **Review the diff output**
-3. **Apply changes**: Re-run with `--apply`
-4. **Format code**: Run formatters (black/ruff/isort) - emend may not preserve exact formatting
-5. **Verify**: Run tests/type checks
+All mutating commands default to dry-run, showing a diff of proposed changes. Re-run with `--apply` to write them. You'll probably want to run a formatter (black/ruff/isort) afterward, since emend doesn't try to preserve exact formatting.
 
 ## Selector Syntax
 
@@ -101,7 +85,8 @@ start: selector
 selector: file_path DOUBLE_COLON symbol_path? component*
 
 file_path: PATH
-symbol_path: IDENTIFIER ("." IDENTIFIER)*
+symbol_path: symbol_segment ("." symbol_segment)*
+symbol_segment: WILDCARD | IDENTIFIER
 component: "[" COMPONENT_NAME "]" accessor? pseudo_class?
 accessor: "[" (IDENTIFIER | INT) "]"
 pseudo_class: PSEUDO_CLASS
@@ -109,8 +94,9 @@ pseudo_class: PSEUDO_CLASS
 COMPONENT_NAME: "params" | "returns" | "decorators" | "bases" | "body" | "imports"
 DOUBLE_COLON: "::"
 PATH: /[^:]+/
+WILDCARD: "*" | /[a-zA-Z_*][a-zA-Z0-9_*]*/
 IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/
-INT: /\d+/
+INT: /-?\d+/
 PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 ```
 
@@ -140,7 +126,7 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 **`replace`** - Replace pattern matches with pattern-based substitution
 - `emend replace 'print($X)' 'logger.info($X)' file.py --apply`
-- Scope constraints: `--where` (syntax: 'def', 'class', 'MyClass.method', 'not ...')
+- Scope: `--where` (syntax: 'def', 'class', 'MyClass.method', 'not ...')
 
 ### Symbol Management
 
@@ -232,10 +218,10 @@ emend edit 'file.py::*[decorators]' "@dataclass" --apply
 emend replace 'print($X)' 'logger.info($X)' file.py
 
 # Replace within a specific scope
-emend replace 'old_var' 'new_var' api.py --in process --apply
+emend replace 'old_var' 'new_var' api.py --where process --apply
 
 # Replace with pattern capture
-emend replace 'get_field($N)' 'field$N' api.py --in process --apply
+emend replace 'get_field($N)' 'field$N' api.py --where process --apply
 
 # Find all pattern matches
 emend search 'print($X)' src/ --output location
@@ -248,7 +234,7 @@ emend batch rules.json --apply
 
 ```bash
 # Find all references to a symbol
-emend refs models.py::User --output json
+emend refs models.py::User --json
 emend refs models.py::User --writes-only    # Only write references
 emend refs models.py::User --calls-only     # Only function calls
 
@@ -285,9 +271,9 @@ emend find 'range($N:int)' src/
 # Anonymous metavariables
 emend find 'func($_, $ARG)' src/
 
-# Structural constraints
-emend find 'print($X)' src/ --inside 'async def'
-emend find 'await $X' src/ --not-inside 'if __debug__'
+# Structural constraints (via --where)
+emend find 'print($X)' src/ --where 'async def'
+emend find 'await $X' src/ --where 'not if __debug__'
 
 # Supported pattern types:
 #   Literals: $X, $MSG:str, $N:int, 3.14
@@ -311,7 +297,7 @@ DOLLAR: "$"
 ELLIPSIS: "..."
 UNDERSCORE: "_"
 METAVAR_NAME: /[A-Z][A-Z0-9_]*/
-TYPE_CONSTRAINT: /:(?:expr|stmt|identifier|int|str|float|call|attr|any)/
+TYPE_CONSTRAINT: /:!?(?:expr|stmt|identifier|int|str|float|call|attr|any)/
 code_chunk: /[^$:]+/ | ":"
 ```
 
@@ -393,7 +379,7 @@ To auto-fix violations, add `args: ["--fix"]` to the hook configuration.
 Clone the repository and install for development:
 
 ```bash
-git clone https://github.com/anthropics/emend
+git clone https://github.com/lucaswiman/emend
 cd emend
 
 # Using make (creates virtual environment)
@@ -429,6 +415,7 @@ emend/
 │   ├── ast_commands.py       # AST-based command implementations
 │   ├── ast_utils.py          # AST traversal utilities
 │   ├── component_selector.py # Extended selector parsing
+│   ├── lint.py              # Pattern-based linter engine
 │   └── grammars/
 │       ├── selector.lark     # Extended selector grammar
 │       └── pattern.lark      # Pattern grammar
