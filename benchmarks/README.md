@@ -39,12 +39,12 @@ python benchmarks/bench_django.py --only lint
 
 | Name | Description |
 |------|-------------|
-| `search_symbol_lookup` | `search "Model"` in a single file (symbol lookup mode) |
+| `search_symbol_lookup` | `search django/db/models/base.py::Model` (symbol lookup) |
 | `search_summary_subtree` | `search --output summary django/db/models/` (symbol listing for a subtree) |
-| `find_pattern` | `find "$X.objects.filter($...args)"` across the Django source |
+| `find_pattern` | `search "$X.objects.filter($...ARGS)" django/` (pattern matching) |
 | `find_pattern_constrained` | Same pattern with `--where "class $C(TestCase):"` constraint |
-| `refs_model` | `refs django/db/models/base.py::Model` (cross-project reference finding) |
-| `rename_dry_run` | `rename django/db/models/query.py::QuerySet.filter --to filter_queryset` (dry-run) |
+| `refs_queryset` | `refs django/db/models/query.py::QuerySet --project django/db/` (reference finding) |
+| `rename_dry_run` | `rename QuerySet.filter --to filter_queryset --project django/db/` (dry-run) |
 | `lint_db_models` | `lint django/db/models/` with 5 pattern rules |
 | `lint_full_django` | `lint django/` with 5 pattern rules (full project) |
 | `graph_file` | `graph django/db/models/query.py` (call graph generation) |

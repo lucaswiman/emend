@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import statistics
 import subprocess
@@ -51,11 +50,11 @@ LINT_RULES_YAML = textwrap.dedent("""\
         message: "hasattr() swallows exceptions; use try/except or check __dict__."
 
       no-open-without-encoding:
-        find: "open($path)"
+        find: "open($PATH)"
         message: "Specify encoding when calling open()."
 
       no-mutable-default:
-        find: "def $F($...a, $P=[], $...b):"
+        find: "def $F($...A, $P=[], $...B):"
         message: "Mutable default argument; use None and initialize inside."
 """)
 
@@ -95,20 +94,20 @@ BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
         {0},
     ),
     (
-        "refs_model",
-        "refs django/db/models/base.py::Model (scope-aware reference finding)",
-        ["refs", "django/db/models/base.py::Model", "--project", "."],
+        "refs_queryset",
+        "refs django/db/models/query.py::QuerySet --project django/db/",
+        ["refs", "django/db/models/query.py::QuerySet", "--project", "django/db/"],
         {0},
     ),
     (
         "rename_dry_run",
-        "rename QuerySet.filter -> filter_queryset (dry-run)",
+        "rename QuerySet.filter -> filter_queryset --project django/db/ (dry-run)",
         [
             "rename",
             "django/db/models/query.py::QuerySet.filter",
             "--to",
             "filter_queryset",
-            "--project", ".",
+            "--project", "django/db/",
         ],
         {0},
     ),
@@ -138,7 +137,16 @@ BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
 # ---------------------------------------------------------------------------
 
 
-TIMEOUT = 600  # seconds – generous limit for slow operations on large codebases
+TIMEOUT = 600  # seconds -- generous limit for slow operations on large codebases
+
+# Whether to suppress progress output (for JSON mode).
+_quiet = False
+
+
+def _log(msg: str) -> None:
+    """Print a progress message to stderr (so JSON output stays clean)."""
+    if not _quiet:
+        print(msg, file=sys.stderr)
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -159,21 +167,23 @@ def ensure_django_checkout() -> Path:
         # Verify we have the right commit checked out.
         result = _run(["git", "rev-parse", "HEAD"], cwd=CACHE_DIR)
         if result.returncode == 0 and result.stdout.strip() == DJANGO_COMMIT:
-            print(f"  Django checkout already present at {CACHE_DIR}")
+            _log(f"  Django checkout already present at {CACHE_DIR}")
             return CACHE_DIR
         else:
-            print(f"  Django checkout exists but wrong commit, resetting...")
+            _log("  Django checkout exists but wrong commit, resetting...")
             _run(
                 ["git", "fetch", "--depth", "1", "origin", f"tag {DJANGO_TAG}"],
                 cwd=CACHE_DIR,
             )
-            result = _run(["git", "checkout", f"tags/{DJANGO_TAG}"], cwd=CACHE_DIR)
+            result = _run(
+                ["git", "checkout", f"tags/{DJANGO_TAG}"], cwd=CACHE_DIR
+            )
             if result.returncode != 0:
-                print(f"  Failed to checkout tag {DJANGO_TAG}, re-cloning...")
+                _log(f"  Failed to checkout tag {DJANGO_TAG}, re-cloning...")
                 shutil.rmtree(CACHE_DIR)
 
     if not CACHE_DIR.exists():
-        print(f"  Cloning Django (tag {DJANGO_TAG}) into {CACHE_DIR}...")
+        _log(f"  Cloning Django (tag {DJANGO_TAG}) into {CACHE_DIR}...")
         # Shallow clone at the exact tag to minimize download size.
         result = _run([
             "git", "clone",
@@ -184,7 +194,8 @@ def ensure_django_checkout() -> Path:
         ])
         if result.returncode != 0:
             print(
-                f"ERROR: Failed to clone Django at tag {DJANGO_TAG}:\n{result.stderr}",
+                f"ERROR: Failed to clone Django at tag {DJANGO_TAG}:\n"
+                f"{result.stderr}",
                 file=sys.stderr,
             )
             shutil.rmtree(CACHE_DIR, ignore_errors=True)
@@ -192,7 +203,9 @@ def ensure_django_checkout() -> Path:
 
         # Verify the commit matches what we expect.
         result = _run(["git", "rev-parse", "HEAD"], cwd=CACHE_DIR)
-        actual_commit = result.stdout.strip() if result.returncode == 0 else "<unknown>"
+        actual_commit = (
+            result.stdout.strip() if result.returncode == 0 else "<unknown>"
+        )
         if actual_commit != DJANGO_COMMIT:
             print(
                 f"  WARNING: Tag {DJANGO_TAG} resolved to {actual_commit}, "
@@ -200,23 +213,27 @@ def ensure_django_checkout() -> Path:
                 file=sys.stderr,
             )
 
-    print(f"  Django checkout ready at {CACHE_DIR}")
+    _log(f"  Django checkout ready at {CACHE_DIR}")
     return CACHE_DIR
 
 
 def setup_lint_rules(django_dir: Path) -> None:
-    """Create a .emend/patterns.yaml in the Django checkout for lint benchmarks."""
+    """Create .emend/patterns.yaml in the Django checkout for lint benchmarks."""
     emend_dir = django_dir / ".emend"
     emend_dir.mkdir(exist_ok=True)
     rules_file = emend_dir / "patterns.yaml"
     rules_file.write_text(LINT_RULES_YAML)
-    print(f"  Lint rules written to {rules_file}")
+    _log(f"  Lint rules written to {rules_file}")
 
 
-def check_emend_available() -> str:
+def check_emend_available() -> list[str]:
     """Check that emend CLI is available. Returns the command to use."""
     # Try 'emend' first, then 'python -m emend'.
-    for cmd in [["emend", "--help"], [sys.executable, "-m", "emend", "--help"]]:
+    candidates = [
+        ["emend", "--help"],
+        [sys.executable, "-m", "emend", "--help"],
+    ]
+    for cmd in candidates:
         result = _run(cmd)
         if result.returncode == 0:
             # Return the base command (without --help).
@@ -257,7 +274,7 @@ def run_benchmark(
     last_stdout = ""
     last_stderr = ""
 
-    for i in range(iterations):
+    for _i in range(iterations):
         start = time.perf_counter()
         try:
             result = _run(full_cmd, cwd=django_dir)
@@ -275,7 +292,9 @@ def run_benchmark(
         last_stderr = result.stderr
 
     # Count output lines as a rough measure of result volume.
-    output_lines = len(last_stdout.strip().splitlines()) if last_stdout else 0
+    output_lines = (
+        len(last_stdout.strip().splitlines()) if last_stdout else 0
+    )
 
     is_ok = last_returncode in ok_codes
 
@@ -343,7 +362,9 @@ def print_table(results: dict[str, dict]) -> None:
     print()
 
     # Print errors for failed benchmarks.
-    failures = {name: data for name, data in results.items() if data["returncode"] != 0}
+    failures = {
+        name: data for name, data in results.items() if not data["ok"]
+    }
     if failures:
         print("Failures:")
         for name, data in failures.items():
@@ -354,9 +375,12 @@ def print_table(results: dict[str, dict]) -> None:
         print()
 
 
-def print_json(results: dict[str, dict], benchmarks_meta: list[tuple[str, str]]) -> None:
+def print_json(
+    results: dict[str, dict],
+    benchmarks_meta: list[tuple[str, str]],
+) -> None:
     """Print machine-readable JSON output."""
-    output = {
+    output: dict = {
         "django_commit": DJANGO_COMMIT,
         "benchmarks": {},
     }
@@ -371,6 +395,7 @@ def print_json(results: dict[str, dict], benchmarks_meta: list[tuple[str, str]])
                 "median_seconds": round(data["median"], 4),
                 "iterations": data["iterations"],
                 "output_lines": data["output_lines"],
+                "ok": data["ok"],
                 "returncode": data["returncode"],
                 "error": data.get("error"),
             }
@@ -411,33 +436,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    global _quiet
     iterations = args.iterations or (1 if args.quick else 3)
 
-    if not args.json_output:
-        print("emend Django Benchmark Suite")
-        print("=" * 40)
-        print()
+    if args.json_output:
+        _quiet = True
+
+    _log("emend Django Benchmark Suite")
+    _log("=" * 40)
+    _log("")
 
     # Step 1: Check emend is available.
-    if not args.json_output:
-        print("[1/3] Checking emend installation...")
+    _log("[1/3] Checking emend installation...")
     emend_cmd = check_emend_available()
-    if not args.json_output:
-        print(f"  Using: {' '.join(str(c) for c in emend_cmd)}")
-        print()
+    _log(f"  Using: {' '.join(str(c) for c in emend_cmd)}")
+    _log("")
 
     # Step 2: Ensure Django checkout.
-    if not args.json_output:
-        print("[2/3] Ensuring Django checkout...")
+    _log("[2/3] Ensuring Django checkout...")
     django_dir = ensure_django_checkout()
     setup_lint_rules(django_dir)
-    if not args.json_output:
-        print()
+    _log("")
 
     # Step 3: Run benchmarks.
-    if not args.json_output:
-        print(f"[3/3] Running benchmarks ({iterations} iteration(s) each)...")
-        print()
+    _log(f"[3/3] Running benchmarks ({iterations} iteration(s) each)...")
+    _log("")
 
     selected_benchmarks = BENCHMARKS
     if args.only:
@@ -446,8 +469,8 @@ def main() -> None:
         ]
         if not selected_benchmarks:
             print(
-                f"ERROR: No benchmarks match --only={args.only!r}. Available: "
-                + ", ".join(b[0] for b in BENCHMARKS),
+                f"ERROR: No benchmarks match --only={args.only!r}. "
+                f"Available: {', '.join(b[0] for b in BENCHMARKS)}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -455,19 +478,23 @@ def main() -> None:
     results: dict[str, dict] = {}
     total_start = time.perf_counter()
 
-    for bench_name, bench_desc, bench_args in selected_benchmarks:
-        if not args.json_output:
-            print(f"  Running: {bench_desc}...", flush=True)
+    for bench_name, bench_desc, bench_args, bench_ok_codes in selected_benchmarks:
+        _log(f"  Running: {bench_desc}...")
 
-        data = run_benchmark(emend_cmd, django_dir, bench_args, iterations)
+        data = run_benchmark(
+            emend_cmd, django_dir, bench_args, iterations,
+            ok_codes=bench_ok_codes,
+        )
         results[bench_name] = data
 
-        if not args.json_output:
-            status = "OK" if data["returncode"] in (0, 1) else f"FAIL (exit {data['returncode']})"
-            print(
-                f"    -> {status}  median={_fmt_time(data['median'])}  "
-                f"({data['output_lines']} output lines)"
-            )
+        if data["ok"]:
+            status = "OK"
+        else:
+            status = f"FAIL (exit {data['returncode']})"
+        _log(
+            f"    -> {status}  median={_fmt_time(data['median'])}  "
+            f"({data['output_lines']} output lines)"
+        )
 
     total_elapsed = time.perf_counter() - total_start
 
