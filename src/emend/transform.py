@@ -45,6 +45,12 @@ def _cached_parse(source: str) -> cst.Module:
     return module
 
 
+# ---------------------------------------------------------------------------
+# Rust accelerator (required)
+# ---------------------------------------------------------------------------
+import emend_core as _rust
+
+
 # Helper functions for cross-project operations
 
 def _find_project_root(start_path: str) -> str:
@@ -84,28 +90,8 @@ _file_list_cache: dict[str, tuple[int, list[str]]] = {}
 
 
 def _collect_python_files_scandir(root_path: str) -> list[str]:
-    """Walk a directory tree using os.scandir (faster than Path.rglob)."""
-    import os
-    files: list[str] = []
-    stack = [root_path]
-    while stack:
-        dirpath = stack.pop()
-        try:
-            entries = os.scandir(dirpath)
-        except (PermissionError, OSError):
-            continue
-        dirs_to_visit: list[str] = []
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if entry.name not in _SKIP_DIRS:
-                        dirs_to_visit.append(entry.path)
-                elif entry.name.endswith('.py') and entry.is_file(follow_symlinks=True):
-                    files.append(entry.path)
-            except OSError:
-                continue
-        stack.extend(dirs_to_visit)
-    return files
+    """Walk a directory tree using the Rust emend_core module."""
+    return _rust.collect_python_files(root_path)
 
 
 def _collect_python_files(project_root: str) -> list[str]:
@@ -139,60 +125,17 @@ def _collect_python_files(project_root: str) -> list[str]:
 _import_graph_cache: dict[str, tuple[int, dict[str, list[str]]]] = {}
 
 
-def _extract_imported_modules(source: str) -> set[str]:
-    """Extract module names from import statements using simple string matching.
-
-    This is intentionally lightweight — no CST parsing required. It handles:
-      - ``from foo.bar import baz``  →  {'foo', 'foo.bar'}
-      - ``import foo.bar``            →  {'foo', 'foo.bar'}
-      - ``from . import foo``        →  (skipped, relative imports)
-
-    We extract both the full dotted module and all prefixes so that a search
-    for symbol ``bar`` defined in module ``foo.bar`` will match files that
-    ``import foo`` or ``from foo import bar`` or ``from foo.bar import baz``.
-    """
-    modules: set[str] = set()
-    for line in source.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith('from '):
-            # "from foo.bar import ..."
-            parts = stripped.split()
-            if len(parts) >= 2:
-                mod = parts[1]
-                if mod.startswith('.'):
-                    continue  # skip relative imports
-                # Add full module and all prefixes
-                segments = mod.split('.')
-                for i in range(1, len(segments) + 1):
-                    modules.add('.'.join(segments[:i]))
-        elif stripped.startswith('import '):
-            # "import foo.bar, baz.qux"
-            rest = stripped[7:]
-            for mod_part in rest.split(','):
-                mod = mod_part.strip().split()[0]  # handle "as" aliases
-                if mod.startswith('.'):
-                    continue
-                segments = mod.split('.')
-                for i in range(1, len(segments) + 1):
-                    modules.add('.'.join(segments[:i]))
-    return modules
-
-
 def _build_import_graph(project_root: str) -> dict[str, list[str]]:
     """Build a reverse import graph: module_name -> [files that import it].
 
-    This is cheap: reads file text and does string matching on import lines.
-    No CST parsing needed.
+    Uses Rust emend_core for parallel import extraction via tree-sitter.
     """
-    graph: dict[str, list[str]] = {}
     py_files = _collect_python_files(project_root)
-    for py_file in py_files:
-        try:
-            content = Path(py_file).read_text()
-        except Exception:
-            continue
-        for mod in _extract_imported_modules(content):
-            graph.setdefault(mod, []).append(py_file)
+
+    graph: dict[str, list[str]] = {}
+    for file_path, modules in _rust.extract_imports(py_files):
+        for mod in modules:
+            graph.setdefault(mod, []).append(file_path)
     return graph
 
 
