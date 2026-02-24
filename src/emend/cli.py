@@ -39,9 +39,9 @@ def resolve_files(path: str) -> tuple[list[Path], bool]:
     """
     path_obj = Path(path)
     if path_obj.is_dir():
-        import emend_core
+        from emend.transform import _collect_python_files
         abs_path = str(path_obj.resolve())
-        return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
+        return [Path(f) for f in _collect_python_files(abs_path)], True
     elif "*" in path or "?" in path:
         return [Path(f) for f in glob_mod.glob(path, recursive=True) if f.endswith('.py')], True
     else:

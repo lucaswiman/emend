@@ -46,9 +46,12 @@ def _cached_parse(source: str) -> cst.Module:
 
 
 # ---------------------------------------------------------------------------
-# Rust accelerator (required)
+# Rust accelerator (optional)
 # ---------------------------------------------------------------------------
-import emend_core as _rust
+try:
+    import emend_core as _rust
+except ImportError:
+    _rust = None  # type: ignore[assignment]
 
 _METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
 
@@ -75,21 +78,32 @@ def extract_pattern_literals(pattern_str: str) -> list[str]:
 
 
 def prefilter_files_for_pattern(files: list[str], pattern_str: str) -> list[str]:
-    """Use Rust to quickly filter files that could match a pattern.
+    """Quickly filter files that could match a pattern.
 
-    Extracts literal identifiers from the pattern and uses memchr-accelerated
-    substring search to eliminate files that don't contain required tokens.
+    Extracts literal identifiers from the pattern and uses substring search
+    to eliminate files that don't contain required tokens.
+    Uses Rust memchr-accelerated search when available, falls back to Python.
     """
     literals = extract_pattern_literals(pattern_str)
     if not literals:
         return files
-    # Filter for each literal token (all must be present)
-    remaining = files
-    for literal in literals:
-        remaining = _rust.filter_files_by_content(remaining, literal)
-        if not remaining:
-            return []
-    return remaining
+    if _rust is not None:
+        remaining = files
+        for literal in literals:
+            remaining = _rust.filter_files_by_content(remaining, literal)
+            if not remaining:
+                return []
+        return remaining
+    # Pure Python fallback: read each file and check for all literals
+    result = []
+    for f in files:
+        try:
+            content = Path(f).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if all(lit in content for lit in literals):
+            result.append(f)
+    return result
 
 
 # Helper functions for cross-project operations
@@ -131,8 +145,18 @@ _file_list_cache: dict[str, tuple[int, list[str]]] = {}
 
 
 def _collect_python_files_scandir(root_path: str) -> list[str]:
-    """Walk a directory tree using the Rust emend_core module."""
-    return _rust.collect_python_files(root_path)
+    """Walk a directory tree collecting .py files, skipping common non-project dirs."""
+    if _rust is not None:
+        return _rust.collect_python_files(root_path)
+    import os
+    result: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            if fn.endswith('.py'):
+                result.append(os.path.join(dirpath, fn))
+    result.sort()
+    return result
 
 
 def _collect_python_files(project_root: str) -> list[str]:
@@ -166,15 +190,43 @@ def _collect_python_files(project_root: str) -> list[str]:
 _import_graph_cache: dict[str, tuple[int, dict[str, list[str]]]] = {}
 
 
+def _extract_imports_python(py_files: list[str]) -> list[tuple[str, list[str]]]:
+    """Pure Python fallback: extract imported module names from each file."""
+    import ast as _ast
+    results: list[tuple[str, list[str]]] = []
+    for fpath in py_files:
+        try:
+            content = Path(fpath).read_text(encoding="utf-8", errors="replace")
+            tree = _ast.parse(content, filename=fpath)
+        except Exception:
+            continue
+        modules: list[str] = []
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Import):
+                for alias in node.names:
+                    modules.append(alias.name)
+            elif isinstance(node, _ast.ImportFrom) and node.module:
+                modules.append(node.module)
+        if modules:
+            results.append((fpath, modules))
+    return results
+
+
 def _build_import_graph(project_root: str) -> dict[str, list[str]]:
     """Build a reverse import graph: module_name -> [files that import it].
 
-    Uses Rust emend_core for parallel import extraction via tree-sitter.
+    Uses Rust emend_core for parallel import extraction when available,
+    falls back to stdlib ast.
     """
     py_files = _collect_python_files(project_root)
 
+    if _rust is not None:
+        raw = _rust.extract_imports(py_files)
+    else:
+        raw = _extract_imports_python(py_files)
+
     graph: dict[str, list[str]] = {}
-    for file_path, modules in _rust.extract_imports(py_files):
+    for file_path, modules in raw:
         for mod in modules:
             graph.setdefault(mod, []).append(file_path)
     return graph
