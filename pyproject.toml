@@ -18,10 +18,9 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["typer", "libcst", "lark", "pyyaml"]
+dependencies = ["typer", "libcst", "lark", "pyyaml", "emend-core"]
 
 [project.optional-dependencies]
-fast = ["emend-core"]
 dev = ["pytest", "pytest-xdist", "sphinx", "furo", "hatch-vcs"]
 
 [project.urls]
