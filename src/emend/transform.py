@@ -1,8 +1,10 @@
 """Transform engine for extended selectors."""
 from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
+from functools import lru_cache
 from pathlib import Path
 import difflib
+import hashlib
 import libcst as cst
 from libcst import matchers as m
 from dataclasses import dataclass
@@ -12,6 +14,35 @@ import io
 import json
 from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern
+
+
+# ---------------------------------------------------------------------------
+# Module parse cache: avoids re-parsing the same source text
+# ---------------------------------------------------------------------------
+# Uses a hash of the source as key to keep memory bounded.
+# LRU cache of 256 entries covers typical project operations.
+_parse_cache: dict[bytes, cst.Module] = {}
+_PARSE_CACHE_MAX = 256
+
+
+def _cached_parse(source: str) -> cst.Module:
+    """Parse Python source into a LibCST Module, with caching.
+
+    Repeated calls with identical source text return the same Module
+    object without re-parsing.
+    """
+    key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
+    cached = _parse_cache.get(key)
+    if cached is not None:
+        return cached
+    module = cst.parse_module(source)
+    if len(_parse_cache) >= _PARSE_CACHE_MAX:
+        # Evict oldest ~25% of entries
+        keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
+        for k in keys_to_evict:
+            del _parse_cache[k]
+    _parse_cache[key] = module
+    return module
 
 
 # Helper functions for cross-project operations
@@ -44,16 +75,157 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     return '.'.join(module_parts)
 
 
-def _collect_python_files(project_root: str) -> list[str]:
-    """Collect all Python files in project."""
-    root = Path(project_root)
-    skip = {'.git', '__pycache__', '.venv', 'venv', '.tox', 'node_modules'}
+_SKIP_DIRS = frozenset({'.git', '__pycache__', '.venv', 'venv', '.tox', 'node_modules',
+                        '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
+                        'dist', 'build', '.nox'})
 
-    files = []
-    for py_file in root.rglob("*.py"):
-        if not any(s in py_file.parts for s in skip):
-            files.append(str(py_file))
+# Module-level file-list cache: maps resolved project root to (mtime_ns, file_list)
+_file_list_cache: dict[str, tuple[int, list[str]]] = {}
+
+
+def _collect_python_files_scandir(root_path: str) -> list[str]:
+    """Walk a directory tree using os.scandir (faster than Path.rglob)."""
+    import os
+    files: list[str] = []
+    stack = [root_path]
+    while stack:
+        dirpath = stack.pop()
+        try:
+            entries = os.scandir(dirpath)
+        except (PermissionError, OSError):
+            continue
+        dirs_to_visit: list[str] = []
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in _SKIP_DIRS:
+                        dirs_to_visit.append(entry.path)
+                elif entry.name.endswith('.py') and entry.is_file(follow_symlinks=True):
+                    files.append(entry.path)
+            except OSError:
+                continue
+        stack.extend(dirs_to_visit)
     return files
+
+
+def _collect_python_files(project_root: str) -> list[str]:
+    """Collect all Python files in project, with caching.
+
+    Uses os.scandir for speed. Caches the file list per project root,
+    invalidated when the root directory's mtime changes (which happens
+    when files are added or removed).
+    """
+    import os
+    resolved = str(Path(project_root).resolve())
+    try:
+        root_mtime = os.stat(resolved).st_mtime_ns
+    except OSError:
+        return _collect_python_files_scandir(resolved)
+
+    cached = _file_list_cache.get(resolved)
+    if cached is not None and cached[0] == root_mtime:
+        return cached[1]
+
+    files = _collect_python_files_scandir(resolved)
+    _file_list_cache[resolved] = (root_mtime, files)
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Import graph for pre-filtering cross-project operations
+# ---------------------------------------------------------------------------
+
+# Cache: resolved project root -> {module_dotted_name -> [file_paths that import it]}
+_import_graph_cache: dict[str, tuple[int, dict[str, list[str]]]] = {}
+
+
+def _extract_imported_modules(source: str) -> set[str]:
+    """Extract module names from import statements using simple string matching.
+
+    This is intentionally lightweight — no CST parsing required. It handles:
+      - ``from foo.bar import baz``  →  {'foo', 'foo.bar'}
+      - ``import foo.bar``            →  {'foo', 'foo.bar'}
+      - ``from . import foo``        →  (skipped, relative imports)
+
+    We extract both the full dotted module and all prefixes so that a search
+    for symbol ``bar`` defined in module ``foo.bar`` will match files that
+    ``import foo`` or ``from foo import bar`` or ``from foo.bar import baz``.
+    """
+    modules: set[str] = set()
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith('from '):
+            # "from foo.bar import ..."
+            parts = stripped.split()
+            if len(parts) >= 2:
+                mod = parts[1]
+                if mod.startswith('.'):
+                    continue  # skip relative imports
+                # Add full module and all prefixes
+                segments = mod.split('.')
+                for i in range(1, len(segments) + 1):
+                    modules.add('.'.join(segments[:i]))
+        elif stripped.startswith('import '):
+            # "import foo.bar, baz.qux"
+            rest = stripped[7:]
+            for mod_part in rest.split(','):
+                mod = mod_part.strip().split()[0]  # handle "as" aliases
+                if mod.startswith('.'):
+                    continue
+                segments = mod.split('.')
+                for i in range(1, len(segments) + 1):
+                    modules.add('.'.join(segments[:i]))
+    return modules
+
+
+def _build_import_graph(project_root: str) -> dict[str, list[str]]:
+    """Build a reverse import graph: module_name -> [files that import it].
+
+    This is cheap: reads file text and does string matching on import lines.
+    No CST parsing needed.
+    """
+    graph: dict[str, list[str]] = {}
+    py_files = _collect_python_files(project_root)
+    for py_file in py_files:
+        try:
+            content = Path(py_file).read_text()
+        except Exception:
+            continue
+        for mod in _extract_imported_modules(content):
+            graph.setdefault(mod, []).append(py_file)
+    return graph
+
+
+def get_import_graph(project_root: str) -> dict[str, list[str]]:
+    """Get the cached import graph for a project root.
+
+    Returns a dict mapping module dotted names to lists of file paths
+    that import from that module.
+    """
+    import os
+    resolved = str(Path(project_root).resolve())
+    try:
+        root_mtime = os.stat(resolved).st_mtime_ns
+    except OSError:
+        return _build_import_graph(resolved)
+    cached = _import_graph_cache.get(resolved)
+    if cached is not None and cached[0] == root_mtime:
+        return cached[1]
+    graph = _build_import_graph(resolved)
+    _import_graph_cache[resolved] = (root_mtime, graph)
+    return graph
+
+
+def _files_importing_module(project_root: str, module_dotted: str) -> set[str] | None:
+    """Return the set of files that import from *module_dotted*, or None if unknown.
+
+    Returns None if the import graph cannot be built (caller should fall back
+    to scanning all files).
+    """
+    graph = get_import_graph(project_root)
+    if not graph:
+        return None
+    return set(graph.get(module_dotted, []))
 
 
 def visit_project(
@@ -62,6 +234,7 @@ def visit_project(
     project_path: str | None = None,
     metadata_providers: Sequence = (),
     target_file: str | None = None,
+    candidate_files: set[str] | None = None,
 ) -> Iterator[tuple[str, cst.Module, object]]:
     """Iterate over Python files in the project, yielding (file_path, module, visitor).
 
@@ -71,9 +244,16 @@ def visit_project(
         project_path: Project root directory.
         metadata_providers: LibCST metadata providers to use with MetadataWrapper.
         target_file: The resolved path of the file defining the symbol (for is_def_file).
+        candidate_files: If provided, only visit these files (pre-filtered by import graph).
     """
     project_root = project_path or "."
     py_files = _collect_python_files(project_root)
+    if candidate_files is not None:
+        # Pre-filter to only files in the candidate set
+        # Always include the target_file itself (definition file)
+        py_files = [f for f in py_files
+                    if f in candidate_files
+                    or (target_file and str(Path(f).resolve()) == target_file)]
 
     for py_file in py_files:
         try:
@@ -88,7 +268,7 @@ def visit_project(
                        and str(Path(py_file).resolve()) == target_file)
 
         try:
-            module = cst.parse_module(content)
+            module = _cached_parse(content)
             visitor = visitor_factory(py_file, is_def_file)
             if metadata_providers:
                 wrapper = cst.metadata.MetadataWrapper(module)
@@ -2158,7 +2338,7 @@ def find_pattern(
         if not file.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
-    module = cst.parse_module(source_code)
+    module = _cached_parse(source_code)
 
     # Wrap module with metadata to get position information
     wrapper = cst.MetadataWrapper(module)
@@ -3537,6 +3717,10 @@ def find_references(
             symbol_name, py_file, target_qns, target_module, is_def_file
         )
 
+    # Use import graph to pre-filter: only check files that import
+    # from the module defining the target symbol.
+    candidates = _files_importing_module(project_root, target_module)
+
     references = []
     for _py_file, _module, finder in visit_project(
         name_hint=symbol_name,
@@ -3544,6 +3728,7 @@ def find_references(
         project_path=project_root,
         metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
         target_file=resolved_target,
+        candidate_files=candidates,
     ):
         references.extend(finder.references)
 
@@ -3671,6 +3856,9 @@ def find_callers(
             symbol_name, py_file, target_qns, target_module, is_def_file
         )
 
+    # Use import graph to pre-filter files
+    candidates = _files_importing_module(project_root, target_module)
+
     callers = []
     for _py_file, _module, visitor in visit_project(
         name_hint=symbol_name,
@@ -3678,6 +3866,7 @@ def find_callers(
         project_path=project_root,
         metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
         target_file=resolved_target,
+        candidate_files=candidates,
     ):
         callers.extend(visitor.call_references)
 
@@ -3916,6 +4105,9 @@ def rename_symbol(
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
         return _SymbolRenamer(symbol_name, new_name, target_qns, target_module)
 
+    # Use import graph to pre-filter files
+    candidates = _files_importing_module(project_root, target_module)
+
     diffs = {}
     for py_file, result_module, renamer in visit_project(
         name_hint=symbol_name,
@@ -3923,6 +4115,7 @@ def rename_symbol(
         project_path=project_root,
         metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
+        candidate_files=candidates,
     ):
         if not renamer.changed:
             continue
