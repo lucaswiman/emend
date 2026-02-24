@@ -121,7 +121,8 @@ Selector grammar (Lark)
    selector: file_path DOUBLE_COLON symbol_path? component*
 
    file_path: PATH
-   symbol_path: IDENTIFIER ("." IDENTIFIER)*
+   symbol_path: symbol_segment ("." symbol_segment)*
+   symbol_segment: WILDCARD | IDENTIFIER
    component: "[" COMPONENT_NAME "]" accessor? pseudo_class?
    accessor: "[" (IDENTIFIER | INT) "]"
    pseudo_class: PSEUDO_CLASS
@@ -129,6 +130,7 @@ Selector grammar (Lark)
    COMPONENT_NAME: "params" | "returns" | "decorators" | "bases" | "body" | "imports"
    DOUBLE_COLON: "::"
    PATH: /[^:]+/
+   WILDCARD: "*" | /[a-zA-Z_*][a-zA-Z0-9_*]*/
    IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/
-   INT: /\d+/
+   INT: /-?\d+/
    PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/

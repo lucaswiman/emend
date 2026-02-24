@@ -15,6 +15,7 @@
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
+| `grammars/pattern.lark` | Lark grammar for pattern syntax |
 
 ### Tests (`tests/test_emend/`)
 
@@ -46,6 +47,7 @@
 | `test_regressions.py` | Regression tests (scope-aware rename, --docs, signatures) |
 | `test_rename_module.py` | `rename-module` command |
 | `test_rename_symbol.py` | `rename` / `rename-symbol` command |
+| `test_rope_commands.py` | Module-level refactoring commands (move module mode) |
 | `test_search.py` | `search` command (unified find/lookup) |
 | `test_show.py` | `show` command |
 | `test_show_unified.py` | Unified show output |
@@ -89,7 +91,7 @@ All cross-project functions use the shared `visit_project()` helper in `transfor
 - `find_references()` -- `_ReferenceFinder` CSTVisitor with QualifiedNameProvider + PositionProvider (scope-aware)
 - `rename_symbol()` -- `_SymbolRenamer` CSTTransformer with QualifiedNameProvider (scope-aware) + optional `_DocstringRenamer`
 - `move_module()` / `rename_module()` -- `_ModuleImportRenamer` + filesystem operations
-- `find_callers()` -- finds call sites (not just references) using `ParentNodeProvider`
+- `find_callers()` -- finds call sites (not just references) using `_CallerFilter` with QualifiedNameProvider + PositionProvider
 - `find_callees()` -- analyzes function body to list all called functions
 - `generate_graph()` -- builds call graph from callers/callees analysis
 
@@ -112,7 +114,7 @@ make test
 make test TESTS=tests/test_emend/test_add_parameter.py
 
 # Run specific test by name
-make test TESTS="tests/test_emend/test_copy_imports.py::test_copy_imports_prepend"
+make test TESTS="tests/test_emend/test_primitives_copy_imports.py::test_copy_imports_prepend"
 
 # Run tests matching a pattern
 make test TESTS="-k default"
