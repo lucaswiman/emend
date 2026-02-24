@@ -1,0 +1,16 @@
+[package]
+name = "emend-core"
+version = "0.1.0"
+edition = "2021"
+description = "Fast Python pattern matching engine for emend"
+
+[lib]
+name = "emend_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+rayon = "1.10"
+memchr = "2.7"

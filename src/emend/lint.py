@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml
 import libcst as cst
 
-from emend.transform import find_pattern, replace_pattern
+from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?:\s*:\s*(.+))?", re.IGNORECASE)
 
@@ -174,6 +174,9 @@ def run_lint(
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
+    Batches all find-only rules so each file is read and parsed only once,
+    regardless of how many rules are checked.
+
     Args:
         rules: List of LintRule to check
         paths: List of file paths to lint
@@ -186,10 +189,33 @@ def run_lint(
     if rule_filter:
         rules = [r for r in rules if r.name == rule_filter]
 
+    # Split rules into find-only and fix rules
+    find_only_rules = [r for r in rules if not (fix and r.replace)]
+    fix_rules = [r for r in rules if fix and r.replace]
+
     violations = []
 
+    # Pre-filter: for each find-only rule, determine which files could match
+    rule_file_sets: dict[str, set[str]] = {}
+    for rule in find_only_rules:
+        filtered = prefilter_files_for_pattern(paths, rule.find)
+        rule_file_sets[rule.name] = set(filtered)
+
+    # Determine files that need processing (at least one rule applies)
+    files_needing_processing = set()
+    for file_set in rule_file_sets.values():
+        files_needing_processing |= file_set
+
     for file_path in paths:
-        source = Path(file_path).read_text()
+        # Skip files entirely if no find-only rules apply and no fix rules exist
+        if file_path not in files_needing_processing and not fix_rules:
+            continue
+
+        try:
+            source = Path(file_path).read_text()
+        except Exception:
+            continue
+
         noqa_comments = parse_noqa_comments(source)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
@@ -202,80 +228,83 @@ def run_lint(
             except cst.ParserSyntaxError:
                 logger.debug("Failed to parse %s for noqa ranges", file_path, exc_info=True)
 
-        for rule in rules:
-            if fix and rule.replace:
-                # Pre-find matches to check for noqa suppression
-                try:
-                    matches = find_pattern(
-                        rule.find,
-                        file_path,
-                        not_inside=rule.not_inside,
-                    )
-                except Exception:
-                    logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
-                    continue
-
-                suppressed_lines: set[int] = set()
-                active_count = 0
-                for match in matches:
-                    line = match.line or 0
-                    if is_noqa_suppressed(line, rule.name, noqa_ranges):
-                        suppressed_lines.add(line)
-                    else:
-                        active_count += 1
-
-                if active_count == 0:
-                    continue
-
-                original_lines = source.splitlines(keepends=True)
-                diff, count = replace_pattern(
+        # --- Batched find-only rules: read source once, pass to each rule ---
+        for rule in find_only_rules:
+            # Skip this rule if file was pre-filtered out
+            if file_path not in rule_file_sets.get(rule.name, set()):
+                continue
+            try:
+                matches = find_pattern(
                     rule.find,
-                    rule.replace,
                     file_path,
                     not_inside=rule.not_inside,
-                    apply=True,
+                    source_override=source,
                 )
-                if count > 0 and suppressed_lines:
-                    # Restore suppressed lines from original source
-                    fixed_lines = Path(file_path).read_text().splitlines(keepends=True)
-                    if len(fixed_lines) == len(original_lines):
-                        for suppressed_line in suppressed_lines:
-                            for start, end, _rules in noqa_ranges:
-                                if start <= suppressed_line <= end:
-                                    for idx in range(start - 1, min(end, len(original_lines))):
-                                        fixed_lines[idx] = original_lines[idx]
-                                    break
-                        Path(file_path).write_text("".join(fixed_lines))
-                if count > 0:
-                    violations.append(LintViolation(
-                        rule_name=rule.name,
-                        message=rule.message,
-                        file_path=file_path,
-                        line=0,
-                        match_text=f"{count} replacement(s) applied",
-                    ))
-            else:
-                # Find-only mode
-                try:
-                    matches = find_pattern(
-                        rule.find,
-                        file_path,
-                        not_inside=rule.not_inside,
-                    )
-                except Exception:
-                    logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
-                    continue
+            except Exception:
+                logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
+                continue
 
-                for match in matches:
-                    if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
-                        continue
-                    match_text = cst.Module([]).code_for_node(match.node).strip()
-                    violations.append(LintViolation(
-                        rule_name=rule.name,
-                        message=rule.message,
-                        file_path=file_path,
-                        line=match.line or 0,
-                        match_text=match_text,
-                    ))
+            for match in matches:
+                if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
+                    continue
+                match_text = cst.Module([]).code_for_node(match.node).strip()
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path,
+                    line=match.line or 0,
+                    match_text=match_text,
+                ))
+
+        # --- Fix rules: these mutate the file so must run sequentially ---
+        for rule in fix_rules:
+            try:
+                matches = find_pattern(
+                    rule.find,
+                    file_path,
+                    not_inside=rule.not_inside,
+                )
+            except Exception:
+                logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
+                continue
+
+            suppressed_lines: set[int] = set()
+            active_count = 0
+            for match in matches:
+                line = match.line or 0
+                if is_noqa_suppressed(line, rule.name, noqa_ranges):
+                    suppressed_lines.add(line)
+                else:
+                    active_count += 1
+
+            if active_count == 0:
+                continue
+
+            original_lines = source.splitlines(keepends=True)
+            diff, count = replace_pattern(
+                rule.find,
+                rule.replace,
+                file_path,
+                not_inside=rule.not_inside,
+                apply=True,
+            )
+            if count > 0 and suppressed_lines:
+                fixed_lines = Path(file_path).read_text().splitlines(keepends=True)
+                if len(fixed_lines) == len(original_lines):
+                    for suppressed_line in suppressed_lines:
+                        for start, end, _rules in noqa_ranges:
+                            if start <= suppressed_line <= end:
+                                for idx in range(start - 1, min(end, len(original_lines))):
+                                    fixed_lines[idx] = original_lines[idx]
+                                break
+                    Path(file_path).write_text("".join(fixed_lines))
+            if count > 0:
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path,
+                    line=0,
+                    match_text=f"{count} replacement(s) applied",
+                ))
 
     return violations

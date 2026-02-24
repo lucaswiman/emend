@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 LibCST
+benchmarks/.django-checkout/
+src/emend/_version.py
+rust/target/

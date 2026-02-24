@@ -299,15 +299,59 @@ class _SymbolCollector(cst.CSTVisitor):
         self._parent_name_stack.pop()
 
 
+# Symbol cache: content_hash -> (filepath_used, symbols)
+# When the same content is collected for different filepaths, we re-map the
+# path prefix but avoid re-parsing and re-visiting.
+_symbol_cache: dict[bytes, tuple[str, list[SymbolInfo]]] = {}
+_SYMBOL_CACHE_MAX = 256
+
+
 def _collect_symbols(
     filepath: Path,
     source: str,
 ) -> list[SymbolInfo]:
-    """Collect all symbols from source using LibCST."""
+    """Collect all symbols from source using LibCST, with caching.
+
+    Caches results by content hash so repeated queries on unchanged files
+    are near-instant.
+    """
+    import hashlib
+    key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
+    cached = _symbol_cache.get(key)
+    if cached is not None:
+        cached_path, cached_symbols = cached
+        if cached_path == str(filepath):
+            return cached_symbols
+        # Same content, different filepath — remap paths
+        old_prefix = cached_path
+        new_prefix = str(filepath)
+        remapped = []
+        for sym in cached_symbols:
+            new_sym = SymbolInfo(
+                path=sym.path.replace(old_prefix, new_prefix, 1),
+                name=sym.name,
+                kind=sym.kind,
+                line=sym.line,
+                end_line=sym.end_line,
+                decorators=sym.decorators,
+                parameters=sym.parameters,
+                returns=sym.returns,
+                parent=sym.parent,
+                depth=sym.depth,
+            )
+            remapped.append(new_sym)
+        return remapped
+
     module = cst.parse_module(source)
     wrapper = MetadataWrapper(module)
     visitor = _SymbolCollector(str(filepath))
     wrapper.visit(visitor)
+
+    if len(_symbol_cache) >= _SYMBOL_CACHE_MAX:
+        keys_to_evict = list(_symbol_cache.keys())[:_SYMBOL_CACHE_MAX // 4]
+        for k in keys_to_evict:
+            del _symbol_cache[k]
+    _symbol_cache[key] = (str(filepath), visitor.symbols)
     return visitor.symbols
 
 
