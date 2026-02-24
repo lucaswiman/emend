@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml
 import libcst as cst
 
-from emend.transform import find_pattern, replace_pattern
+from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?:\s*:\s*(.+))?", re.IGNORECASE)
 
@@ -195,7 +195,22 @@ def run_lint(
 
     violations = []
 
+    # Pre-filter: for each find-only rule, determine which files could match
+    rule_file_sets: dict[str, set[str]] = {}
+    for rule in find_only_rules:
+        filtered = prefilter_files_for_pattern(paths, rule.find)
+        rule_file_sets[rule.name] = set(filtered)
+
+    # Determine files that need processing (at least one rule applies)
+    files_needing_processing = set()
+    for file_set in rule_file_sets.values():
+        files_needing_processing |= file_set
+
     for file_path in paths:
+        # Skip files entirely if no find-only rules apply and no fix rules exist
+        if file_path not in files_needing_processing and not fix_rules:
+            continue
+
         try:
             source = Path(file_path).read_text()
         except Exception:
@@ -215,6 +230,9 @@ def run_lint(
 
         # --- Batched find-only rules: read source once, pass to each rule ---
         for rule in find_only_rules:
+            # Skip this rule if file was pre-filtered out
+            if file_path not in rule_file_sets.get(rule.name, set()):
+                continue
             try:
                 matches = find_pattern(
                     rule.find,

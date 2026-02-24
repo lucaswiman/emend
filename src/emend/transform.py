@@ -50,6 +50,47 @@ def _cached_parse(source: str) -> cst.Module:
 # ---------------------------------------------------------------------------
 import emend_core as _rust
 
+_METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
+
+
+def extract_pattern_literals(pattern_str: str) -> list[str]:
+    """Extract literal identifier tokens from a pattern string for pre-filtering.
+
+    For a pattern like "$X.objects.filter($...ARGS)", returns ["objects", "filter"].
+    These can be used with Rust filter_files_by_content to quickly eliminate files
+    that cannot possibly match the pattern.
+    """
+    # Remove metavariables
+    cleaned = _METAVAR_RE.sub('', pattern_str)
+    # Extract identifier-like tokens (Python identifiers)
+    tokens = re.findall(r'[a-zA-Z_][a-zA-Z_0-9]*', cleaned)
+    # Filter out Python keywords and very short tokens that would match too broadly
+    _PY_KEYWORDS = {'if', 'else', 'elif', 'for', 'while', 'try', 'except',
+                    'finally', 'with', 'as', 'import', 'from', 'class', 'def',
+                    'return', 'yield', 'raise', 'pass', 'break', 'continue',
+                    'and', 'or', 'not', 'in', 'is', 'True', 'False', 'None',
+                    'lambda', 'global', 'nonlocal', 'del', 'assert', 'async',
+                    'await'}
+    return [t for t in tokens if t not in _PY_KEYWORDS and len(t) > 1]
+
+
+def prefilter_files_for_pattern(files: list[str], pattern_str: str) -> list[str]:
+    """Use Rust to quickly filter files that could match a pattern.
+
+    Extracts literal identifiers from the pattern and uses memchr-accelerated
+    substring search to eliminate files that don't contain required tokens.
+    """
+    literals = extract_pattern_literals(pattern_str)
+    if not literals:
+        return files
+    # Filter for each literal token (all must be present)
+    remaining = files
+    for literal in literals:
+        remaining = _rust.filter_files_by_content(remaining, literal)
+        if not remaining:
+            return []
+    return remaining
+
 
 # Helper functions for cross-project operations
 
@@ -2201,6 +2242,46 @@ def _filter_matches_by_import(
     return filtered
 
 
+def _assign_line_numbers_from_source(
+    matches: list[PatternMatch],
+    source_code: str,
+    module: cst.Module,
+) -> None:
+    """Assign line numbers to pattern matches without using MetadataWrapper.
+
+    Computes line numbers by generating the code for each matched node and
+    finding its position in the source text. This is much cheaper than
+    MetadataWrapper which requires a deep_clone + full code generation pass.
+    """
+    if not matches:
+        return
+
+    import bisect
+    # Build a newline offset table for the source
+    line_starts = [0]
+    for i, ch in enumerate(source_code):
+        if ch == '\n':
+            line_starts.append(i + 1)
+
+    def offset_to_line(offset: int) -> int:
+        """Convert a character offset to a 1-based line number."""
+        return bisect.bisect_right(line_starts, offset)
+
+    # For each match, find its code in the source to determine line number.
+    # Track search positions to handle duplicate code correctly - matches
+    # come from a DFS walk so they appear in source order.
+    search_start = 0
+    for match in matches:
+        code_snippet = module.code_for_node(match.node).lstrip()
+        idx = source_code.find(code_snippet, search_start)
+        if idx < 0:
+            # If not found from current position, search from beginning
+            idx = source_code.find(code_snippet)
+        if idx >= 0:
+            match.line = offset_to_line(idx)
+            search_start = idx + 1
+
+
 def find_pattern(
     pattern_str: str,
     file_path: str,
@@ -2283,7 +2364,22 @@ def find_pattern(
         source_code = file.read_text()
     module = _cached_parse(source_code)
 
-    # Wrap module with metadata to get position information
+    # Fast path: for basic pattern matching (no constraints, no scope,
+    # no import/scope filters), skip the expensive MetadataWrapper and
+    # compute line numbers from the source text afterwards.
+    needs_wrapper = bool(inside or not_inside or scope is not None
+                         or imported_from is not None or scope_local)
+
+    if not needs_wrapper:
+        # Basic pattern matching without MetadataWrapper
+        finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
+        module.visit(finder)
+        # Compute line numbers from source text for each match
+        if finder.matches:
+            _assign_line_numbers_from_source(finder.matches, source_code, module)
+        return finder.matches
+
+    # Full path: use MetadataWrapper for position info and post-filters
     wrapper = cst.MetadataWrapper(module)
     position_provider = wrapper.resolve(cst.metadata.PositionProvider)
 

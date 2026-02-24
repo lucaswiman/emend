@@ -14,6 +14,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph,
+    prefilter_files_for_pattern,
 )
 from emend import ast_commands
 
@@ -38,7 +39,9 @@ def resolve_files(path: str) -> tuple[list[Path], bool]:
     """
     path_obj = Path(path)
     if path_obj.is_dir():
-        return list(path_obj.rglob("*.py")), True
+        import emend_core
+        abs_path = str(path_obj.resolve())
+        return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
     elif "*" in path or "?" in path:
         return [Path(f) for f in glob_mod.glob(path, recursive=True) if f.endswith('.py')], True
     else:
@@ -338,6 +341,12 @@ def search(
             import libcst as cst
 
             files, is_multi_file = resolve_files(target_path)
+
+            # Pre-filter files using Rust memchr to skip files that can't match
+            if is_multi_file and len(files) > 1:
+                file_strs = [str(f) for f in files]
+                filtered = prefilter_files_for_pattern(file_strs, query)
+                files = [Path(f) for f in filtered]
 
             all_matches = []
             for file_path in files:
