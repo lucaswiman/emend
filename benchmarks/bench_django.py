@@ -34,7 +34,7 @@ CACHE_DIR = Path(__file__).resolve().parent / ".django-checkout"
 
 LINT_RULES_YAML = textwrap.dedent("""\
     macros:
-      print_call: "print($...args)"
+      print_call: "print($...ARGS)"
       isinstance_str: "isinstance($X, str)"
 
     rules:
@@ -78,16 +78,16 @@ BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
     ),
     (
         "find_pattern",
-        'find "$X.objects.filter($...args)" (pattern matching)',
-        ["search", "$X.objects.filter($...args)", "django/"],
+        'find "$X.objects.filter($...ARGS)" (pattern matching)',
+        ["search", "$X.objects.filter($...ARGS)", "django/"],
         {0},
     ),
     (
         "find_pattern_constrained",
-        'find "$X.objects.filter($...args)" --where "class $C(TestCase):"',
+        'find "$X.objects.filter($...ARGS)" --where "class $C(TestCase):"',
         [
             "search",
-            "$X.objects.filter($...args)",
+            "$X.objects.filter($...ARGS)",
             "django/",
             "--where",
             "class $C(TestCase):",
