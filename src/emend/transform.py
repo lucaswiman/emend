@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
+import ast
 import difflib
 import hashlib
 import libcst as cst
@@ -1787,11 +1788,7 @@ def _extract_string_content(node: cst.CSTNode) -> str | None:
     trivially unwrapped (f-strings, concatenated strings).
     """
     if isinstance(node, cst.SimpleString):
-        import ast
-        try:
-            return str(ast.literal_eval(node.value))
-        except Exception:
-            return None
+        return str(ast.literal_eval(node.value))
     return None
 
 
@@ -2503,18 +2500,16 @@ class PatternReplacer(cst.CSTTransformer):
             for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
                 ref_name = ref_match.group(1)
                 captured = captures.get(ref_name)
-                if captured is not None and not isinstance(captured, tuple):
-                    content = _extract_string_content(captured)
-                    if content is not None:
-                        replacement_code = replacement_code.replace(
-                            ref_match.group(0), content
-                        )
-                    else:
-                        content_failed = True
-                        break
-                else:
+                if (
+                    captured is None
+                    or isinstance(captured, tuple)
+                    or (content := _extract_string_content(captured)) is None
+                ):
                     content_failed = True
                     break
+                replacement_code = replacement_code.replace(
+                    ref_match.group(0), content
+                )
             if content_failed:
                 return None
 
