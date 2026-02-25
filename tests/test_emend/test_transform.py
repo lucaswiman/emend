@@ -1,71 +1,11 @@
 """Tests for transform engine (find, replace, imports, symbols, references, rename, move).
 
 Component operation tests (get/set/add/remove) are in test_component_operations.py.
+Basic find_pattern() tests are in test_find.py and test_cli_transform.py.
 """
 
 import pytest
 from pathlib import Path
-
-
-class TestFindPattern:
-    """Tests for find_pattern() function."""
-
-    def test_find_simple_pattern(self, tmp_path):
-        """Find a simple pattern without metavariables."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "print('hello')\n"
-            "x = 5\n"
-            "print('world')\n"
-        )
-
-        matches = find_pattern("print('hello')", str(test_file))
-        assert len(matches) == 1
-
-    def test_find_no_matches(self, tmp_path):
-        """Find pattern that doesn't match anything."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "x = 5\n"
-            "y = 10\n"
-        )
-
-        matches = find_pattern("print($X)", str(test_file))
-        assert len(matches) == 0
-
-    def test_find_multiple_matches(self, tmp_path):
-        """Find pattern that matches multiple times."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "print('hello')\n"
-            "x = 5\n"
-            "print('world')\n"
-            "print('test')\n"
-        )
-
-        matches = find_pattern("print($X)", str(test_file))
-        assert len(matches) == 3
-
-    def test_find_with_metavar_captures(self, tmp_path):
-        """Find pattern with metavariable and verify captures."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "print('hello')\n"
-            "print('world')\n"
-        )
-
-        matches = find_pattern("print($X)", str(test_file))
-        assert len(matches) == 2
-        # Matches should have capture information
-        assert hasattr(matches[0], 'captures')
 
 
 class TestReplacePattern:
