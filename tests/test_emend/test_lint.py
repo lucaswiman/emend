@@ -549,3 +549,135 @@ def test_noqa_fix_no_noqa_unchanged(tmp_path):
     content = test_file.read_text()
     assert "logger.info('hello')" in content
     assert "print('hello')" not in content
+
+
+def test_lint_fix_union_to_pipe_simple(tmp_path):
+    """lint --fix converts Union[X, Y] to X | Y (no string args)."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "from typing import Union\n"
+        "x: Union[int, str]\n"
+        "y: Union[float, bool]\n"
+    )
+
+    rules = [
+        LintRule(
+            name="union-to-pipe",
+            find="Union[$X:!str, $Y:!str]",
+            message="Use X | Y syntax instead of Union[X, Y]",
+            replace="$X | $Y",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) == 1
+    content = test_file.read_text()
+    assert "int | str" in content
+    assert "float | bool" in content
+    assert "Union[" not in content
+
+
+def test_lint_fix_union_to_pipe_deferred_string_first(tmp_path):
+    """lint --fix converts Union['MyClass', int] to 'MyClass | int'."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "from typing import Union\n"
+        'x: Union["MyClass", int]\n'
+    )
+
+    rules = [
+        LintRule(
+            name="union-with-deferred",
+            find="Union[$X:str, $Y]",
+            message="Union with deferred annotation",
+            replace='"${X.content} | $Y"',
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) == 1
+    content = test_file.read_text()
+    assert '"MyClass | int"' in content
+    assert "Union[" not in content
+
+
+def test_lint_fix_union_to_pipe_deferred_string_second(tmp_path):
+    """lint --fix converts Union[int, 'MyClass'] to 'int | MyClass'."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "from typing import Union\n"
+        'x: Union[int, "MyClass"]\n'
+    )
+
+    rules = [
+        LintRule(
+            name="union-with-deferred-2",
+            find="Union[$X, $Y:str]",
+            message="Union with deferred annotation",
+            replace='"$X | ${Y.content}"',
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) == 1
+    content = test_file.read_text()
+    assert '"int | MyClass"' in content
+    assert "Union[" not in content
+
+
+def test_lint_fix_union_to_pipe_both_deferred(tmp_path):
+    """lint --fix converts Union['Foo', 'Bar'] to 'Foo | Bar'."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "from typing import Union\n"
+        'x: Union["Foo", "Bar"]\n'
+    )
+
+    rules = [
+        LintRule(
+            name="union-both-deferred",
+            find="Union[$X:str, $Y:str]",
+            message="Union with both deferred",
+            replace='"${X.content} | ${Y.content}"',
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) == 1
+    content = test_file.read_text()
+    assert '"Foo | Bar"' in content
+    assert "Union[" not in content
+
+
+def test_lint_union_to_pipe_config_file(tmp_path):
+    """Union-to-pipe rules work end-to-end loaded from a YAML config."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "from typing import Union\n"
+        "a: Union[int, str]\n"
+        'b: Union["MyClass", int]\n'
+    )
+
+    config = {
+        "rules": {
+            "union-to-pipe": {
+                "find": "Union[$X:!str, $Y:!str]",
+                "message": "Use X | Y syntax instead of Union[X, Y]",
+                "replace": "$X | $Y",
+            },
+            "union-to-pipe-deferred": {
+                "find": "Union[$X:str, $Y]",
+                "message": "Union with deferred annotation",
+                "replace": '"${X.content} | $Y"',
+            },
+        },
+    }
+
+    config_file = _write_config(tmp_path, config)
+    rules, macros = load_rules(str(config_file))
+
+    violations = run_lint(rules, [str(test_file)], fix=True)
+    assert len(violations) >= 1
+    content = test_file.read_text()
+    assert "int | str" in content
+    assert '"MyClass | int"' in content

@@ -2872,3 +2872,133 @@ class TestFindPattern:
         # Should find only the print inside MyClass.method
         assert len(matches) == 1
         assert matches[0].line == 3
+
+
+class TestContentInterpolation:
+    """Tests for ${NAME.content} string interpolation in replace patterns."""
+
+    def test_content_basic_double_quotes(self, tmp_path):
+        """${X.content} strips double quotes from a captured SimpleString."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x = wrap("hello")\n')
+
+        diff, count = replace_pattern(
+            "wrap($X:str)", '"unwrapped: ${X.content}"', str(test_file), apply=True
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'x = "unwrapped: hello"'
+
+    def test_content_single_quotes(self, tmp_path):
+        """${X.content} strips single quotes from a captured SimpleString."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = wrap('hello')\n")
+
+        diff, count = replace_pattern(
+            "wrap($X:str)", '"unwrapped: ${X.content}"', str(test_file), apply=True
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'x = "unwrapped: hello"'
+
+    def test_content_union_to_pipe_string_first(self, tmp_path):
+        """Union['MyClass', int] -> 'MyClass | int' with ${X.content}."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x: Union["MyClass", int]\n')
+
+        diff, count = replace_pattern(
+            "Union[$X:str, $Y]",
+            '"${X.content} | $Y"',
+            str(test_file),
+            apply=True,
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'x: "MyClass | int"'
+
+    def test_content_union_to_pipe_string_second(self, tmp_path):
+        """Union[int, 'MyClass'] -> 'int | MyClass' with ${Y.content}."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x: Union[int, "MyClass"]\n')
+
+        diff, count = replace_pattern(
+            "Union[$X, $Y:str]",
+            '"$X | ${Y.content}"',
+            str(test_file),
+            apply=True,
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'x: "int | MyClass"'
+
+    def test_content_both_strings(self, tmp_path):
+        """Union['Foo', 'Bar'] -> 'Foo | Bar' using ${.content} on both."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x: Union["Foo", "Bar"]\n')
+
+        diff, count = replace_pattern(
+            "Union[$X:str, $Y:str]",
+            '"${X.content} | ${Y.content}"',
+            str(test_file),
+            apply=True,
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'x: "Foo | Bar"'
+
+    def test_content_mixed_with_regular_metavar(self, tmp_path):
+        """${X.content} and $Y can coexist in one replacement."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('convert("name", default)\n')
+
+        diff, count = replace_pattern(
+            'convert($X:str, $Y)',
+            'convert_named("${X.content}", $Y)',
+            str(test_file),
+            apply=True,
+        )
+        assert count == 1
+        content = test_file.read_text()
+        assert content.strip() == 'convert_named("name", default)'
+
+    def test_content_no_match_non_string(self, tmp_path):
+        """${X.content} on a non-string capture leaves the reference as-is."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = wrap(42)\n")
+
+        # $X captures an Integer, not a string — ${X.content} cannot resolve
+        diff, count = replace_pattern(
+            "wrap($X)", '"result: ${X.content}"', str(test_file), apply=True
+        )
+        # Replacement should fail to parse and be skipped
+        assert count == 0
+
+    def test_content_dry_run(self, tmp_path):
+        """${X.content} works in dry-run mode."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x: Union["MyClass", int]\n')
+
+        diff, count = replace_pattern(
+            "Union[$X:str, $Y]",
+            '"${X.content} | $Y"',
+            str(test_file),
+            apply=False,
+        )
+        assert count == 1
+        assert '"MyClass | int"' in diff
