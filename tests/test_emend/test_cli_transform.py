@@ -4,7 +4,6 @@ Component operation CLI tests (search/edit/add/rm) are in test_component_operati
 """
 
 import pytest
-from pathlib import Path
 from typer.testing import CliRunner
 
 from emend.cli import app

@@ -6,7 +6,6 @@ Covered elsewhere:
 - Filter combinations (--kind, --name, etc.): test_query.py
 """
 
-import pytest
 from typer.testing import CliRunner
 
 from emend.cli import app

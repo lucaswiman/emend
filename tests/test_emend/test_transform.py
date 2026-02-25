@@ -5,7 +5,6 @@ Basic find_pattern() tests are in test_find.py and test_cli_transform.py.
 """
 
 import pytest
-from pathlib import Path
 
 
 class TestReplacePattern:
