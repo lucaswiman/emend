@@ -1776,6 +1776,25 @@ def _extract_ellipsis_and_partial_captures(
                     break
 
 
+_CONTENT_REF_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\.content\}")
+
+
+def _extract_string_content(node: cst.CSTNode) -> str | None:
+    """Extract the inner content of a string literal, stripping quotes.
+
+    For a SimpleString like ``"MyClass"`` returns ``MyClass``.
+    Returns None for non-string nodes or string types that cannot be
+    trivially unwrapped (f-strings, concatenated strings).
+    """
+    if isinstance(node, cst.SimpleString):
+        import ast
+        try:
+            return str(ast.literal_eval(node.value))
+        except Exception:
+            return None
+    return None
+
+
 @dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
@@ -2473,6 +2492,34 @@ class PatternReplacer(cst.CSTTransformer):
 
             # Build replacement by substituting metavars
             replacement_code = self.replacement_str
+
+            # First pass: resolve ${NAME.content} references (string
+            # interpolation).  These extract the inner content of a string
+            # literal, stripping the surrounding quotes.  If any reference
+            # cannot be resolved (e.g. the captured node is not a string
+            # literal), skip the entire replacement to avoid producing
+            # nonsense output.
+            content_failed = False
+            for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
+                ref_name = ref_match.group(1)
+                captured = captures.get(ref_name)
+                if captured is not None and not isinstance(captured, tuple):
+                    content = _extract_string_content(captured)
+                    if content is not None:
+                        replacement_code = replacement_code.replace(
+                            ref_match.group(0), content
+                        )
+                    else:
+                        content_failed = True
+                        break
+                else:
+                    content_failed = True
+                    break
+            if content_failed:
+                return None
+
+            # Second pass: substitute regular metavar references ($NAME,
+            # $...NAME).
             for name, captured_node in captures.items():
                 # Handle ellipsis captures (tuples of args/elements)
                 if isinstance(captured_node, tuple):
