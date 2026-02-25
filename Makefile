@@ -4,6 +4,8 @@ TESTS ?=
 
 .PHONY: venv test docs docs-html benchmark clean
 
+RUST_SOURCES := $(wildcard rust/src/*.rs)
+
 $(VENV)/bin/activate: pyproject.toml rust/Cargo.toml rust/pyproject.toml
 	python3 -m venv $(VENV) --without-pip
 	curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
@@ -13,7 +15,13 @@ $(VENV)/bin/activate: pyproject.toml rust/Cargo.toml rust/pyproject.toml
 	$(VENV)/bin/pip install -e ".[dev]"
 	touch $(VENV)/bin/activate
 
-test: $(VENV)/bin/activate
+# Rebuild Rust extension when source files change
+$(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
+	$(VENV)/bin/pip install -q maturin
+	$(VENV)/bin/maturin develop --manifest-path rust/Cargo.toml
+	@mkdir -p $(@D) && touch $@
+
+test: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	$(VENV)/bin/pytest --tb=short -n 8 $(if $(TESTS),$(TESTS),tests/)
 
 docs: docs-html

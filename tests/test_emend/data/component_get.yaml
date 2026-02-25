@@ -1,0 +1,133 @@
+# Test cases for get_component() / search command
+# Each case: source code, selector, expected result string
+
+- name: params_all
+  source: |
+    def func(self, x: int, y: str = 'default', *args, **kwargs):
+        pass
+  selector: "func[params]"
+  expected: "self, x: int, y: str = 'default', *args, **kwargs"
+
+- name: returns
+  source: |
+    def func() -> str | None:
+        pass
+  selector: "func[returns]"
+  expected: "str | None"
+
+- name: decorators_all
+  source: |
+    @property
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators]"
+  expected: "@property\n@lru_cache"
+
+- name: bases_all
+  source: |
+    class MyClass(BaseClass, Protocol):
+        pass
+  selector: "MyClass[bases]"
+  expected: "BaseClass, Protocol"
+
+- name: body
+  source: |
+    def func():
+        x = 1
+        return x + 2
+  selector: "func[body]"
+  expected: "    x = 1\n    return x + 2"
+  cli_contains:
+    - "x = 1"
+    - "return x + 2"
+
+- name: param_by_name
+  source: |
+    def func(self, x: int, y: str = 'default'):
+        pass
+  selector: "func[params][x]"
+  expected: "x: int"
+
+- name: decorator_by_name
+  source: |
+    @property
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators][lru_cache]"
+  expected: "@lru_cache"
+
+- name: base_by_name
+  source: |
+    class MyClass(BaseClass, Protocol):
+        pass
+  selector: "MyClass[bases][Protocol]"
+  expected: "Protocol"
+
+- name: param_by_index
+  source: |
+    def func(self, x: int, y: str):
+        pass
+  selector: "func[params][1]"
+  expected: "x: int"
+
+- name: decorator_by_index
+  source: |
+    @property
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators][0]"
+  expected: "@property"
+
+- name: param_negative_index
+  source: |
+    def func(self, x: int, y: str):
+        pass
+  selector: "func[params][-1]"
+  expected: "y: str"
+
+- name: method_params
+  source: |
+    class MyClass:
+        def method(self, x: int, y: str):
+            pass
+  selector: "MyClass.method[params]"
+  expected: "self, x: int, y: str"
+
+- name: nested_class_bases
+  source: |
+    class Outer:
+        class Inner(BaseClass):
+            pass
+  selector: "Outer.Inner[bases]"
+  expected: "BaseClass"
+
+- name: empty_params
+  source: |
+    def func():
+        pass
+  selector: "func[params]"
+  expected: ""
+
+- name: empty_decorators
+  source: |
+    def func():
+        pass
+  selector: "func[decorators]"
+  expected: ""
+
+- name: params_with_star_separator
+  source: |
+    def func(a, *, b):
+        pass
+  selector: "func[params]"
+  expected: "a, *, b"
+
+- name: params_with_star_separator_and_default
+  source: |
+    def func(a, *, b='default', c: int = 5):
+        pass
+  selector: "func[params]"
+  expected: "a, *, b='default', c: int = 5"
