@@ -1,0 +1,149 @@
+# Error test cases for component operations
+# Each case: operation, source, selector, expected error type/message
+
+# --- get errors ---
+- name: get_returns_none
+  operation: get
+  source: |
+    def func():
+        pass
+  selector: "func[returns]"
+  error_type: ValueError
+  error_match: "no return annotation"
+
+- name: get_invalid_component_for_class
+  operation: get
+  source: |
+    class MyClass:
+        pass
+  selector: "MyClass[params]"
+  error_type: ValueError
+  error_match: "Component 'params' not valid for ClassDef"
+
+- name: get_invalid_component_for_function
+  operation: get
+  source: |
+    def func():
+        pass
+  selector: "func[bases]"
+  error_type: ValueError
+  error_match: "Component 'bases' not valid for FunctionDef"
+
+- name: get_symbol_not_found
+  operation: get
+  source: |
+    def func():
+        pass
+  selector: "nonexistent[params]"
+  error_type: ValueError
+  error_match: "not found"
+
+- name: get_accessor_not_found
+  operation: get
+  source: |
+    def func(x: int):
+        pass
+  selector: "func[params][nonexistent]"
+  error_type: ValueError
+  error_match: "not found"
+
+- name: get_file_not_found
+  operation: get
+  source: null
+  selector: "func[params]"
+  error_type: FileNotFoundError
+  error_match: ""
+
+# --- set errors ---
+- name: set_invalid_component_for_class
+  operation: set
+  source: |
+    class MyClass:
+        pass
+  selector: "MyClass[params]"
+  value: "x: int"
+  error_type: ValueError
+  error_match: "Component 'params' not valid for ClassDef"
+
+- name: set_symbol_not_found
+  operation: set
+  source: |
+    def func():
+        pass
+  selector: "nonexistent[params]"
+  value: "x: int"
+  error_type: ValueError
+  error_match: "not found"
+
+- name: set_accessor_not_found
+  operation: set
+  source: |
+    def func(x: int):
+        pass
+  selector: "func[params][nonexistent]"
+  value: "y: int"
+  error_type: ValueError
+  error_match: "not found"
+
+# --- add errors ---
+- name: add_to_returns_invalid
+  operation: add
+  source: |
+    def func() -> int:
+        pass
+  selector: "func[returns]"
+  value: "str"
+  error_type: ValueError
+  error_match: "not a list component"
+
+- name: add_to_body_invalid
+  operation: add
+  source: |
+    def func():
+        pass
+  selector: "func[body]"
+  value: "x = 1"
+  error_type: ValueError
+  error_match: "not a list component"
+
+- name: add_with_accessor_invalid
+  operation: add
+  source: |
+    def func(x: int):
+        pass
+  selector: "func[params][x]"
+  value: "y: str"
+  error_type: ValueError
+  error_match: "accessor must be None"
+
+# --- remove errors ---
+- name: remove_body_invalid
+  operation: remove
+  source: |
+    def func():
+        pass
+  selector: "func[body]"
+  error_type: ValueError
+  error_match: "Cannot remove body"
+
+- name: remove_accessor_not_found
+  operation: remove
+  source: |
+    def func(x: int):
+        pass
+  selector: "func[params][nonexistent]"
+  error_type: ValueError
+  error_match: "not found"
+
+# --- CLI-only errors ---
+- name: add_before_after_mutual_exclusion
+  operation: add
+  cli_only: true
+  source: |
+    def func(x: int, z: str):
+        pass
+  selector: "func[params]"
+  value: "y: float"
+  before: "z"
+  after: "x"
+  error_match: "Error"

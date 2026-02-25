@@ -1,0 +1,129 @@
+# Test cases for remove_component() / edit --rm command
+# Each case: source, selector, expected strings in diff and file
+
+- name: param_by_name
+  source: |
+    def func(x: int, y: str, z: bool):
+        pass
+  selector: "func[params][y]"
+  expected_in_diff:
+    - "def func(x: int, y: str, z: bool):"
+    - "def func(x: int, z: bool):"
+  expected_in_file:
+    - "def func(x: int, z: bool):"
+
+- name: decorator_by_name
+  source: |
+    @property
+    @cache
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators][cache]"
+  expected_in_diff:
+    - "-@cache"
+    - "@property"
+    - "@lru_cache"
+  expected_in_file:
+    - "@property"
+    - "@lru_cache"
+  not_in_file:
+    - "@cache"
+
+- name: base_by_name
+  source: |
+    class MyClass(BaseClass, Protocol, Generic[T]):
+        pass
+  selector: "MyClass[bases][Protocol]"
+  expected_in_diff:
+    - "Protocol"
+    - "class MyClass(BaseClass, Generic[T]):"
+  expected_in_file:
+    - "class MyClass(BaseClass, Generic[T]):"
+
+- name: param_by_index
+  source: |
+    def func(x: int, y: str, z: bool):
+        pass
+  selector: "func[params][1]"
+  expected_in_diff:
+    - "def func(x: int, y: str, z: bool):"
+    - "def func(x: int, z: bool):"
+  expected_in_file:
+    - "def func(x: int, z: bool):"
+
+- name: decorator_by_index
+  source: |
+    @property
+    @cache
+    def func():
+        pass
+  selector: "func[decorators][0]"
+  expected_in_diff:
+    - "-@property"
+    - "@cache"
+  expected_in_file:
+    - "@cache"
+  not_in_file:
+    - "@property"
+
+- name: param_negative_index
+  source: |
+    def func(x: int, y: str, z: bool):
+        pass
+  selector: "func[params][-1]"
+  expected_in_diff:
+    - "def func(x: int, y: str, z: bool):"
+    - "def func(x: int, y: str):"
+  expected_in_file:
+    - "def func(x: int, y: str):"
+
+- name: all_decorators
+  source: |
+    @property
+    @cache
+    def func():
+        pass
+  selector: "func[decorators]"
+  expected_in_diff:
+    - "@property"
+    - "@cache"
+    - "def func():"
+  expected_in_file:
+    - "def func():"
+  not_in_file:
+    - "@property"
+    - "@cache"
+
+- name: all_bases
+  source: |
+    class MyClass(BaseClass, Protocol):
+        pass
+  selector: "MyClass[bases]"
+  expected_in_diff:
+    - "class MyClass(BaseClass, Protocol):"
+    - "class MyClass:"
+  expected_in_file:
+    - "class MyClass:"
+
+- name: all_params
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params]"
+  expected_in_diff:
+    - "def func(x: int, y: str):"
+    - "def func():"
+  expected_in_file:
+    - "def func():"
+
+- name: returns_removes_annotation
+  source: |
+    def func() -> int:
+        pass
+  selector: "func[returns]"
+  expected_in_diff:
+    - "def func() -> int:"
+    - "def func():"
+  expected_in_file:
+    - "def func():"

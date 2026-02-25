@@ -1,0 +1,238 @@
+# Test cases for add_to_component() / add command
+# Each case: source, selector, value, position/before/after, expected strings
+
+- name: param_at_end
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params]"
+  value: "debug: bool = False"
+  position: -1
+  expected_in_diff:
+    - "def func(x: int, y: str):"
+    - "def func(x: int, y: str, debug: bool = False):"
+  expected_in_file:
+    - "def func(x: int, y: str, debug: bool = False):"
+
+- name: param_at_start
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params]"
+  value: "self"
+  position: 0
+  expected_in_diff:
+    - "def func(x: int, y: str):"
+    - "def func(self, x: int, y: str):"
+  expected_in_file:
+    - "def func(self, x: int, y: str):"
+
+- name: param_at_index
+  source: |
+    def func(x: int, z: str):
+        pass
+  selector: "func[params]"
+  value: "y: float"
+  position: 1
+  expected_in_diff:
+    - "def func(x: int, z: str):"
+    - "def func(x: int, y: float, z: str):"
+  expected_in_file:
+    - "def func(x: int, y: float, z: str):"
+
+- name: param_to_empty
+  source: |
+    def func():
+        pass
+  selector: "func[params]"
+  value: "x: int"
+  position: -1
+  expected_in_diff:
+    - "def func():"
+    - "def func(x: int):"
+  expected_in_file:
+    - "def func(x: int):"
+
+- name: decorator_at_end
+  source: |
+    @property
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@cache"
+  position: -1
+  expected_in_diff:
+    - "@property"
+    - "+@cache"
+  expected_in_file:
+    - "@property"
+    - "@cache"
+
+- name: decorator_at_start
+  source: |
+    @cache
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@staticmethod"
+  position: 0
+  expected_in_diff:
+    - "@cache"
+    - "+@staticmethod"
+  expected_in_file:
+    - "@staticmethod"
+    - "@cache"
+
+- name: decorator_to_empty
+  source: |
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@property"
+  position: -1
+  expected_in_diff:
+    - "+@property"
+    - "def func():"
+  expected_in_file:
+    - "@property"
+
+- name: base_at_end
+  source: |
+    class MyClass(BaseClass):
+        pass
+  selector: "MyClass[bases]"
+  value: "Protocol"
+  position: -1
+  expected_in_diff:
+    - "class MyClass(BaseClass):"
+    - "class MyClass(BaseClass, Protocol):"
+  expected_in_file:
+    - "class MyClass(BaseClass, Protocol):"
+
+- name: base_at_start
+  source: |
+    class MyClass(Protocol):
+        pass
+  selector: "MyClass[bases]"
+  value: "Generic[T]"
+  position: 0
+  expected_in_diff:
+    - "class MyClass(Protocol):"
+    - "class MyClass(Generic[T], Protocol):"
+  expected_in_file:
+    - "class MyClass(Generic[T], Protocol):"
+
+- name: base_to_empty
+  source: |
+    class MyClass:
+        pass
+  selector: "MyClass[bases]"
+  value: "BaseClass"
+  position: -1
+  expected_in_diff:
+    - "class MyClass:"
+    - "class MyClass(BaseClass):"
+  expected_in_file:
+    - "class MyClass(BaseClass):"
+
+# before/after cases (CLI-only, tested via cmd_add at API level)
+- name: param_before_name
+  source: |
+    def func(self, y: str):
+        pass
+  selector: "func[params]"
+  value: "x: int"
+  before: "y"
+  expected_in_diff:
+    - "x: int, y: str"
+  expected_in_file:
+    - "def func(self, x: int, y: str):"
+
+- name: param_after_name
+  source: |
+    def func(self, x: int):
+        pass
+  selector: "func[params]"
+  value: "y: str"
+  after: "self"
+  expected_in_diff:
+    - "self, y: str, x: int"
+  expected_in_file:
+    - "def func(self, y: str, x: int):"
+
+- name: decorator_before_name
+  source: |
+    @property
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@cache"
+  before: "property"
+  expected_in_file:
+    - "@cache"
+    - "@property"
+
+- name: base_after_name
+  source: |
+    class MyClass(ABC):
+        pass
+  selector: "MyClass[bases]"
+  value: "Protocol"
+  after: "ABC"
+  expected_in_file:
+    - "class MyClass(ABC, Protocol):"
+
+# Pseudo-class cases
+- name: pseudo_class_keyword_only_with_existing_star
+  source: |
+    def foo(a, *, b):
+        pass
+  selector: "foo[params]:KEYWORD_ONLY"
+  value: "c"
+  expected_in_file:
+    - "def foo(a, *, b, c):"
+
+- name: pseudo_class_keyword_only_without_star
+  source: |
+    def foo(a, b):
+        pass
+  selector: "foo[params]:KEYWORD_ONLY"
+  value: "c"
+  expected_in_file:
+    - "def foo(a, b, *, c):"
+
+- name: pseudo_class_positional_or_keyword
+  source: |
+    def foo(a, *, b):
+        pass
+  selector: "foo[params]:POSITIONAL_OR_KEYWORD"
+  value: "c"
+  expected_in_file:
+    - "def foo(a, c, *, b):"
+
+- name: pseudo_class_positional_only
+  source: |
+    def foo(a, b):
+        pass
+  selector: "foo[params]:POSITIONAL_ONLY"
+  value: "c"
+  expected_in_file:
+    - "def foo(a, b, c):"
+
+- name: pseudo_class_keyword_only_no_args
+  source: |
+    def foo():
+        pass
+  selector: "foo[params]:KEYWORD_ONLY"
+  value: "bar"
+  expected_in_file:
+    - "def foo(*, bar):"
+
+- name: pseudo_class_keyword_only_before_kwargs
+  source: |
+    def foo(a, **kw):
+        pass
+  selector: "foo[params]:KEYWORD_ONLY"
+  value: "b"
+  expected_in_file:
+    - "def foo(a, *, b, **kw):"

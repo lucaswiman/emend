@@ -1,0 +1,206 @@
+# Test cases for set_component() / edit command
+# Each case: source, selector, value, expected strings in diff and file
+
+- name: params_all
+  source: |
+    def func(old_param: int):
+        pass
+  selector: "func[params]"
+  value: "x: int, y: str = 'default'"
+  expected_in_diff:
+    - "def func(old_param: int):"
+    - "def func(x: int, y: str = 'default'):"
+  expected_in_file:
+    - "def func(x: int, y: str = 'default'):"
+
+- name: params_empty
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params]"
+  value: ""
+  expected_in_diff:
+    - "def func(x: int, y: str):"
+    - "def func():"
+  expected_in_file:
+    - "def func():"
+
+- name: param_by_name
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params][x]"
+  value: "x: float"
+  expected_in_diff:
+    - "x: int"
+    - "x: float"
+  expected_in_file:
+    - "x: float"
+    - "y: str"
+
+- name: param_by_index
+  source: |
+    def func(x: int, y: str):
+        pass
+  selector: "func[params][1]"
+  value: "y: int"
+  expected_in_diff:
+    - "y: str"
+    - "y: int"
+  expected_in_file:
+    - "y: int"
+
+- name: returns
+  source: |
+    def func() -> int:
+        pass
+  selector: "func[returns]"
+  value: "str | None"
+  expected_in_diff:
+    - "-> int:"
+    - "-> str | None:"
+  expected_in_file:
+    - "-> str | None:"
+
+- name: returns_add_new
+  source: |
+    def func():
+        pass
+  selector: "func[returns]"
+  value: "str"
+  expected_in_diff:
+    - "def func():"
+    - "-> str:"
+  expected_in_file:
+    - "-> str:"
+
+- name: returns_remove
+  source: |
+    def func() -> int:
+        pass
+  selector: "func[returns]"
+  value: ""
+  expected_in_diff:
+    - "-> int:"
+    - "def func():"
+  expected_in_file:
+    - "def func():"
+
+- name: decorators_all
+  source: |
+    @old_decorator
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@property\n@cache"
+  expected_in_diff:
+    - "@old_decorator"
+    - "@property"
+    - "@cache"
+  expected_in_file:
+    - "@property"
+    - "@cache"
+
+- name: decorator_by_name
+  source: |
+    @property
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators][lru_cache]"
+  value: "@lru_cache(maxsize=100)"
+  expected_in_diff:
+    - "@lru_cache"
+    - "@lru_cache(maxsize=100)"
+  expected_in_file:
+    - "@lru_cache(maxsize=100)"
+
+- name: decorator_by_index
+  source: |
+    @property
+    @lru_cache
+    def func():
+        pass
+  selector: "func[decorators][0]"
+  value: "@staticmethod"
+  expected_in_diff:
+    - "@property"
+    - "@staticmethod"
+  expected_in_file:
+    - "@staticmethod"
+
+- name: multiline_decorators
+  source: |
+    @old
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@pytest.mark.parametrize(\"x\", [\n    1,\n    2,\n])"
+  expected_in_file:
+    - "@pytest.mark.parametrize(\"x\", ["
+    - "    1,"
+    - "    2,"
+    - "])"
+
+- name: multiple_multiline_decorators
+  source: |
+    def func():
+        pass
+  selector: "func[decorators]"
+  value: "@property\n@pytest.mark.parametrize(\"x,y\", [\n    (1, 2),\n    (3, 4),\n])"
+  expected_in_file:
+    - "@property"
+    - "@pytest.mark.parametrize(\"x,y\", ["
+    - "(1, 2)"
+    - "(3, 4)"
+
+- name: bases_all
+  source: |
+    class MyClass(OldBase):
+        pass
+  selector: "MyClass[bases]"
+  value: "NewBase, Protocol"
+  expected_in_diff:
+    - "OldBase"
+    - "NewBase, Protocol"
+  expected_in_file:
+    - "class MyClass(NewBase, Protocol):"
+
+- name: base_by_name
+  source: |
+    class MyClass(BaseClass, Protocol):
+        pass
+  selector: "MyClass[bases][Protocol]"
+  value: "Generic[T]"
+  expected_in_diff:
+    - "Protocol"
+    - "Generic[T]"
+  expected_in_file:
+    - "Generic[T]"
+
+- name: body
+  source: |
+    def func():
+        pass
+  selector: "func[body]"
+  value: "    x = 1\n    return x + 2"
+  expected_in_diff:
+    - "pass"
+    - "x = 1"
+    - "return x + 2"
+  expected_in_file:
+    - "x = 1"
+    - "return x + 2"
+
+- name: method_params
+  source: |
+    class MyClass:
+        def method(self, x: int):
+            pass
+  selector: "MyClass.method[params]"
+  value: "self, x: str, y: int"
+  expected_in_diff:
+    - "self, x: int"
+    - "self, x: str, y: int"
+  expected_in_file:
+    - "self, x: str, y: int"
