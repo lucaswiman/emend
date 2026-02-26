@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 mod scanner;
 mod pattern;
+mod symbols;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -185,5 +186,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_method_calls_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     Ok(())
 }

@@ -310,19 +310,35 @@ def search(
             file_path_obj = Path(file_for_summary)
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
                 files, _ = resolve_files(file_for_summary)
-                for fp in files:
-                    try:
-                        symbols = ast_commands.collect_symbols(
-                            str(fp), tree_depth=tree_depth, selector=selector_for_summary
-                        )
-                        print(f"\nModule: {fp}")
+                try:
+                    import emend_core
+                    file_strs = [str(fp) for fp in files]
+                    batch_results = emend_core.collect_symbols_batch(
+                        file_strs, max_depth=tree_depth, selector=selector_for_summary,
+                    )
+                    for file_path_str, symbol_dicts in batch_results:
+                        symbols = ast_commands._dicts_to_tree_symbols(symbol_dicts)
+                        print(f"\nModule: {file_path_str}")
                         if symbols:
                             if flat_output:
                                 ast_commands._print_symbol_flat(symbols)
                             else:
                                 ast_commands._print_symbol_tree(symbols, indent=1)
-                    except Exception:
-                        continue
+                except Exception:
+                    # Fallback: process files sequentially with LibCST
+                    for fp in files:
+                        try:
+                            symbols = ast_commands.collect_symbols(
+                                str(fp), tree_depth=tree_depth, selector=selector_for_summary
+                            )
+                            print(f"\nModule: {fp}")
+                            if symbols:
+                                if flat_output:
+                                    ast_commands._print_symbol_flat(symbols)
+                                else:
+                                    ast_commands._print_symbol_tree(symbols, indent=1)
+                        except Exception:
+                            continue
             else:
                 symbols = ast_commands.collect_symbols(
                     file_for_summary, tree_depth=tree_depth, selector=selector_for_summary

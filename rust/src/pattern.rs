@@ -14,7 +14,7 @@ fn get_parser() -> Parser {
 }
 
 /// Parse Python source into a tree-sitter Tree.
-fn parse_python(source: &str) -> Option<Tree> {
+pub(crate) fn parse_python(source: &str) -> Option<Tree> {
     let mut parser = get_parser();
     parser.parse(source.as_bytes(), None)
 }
