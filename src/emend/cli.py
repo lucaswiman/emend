@@ -869,6 +869,7 @@ def refs_cmd(
 
         references = find_references(
             parsed_selector,
+            project_path=project,
             include_definition=not exclude_definition,
             include_imports=not exclude_imports,
             writes_only=writes_only,

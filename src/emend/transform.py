@@ -4094,30 +4094,35 @@ def generate_graph(
     from .component_selector import ExtendedSelector
 
     content = Path(file_path).read_text()
-    module = cst.parse_module(content)
 
-    # Collect all top-level function/class defs
-    functions = []
-    for stmt in module.body:
-        if isinstance(stmt, cst.FunctionDef):
-            functions.append(stmt.name.value)
-        elif isinstance(stmt, cst.ClassDef):
-            functions.append(stmt.name.value)
+    # Try Rust fast-path: single-pass tree-sitter callee extraction
+    try:
+        import emend_core
+        raw = emend_core.collect_callees(content)
+        edges: dict[str, list[str]] = {name: callees for name, callees in raw}
+    except Exception:
+        # Fallback: existing per-symbol LibCST path
+        module = cst.parse_module(content)
+        functions = []
+        for stmt in module.body:
+            if isinstance(stmt, cst.FunctionDef):
+                functions.append(stmt.name.value)
+            elif isinstance(stmt, cst.ClassDef):
+                functions.append(stmt.name.value)
 
-    # Build adjacency list: function -> [callees]
-    edges: dict[str, list[str]] = {}
-    for func_name in functions:
-        selector = ExtendedSelector(
-            file_path=file_path,
-            symbol_path=[func_name],
-            component=None,
-            accessor=None,
-        )
-        try:
-            callees = find_callees(selector, project_path)
-            edges[func_name] = [c.name for c in callees]
-        except Exception:
-            edges[func_name] = []
+        edges = {}
+        for func_name in functions:
+            selector = ExtendedSelector(
+                file_path=file_path,
+                symbol_path=[func_name],
+                component=None,
+                accessor=None,
+            )
+            try:
+                callees = find_callees(selector, project_path)
+                edges[func_name] = [c.name for c in callees]
+            except Exception:
+                edges[func_name] = []
 
     if format == "json":
         return json.dumps(edges, indent=2)

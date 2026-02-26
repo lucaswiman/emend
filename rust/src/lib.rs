@@ -155,6 +155,15 @@ fn read_and_filter_files(files: Vec<String>, hints: Vec<String>) -> PyResult<Vec
     Ok(results)
 }
 
+/// Collect callees for all top-level symbols in a Python source file.
+///
+/// Returns a list of (symbol_name, [callee_names]) tuples.
+/// Callee names are bare function/method names (deduplicated).
+#[pyfunction]
+fn collect_callees(source: &str) -> PyResult<Vec<(String, Vec<String>)>> {
+    Ok(pattern::collect_callees_from_source(source))
+}
+
 /// Extract all import statements from Python files in parallel.
 ///
 /// Returns a list of (file_path, module_name) tuples representing
@@ -187,6 +196,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_method_calls_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     Ok(())
