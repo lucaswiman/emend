@@ -204,13 +204,22 @@ def get_import_graph(project_root: str) -> dict[str, list[str]]:
 def _files_importing_module(project_root: str, module_dotted: str) -> set[str] | None:
     """Return the set of files that import from *module_dotted*, or None if unknown.
 
-    Returns None if the import graph cannot be built (caller should fall back
+    Uses the Rust targeted import filter: text-prefilters then tree-sitter-parses
+    only candidate files, avoiding building the full import graph.
+
+    Returns None if the filter cannot be applied (caller should fall back
     to scanning all files).
     """
-    graph = get_import_graph(project_root)
-    if not graph:
-        return None
-    return set(graph.get(module_dotted, []))
+    py_files = _collect_python_files(project_root)
+    try:
+        matching = _rust.files_importing_module(py_files, module_dotted)
+        return set(matching)
+    except Exception:
+        # Fallback to full import graph
+        graph = get_import_graph(project_root)
+        if not graph:
+            return None
+        return set(graph.get(module_dotted, []))
 
 
 def prefilter_files_structural(files: list[str], name: str) -> list[str]:
@@ -3812,9 +3821,12 @@ def find_references(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_references")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
@@ -3824,13 +3836,13 @@ def find_references(
 
     # Use import graph to pre-filter: only check files that import
     # from the module defining the target symbol.
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     references = []
     for _py_file, _module, finder in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
@@ -3951,9 +3963,12 @@ def find_callers(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callers")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
@@ -3962,13 +3977,13 @@ def find_callers(
         )
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     callers = []
     for _py_file, _module, visitor in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
@@ -4207,22 +4222,25 @@ def rename_symbol(
     if not symbol_name:
         raise ValueError("Symbol path is required for rename_symbol")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
         return _SymbolRenamer(symbol_name, new_name, target_qns, target_module)
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     diffs = {}
     for py_file, result_module, renamer in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,

@@ -185,6 +185,34 @@ fn extract_imports(files: Vec<String>) -> PyResult<Vec<(String, Vec<String>)>> {
     Ok(results)
 }
 
+/// Find files that import from a specific target module.
+///
+/// For each file (in parallel):
+/// 1. Read the file
+/// 2. Text check: skip files not containing the target module name as a string
+/// 3. Parse with tree-sitter, extract import modules (with prefix expansion)
+/// 4. Check if target_module is among the extracted modules
+///
+/// Returns paths of files that import from the target module.
+#[pyfunction]
+fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<Vec<String>> {
+    let target = target_module.to_string();
+    let result: Vec<String> = files
+        .into_par_iter()
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .map(|content| {
+                    if !content.contains(&target) {
+                        return false;
+                    }
+                    pattern::files_importing_module_from_source(&content, &target)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    Ok(result)
+}
+
 /// Python module definition.
 #[pymodule]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -197,6 +225,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
     m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
+    m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     Ok(())

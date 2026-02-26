@@ -214,6 +214,15 @@ pub fn extract_import_modules(source: &str) -> Vec<String> {
     modules
 }
 
+/// Check if a Python source file imports from a specific target module.
+///
+/// Returns true if the source contains an import that matches `target_module`
+/// (including prefix expansion: `from a.b.c import x` matches `a.b.c`).
+pub fn files_importing_module_from_source(source: &str, target_module: &str) -> bool {
+    let modules = extract_import_modules(source);
+    modules.contains(&target_module.to_string())
+}
+
 /// Collect callees for all top-level functions/classes in a Python source file.
 ///
 /// Returns Vec<(symbol_name, Vec<callee_name>)> where each callee_name is
