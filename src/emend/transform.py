@@ -213,6 +213,14 @@ def _files_importing_module(project_root: str, module_dotted: str) -> set[str] |
     return set(graph.get(module_dotted, []))
 
 
+def prefilter_files_structural(files: list[str], name: str) -> list[str]:
+    """Structural pre-filter: use tree-sitter to find files containing
+    an actual identifier matching name (not just substring in strings/comments).
+    """
+    matches = _rust.find_name_in_files(files, name)
+    return list({m.file for m in matches})
+
+
 def visit_project(
     name_hint: str,
     visitor_factory: Callable[[str, bool], cst.CSTVisitor | cst.CSTTransformer],
@@ -240,15 +248,29 @@ def visit_project(
                     if f in candidate_files
                     or (target_file and str(Path(f).resolve()) == target_file)]
 
-    for py_file in py_files:
-        try:
-            content = Path(py_file).read_text()
-        except Exception:
-            continue
+    # Structural pre-filter for cross-project ops: use tree-sitter to find
+    # files with actual identifier matches (eliminates strings/comments false positives)
+    if metadata_providers and name_hint:
+        py_files = prefilter_files_structural(py_files, name_hint)
+        # Re-add target_file if it was filtered out (definition file must always be visited)
+        if target_file and target_file not in py_files:
+            py_files.append(target_file)
 
-        if name_hint not in content:
-            continue
+    # Batch read + filter in Rust (parallel I/O + substring pre-filter)
+    hints = [name_hint] if name_hint and not metadata_providers else []
+    file_contents = _rust.read_and_filter_files(py_files, hints)
 
+    # Ensure target_file is always included (definition file must be visited)
+    if target_file and not metadata_providers:
+        seen = {str(Path(f).resolve()) for f, _ in file_contents}
+        if target_file not in seen:
+            try:
+                content = Path(target_file).read_text()
+                file_contents.append((target_file, content))
+            except Exception:
+                pass
+
+    for py_file, content in file_contents:
         is_def_file = (target_file is not None
                        and str(Path(py_file).resolve()) == target_file)
 

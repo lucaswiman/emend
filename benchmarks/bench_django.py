@@ -229,13 +229,18 @@ def setup_lint_rules(django_dir: Path) -> None:
 
 def check_emend_available() -> list[str]:
     """Check that emend CLI is available. Returns the command to use."""
-    # Try 'emend' first, then 'python -m emend'.
+    # Try 'emend' on PATH first, then look for it next to the current Python.
+    venv_emend = str(Path(sys.executable).parent / "emend")
     candidates = [
         ["emend", "--help"],
+        [venv_emend, "--help"],
         [sys.executable, "-m", "emend", "--help"],
     ]
     for cmd in candidates:
-        result = _run(cmd)
+        try:
+            result = _run(cmd)
+        except (FileNotFoundError, OSError):
+            continue
         if result.returncode == 0:
             # Return the base command (without --help).
             return cmd[:-1]

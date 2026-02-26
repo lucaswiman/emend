@@ -132,6 +132,27 @@ fn find_method_calls_in_files(files: Vec<String>, method_name: &str) -> PyResult
     Ok(results.into_iter().flatten().collect())
 }
 
+/// Read files in parallel and return (path, content) for files matching all hints.
+///
+/// If hints is empty, reads all files (parallel I/O only).
+/// All hint strings must appear in the file content (AND logic).
+#[pyfunction]
+fn read_and_filter_files(files: Vec<String>, hints: Vec<String>) -> PyResult<Vec<(String, String)>> {
+    let results: Vec<(String, String)> = files
+        .into_par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(&path).ok()?;
+            for hint in &hints {
+                if !content.contains(hint.as_str()) {
+                    return None;
+                }
+            }
+            Some((path, content))
+        })
+        .collect();
+    Ok(results)
+}
+
 /// Extract all import statements from Python files in parallel.
 ///
 /// Returns a list of (file_path, module_name) tuples representing
@@ -162,6 +183,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_name_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(find_calls_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(find_method_calls_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
     Ok(())
 }

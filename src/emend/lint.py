@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml
 import libcst as cst
 
-from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern
+from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern, extract_pattern_literals
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?:\s*:\s*(.+))?", re.IGNORECASE)
 
@@ -195,11 +195,19 @@ def run_lint(
 
     violations = []
 
-    # Pre-filter: for each find-only rule, determine which files could match
+    # Batch-read all candidate files in parallel via Rust
+    import emend_core
+    all_file_contents: dict[str, str] = dict(emend_core.read_and_filter_files(paths, []))
+
+    # Pre-filter per rule using already-read content (no extra I/O)
     rule_file_sets: dict[str, set[str]] = {}
     for rule in find_only_rules:
-        filtered = prefilter_files_for_pattern(paths, rule.find)
-        rule_file_sets[rule.name] = set(filtered)
+        literals = extract_pattern_literals(rule.find)
+        matching: set[str] = set()
+        for fpath, content in all_file_contents.items():
+            if all(lit in content for lit in literals):
+                matching.add(fpath)
+        rule_file_sets[rule.name] = matching
 
     # Determine files that need processing (at least one rule applies)
     files_needing_processing = set()
@@ -211,9 +219,8 @@ def run_lint(
         if file_path not in files_needing_processing and not fix_rules:
             continue
 
-        try:
-            source = Path(file_path).read_text()
-        except Exception:
+        source = all_file_contents.get(file_path)
+        if source is None:
             continue
 
         noqa_comments = parse_noqa_comments(source)

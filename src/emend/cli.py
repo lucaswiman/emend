@@ -14,7 +14,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph,
-    prefilter_files_for_pattern,
+    prefilter_files_for_pattern, extract_pattern_literals,
 )
 from emend import ast_commands
 
@@ -339,33 +339,50 @@ def search(
         if is_pattern_mode:
             target_path = path or "."
             import libcst as cst
+            import emend_core
 
             files, is_multi_file = resolve_files(target_path)
 
-            # Pre-filter files using Rust memchr to skip files that can't match
-            if is_multi_file and len(files) > 1:
-                file_strs = [str(f) for f in files]
-                filtered = prefilter_files_for_pattern(file_strs, query)
-                files = [Path(f) for f in filtered]
-
             all_matches = []
-            for file_path in files:
-                file_path_str = str(file_path)
-                try:
-                    file_matches = find_pattern(
-                        query, file_path_str,
-                        scope=where_scope,
-                        inside=where_inside,
-                        not_inside=where_not_inside,
-                        imported_from=imported_from,
-                        scope_local=scope_local,
-                    )
-                    for match in file_matches:
-                        all_matches.append((file_path_str, match))
-                except FileNotFoundError:
-                    if not is_multi_file:
-                        raise
-                    continue
+            if is_multi_file and len(files) > 1:
+                # Single Rust pass: parallel read + filter (no double read)
+                file_strs = [str(f) for f in files]
+                literals = extract_pattern_literals(query)
+                file_contents = emend_core.read_and_filter_files(file_strs, literals)
+
+                for file_path_str, content in file_contents:
+                    try:
+                        file_matches = find_pattern(
+                            query, file_path_str,
+                            scope=where_scope,
+                            inside=where_inside,
+                            not_inside=where_not_inside,
+                            imported_from=imported_from,
+                            scope_local=scope_local,
+                            source_override=content,
+                        )
+                        for match in file_matches:
+                            all_matches.append((file_path_str, match))
+                    except Exception:
+                        continue
+            else:
+                for file_path in files:
+                    file_path_str = str(file_path)
+                    try:
+                        file_matches = find_pattern(
+                            query, file_path_str,
+                            scope=where_scope,
+                            inside=where_inside,
+                            not_inside=where_not_inside,
+                            imported_from=imported_from,
+                            scope_local=scope_local,
+                        )
+                        for match in file_matches:
+                            all_matches.append((file_path_str, match))
+                    except FileNotFoundError:
+                        if not is_multi_file:
+                            raise
+                        continue
 
             if count_output:
                 print(len(all_matches))
