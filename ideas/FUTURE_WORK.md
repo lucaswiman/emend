@@ -27,5 +27,5 @@ the full reference collection.
 ## Longer-Term Ideas
 
 - **Persistent index / caching** — Cache parsed modules and symbol indexes across invocations for faster repeated operations on large projects.
-- **Rust-accelerated core** — Replace hot paths (parsing, pattern matching, scope analysis) with a PyO3 Rust extension for 10-50x speedup on large projects.
+- **Deeper Rust acceleration** — The `emend-core` crate already handles file scanning and content pre-filtering. Extending it to cover hot paths in pattern matching and scope analysis could yield further 10-50x speedup on large projects.
 - **Semantic type constraints** — Use mypy/pyright or LibCST's `TypeInferenceProvider` for type-aware pattern matching (e.g. `$X:int` checks inferred type, not AST node type).
