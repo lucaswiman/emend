@@ -223,6 +223,9 @@ emend replace 'old_var' 'new_var' api.py --where process --apply
 # Replace with pattern capture
 emend replace 'get_field($N)' 'field$N' api.py --where process --apply
 
+# String content interpolation: ${X.content} strips quotes from a captured string literal
+emend replace 'Union["$X", $Y]' '$X | $Y' src/ --apply
+
 # Find all pattern matches
 emend search 'print($X)' src/ --output location
 

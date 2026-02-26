@@ -292,6 +292,22 @@ In ``replace``, the replacement string can reference captured metavariables:
    # Add a wrapper
    emend replace 'open($PATH)' 'open($PATH, encoding="utf-8")' src/ --apply
 
+String content interpolation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Append ``.content`` to a metavariable in a replacement to extract the inner
+value of a captured string literal (i.e. the string without surrounding quotes).
+Use ``${NAME.content}`` syntax:
+
+.. code-block:: bash
+
+   # Union["Foo", Bar] → Foo | Bar  (strips quotes from the string literal)
+   emend replace 'Union["$X", $Y]' '${X.content} | $Y' src/ --apply
+
+If the captured node is not a string literal, the replacement is skipped for
+that match. This is particularly useful for migrating ``Union["X", Y]``
+(deferred-annotation style) to PEP 604 ``X | Y`` union syntax.
+
 Scope constraints
 -----------------
 
