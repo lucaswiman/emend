@@ -29,8 +29,11 @@ docs: docs-html
 docs-html: $(VENV)/bin/activate
 	$(VENV)/bin/sphinx-build -b html docs docs/_build/html
 
+BENCH_LABEL ?=
+
 benchmark: $(VENV)/bin/activate
-	$(PYTHON) benchmarks/bench_django.py $(BENCH_ARGS)
+	@mkdir -p benchmark-results
+	$(PYTHON) benchmarks/bench_django.py --json --save benchmark-results/$$(date +%Y%m%d-%H%M%S).json --label "$(BENCH_LABEL)" $(BENCH_ARGS)
 
 clean:
 	rm -rf $(VENV) build *.egg-info src/*.egg-info docs/_build

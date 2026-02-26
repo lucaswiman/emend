@@ -8,3 +8,4 @@ LibCST
 benchmarks/.django-checkout/
 src/emend/_version.py
 rust/target/
+benchmark-results/
