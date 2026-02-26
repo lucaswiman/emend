@@ -366,21 +366,45 @@ def search(
                 literals = extract_pattern_literals(query)
                 file_contents = emend_core.read_and_filter_files(file_strs, literals)
 
-                for file_path_str, content in file_contents:
+                # Try Rust batch fast-path (no scope/imported_from/scope_local constraints)
+                rust_path_used = False
+                if where_scope is None and imported_from is None and not scope_local:
                     try:
-                        file_matches = find_pattern(
-                            query, file_path_str,
-                            scope=where_scope,
-                            inside=where_inside,
-                            not_inside=where_not_inside,
-                            imported_from=imported_from,
-                            scope_local=scope_local,
-                            source_override=content,
-                        )
-                        for match in file_matches:
-                            all_matches.append((file_path_str, match))
+                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+                        from emend.transform import PatternMatch
+                        pattern_ir = compile_pattern_to_rust_ir(query)
+                        if pattern_ir is not None:
+                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
+                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
+                            if (where_inside is None or inside_ir is not None) and \
+                               (where_not_inside is None or not_inside_ir is not None):
+                                raw_matches = emend_core.find_pattern_in_files(
+                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                                )
+                                for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                                    all_matches.append((file_path_str, PatternMatch(
+                                        node=None, captures={}, line=line, matched_text=text
+                                    )))
+                                rust_path_used = True
                     except Exception:
-                        continue
+                        pass
+
+                if not rust_path_used:
+                    for file_path_str, content in file_contents:
+                        try:
+                            file_matches = find_pattern(
+                                query, file_path_str,
+                                scope=where_scope,
+                                inside=where_inside,
+                                not_inside=where_not_inside,
+                                imported_from=imported_from,
+                                scope_local=scope_local,
+                                source_override=content,
+                            )
+                            for match in file_matches:
+                                all_matches.append((file_path_str, match))
+                        except Exception:
+                            continue
             else:
                 for file_path in files:
                     file_path_str = str(file_path)
@@ -406,7 +430,10 @@ def search(
                 import json
                 serialized_matches = []
                 for file_path_str, match in all_matches:
-                    code_str = cst.Module([]).code_for_node(match.node).strip()
+                    if match.matched_text is not None:
+                        code_str = match.matched_text.strip()
+                    else:
+                        code_str = cst.Module([]).code_for_node(match.node).strip()
                     captures = {}
                     for cap_name, captured in match.captures.items():
                         if isinstance(captured, tuple):

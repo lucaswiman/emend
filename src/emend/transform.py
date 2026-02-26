@@ -1817,9 +1817,10 @@ def _extract_string_content(node: cst.CSTNode) -> str | None:
 @dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
-    node: cst.CSTNode
+    node: cst.CSTNode | None
     captures: dict[str, cst.CSTNode]
     line: int | None = None
+    matched_text: str | None = None
 
 
 def _extract_all_captures(node: cst.CSTNode, matcher: m.BaseMatcherNode, metavar_names: set[str]) -> dict[str, list[cst.CSTNode]]:
@@ -2385,6 +2386,7 @@ def find_pattern(
     # Validate inside/not_inside constraints
     if inside and not_inside:
         raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
+
     # Parse pattern and compile to matcher
     pattern = parse_pattern(pattern_str)
     matcher, ellipsis_info = compile_pattern_to_matcher(pattern)

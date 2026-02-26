@@ -209,13 +209,82 @@ def run_lint(
                 matching.add(fpath)
         rule_file_sets[rule.name] = matching
 
-    # Determine files that need processing (at least one rule applies)
-    files_needing_processing = set()
-    for file_set in rule_file_sets.values():
-        files_needing_processing |= file_set
+    # --- Rust fast-path: batch process compatible find-only rules ---
+    libcst_rules = find_only_rules  # Will be narrowed if Rust handles some rules
+    try:
+        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+
+        rust_rules = []
+        libcst_fallback = []
+        for rule in find_only_rules:
+            ir = compile_pattern_to_rust_ir(rule.find)
+            if ir is None:
+                libcst_fallback.append(rule)
+                continue
+            ni_ir = compile_constraint_to_rust_ir(rule.not_inside) if rule.not_inside else None
+            if rule.not_inside is not None and ni_ir is None:
+                # not_inside constraint didn't compile — fall back to LibCST
+                libcst_fallback.append(rule)
+                continue
+            rust_rules.append((rule, ir, ni_ir))
+
+        libcst_rules = libcst_fallback
+
+        # noqa_ranges cache: lazily built per file when matches are found
+        noqa_ranges_cache: dict[str, list[tuple[int, int, set[str] | None]]] = {}
+
+        for rule, ir, ni_ir in rust_rules:
+            file_pairs = [
+                (fp, all_file_contents[fp])
+                for fp in rule_file_sets.get(rule.name, set())
+                if fp in all_file_contents
+            ]
+            if not file_pairs:
+                continue
+
+            raw_matches = emend_core.find_pattern_in_files(file_pairs, ir, None, ni_ir)
+
+            for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                # Build noqa ranges for this file on first match
+                if file_path_str not in noqa_ranges_cache:
+                    src = all_file_contents.get(file_path_str, "")
+                    noqa_comments = parse_noqa_comments(src)
+                    noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
+                    if noqa_comments:
+                        try:
+                            module = cst.parse_module(src)
+                            wrapper = cst.MetadataWrapper(module)
+                            mapper = _StatementRangeMapper()
+                            wrapper.visit(mapper)
+                            noqa_ranges_for_file = build_noqa_ranges(noqa_comments, mapper.line_to_range)
+                        except cst.ParserSyntaxError:
+                            logger.debug(
+                                "Failed to parse %s for noqa ranges", file_path_str, exc_info=True
+                            )
+                    noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
+
+                if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
+                    continue
+
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path_str,
+                    line=line,
+                    match_text=text.strip(),
+                ))
+
+    except Exception:
+        logger.debug("Rust fast-path failed, falling back to LibCST for all rules", exc_info=True)
+        libcst_rules = find_only_rules
+
+    # Determine files that need LibCST processing (remaining find rules + fix rules)
+    files_needing_processing: set[str] = set()
+    for rule in libcst_rules:
+        files_needing_processing |= rule_file_sets.get(rule.name, set())
 
     for file_path in paths:
-        # Skip files entirely if no find-only rules apply and no fix rules exist
+        # Skip files entirely if no LibCST find rules apply and no fix rules exist
         if file_path not in files_needing_processing and not fix_rules:
             continue
 
@@ -235,8 +304,8 @@ def run_lint(
             except cst.ParserSyntaxError:
                 logger.debug("Failed to parse %s for noqa ranges", file_path, exc_info=True)
 
-        # --- Batched find-only rules: read source once, pass to each rule ---
-        for rule in find_only_rules:
+        # --- LibCST find-only rules: read source once, pass to each rule ---
+        for rule in libcst_rules:
             # Skip this rule if file was pre-filtered out
             if file_path not in rule_file_sets.get(rule.name, set()):
                 continue

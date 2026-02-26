@@ -1143,3 +1143,327 @@ def compile_pattern_to_matcher(pattern: Pattern) -> tuple[m.BaseMatcherNode, dic
 def compile_pattern_to_libcst(pattern: Pattern):
     """Compile pattern to LibCST matcher. (Deprecated - use compile_pattern_to_matcher)"""
     return compile_pattern_to_matcher(pattern)
+
+
+# ---------------------------------------------------------------------------
+# Rust IR compiler (for tree-sitter fast path)
+# ---------------------------------------------------------------------------
+
+def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, MetaVar]]:
+    """Shared step 1 of pattern compilation: replace metavars with placeholders.
+
+    Returns (temp_code, metavar_map) where metavar_map maps placeholder names
+    to MetaVar objects.
+    """
+    temp_code = pattern.raw
+    metavar_map: dict[str, MetaVar] = {}
+
+    sorted_metavars = sorted(pattern.metavars, key=lambda mv: (
+        -len(f"$...{mv.name}:{mv.type_constraint or ''}"),
+        -len(f"$...{mv.name}"),
+        -len(f"${mv.name}:{mv.type_constraint or ''}"),
+        -len(f"${mv.name}")
+    ))
+
+    for mv in sorted_metavars:
+        placeholder = f"__META_{mv.name}__"
+        metavar_map[placeholder] = mv
+
+        if mv.ellipsis and mv.type_constraint:
+            pattern_str = f"$...{mv.name}:{mv.type_constraint}"
+        elif mv.ellipsis:
+            pattern_str = f"$...{mv.name}"
+        elif mv.type_constraint:
+            pattern_str = f"${mv.name}:{mv.type_constraint}"
+        else:
+            pattern_str = f"${mv.name}"
+
+        temp_code = temp_code.replace(pattern_str, placeholder)
+
+    return temp_code, metavar_map
+
+
+def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict | None:
+    """Convert a LibCST node to a Rust IR dict.
+
+    Returns None if the node type is not yet supported by the Rust matcher.
+    """
+    if isinstance(node, cst.Name):
+        if node.value in metavar_map:
+            metavar = metavar_map[node.value]
+            # Type constraints not yet supported in Rust matcher — fall back
+            if metavar.type_constraint is not None:
+                return None
+            if metavar.ellipsis:
+                return {"type": "ellipsis"}
+            else:
+                return {"type": "any_expr"}
+        else:
+            return {"type": "name", "value": node.value}
+
+    elif isinstance(node, cst.Call):
+        func_ir = _cst_to_rust_ir(node.func, metavar_map)
+        if func_ir is None:
+            return None
+
+        args_ir = []
+        has_ellipsis = False
+        for arg in node.args:
+            # Star/double-star args not yet supported in Rust matcher — fall back
+            if arg.star in ("*", "**"):
+                return None
+            # Check if this is an ellipsis metavar in arg position
+            if isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
+                metavar = metavar_map[arg.value.value]
+                if metavar.ellipsis:
+                    args_ir.append({"type": "ellipsis"})
+                    has_ellipsis = True
+                    continue
+            arg_ir = _cst_to_rust_ir(arg.value, metavar_map)
+            if arg_ir is None:
+                return None
+            args_ir.append(arg_ir)
+
+        return {
+            "type": "call",
+            "func": func_ir,
+            "args": args_ir,
+            "exact_args": not has_ellipsis,
+        }
+
+    elif isinstance(node, cst.Attribute):
+        value_ir = _cst_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        attr_name = node.attr.value if isinstance(node.attr, cst.Name) else str(node.attr)
+        return {"type": "attr", "value": value_ir, "attr": attr_name}
+
+    elif isinstance(node, cst.Integer):
+        return {"type": "integer", "value": node.value}
+
+    elif isinstance(node, cst.SimpleString):
+        return {"type": "string", "value": node.value}
+
+    elif isinstance(node, cst.List):
+        if len(node.elements) == 0:
+            return {"type": "empty_list"}
+        elems_ir = []
+        for elem in node.elements:
+            if isinstance(elem, cst.Element):
+                elem_ir = _cst_to_rust_ir(elem.value, metavar_map)
+                if elem_ir is None:
+                    return None
+                elems_ir.append(elem_ir)
+            else:
+                return None  # StarredElement or other unsupported
+        return {"type": "list", "elements": elems_ir}
+
+    elif isinstance(node, cst.FunctionDef):
+        # Decorators not yet supported in Rust matcher — fall back
+        if node.decorators:
+            return None
+        # Async functions not yet distinguished in Rust matcher — fall back
+        if node.asynchronous is not None:
+            return None
+
+        name_ir = _cst_to_rust_ir(node.name, metavar_map)
+        if name_ir is None:
+            return None
+
+        params = node.params
+        param_patterns = []
+        all_params = list(params.params) + list(params.posonly_params or []) + list(params.kwonly_params or [])
+
+        for p in all_params:
+            if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
+                metavar = metavar_map[p.name.value]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                    continue
+                # Non-ellipsis metavar param
+                if p.default is not None:
+                    dv_ir = _cst_to_rust_ir(p.default, metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                # Literal param name
+                if p.default is not None:
+                    dv_ir = _cst_to_rust_ir(p.default, metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    pname = p.name.value if isinstance(p.name, cst.Name) else str(p.name)
+                    param_patterns.append({"type": "name", "value": pname})
+
+        # Handle *args and **kwargs in params
+        if params.star_arg and isinstance(params.star_arg, cst.Param):
+            p = params.star_arg
+            if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
+                metavar = metavar_map[p.name.value]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+        if params.star_kwarg:
+            p = params.star_kwarg
+            if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
+                metavar = metavar_map[p.name.value]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+
+        return {"type": "funcdef", "name": name_ir, "params": param_patterns}
+
+    elif isinstance(node, cst.ClassDef):
+        name_ir = _cst_to_rust_ir(node.name, metavar_map)
+        if name_ir is None:
+            return None
+
+        bases_ir = []
+        for base_arg in node.bases:
+            base_ir = _cst_to_rust_ir(base_arg.value, metavar_map)
+            if base_ir is None:
+                return None
+            bases_ir.append(base_ir)
+
+        return {"type": "classdef", "name": name_ir, "bases": bases_ir}
+
+    else:
+        # Unsupported node type — fall back to LibCST path
+        return None
+
+
+def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
+    """Compile a pattern string to Rust IR dict for the tree-sitter fast path.
+
+    Returns None if the pattern is not yet supported by the Rust matcher
+    (e.g., assignments, comprehensions, binary ops, f-strings).
+    In that case, the caller should fall back to the LibCST path.
+
+    Args:
+        pattern_str: Raw pattern string, e.g. "print($...ARGS)" or
+                     "$X.objects.filter($...ARGS)"
+
+    Returns:
+        Dict IR like {"type": "call", "func": ..., "args": [...]} or None.
+    """
+    try:
+        pattern = parse_pattern(pattern_str)
+        temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
+
+        # Handle compound statement headers
+        is_except_header = _is_except_header(temp_code)
+        is_compound_header = _is_compound_statement_header(temp_code)
+        is_try = temp_code.strip() == "try:"
+        parse_code = temp_code
+        if is_try:
+            parse_code = "try:\n    pass\nexcept Exception:\n    pass"
+        elif is_except_header:
+            parse_code = "try:\n    pass\n" + temp_code + "\n    pass"
+        elif is_compound_header:
+            parse_code = temp_code + "\n    pass"
+
+        # Parse as Python expression or statement
+        try:
+            expr = cst.parse_expression(parse_code)
+        except Exception:
+            try:
+                module = cst.parse_module(parse_code)
+                if module.body:
+                    expr = module.body[0]
+                    if isinstance(expr, cst.SimpleStatementLine) and len(expr.body) == 1:
+                        expr = expr.body[0]
+                    if is_try and isinstance(expr, cst.Try):
+                        pass
+                    elif is_except_header and isinstance(expr, cst.Try):
+                        if expr.handlers:
+                            expr = expr.handlers[0]
+                else:
+                    return None
+            except Exception:
+                return None
+
+        return _cst_to_rust_ir(expr, metavar_map)
+
+    except Exception:
+        return None
+
+
+def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
+    """Compile an inside/not_inside constraint string to Rust IR dict.
+
+    Handles:
+    - "def" → any function definition
+    - "class" → any class definition
+    - "def test_*" → function with name matching glob
+    - "class MyClass:" → class with specific name
+    - Full pattern strings like "class $C(TestCase):"
+
+    Returns None if the constraint is not supported by the Rust matcher.
+    """
+    if constraint is None:
+        return None
+
+    if constraint == "def":
+        return {
+            "type": "funcdef",
+            "name": {"type": "any_expr"},
+            "params": [{"type": "ellipsis"}],
+        }
+
+    if constraint == "async def":
+        # tree-sitter doesn't distinguish async/sync in our matcher yet
+        # Fall back to LibCST for async def constraints
+        return None
+
+    if constraint == "class":
+        return {
+            "type": "classdef",
+            "name": {"type": "any_expr"},
+            "bases": [{"type": "ellipsis"}],
+        }
+
+    # "def name_pattern" or "class name_pattern"
+    for keyword in ("def", "class"):
+        if constraint.startswith(keyword + " "):
+            name_pattern = constraint[len(keyword) + 1:].strip()
+            # Remove trailing colon if present (e.g., "def test_*:")
+            name_pattern = name_pattern.rstrip(":").strip()
+            if "*" in name_pattern:
+                name_ir = {"type": "name_glob", "value": name_pattern}
+            else:
+                name_ir = {"type": "name", "value": name_pattern}
+            if keyword == "def":
+                return {
+                    "type": "funcdef",
+                    "name": name_ir,
+                    "params": [{"type": "ellipsis"}],
+                }
+            else:
+                return {
+                    "type": "classdef",
+                    "name": name_ir,
+                    "bases": [{"type": "ellipsis"}],
+                }
+
+    # Try as a full pattern (e.g., "class $C(TestCase):")
+    # Strip trailing colon first for pattern compilation
+    stripped = constraint.rstrip()
+    if stripped.endswith(":"):
+        # It might be a compound statement header — try compiling as pattern
+        ir = compile_pattern_to_rust_ir(stripped)
+        if ir is not None:
+            return ir
+
+    # Try as a plain pattern
+    ir = compile_pattern_to_rust_ir(constraint)
+    return ir

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod scanner;
 mod pattern;
 mod symbols;
+mod matcher;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -187,5 +188,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     Ok(())
 }
