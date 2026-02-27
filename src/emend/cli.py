@@ -114,6 +114,23 @@ app = typer.Typer(
 )
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from emend import __version__
+        typer.echo(f"emend {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _app_callback(
+    version: Annotated[
+        Optional[bool],
+        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version and exit."),
+    ] = None,
+) -> None:
+    pass
+
+
 # ============================================================================
 # Unified Commands
 # ============================================================================
