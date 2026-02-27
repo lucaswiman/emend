@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.2.0)
+## 0.2.0
 
 ### Features
 
@@ -20,23 +20,18 @@ emend replace 'Union["$X", $Y]' '${X.content} | $Y' src/ --apply
 
 Use `${NAME.content}` in a replacement template to strip surrounding quotes from a captured string node. If the captured node is not a string literal, the replacement is skipped for that match. Useful for migrating `Union["X", Y]` (deferred-annotation style) to PEP 604 `X | Y` union syntax.
 
+#### `emend deadcode` detection
+
+* Traces references to find unreferenced symbols.
+* False positive reduction:
+  * Uses heuristics to see where symbols may be referenced as strings.
+  * Special-cases common framework decorator names like `@post`.
+* Finds last reference in git.
+* May be used in lint, but is too slow to use as a pre-commit hook on large projects.
+
 #### Performance
 
-- **Parse cache** — LRU cache of 256 parsed modules, keyed by source hash.
-- **File list cache** — per-project-root cache with mtime-based invalidation.
-- **Symbol collection cache** (PR #4) — cached per file to avoid re-scanning.
-- **Import graph pre-filtering** — skip files that cannot possibly match a pattern.
-- **Lint batching** — process all rules in one pass per file.
-- **Rust accelerator** (PR #7, `emend-core` crate) — optional PyO3 extension for:
-  - Fast recursive Python file discovery (replaces `os.walk`)
-  - Content-based pre-filtering using `memchr` (skips MetadataWrapper for files that can't match)
-  - Import extraction for call-graph operations
-  - Builds via `make venv`; gracefully absent if not built.
-
-### Fixes
-
-- Fix publish workflow: `fetch-depth: 0` on checkout so `hatch-vcs` can read the release tag and produce the correct version (without it, PyPI rejects the upload due to the local version label).
-- `emend-core` excluded from `pip install emend` dependencies (not on PyPI; built locally via Makefile).
+Refactored much of the codebase to use rust, treesitter and python freethreading.
 
 ---
 
