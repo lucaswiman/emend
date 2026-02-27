@@ -480,12 +480,45 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
         _print_symbol_flat(sym.children, full_path)
 
 
+def dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
+    """Convert Rust collect_symbols_batch dicts to TreeSymbol objects."""
+    return [
+        TreeSymbol(
+            name=d["name"],
+            kind=d["kind"],
+            signature=d.get("signature"),
+            type_annotation=d.get("type_annotation"),
+            children=dicts_to_tree_symbols(d.get("children", [])),
+            depth=d["depth"],
+            line=d.get("line") or None,
+            end_line=d.get("end_line") or None,
+            path=d.get("path", []),
+        )
+        for d in dicts
+    ]
+
+
 def collect_symbols(
     file: str,
     tree_depth: int | None = None,
     selector: Optional[str] = None,
 ) -> list[TreeSymbol]:
-    """Collect symbols from a file, returning list of TreeSymbol objects."""
+    """Collect symbols from a file, returning list of TreeSymbol objects.
+
+    Tries the Rust fast path first, falls back to LibCST on failure.
+    """
+    try:
+        import emend_core
+        result_dicts = emend_core.collect_symbols_batch(
+            [file], max_depth=tree_depth, selector=selector,
+        )
+        if result_dicts:
+            return dicts_to_tree_symbols(result_dicts[0][1])
+        return []
+    except Exception:
+        pass
+
+    # LibCST fallback
     file_path = Path(file)
     code = file_path.read_text()
 

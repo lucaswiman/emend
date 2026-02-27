@@ -14,7 +14,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph,
-    prefilter_files_for_pattern,
+    extract_pattern_literals,
 )
 from emend import ast_commands
 
@@ -310,19 +310,35 @@ def search(
             file_path_obj = Path(file_for_summary)
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
                 files, _ = resolve_files(file_for_summary)
-                for fp in files:
-                    try:
-                        symbols = ast_commands.collect_symbols(
-                            str(fp), tree_depth=tree_depth, selector=selector_for_summary
-                        )
-                        print(f"\nModule: {fp}")
+                try:
+                    import emend_core
+                    file_strs = [str(fp) for fp in files]
+                    batch_results = emend_core.collect_symbols_batch(
+                        file_strs, max_depth=tree_depth, selector=selector_for_summary,
+                    )
+                    for file_path_str, symbol_dicts in batch_results:
+                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
+                        print(f"\nModule: {file_path_str}")
                         if symbols:
                             if flat_output:
                                 ast_commands._print_symbol_flat(symbols)
                             else:
                                 ast_commands._print_symbol_tree(symbols, indent=1)
-                    except Exception:
-                        continue
+                except Exception:
+                    # Fallback: process files sequentially with LibCST
+                    for fp in files:
+                        try:
+                            symbols = ast_commands.collect_symbols(
+                                str(fp), tree_depth=tree_depth, selector=selector_for_summary
+                            )
+                            print(f"\nModule: {fp}")
+                            if symbols:
+                                if flat_output:
+                                    ast_commands._print_symbol_flat(symbols)
+                                else:
+                                    ast_commands._print_symbol_tree(symbols, indent=1)
+                        except Exception:
+                            continue
             else:
                 symbols = ast_commands.collect_symbols(
                     file_for_summary, tree_depth=tree_depth, selector=selector_for_summary
@@ -339,33 +355,74 @@ def search(
         if is_pattern_mode:
             target_path = path or "."
             import libcst as cst
+            import emend_core
 
             files, is_multi_file = resolve_files(target_path)
 
-            # Pre-filter files using Rust memchr to skip files that can't match
-            if is_multi_file and len(files) > 1:
-                file_strs = [str(f) for f in files]
-                filtered = prefilter_files_for_pattern(file_strs, query)
-                files = [Path(f) for f in filtered]
-
             all_matches = []
-            for file_path in files:
-                file_path_str = str(file_path)
-                try:
-                    file_matches = find_pattern(
-                        query, file_path_str,
-                        scope=where_scope,
-                        inside=where_inside,
-                        not_inside=where_not_inside,
-                        imported_from=imported_from,
-                        scope_local=scope_local,
-                    )
-                    for match in file_matches:
-                        all_matches.append((file_path_str, match))
-                except FileNotFoundError:
-                    if not is_multi_file:
-                        raise
-                    continue
+            if is_multi_file and len(files) > 1:
+                # Single Rust pass: parallel read + filter (no double read)
+                file_strs = [str(f) for f in files]
+                literals = extract_pattern_literals(query)
+                file_contents = emend_core.read_and_filter_files(file_strs, literals)
+
+                # Try Rust batch fast-path (no scope/imported_from/scope_local constraints)
+                rust_path_used = False
+                if where_scope is None and imported_from is None and not scope_local:
+                    try:
+                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+                        from emend.transform import PatternMatch
+                        pattern_ir = compile_pattern_to_rust_ir(query)
+                        if pattern_ir is not None:
+                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
+                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
+                            if (where_inside is None or inside_ir is not None) and \
+                               (where_not_inside is None or not_inside_ir is not None):
+                                raw_matches = emend_core.find_pattern_in_files(
+                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                                )
+                                for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                                    all_matches.append((file_path_str, PatternMatch(
+                                        node=None, captures={}, line=line, matched_text=text
+                                    )))
+                                rust_path_used = True
+                    except Exception:
+                        pass
+
+                if not rust_path_used:
+                    for file_path_str, content in file_contents:
+                        try:
+                            file_matches = find_pattern(
+                                query, file_path_str,
+                                scope=where_scope,
+                                inside=where_inside,
+                                not_inside=where_not_inside,
+                                imported_from=imported_from,
+                                scope_local=scope_local,
+                                source_override=content,
+                            )
+                            for match in file_matches:
+                                all_matches.append((file_path_str, match))
+                        except Exception:
+                            continue
+            else:
+                for file_path in files:
+                    file_path_str = str(file_path)
+                    try:
+                        file_matches = find_pattern(
+                            query, file_path_str,
+                            scope=where_scope,
+                            inside=where_inside,
+                            not_inside=where_not_inside,
+                            imported_from=imported_from,
+                            scope_local=scope_local,
+                        )
+                        for match in file_matches:
+                            all_matches.append((file_path_str, match))
+                    except FileNotFoundError:
+                        if not is_multi_file:
+                            raise
+                        continue
 
             if count_output:
                 print(len(all_matches))
@@ -373,7 +430,10 @@ def search(
                 import json
                 serialized_matches = []
                 for file_path_str, match in all_matches:
-                    code_str = cst.Module([]).code_for_node(match.node).strip()
+                    if match.matched_text is not None:
+                        code_str = match.matched_text.strip()
+                    else:
+                        code_str = cst.Module([]).code_for_node(match.node).strip()
                     captures = {}
                     for cap_name, captured in match.captures.items():
                         if isinstance(captured, tuple):
@@ -809,6 +869,7 @@ def refs_cmd(
 
         references = find_references(
             parsed_selector,
+            project_path=project,
             include_definition=not exclude_definition,
             include_imports=not exclude_imports,
             writes_only=writes_only,

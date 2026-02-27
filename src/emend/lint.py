@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml
 import libcst as cst
 
-from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern
+from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?:\s*:\s*(.+))?", re.IGNORECASE)
 
@@ -195,27 +195,172 @@ def run_lint(
 
     violations = []
 
-    # Pre-filter: for each find-only rule, determine which files could match
+    # Batch-read all candidate files in parallel via Rust
+    import emend_core
+    all_file_contents: dict[str, str] = dict(emend_core.read_and_filter_files(paths, []))
+
+    # Pre-filter per rule using already-read content (no extra I/O)
     rule_file_sets: dict[str, set[str]] = {}
     for rule in find_only_rules:
-        filtered = prefilter_files_for_pattern(paths, rule.find)
-        rule_file_sets[rule.name] = set(filtered)
+        literals = extract_pattern_literals(rule.find)
+        matching: set[str] = set()
+        for fpath, content in all_file_contents.items():
+            if all(lit in content for lit in literals):
+                matching.add(fpath)
+        rule_file_sets[rule.name] = matching
 
-    # Determine files that need processing (at least one rule applies)
-    files_needing_processing = set()
-    for file_set in rule_file_sets.values():
-        files_needing_processing |= file_set
+    # --- Rust fast-path: batch process compatible find-only rules ---
+    libcst_rules = find_only_rules  # Will be narrowed if Rust handles some rules
+    try:
+        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
 
+        rust_rules = []
+        libcst_fallback = []
+        for rule in find_only_rules:
+            ir = compile_pattern_to_rust_ir(rule.find)
+            if ir is None:
+                libcst_fallback.append(rule)
+                continue
+            ni_ir = compile_constraint_to_rust_ir(rule.not_inside) if rule.not_inside else None
+            if rule.not_inside is not None and ni_ir is None:
+                # not_inside constraint didn't compile — fall back to LibCST
+                libcst_fallback.append(rule)
+                continue
+            rust_rules.append((rule, ir, ni_ir))
+
+        libcst_rules = libcst_fallback
+
+        # Single-pass batched scan: parse each file once, apply all rules.
+        # Union of per-rule file sets — extra files cost one extra tree walk
+        # but save N_rules-1 re-parses for every file in the intersection.
+        all_rust_files = set()
+        for rule, _ir, _ni_ir in rust_rules:
+            all_rust_files |= rule_file_sets.get(rule.name, set())
+        rust_file_pairs = [
+            (fp, all_file_contents[fp])
+            for fp in all_rust_files
+            if fp in all_file_contents
+        ]
+
+        # noqa_ranges cache: lazily built per file when matches are found
+        noqa_ranges_cache: dict[str, list[tuple[int, int, set[str] | None]]] = {}
+
+        if rust_file_pairs and rust_rules:
+            patterns_for_batch = [(ir, ni_ir) for _rule, ir, ni_ir in rust_rules]
+            batch_matches = emend_core.find_multi_patterns_in_files(
+                rust_file_pairs, patterns_for_batch
+            )
+            for rule_idx, file_path_str, line, _col, _end_line, _end_col, text in batch_matches:
+                # Skip if this file wasn't in the per-rule candidate set
+                rule = rust_rules[rule_idx][0]
+                if file_path_str not in rule_file_sets.get(rule.name, set()):
+                    continue
+
+                if file_path_str not in noqa_ranges_cache:
+                    src = all_file_contents.get(file_path_str, "")
+                    noqa_comments = parse_noqa_comments(src)
+                    noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
+                    if noqa_comments:
+                        try:
+                            module = cst.parse_module(src)
+                            wrapper = cst.MetadataWrapper(module)
+                            mapper = _StatementRangeMapper()
+                            wrapper.visit(mapper)
+                            noqa_ranges_for_file = build_noqa_ranges(
+                                noqa_comments, mapper.line_to_range
+                            )
+                        except cst.ParserSyntaxError:
+                            logger.debug(
+                                "Failed to parse %s for noqa ranges",
+                                file_path_str,
+                                exc_info=True,
+                            )
+                    noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
+
+                if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
+                    continue
+
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path_str,
+                    line=line,
+                    match_text=text.strip(),
+                ))
+
+    except Exception:
+        logger.debug("Rust fast-path failed, falling back to LibCST for all rules", exc_info=True)
+        libcst_rules = find_only_rules
+
+    # Determine files that need LibCST processing (remaining find rules + fix rules)
+    files_needing_processing: set[str] = set()
+    for rule in libcst_rules:
+        files_needing_processing |= rule_file_sets.get(rule.name, set())
+
+    # --- LibCST find-only rules ---
+    def _process_file_libcst(file_path: str) -> list[LintViolation]:
+        source = all_file_contents.get(file_path)
+        if source is None:
+            return []
+        file_violations: list[LintViolation] = []
+        # Build noqa ranges lazily: only when a rule actually produces matches.
+        noqa_ranges: list[tuple[int, int, set[str] | None]] | None = None
+        for rule in libcst_rules:
+            if file_path not in rule_file_sets.get(rule.name, set()):
+                continue
+            try:
+                matches = find_pattern(
+                    rule.find,
+                    file_path,
+                    not_inside=rule.not_inside,
+                    source_override=source,
+                )
+            except Exception:
+                logger.debug(
+                    "find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True
+                )
+                continue
+            if not matches:
+                continue
+            # First match for this file: build noqa ranges now
+            if noqa_ranges is None:
+                noqa_ranges = []
+                noqa_comments = parse_noqa_comments(source)
+                if noqa_comments:
+                    try:
+                        module = cst.parse_module(source)
+                        wrapper = cst.MetadataWrapper(module)
+                        mapper = _StatementRangeMapper()
+                        wrapper.visit(mapper)
+                        noqa_ranges = build_noqa_ranges(noqa_comments, mapper.line_to_range)
+                    except cst.ParserSyntaxError:
+                        logger.debug(
+                            "Failed to parse %s for noqa ranges", file_path, exc_info=True
+                        )
+            for match in matches:
+                if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
+                    continue
+                match_text = cst.Module([]).code_for_node(match.node).strip()
+                file_violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path,
+                    line=match.line or 0,
+                    match_text=match_text,
+                ))
+        return file_violations
+
+    for fp in paths:
+        if fp in files_needing_processing:
+            violations.extend(_process_file_libcst(fp))
+
+    # --- Fix rules: these mutate the file so must run sequentially ---
     for file_path in paths:
-        # Skip files entirely if no find-only rules apply and no fix rules exist
-        if file_path not in files_needing_processing and not fix_rules:
+        if not fix_rules:
+            break
+        source = all_file_contents.get(file_path)
+        if source is None:
             continue
-
-        try:
-            source = Path(file_path).read_text()
-        except Exception:
-            continue
-
         noqa_comments = parse_noqa_comments(source)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
@@ -228,35 +373,6 @@ def run_lint(
             except cst.ParserSyntaxError:
                 logger.debug("Failed to parse %s for noqa ranges", file_path, exc_info=True)
 
-        # --- Batched find-only rules: read source once, pass to each rule ---
-        for rule in find_only_rules:
-            # Skip this rule if file was pre-filtered out
-            if file_path not in rule_file_sets.get(rule.name, set()):
-                continue
-            try:
-                matches = find_pattern(
-                    rule.find,
-                    file_path,
-                    not_inside=rule.not_inside,
-                    source_override=source,
-                )
-            except Exception:
-                logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
-                continue
-
-            for match in matches:
-                if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
-                    continue
-                match_text = cst.Module([]).code_for_node(match.node).strip()
-                violations.append(LintViolation(
-                    rule_name=rule.name,
-                    message=rule.message,
-                    file_path=file_path,
-                    line=match.line or 0,
-                    match_text=match_text,
-                ))
-
-        # --- Fix rules: these mutate the file so must run sequentially ---
         for rule in fix_rules:
             try:
                 matches = find_pattern(

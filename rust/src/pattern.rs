@@ -1,7 +1,7 @@
 //! Tree-sitter-based pattern matching for Python code.
 
 use crate::Match;
-use tree_sitter::{Language, Parser, Node, Tree};
+use tree_sitter::{Parser, Node, Tree};
 
 /// Get a thread-local Python parser.
 fn get_parser() -> Parser {
@@ -14,7 +14,7 @@ fn get_parser() -> Parser {
 }
 
 /// Parse Python source into a tree-sitter Tree.
-fn parse_python(source: &str) -> Option<Tree> {
+pub(crate) fn parse_python(source: &str) -> Option<Tree> {
     let mut parser = get_parser();
     parser.parse(source.as_bytes(), None)
 }
@@ -212,6 +212,101 @@ pub fn extract_import_modules(source: &str) -> Vec<String> {
     modules.sort();
     modules.dedup();
     modules
+}
+
+/// Check if a Python source file imports from a specific target module.
+///
+/// Returns true if the source contains an import that matches `target_module`
+/// (including prefix expansion: `from a.b.c import x` matches `a.b.c`).
+pub fn files_importing_module_from_source(source: &str, target_module: &str) -> bool {
+    let modules = extract_import_modules(source);
+    modules.contains(&target_module.to_string())
+}
+
+/// Collect callees for all top-level functions/classes in a Python source file.
+///
+/// Returns Vec<(symbol_name, Vec<callee_name>)> where each callee_name is
+/// the bare function/method name extracted from call expressions.
+/// Deduplicates callee names within each symbol (matching _CalleeCollector._seen behavior).
+pub fn collect_callees_from_source(source: &str) -> Vec<(String, Vec<String>)> {
+    let tree = match parse_python(source) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut results = Vec::new();
+
+    // Walk direct children of the module (top-level statements)
+    let mut cursor = root.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let node = cursor.node();
+            let sym_name = match node.kind() {
+                "function_definition" | "class_definition" => {
+                    node.child_by_field_name("name")
+                        .and_then(|n| std::str::from_utf8(&source_bytes[n.start_byte()..n.end_byte()]).ok())
+                        .map(|s| s.to_string())
+                }
+                // decorated definition: decorator* + function_definition/class_definition
+                "decorated_definition" => {
+                    // The last child should be the actual function/class def
+                    let child_count = node.child_count();
+                    let mut def_name = None;
+                    for i in 0..child_count {
+                        if let Some(child) = node.child(i) {
+                            if child.kind() == "function_definition" || child.kind() == "class_definition" {
+                                def_name = child.child_by_field_name("name")
+                                    .and_then(|n| std::str::from_utf8(&source_bytes[n.start_byte()..n.end_byte()]).ok())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                    }
+                    def_name
+                }
+                _ => None,
+            };
+
+            if let Some(name) = sym_name {
+                let mut callees: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+
+                walk_tree(node, source_bytes, &mut |n| {
+                    if n.kind() == "call" {
+                        if let Some(func_node) = n.child_by_field_name("function") {
+                            let callee_name = match func_node.kind() {
+                                "identifier" => {
+                                    std::str::from_utf8(&source_bytes[func_node.start_byte()..func_node.end_byte()])
+                                        .ok()
+                                        .map(|s| s.to_string())
+                                }
+                                "attribute" => {
+                                    func_node.child_by_field_name("attribute")
+                                        .and_then(|attr| std::str::from_utf8(&source_bytes[attr.start_byte()..attr.end_byte()]).ok())
+                                        .map(|s| s.to_string())
+                                }
+                                _ => None,
+                            };
+                            if let Some(cn) = callee_name {
+                                if seen.insert(cn.clone()) {
+                                    callees.push(cn);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                results.push((name, callees));
+            }
+
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    results
 }
 
 /// Walk all nodes in a tree-sitter tree, calling `f` on each node.

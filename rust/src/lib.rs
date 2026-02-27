@@ -4,12 +4,13 @@
 //! tree-sitter-based pattern matching exposed to Python via PyO3.
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 use rayon::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod scanner;
 mod pattern;
+mod symbols;
+mod matcher;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -132,6 +133,36 @@ fn find_method_calls_in_files(files: Vec<String>, method_name: &str) -> PyResult
     Ok(results.into_iter().flatten().collect())
 }
 
+/// Read files in parallel and return (path, content) for files matching all hints.
+///
+/// If hints is empty, reads all files (parallel I/O only).
+/// All hint strings must appear in the file content (AND logic).
+#[pyfunction]
+fn read_and_filter_files(files: Vec<String>, hints: Vec<String>) -> PyResult<Vec<(String, String)>> {
+    let results: Vec<(String, String)> = files
+        .into_par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(&path).ok()?;
+            for hint in &hints {
+                if !content.contains(hint.as_str()) {
+                    return None;
+                }
+            }
+            Some((path, content))
+        })
+        .collect();
+    Ok(results)
+}
+
+/// Collect callees for all top-level symbols in a Python source file.
+///
+/// Returns a list of (symbol_name, [callee_names]) tuples.
+/// Callee names are bare function/method names (deduplicated).
+#[pyfunction]
+fn collect_callees(source: &str) -> PyResult<Vec<(String, Vec<String>)>> {
+    Ok(pattern::collect_callees_from_source(source))
+}
+
 /// Extract all import statements from Python files in parallel.
 ///
 /// Returns a list of (file_path, module_name) tuples representing
@@ -153,8 +184,36 @@ fn extract_imports(files: Vec<String>) -> PyResult<Vec<(String, Vec<String>)>> {
     Ok(results)
 }
 
+/// Find files that import from a specific target module.
+///
+/// For each file (in parallel):
+/// 1. Read the file
+/// 2. Text check: skip files not containing the target module name as a string
+/// 3. Parse with tree-sitter, extract import modules (with prefix expansion)
+/// 4. Check if target_module is among the extracted modules
+///
+/// Returns paths of files that import from the target module.
+#[pyfunction]
+fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<Vec<String>> {
+    let target = target_module.to_string();
+    let result: Vec<String> = files
+        .into_par_iter()
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .map(|content| {
+                    if !content.contains(&target) {
+                        return false;
+                    }
+                    pattern::files_importing_module_from_source(&content, &target)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    Ok(result)
+}
+
 /// Python module definition.
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_function(wrap_pyfunction!(collect_python_files, m)?)?;
@@ -162,6 +221,12 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_name_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(find_calls_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(find_method_calls_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
+    m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
     Ok(())
 }

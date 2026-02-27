@@ -1,11 +1,13 @@
 """Transform engine for extended selectors."""
 from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 import ast
 import difflib
 import hashlib
+import threading
 import libcst as cst
 from libcst import matchers as m
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern
 # Uses a hash of the source as key to keep memory bounded.
 # LRU cache of 256 entries covers typical project operations.
 _parse_cache: dict[bytes, cst.Module] = {}
+_parse_cache_lock = threading.Lock()
 _PARSE_CACHE_MAX = 256
 
 
@@ -30,19 +33,21 @@ def _cached_parse(source: str) -> cst.Module:
     """Parse Python source into a LibCST Module, with caching.
 
     Repeated calls with identical source text return the same Module
-    object without re-parsing.
+    object without re-parsing. Thread-safe for use with ThreadPoolExecutor.
     """
     key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
-    cached = _parse_cache.get(key)
+    with _parse_cache_lock:
+        cached = _parse_cache.get(key)
     if cached is not None:
         return cached
     module = cst.parse_module(source)
-    if len(_parse_cache) >= _PARSE_CACHE_MAX:
-        # Evict oldest ~25% of entries
-        keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
-        for k in keys_to_evict:
-            del _parse_cache[k]
-    _parse_cache[key] = module
+    with _parse_cache_lock:
+        if len(_parse_cache) >= _PARSE_CACHE_MAX:
+            # Evict oldest ~25% of entries
+            keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
+            for k in keys_to_evict:
+                del _parse_cache[k]
+        _parse_cache[key] = module
     return module
 
 
@@ -73,24 +78,6 @@ def extract_pattern_literals(pattern_str: str) -> list[str]:
                     'lambda', 'global', 'nonlocal', 'del', 'assert', 'async',
                     'await'}
     return [t for t in tokens if t not in _PY_KEYWORDS and len(t) > 1]
-
-
-def prefilter_files_for_pattern(files: list[str], pattern_str: str) -> list[str]:
-    """Use Rust to quickly filter files that could match a pattern.
-
-    Extracts literal identifiers from the pattern and uses memchr-accelerated
-    substring search to eliminate files that don't contain required tokens.
-    """
-    literals = extract_pattern_literals(pattern_str)
-    if not literals:
-        return files
-    # Filter for each literal token (all must be present)
-    remaining = files
-    for literal in literals:
-        remaining = _rust.filter_files_by_content(remaining, literal)
-        if not remaining:
-            return []
-    return remaining
 
 
 # Helper functions for cross-project operations
@@ -159,58 +146,29 @@ def _collect_python_files(project_root: str) -> list[str]:
     return files
 
 
-# ---------------------------------------------------------------------------
-# Import graph for pre-filtering cross-project operations
-# ---------------------------------------------------------------------------
-
-# Cache: resolved project root -> {module_dotted_name -> [file_paths that import it]}
-_import_graph_cache: dict[str, tuple[int, dict[str, list[str]]]] = {}
-
-
-def _build_import_graph(project_root: str) -> dict[str, list[str]]:
-    """Build a reverse import graph: module_name -> [files that import it].
-
-    Uses Rust emend_core for parallel import extraction via tree-sitter.
-    """
-    py_files = _collect_python_files(project_root)
-
-    graph: dict[str, list[str]] = {}
-    for file_path, modules in _rust.extract_imports(py_files):
-        for mod in modules:
-            graph.setdefault(mod, []).append(file_path)
-    return graph
-
-
-def get_import_graph(project_root: str) -> dict[str, list[str]]:
-    """Get the cached import graph for a project root.
-
-    Returns a dict mapping module dotted names to lists of file paths
-    that import from that module.
-    """
-    import os
-    resolved = str(Path(project_root).resolve())
-    try:
-        root_mtime = os.stat(resolved).st_mtime_ns
-    except OSError:
-        return _build_import_graph(resolved)
-    cached = _import_graph_cache.get(resolved)
-    if cached is not None and cached[0] == root_mtime:
-        return cached[1]
-    graph = _build_import_graph(resolved)
-    _import_graph_cache[resolved] = (root_mtime, graph)
-    return graph
-
-
 def _files_importing_module(project_root: str, module_dotted: str) -> set[str] | None:
     """Return the set of files that import from *module_dotted*, or None if unknown.
 
-    Returns None if the import graph cannot be built (caller should fall back
+    Uses the Rust targeted import filter: text-prefilters then tree-sitter-parses
+    only candidate files, avoiding building the full import graph.
+
+    Returns None if the filter cannot be applied (caller should fall back
     to scanning all files).
     """
-    graph = get_import_graph(project_root)
-    if not graph:
+    py_files = _collect_python_files(project_root)
+    try:
+        matching = _rust.files_importing_module(py_files, module_dotted)
+        return set(matching)
+    except Exception:
         return None
-    return set(graph.get(module_dotted, []))
+
+
+def prefilter_files_structural(files: list[str], name: str) -> list[str]:
+    """Structural pre-filter: use tree-sitter to find files containing
+    an actual identifier matching name (not just substring in strings/comments).
+    """
+    matches = _rust.find_name_in_files(files, name)
+    return list({m.file for m in matches})
 
 
 def visit_project(
@@ -240,29 +198,63 @@ def visit_project(
                     if f in candidate_files
                     or (target_file and str(Path(f).resolve()) == target_file)]
 
-    for py_file in py_files:
-        try:
-            content = Path(py_file).read_text()
-        except Exception:
-            continue
+    # Structural pre-filter for cross-project ops: use tree-sitter to find
+    # files with actual identifier matches (eliminates strings/comments false positives)
+    if metadata_providers and name_hint:
+        py_files = prefilter_files_structural(py_files, name_hint)
+        # Re-add target_file if it was filtered out (definition file must always be visited)
+        if target_file and target_file not in py_files:
+            py_files.append(target_file)
 
-        if name_hint not in content:
-            continue
+    # Batch read + filter in Rust (parallel I/O + substring pre-filter)
+    hints = [name_hint] if name_hint and not metadata_providers else []
+    file_contents = _rust.read_and_filter_files(py_files, hints)
 
-        is_def_file = (target_file is not None
-                       and str(Path(py_file).resolve()) == target_file)
+    # Ensure target_file is always included (definition file must be visited)
+    if target_file and not metadata_providers:
+        seen = {str(Path(f).resolve()) for f, _ in file_contents}
+        if target_file not in seen:
+            try:
+                content = Path(target_file).read_text()
+                file_contents.append((target_file, content))
+            except Exception:
+                pass
 
-        try:
-            module = _cached_parse(content)
-            visitor = visitor_factory(py_file, is_def_file)
-            if metadata_providers:
+    if metadata_providers and len(file_contents) > 1:
+        # Parallel path: each MetadataWrapper is independent per file — no shared state
+        def _visit_one(args: tuple[str, str]) -> tuple[str, cst.Module, object] | None:
+            py_file, content = args
+            is_def_file = (target_file is not None
+                           and str(Path(py_file).resolve()) == target_file)
+            try:
+                module = _cached_parse(content)
+                visitor = visitor_factory(py_file, is_def_file)
                 wrapper = cst.metadata.MetadataWrapper(module)
                 result_module = wrapper.visit(visitor)
-            else:
-                result_module = module.visit(visitor)
-            yield (py_file, result_module, visitor)
-        except Exception:
-            continue
+                return (py_file, result_module, visitor)
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor() as executor:
+            for result in executor.map(_visit_one, file_contents):
+                if result is not None:
+                    yield result
+    else:
+        # Sequential path: no metadata providers or single file
+        for py_file, content in file_contents:
+            is_def_file = (target_file is not None
+                           and str(Path(py_file).resolve()) == target_file)
+            try:
+                module = _cached_parse(content)
+                visitor = visitor_factory(py_file, is_def_file)
+                if metadata_providers:
+                    wrapper = cst.metadata.MetadataWrapper(module)
+                    result_module = wrapper.visit(visitor)
+                else:
+                    result_module = module.visit(visitor)
+                yield (py_file, result_module, visitor)
+            except Exception:
+                continue
 
 
 class SymbolFinder(cst.CSTVisitor):
@@ -1795,9 +1787,10 @@ def _extract_string_content(node: cst.CSTNode) -> str | None:
 @dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
-    node: cst.CSTNode
+    node: cst.CSTNode | None
     captures: dict[str, cst.CSTNode]
     line: int | None = None
+    matched_text: str | None = None
 
 
 def _extract_all_captures(node: cst.CSTNode, matcher: m.BaseMatcherNode, metavar_names: set[str]) -> dict[str, list[cst.CSTNode]]:
@@ -2363,6 +2356,7 @@ def find_pattern(
     # Validate inside/not_inside constraints
     if inside and not_inside:
         raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
+
     # Parse pattern and compile to matcher
     pattern = parse_pattern(pattern_str)
     matcher, ellipsis_info = compile_pattern_to_matcher(pattern)
@@ -3788,9 +3782,12 @@ def find_references(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_references")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
@@ -3800,13 +3797,13 @@ def find_references(
 
     # Use import graph to pre-filter: only check files that import
     # from the module defining the target symbol.
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     references = []
     for _py_file, _module, finder in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
@@ -3927,9 +3924,12 @@ def find_callers(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callers")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
@@ -3938,13 +3938,13 @@ def find_callers(
         )
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     callers = []
     for _py_file, _module, visitor in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
@@ -4070,30 +4070,35 @@ def generate_graph(
     from .component_selector import ExtendedSelector
 
     content = Path(file_path).read_text()
-    module = cst.parse_module(content)
 
-    # Collect all top-level function/class defs
-    functions = []
-    for stmt in module.body:
-        if isinstance(stmt, cst.FunctionDef):
-            functions.append(stmt.name.value)
-        elif isinstance(stmt, cst.ClassDef):
-            functions.append(stmt.name.value)
+    # Try Rust fast-path: single-pass tree-sitter callee extraction
+    try:
+        import emend_core
+        raw = emend_core.collect_callees(content)
+        edges: dict[str, list[str]] = {name: callees for name, callees in raw}
+    except Exception:
+        # Fallback: existing per-symbol LibCST path
+        module = cst.parse_module(content)
+        functions = []
+        for stmt in module.body:
+            if isinstance(stmt, cst.FunctionDef):
+                functions.append(stmt.name.value)
+            elif isinstance(stmt, cst.ClassDef):
+                functions.append(stmt.name.value)
 
-    # Build adjacency list: function -> [callees]
-    edges: dict[str, list[str]] = {}
-    for func_name in functions:
-        selector = ExtendedSelector(
-            file_path=file_path,
-            symbol_path=[func_name],
-            component=None,
-            accessor=None,
-        )
-        try:
-            callees = find_callees(selector, project_path)
-            edges[func_name] = [c.name for c in callees]
-        except Exception:
-            edges[func_name] = []
+        edges = {}
+        for func_name in functions:
+            selector = ExtendedSelector(
+                file_path=file_path,
+                symbol_path=[func_name],
+                component=None,
+                accessor=None,
+            )
+            try:
+                callees = find_callees(selector, project_path)
+                edges[func_name] = [c.name for c in callees]
+            except Exception:
+                edges[func_name] = []
 
     if format == "json":
         return json.dumps(edges, indent=2)
@@ -4178,22 +4183,25 @@ def rename_symbol(
     if not symbol_name:
         raise ValueError("Symbol path is required for rename_symbol")
 
-    project_root = _find_project_root(project_path or selector.file_path)
+    # scan_root: where to collect files (respects --project for scope limiting)
+    # module_root: project root for computing dotted module names (always git root)
+    scan_root = project_path if project_path else _find_project_root(selector.file_path)
+    module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, project_root)
+    target_module = _file_to_module(selector.file_path, module_root)
 
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
         return _SymbolRenamer(symbol_name, new_name, target_qns, target_module)
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(project_root, target_module)
+    candidates = _files_importing_module(scan_root, target_module)
 
     diffs = {}
     for py_file, result_module, renamer in visit_project(
         name_hint=symbol_name,
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,

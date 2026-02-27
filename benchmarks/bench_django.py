@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import shutil
 import statistics
@@ -228,13 +229,18 @@ def setup_lint_rules(django_dir: Path) -> None:
 
 def check_emend_available() -> list[str]:
     """Check that emend CLI is available. Returns the command to use."""
-    # Try 'emend' first, then 'python -m emend'.
+    # Try 'emend' on PATH first, then look for it next to the current Python.
+    venv_emend = str(Path(sys.executable).parent / "emend")
     candidates = [
         ["emend", "--help"],
+        [venv_emend, "--help"],
         [sys.executable, "-m", "emend", "--help"],
     ]
     for cmd in candidates:
-        result = _run(cmd)
+        try:
+            result = _run(cmd)
+        except (FileNotFoundError, OSError):
+            continue
         if result.returncode == 0:
             # Return the base command (without --help).
             return cmd[:-1]
@@ -375,13 +381,27 @@ def print_table(results: dict[str, dict]) -> None:
         print()
 
 
+def _get_emend_commit() -> str:
+    """Get the current emend git commit hash."""
+    try:
+        result = _run(["git", "rev-parse", "HEAD"])
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def print_json(
     results: dict[str, dict],
     benchmarks_meta: list[tuple[str, str]],
+    label: str | None = None,
+    save_path: str | None = None,
 ) -> None:
-    """Print machine-readable JSON output."""
+    """Print machine-readable JSON output, optionally saving to a file."""
     output: dict = {
         "django_commit": DJANGO_COMMIT,
+        "emend_commit": _get_emend_commit(),
+        "label": label or "",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "benchmarks": {},
     }
     for name, desc in benchmarks_meta:
@@ -399,7 +419,12 @@ def print_json(
                 "returncode": data["returncode"],
                 "error": data.get("error"),
             }
-    print(json.dumps(output, indent=2))
+    json_str = json.dumps(output, indent=2)
+    if save_path:
+        Path(save_path).write_text(json_str)
+        _log(f"  Results saved to {save_path}")
+    else:
+        print(json_str)
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +459,23 @@ def main() -> None:
         default=None,
         help="Run only benchmarks whose name contains this substring.",
     )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Prose description of what's being tested (required with --save).",
+    )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default=None,
+        help="Save JSON results to this file path.",
+    )
     args = parser.parse_args()
+
+    if args.save and not args.label:
+        print("ERROR: --label is required when using --save.", file=sys.stderr)
+        sys.exit(1)
 
     global _quiet
     iterations = args.iterations or (1 if args.quick else 3)
@@ -499,9 +540,15 @@ def main() -> None:
     total_elapsed = time.perf_counter() - total_start
 
     # Step 4: Output results.
-    if args.json_output:
-        benchmarks_meta = [(b[0], b[1]) for b in selected_benchmarks]
-        print_json(results, benchmarks_meta)
+    benchmarks_meta = [(b[0], b[1]) for b in selected_benchmarks]
+    if args.save:
+        # Save JSON to file; print human-readable table to stderr
+        print_json(results, benchmarks_meta, label=args.label, save_path=args.save)
+        print_table(results)
+        print(f"  Total wall time: {_fmt_time(total_elapsed)}")
+        print()
+    elif args.json_output:
+        print_json(results, benchmarks_meta, label=args.label)
     else:
         print_table(results)
         print(f"  Total wall time: {_fmt_time(total_elapsed)}")
