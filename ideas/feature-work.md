@@ -11,46 +11,19 @@ things already solved by existing tools. What remains are capabilities that requ
 whole-project graph traversal or persistent infrastructure — things no amount of LLM
 reasoning can substitute for.
 
-### What was cut and why
+### What was cut
 
-**Agent strengths (cut because agents already do these well):**
-- **Extract/Inline function** — Agents read code, identify free variables, rewrite. Core
-  LLM capability.
-- **Convention detection, scope context, insertion point intelligence** — Agents infer
-  these from reading a few files. Pattern recognition is what LLMs do.
-- **Scaffold/stub generation** — Writing boilerplate from a protocol is trivial for agents.
-- **Change description generation** — Agents write better commit messages than a
-  structural tool would because they understand narrative context.
-- **NL search compilation** — The agent IS the natural language layer.
-- **Impact analysis (categorized refs)** — `refs` already returns code at each reference
-  site. An agent reading `User(name=name)` instantly knows it's a call site;
-  `class AdminUser(User)` is obviously a subclass. Classifying references from code
-  snippets is exactly the pattern recognition LLMs excel at.
-- **Diff minimization** — The noisy-diff problem comes from full-file writes. The solution
-  is to use surgical edit tools (which emend already is), not to post-process noisy diffs.
-- **Clone detection** — The common case (similar functions with similar names) is handled
-  by name-based search. Full-codebase clone detection is a solved problem (jscpd, pylint).
-- **Test-symbol mapping** — Direct test refs come from `emend refs` filtered to test
-  files. Transitive mapping takes 2-3 commands (`callers` then `refs`). And in practice,
-  running whole test files catches transitive deps naturally.
+**Agents are already good at these:** extract/inline function, convention detection, scope
+context, insertion point intelligence, scaffold generation, change descriptions, NL search
+compilation, impact analysis (agents classify refs from code snippets), diff minimization
+(use surgical edits instead), clone detection (name search + jscpd), test-symbol mapping
+(2-3 existing commands approximate it).
 
-**Already solved (cut because existing tools handle these):**
-- **Structural invariant checking** — Already exists as `lint` with
-  `.emend/patterns.yaml`.
-- **Multi-step plans / batch rollback** — `batch` with `--dry-run` catches failures before
-  applying. `git stash` provides rollback for the rest.
-- **Dependency graph** — Between `graph`, `refs`, and `files_importing_module` in
-  emend_core, this is covered.
-- **Bulk rename mapping** — Name-swap conflicts (A→B and B→C simultaneously) are
-  extremely rare in practice. Sequential renames work for the common case.
-- **Workspace snapshots** — `git stash` exists.
-- **Semantic diff, API surface, codebase health, code provenance** — Agents read diffs,
-  `__init__.py` files, and `git log -S` directly.
-- **MCP server** — The per-call savings (~300ms startup) are real but not transformative.
-  Parse cache persistence helps over multi-step workflows, but the magnitude is seconds.
-  A simpler approach — persisting the parse cache to disk (SQLite keyed by path + mtime)
-  — gets most of the benefit without the protocol complexity. MCP also makes more sense
-  for cloud services than local dev tools, and investing in it doesn't help human users.
+**Already solved:** structural invariants (= `lint`), batch rollback (`--dry-run` + `git
+stash`), dependency graph (`graph` + `refs`), bulk rename mapping (overlap conflicts are
+rare), workspace snapshots (`git stash`), semantic diff / API surface / codebase health /
+code provenance (agents read diffs and `git log -S` directly), MCP server (modest savings;
+disk-persisted parse cache gets most of the benefit without protocol complexity).
 
 ---
 
