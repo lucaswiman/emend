@@ -1,60 +1,15 @@
-# Publish emend to PyPI using OIDC trusted publishing.
+# Publishing is now handled by wheels.yml, which builds platform wheels
+# for all supported Python versions (3.10–3.14t) and publishes them to PyPI
+# as part of the same release workflow.
 #
-# Setup requirements:
-#   1. Configure trusted publishing on pypi.org:
-#      - Go to "Publishing" settings for the "emend" project
-#      - Add a new "pending publisher" (or "trusted publisher" if project exists)
-#      - Set the GitHub repository owner/name, workflow name "publish.yml",
-#        and the environment name ("pypi")
-#   2. Create a GitHub environment in your repository settings:
-#      - "pypi" - add required reviewers for manual approval before publishing
-
-name: Publish to PyPI
-
-on:
-  release:
-    types: [published]
-
-jobs:
-  build:
-    name: Build distribution
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install build dependencies
-        run: pip install build
-
-      - name: Build sdist and wheel
-        run: python -m build
-
-      - name: Upload distribution artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-  publish-pypi:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/emend
-    permissions:
-      id-token: write
-    steps:
-      - name: Download distribution artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+# This file is retained as a placeholder. To trigger a release:
+#   1. Create and push a version tag: git tag v0.2.0 && git push --tags
+#   2. Publish a GitHub Release from that tag
+#   3. The wheels.yml workflow will automatically build and publish to PyPI
+#
+# Setup requirements for PyPI trusted publishing:
+#   1. Configure trusted publishing on pypi.org for the "emend" project:
+#      - Workflow file name: wheels.yml
+#      - Environment name: pypi
+#   2. Create a "pypi" environment in your repository settings with required
+#      reviewers for manual approval before publishing.

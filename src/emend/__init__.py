@@ -1,6 +1,8 @@
 """emend - Python refactoring CLI tool."""
 
+from importlib.metadata import version, PackageNotFoundError
+
 try:
-    from emend._version import __version__
-except ImportError:
+    __version__ = version("emend")
+except PackageNotFoundError:
     __version__ = "0.0.0+unknown"

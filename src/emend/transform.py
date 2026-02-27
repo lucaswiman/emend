@@ -52,9 +52,9 @@ def _cached_parse(source: str) -> cst.Module:
 
 
 # ---------------------------------------------------------------------------
-# Rust accelerator (required — built from rust/ via Makefile)
+# Rust accelerator (bundled with the emend wheel via maturin)
 # ---------------------------------------------------------------------------
-import emend_core as _rust
+from emend import emend_core as _rust
 
 _METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
 
@@ -4071,34 +4071,8 @@ def generate_graph(
 
     content = Path(file_path).read_text()
 
-    # Try Rust fast-path: single-pass tree-sitter callee extraction
-    try:
-        import emend_core
-        raw = emend_core.collect_callees(content)
-        edges: dict[str, list[str]] = {name: callees for name, callees in raw}
-    except Exception:
-        # Fallback: existing per-symbol LibCST path
-        module = cst.parse_module(content)
-        functions = []
-        for stmt in module.body:
-            if isinstance(stmt, cst.FunctionDef):
-                functions.append(stmt.name.value)
-            elif isinstance(stmt, cst.ClassDef):
-                functions.append(stmt.name.value)
-
-        edges = {}
-        for func_name in functions:
-            selector = ExtendedSelector(
-                file_path=file_path,
-                symbol_path=[func_name],
-                component=None,
-                accessor=None,
-            )
-            try:
-                callees = find_callees(selector, project_path)
-                edges[func_name] = [c.name for c in callees]
-            except Exception:
-                edges[func_name] = []
+    raw = _rust.collect_callees(content)
+    edges: dict[str, list[str]] = {name: callees for name, callees in raw}
 
     if format == "json":
         return json.dumps(edges, indent=2)

@@ -503,33 +503,14 @@ def collect_symbols(
     tree_depth: int | None = None,
     selector: Optional[str] = None,
 ) -> list[TreeSymbol]:
-    """Collect symbols from a file, returning list of TreeSymbol objects.
-
-    Tries the Rust fast path first, falls back to LibCST on failure.
-    """
-    try:
-        import emend_core
-        result_dicts = emend_core.collect_symbols_batch(
-            [file], max_depth=tree_depth, selector=selector,
-        )
-        if result_dicts:
-            return dicts_to_tree_symbols(result_dicts[0][1])
-        return []
-    except Exception:
-        pass
-
-    # LibCST fallback
-    file_path = Path(file)
-    code = file_path.read_text()
-
-    max_depth = tree_depth if tree_depth is not None else float('inf')
-    selector_path = selector.split(".") if selector else None
-
-    module = cst.parse_module(code)
-    wrapper = MetadataWrapper(module)
-    visitor = _ListSymbolsVisitor(max_depth=max_depth, selector_path=selector_path)
-    wrapper.visit(visitor)
-    return visitor.symbols
+    """Collect symbols from a file using the bundled Rust extension."""
+    from emend import emend_core
+    result_dicts = emend_core.collect_symbols_batch(
+        [file], max_depth=tree_depth, selector=selector,
+    )
+    if result_dicts:
+        return dicts_to_tree_symbols(result_dicts[0][1])
+    return []
 
 
 def cmd_list_symbols(

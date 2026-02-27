@@ -15,13 +15,15 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = ["typer", "libcst", "lark", "pyyaml"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-xdist", "sphinx", "furo", "hatch-vcs"]
+dev = ["pytest", "pytest-xdist", "sphinx", "furo"]
 
 [project.urls]
 Homepage = "https://github.com/lucaswiman/emend"
@@ -33,11 +35,15 @@ Issues = "https://github.com/lucaswiman/emend/issues"
 emend = "emend.cli:main"
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.build.hooks.vcs]
-version-file = "src/emend/_version.py"
+[tool.maturin]
+# Python source layout: src/emend/*.py is packaged alongside the Rust extension
+python-source = "src"
+# Rust extension is compiled from rust/Cargo.toml
+manifest-path = "rust/Cargo.toml"
+# Place the compiled extension inside the emend package namespace so that
+# `from emend import emend_core` works and emend_core is fully bundled
+module-name = "emend.emend_core"
+features = ["pyo3/extension-module"]
