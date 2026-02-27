@@ -100,19 +100,112 @@ def _find_project_root(start_path: str) -> str:
     return str(path)
 
 
+@lru_cache(maxsize=64)
+def _find_python_source_root(project_root: str) -> str:
+    """Find the Python source root directory for a project.
+
+    Detects ``src/`` layout by checking (in order):
+    1. ``pyproject.toml`` settings (maturin, setuptools, hatch)
+    2. ``setup.cfg`` [options] package_dir
+    3. Heuristic: ``src/`` exists and contains a package (dir with ``__init__.py``)
+
+    Returns the resolved source root (e.g. ``/repo/src``), or the
+    project root itself if no ``src/`` layout is detected.
+    """
+    root = Path(project_root).resolve()
+
+    # --- pyproject.toml -------------------------------------------------
+    pyproject = root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+        except ModuleNotFoundError:          # Python < 3.11
+            try:
+                import tomli as tomllib      # type: ignore[no-redef]
+            except ModuleNotFoundError:
+                tomllib = None               # type: ignore[assignment]
+        if tomllib is not None:
+            try:
+                data = tomllib.loads(pyproject.read_text())
+                # maturin: python-source = "src"
+                ps = (data.get("tool", {}).get("maturin", {})
+                      .get("python-source"))
+                if ps:
+                    candidate = root / ps
+                    if candidate.is_dir():
+                        return str(candidate)
+                # setuptools: [tool.setuptools.packages.find] where = ["src"]
+                where = (data.get("tool", {}).get("setuptools", {})
+                         .get("packages", {}).get("find", {}).get("where"))
+                if isinstance(where, list) and where:
+                    candidate = root / where[0]
+                    if candidate.is_dir():
+                        return str(candidate)
+                # hatch / hatchling
+                where = (data.get("tool", {}).get("hatch", {})
+                         .get("build", {}).get("sources", {}).get("src"))
+                if isinstance(where, str):
+                    candidate = root / where
+                    if candidate.is_dir():
+                        return str(candidate)
+            except Exception:
+                pass
+
+    # --- setup.cfg ------------------------------------------------------
+    setup_cfg = root / "setup.cfg"
+    if setup_cfg.is_file():
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(str(setup_cfg))
+            pkg_dir = cfg.get("options", "package_dir", fallback=None)
+            if pkg_dir:
+                # Format: "= src" or "\n= src"
+                for part in pkg_dir.splitlines():
+                    part = part.strip()
+                    if part.startswith("="):
+                        src_dir = part[1:].strip()
+                        candidate = root / src_dir
+                        if candidate.is_dir():
+                            return str(candidate)
+        except Exception:
+            pass
+
+    # --- Heuristic: src/ with an __init__.py package --------------------
+    src_dir = root / "src"
+    if src_dir.is_dir():
+        for child in src_dir.iterdir():
+            if child.is_dir() and (child / "__init__.py").is_file():
+                return str(src_dir)
+
+    return str(root)
+
+
 def _file_to_module(file_path: str, project_path: str | None) -> str:
-    """Convert file path to Python module name."""
+    """Convert file path to Python module name.
+
+    Detects ``src/`` layout automatically so that
+    ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
+    """
     abs_file = Path(file_path).resolve()
     proj_root = Path(project_path or _find_project_root(file_path)).resolve()
+    source_root = Path(_find_python_source_root(str(proj_root)))
 
-    rel_path = abs_file.relative_to(proj_root)
+    # Use the source root if the file lives under it; otherwise fall
+    # back to the project root (e.g. for test files outside src/).
+    try:
+        rel_path = abs_file.relative_to(source_root)
+    except ValueError:
+        rel_path = abs_file.relative_to(proj_root)
+
     module_parts = list(rel_path.parts[:-1]) + [rel_path.stem]
     return '.'.join(module_parts)
 
 
 _SKIP_DIRS = frozenset({'.git', '__pycache__', '.venv', 'venv', '.tox', 'node_modules',
                         '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
-                        'dist', 'build', '.nox'})
+                        'dist', 'build', '.nox', '.uv-cache', '.pixi',
+                        '.cargo', '.cargo-cache'})
 
 # Module-level file-list cache: maps resolved project root to (mtime_ns, file_list)
 _file_list_cache: dict[str, tuple[int, list[str]]] = {}
@@ -4244,7 +4337,8 @@ class _BulkReferenceFinder(cst.CSTVisitor):
         # Set of (defining_file, symbol_name) that are referenced
         self.referenced: set[tuple[str, str]] = set()
 
-    def visit_Name(self, node: cst.Name) -> None:
+    def _check_node(self, node: cst.CSTNode) -> None:
+        """Resolve the QN of *node* and mark matching candidates as referenced."""
         try:
             qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
         except KeyError:
@@ -4265,6 +4359,13 @@ class _BulkReferenceFinder(cst.CSTVisitor):
                 except KeyError:
                     pass
             self.referenced.add(key)
+
+    def visit_Name(self, node: cst.Name) -> None:
+        self._check_node(node)
+
+    def visit_Attribute(self, node: cst.Attribute) -> None:
+        # Catches module.symbol references like ast_commands.cmd_copy_to
+        self._check_node(node)
 
 
 def find_dead_code(
@@ -4291,8 +4392,12 @@ def find_dead_code(
     """
     from .query import _collect_symbols, SymbolInfo
 
-    project_root = str(Path(project_path).resolve())
-    py_files = _collect_python_files(project_root)
+    # scan_root: where to collect files (respects the user-supplied path)
+    # module_root: project root for computing dotted module names (always
+    #              the real project root so that QNs match across files)
+    scan_root = str(Path(project_path).resolve())
+    module_root = _find_project_root(project_path)
+    py_files = _collect_python_files(scan_root)
 
     # Phase 1: Collect candidate symbols and build QN lookup table
     # candidate key = (resolved_file_path, symbol_name)
@@ -4316,7 +4421,7 @@ def find_dead_code(
         if exports:
             all_exports[resolved_file] = exports
 
-        file_module = _file_to_module(py_file, project_root)
+        file_module = _file_to_module(py_file, module_root)
         local_defs: dict[str, int] = {}
 
         for sym in symbols:
@@ -4366,7 +4471,7 @@ def find_dead_code(
     for _py_file, _module, visitor in visit_project(
         name_hint="",  # No single hint — we handle multi-name filtering below
         visitor_factory=factory,
-        project_path=project_root,
+        project_path=scan_root,
         metadata_providers=_BulkReferenceFinder.METADATA_DEPENDENCIES,
         target_file=None,
         candidate_files=None,

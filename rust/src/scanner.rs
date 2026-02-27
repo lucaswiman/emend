@@ -17,6 +17,10 @@ const SKIP_DIRS: &[&str] = &[
     "dist",
     "build",
     ".nox",
+    ".uv-cache",
+    ".pixi",
+    ".cargo",
+    ".cargo-cache",
 ];
 
 /// Collect all `.py` files under `root`, skipping non-project directories.
