@@ -29,7 +29,7 @@ class TestFindDeadCode:
             "result = used_func()\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "unused_func" in dead_names
         assert "used_func" not in dead_names
@@ -52,7 +52,7 @@ class TestFindDeadCode:
             "obj = UsedClass()\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "UnusedClass" in dead_names
         assert "UsedClass" not in dead_names
@@ -80,7 +80,7 @@ class TestFindDeadCode:
             "result = helper()\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "orphan" in dead_names
         assert "helper" not in dead_names
@@ -98,7 +98,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "__init__" not in dead_names
 
@@ -118,7 +118,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "test_something" not in dead_names
         assert "TestSuite" not in dead_names
@@ -136,7 +136,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "main" not in dead_names
 
@@ -156,7 +156,7 @@ class TestFindDeadCode:
             "    return 2\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "_private_helper" not in dead_names
         assert "public_unused" in dead_names
@@ -174,7 +174,7 @@ class TestFindDeadCode:
             "    return 1\n"
         )
 
-        dead = find_dead_code(str(project), include_private=True)
+        dead = list(find_dead_code(str(project), include_private=True))
         dead_names = {d.name for d in dead}
         assert "_private_helper" in dead_names
 
@@ -196,7 +196,7 @@ class TestFindDeadCode:
             "    return 2\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "exported_func" not in dead_names
         assert "not_exported" in dead_names
@@ -217,7 +217,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project), kind="function")
+        dead = list(find_dead_code(str(project), kind="function"))
         dead_names = {d.name for d in dead}
         assert "unused_func" in dead_names
         assert "UnusedClass" not in dead_names
@@ -238,7 +238,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project), kind="class")
+        dead = list(find_dead_code(str(project), kind="class"))
         dead_names = {d.name for d in dead}
         assert "UnusedClass" in dead_names
         assert "unused_func" not in dead_names
@@ -256,7 +256,7 @@ class TestFindDeadCode:
             "    return 42\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         assert len(dead) == 1
         d = dead[0]
         assert d.name == "orphan"
@@ -273,7 +273,7 @@ class TestFindDeadCode:
         project = tmp_path / "project"
         project.mkdir()
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         assert dead == []
 
     def test_skips_decorated_entry_points(self, tmp_path):
@@ -296,7 +296,7 @@ class TestFindDeadCode:
             "    return 'bye'\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "my_handler" not in dead_names
         assert "truly_unused" in dead_names
@@ -328,7 +328,7 @@ class TestFindDeadCode:
             "    return 'bye'\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         assert "list_users" not in dead_names
         assert "create_user" not in dead_names
@@ -356,7 +356,7 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         # Should be sorted: a.py first, then b.py, then by line within file
         assert len(dead) >= 3
         file_paths = [d.file_path for d in dead]
@@ -381,7 +381,7 @@ class TestFindDeadCode:
             "obj = MyClass()\n"
         )
 
-        dead = find_dead_code(str(project))
+        dead = list(find_dead_code(str(project)))
         dead_names = {d.name for d in dead}
         # Methods are nested (depth > 1), so should not be checked
         assert "unused_method" not in dead_names
@@ -512,16 +512,16 @@ class TestExcludeReferencesFrom:
         )
 
         # Without exclusion: not dead (test references it)
-        dead = find_dead_code(str(project), show_last_reference=False)
+        dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "only_tested" not in dead_names
 
         # With exclusion: dead (test dir references are ignored)
-        dead = find_dead_code(
+        dead = list(find_dead_code(
             str(project),
             exclude_references_from=[str(tests_dir)],
             show_last_reference=False,
-        )
+        ))
         dead_names = {d.name for d in dead}
         assert "only_tested" in dead_names
 
@@ -573,18 +573,18 @@ class TestStringsCountAsReferences:
         )
 
         # With strings (default): not flagged
-        dead = find_dead_code(
+        dead = list(find_dead_code(
             str(project), strings_count_as_references=True,
             show_last_reference=False,
-        )
+        ))
         dead_names = {d.name for d in dead}
         assert "dynamic_handler" not in dead_names
 
         # Without strings: flagged
-        dead = find_dead_code(
+        dead = list(find_dead_code(
             str(project), strings_count_as_references=False,
             show_last_reference=False,
-        )
+        ))
         dead_names = {d.name for d in dead}
         assert "dynamic_handler" in dead_names
 
@@ -603,10 +603,10 @@ class TestStringsCountAsReferences:
             "x = 'foo bar'\n"
         )
 
-        dead = find_dead_code(
+        dead = list(find_dead_code(
             str(project), strings_count_as_references=True,
             show_last_reference=False,
-        )
+        ))
         dead_names = {d.name for d in dead}
         # "foo" is only 3 chars — string matching should not protect it
         assert "foo" in dead_names
@@ -656,7 +656,7 @@ class TestNoqaDeadcode:
             "    return 2\n"
         )
 
-        dead = find_dead_code(str(project), show_last_reference=False)
+        dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "suppressed" not in dead_names
         assert "not_suppressed" in dead_names
@@ -674,7 +674,7 @@ class TestNoqaDeadcode:
             "    return 1\n"
         )
 
-        dead = find_dead_code(str(project), show_last_reference=False)
+        dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "suppressed" not in dead_names
 
@@ -695,7 +695,7 @@ class TestShowLastReference:
             "    return 42\n"
         )
 
-        dead = find_dead_code(str(project), show_last_reference=False)
+        dead = list(find_dead_code(str(project), show_last_reference=False))
         assert len(dead) == 1
         assert dead[0].last_reference_commit is None
 
@@ -729,7 +729,7 @@ class TestShowLastReference:
                         cwd=str(project), capture_output=True, check=True,
                         env=env)
 
-        dead = find_dead_code(str(project), show_last_reference=True)
+        dead = list(find_dead_code(str(project), show_last_reference=True))
         assert len(dead) == 1
         assert dead[0].last_reference_commit is not None
         assert "initial" in dead[0].last_reference_commit

@@ -1276,12 +1276,16 @@ def dead_code_cmd(
     ] = None,
     no_strings: Annotated[bool, typer.Option("--no-strings", help="Don't count string literals as references")] = False,
     no_last_reference: Annotated[bool, typer.Option("--no-last-reference", help="Don't show git last-reference info")] = False,
+    all_files: Annotated[bool, typer.Option("--all-files", help="Scan all Python files, not just git-tracked ones")] = False,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
-    Scans all Python files and reports top-level symbols that have no
+    Scans Python files and reports top-level symbols that have no
     references outside their own definition. Uses scope-aware analysis
     to avoid false positives from same-named symbols.
+
+    By default, only git-tracked files are scanned. Use --all-files
+    to include untracked files (e.g. in non-git projects).
 
     Automatically skips:
     - Dunder methods (__init__, __str__, etc.)
@@ -1302,6 +1306,7 @@ def dead_code_cmd(
         emend deadcode . --include-private --json
         emend deadcode src/ --exclude-references-from tests/
         emend deadcode . --no-strings --no-last-reference
+        emend deadcode . --all-files
     """
     try:
         results = find_dead_code(
@@ -1311,37 +1316,41 @@ def dead_code_cmd(
             exclude_references_from=exclude_references_from,
             strings_count_as_references=not no_strings,
             show_last_reference=not no_last_reference,
+            all_files=all_files,
         )
 
-        if not results:
-            print("No dead code found.")
-            return
-
         if json_output:
-            import json
-            data = [
-                {
+            # JSON mode: must collect all results before printing
+            data = []
+            for d in results:
+                entry = {
                     "file_path": d.file_path,
                     "name": d.name,
                     "kind": d.kind,
                     "line": d.line,
                     "selector": d.selector,
                     "reason": d.reason,
-                    **({"last_reference_commit": d.last_reference_commit}
-                       if d.last_reference_commit else {}),
                 }
-                for d in results
-            ]
-            print(json.dumps(data, indent=2))
+                if d.last_reference_commit:
+                    entry["last_reference_commit"] = d.last_reference_commit
+                data.append(entry)
+            if not data:
+                print("[]")
+            else:
+                import json
+                print(json.dumps(data, indent=2))
         else:
+            count = 0
             for d in results:
                 line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
                 if d.last_reference_commit:
                     line += f"\n    last commit: {d.last_reference_commit}"
-                print(line)
-
-        if not json_output:
-            print(f"\nFound {len(results)} potentially dead symbol(s).", file=sys.stderr)
+                print(line, flush=True)
+                count += 1
+            if count == 0:
+                print("No dead code found.")
+            else:
+                print(f"\nFound {count} potentially dead symbol(s).", file=sys.stderr)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)

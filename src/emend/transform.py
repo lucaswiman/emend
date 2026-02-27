@@ -216,13 +216,49 @@ def _collect_python_files_scandir(root_path: str) -> list[str]:
     return _rust.collect_python_files(root_path)
 
 
-def _collect_python_files(project_root: str) -> list[str]:
+def _collect_git_tracked_python_files(project_root: str) -> list[str] | None:
+    """Return git-tracked .py files, or None if not in a git repo."""
+    import subprocess
+    resolved = str(Path(project_root).resolve())
+    try:
+        result = subprocess.run(
+            ['git', 'ls-files', '-z', '*.py'],
+            capture_output=True, timeout=10,
+            cwd=resolved,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout
+        if not raw:
+            return []
+        # git ls-files -z uses null separators; paths are relative to cwd
+        rel_paths = raw.decode('utf-8', errors='replace').split('\0')
+        abs_paths = []
+        for p in rel_paths:
+            p = p.strip()
+            if p:
+                abs_paths.append(str(Path(resolved) / p))
+        return abs_paths
+    except Exception:
+        return None
+
+
+def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> list[str]:
     """Collect all Python files in project, with caching.
 
     Uses os.scandir for speed. Caches the file list per project root,
     invalidated when the root directory's mtime changes (which happens
     when files are added or removed).
+
+    If *git_tracked_only* is True, uses ``git ls-files`` to only return
+    files tracked by git.  Falls back to directory scan if not in a
+    git repository.
     """
+    if git_tracked_only:
+        tracked = _collect_git_tracked_python_files(project_root)
+        if tracked is not None:
+            return tracked
+
     import os
     resolved = str(Path(project_root).resolve())
     try:
@@ -4442,7 +4478,8 @@ def find_dead_code(
     exclude_references_from: list[str] | None = None,
     strings_count_as_references: bool = True,
     show_last_reference: bool = True,
-) -> list[DeadSymbol]:
+    all_files: bool = False,
+) -> Iterator[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
     Performs two passes over project files:
@@ -4464,9 +4501,12 @@ def find_dead_code(
             false positives from dynamic dispatch, serialization, and similar.
         show_last_reference: If True (default), annotate each dead symbol with
             the last ``git log -S`` commit that touched its name.
+        all_files: If True, scan all Python files (including untracked).
+            By default only git-tracked files are scanned when inside a
+            git repository.
 
-    Returns:
-        List of DeadSymbol objects sorted by file path and line number.
+    Yields:
+        DeadSymbol objects sorted by file path and line number.
     """
     from .query import _collect_symbols, SymbolInfo
 
@@ -4475,7 +4515,7 @@ def find_dead_code(
     #              the real project root so that QNs match across files)
     scan_root = str(Path(project_path).resolve())
     module_root = _find_project_root(project_path)
-    py_files = _collect_python_files(scan_root)
+    py_files = _collect_python_files(scan_root, git_tracked_only=not all_files)
 
     # Build resolved exclude set for reference scanning
     exclude_resolved: set[str] = set()
@@ -4601,13 +4641,10 @@ def find_dead_code(
     ):
         referenced.update(visitor.referenced)
 
-    # Phase 3: Build result — candidates not in referenced set
+    # Phase 3: Yield results — candidates not in referenced set
     dead_symbols: list[DeadSymbol] = []
     for cand_key, (file_path, sym) in candidates.items():
         if cand_key not in referenced:
-            last_commit = None
-            if show_last_reference:
-                last_commit = _get_last_reference_commit(file_path, sym.name)
             dead_symbols.append(DeadSymbol(
                 file_path=file_path,
                 name=sym.name,
@@ -4615,11 +4652,15 @@ def find_dead_code(
                 line=sym.line,
                 selector=sym.path,
                 reason="no references found",
-                last_reference_commit=last_commit,
             ))
 
     dead_symbols.sort(key=lambda d: (d.file_path, d.line))
-    return dead_symbols
+
+    for d in dead_symbols:
+        if show_last_reference:
+            d.last_reference_commit = _get_last_reference_commit(
+                d.file_path, d.name)
+        yield d
 
 
 def _rename_symbol_in_file(
