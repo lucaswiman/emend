@@ -361,6 +361,103 @@ For Python, the adapter wraps Pyrefly/ty. For other languages:
 The adapter doesn't need to be in-process. The type spec is a
 serialization format — produce it however you want, emend consumes it.
 
+### Why Not LSP?
+
+LSP seems like the obvious universal layer — every language has an LSP
+server. But LSP's type information is **display strings, not structured
+data**. `textDocument/hover` returns `MarkupContent` (markdown).
+`textDocument/signatureHelp` embeds types in label strings. There is no
+LSP method that returns "this is a generic type `Map` with type argument
+`String` and type argument `List<Int>`" as structured data.
+
+You'd have to parse type-display strings from every language's syntax,
+which is the per-language engineering you're trying to avoid. And LSP
+is position-based (one query per cursor location) — querying types for
+every match in a codebase-wide search would be prohibitively slow.
+
+SCIP (Sourcegraph's Code Intelligence Protocol) has the same problem:
+types are stored as rendered strings in `signature_documentation`, not
+as queryable trees. Good for code navigation, useless for type pattern
+matching.
+
+### Layer 0: Tree-Sitter Type Extraction (No Checker Required)
+
+Before any language adapter runs, tree-sitter can already extract
+**declared** types from annotations:
+
+```python
+# Tree-sitter can see these types without any type checker
+def connect(host: str, port: int) -> Connection: ...
+x: list[int] = [1, 2, 3]
+```
+
+```typescript
+// Same for TypeScript
+function connect(host: string, port: number): Connection { ... }
+const x: number[] = [1, 2, 3];
+```
+
+```go
+// And Go
+func connect(host string, port int) *Connection { ... }
+var x []int = []int{1, 2, 3}
+```
+
+The tree-sitter grammar already parses these annotations into typed
+nodes (`type_identifier`, `generic_type`, `return_type`, etc.). The
+language spec YAML maps these to `TypeDescriptor` trees. No type
+checker needed.
+
+This gives you **declared types for free across all 250+ tree-sitter
+languages**. It won't resolve inferred types (what's the type of
+`x = foo()`?), but it covers:
+
+- Function parameter types (from annotations)
+- Return types (from annotations)
+- Variable types (from explicit annotations)
+- Class/struct field types
+- Generic type arguments (from syntax)
+
+For many queries this is enough. `$f:returns[Optional[$T]]` can be
+answered purely from syntax if the return type is annotated. Only
+`$x:type[Connection]` on an unannotated variable needs the type checker.
+
+This creates a natural progression:
+
+| Layer | What you get | Cost |
+|-------|-------------|------|
+| Layer 0: tree-sitter | Declared/annotated types | Free (already parsed) |
+| Layer 1: native type checker | Inferred types, resolved generics, subtyping | Per-language adapter |
+
+Layer 0 is what makes agent-generated adapters viable for 50+ languages
+quickly. Layer 1 is the premium experience for languages with deep
+checker integration.
+
+### Prior Art: Semgrep Typed Metavariables
+
+Semgrep is the closest prior art. In Java you can write `(String $X)`
+to match expressions of type `String`. Semgrep does this with
+**lightweight per-language type inference** — tracking declarations,
+assignments, and literals.
+
+Where Semgrep hits a wall: deep generics. You can check `String` but
+not `Map<String, List<Integer>>`. The lightweight inference doesn't
+resolve generic type arguments or track type information through method
+chains. This is the inherent limit of trying to infer types yourself
+instead of consuming a real type checker's output.
+
+emend's approach (consume native checker output as structured type
+specs) avoids this wall entirely. If Pyrefly knows the type is
+`dict[str, list[int]]`, emend gets the full parameterized type
+descriptor and can match `dict[str, $T]` binding `$T = list[int]`.
+
+The IEEE SCAM 2006 paper on cross-language program analysis explicitly
+warns that "unifying or abstracting language semantics is not scalable
+because it relies on heavyweight per-language engineering." The right
+response: don't unify the semantics, unify the **output format**. Let
+each language keep its own semantics. The type spec is a data exchange
+format, not a type system.
+
 ### You Don't Need a Type Inference Engine
 
 The earlier version of this proposal described building a unification
