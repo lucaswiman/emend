@@ -17,7 +17,8 @@ reasoning can substitute for.
 context, insertion point intelligence, scaffold generation, change descriptions, NL search
 compilation, impact analysis (agents classify refs from code snippets), diff minimization
 (use surgical edits instead), clone detection (name search + jscpd), test-symbol mapping
-(2-3 existing commands approximate it).
+(2-3 existing commands approximate it), refactoring by example (agent reads before/after,
+writes `emend replace` command — that's just using emend).
 
 **Already solved:** structural invariants (= `lint`), batch rollback (`--dry-run` + `git
 stash`), dependency graph (`graph` + `refs`), bulk rename mapping (overlap conflicts are
@@ -102,34 +103,6 @@ consistency, compactness, and capture metadata — not a fundamental capability 
 
 Ideas that are probably too hard or too speculative, but would fundamentally change what's
 possible if they worked.
-
-
-### Refactoring by Example
-
-Show emend a before/after pair of one file and have it infer the structural pattern:
-
-```bash
-emend by-example --before old_handler.py --after new_handler.py --apply-to src/handlers/
-```
-
-Internally: diff the before/after ASTs, extract the structural transformation as a
-pattern/replacement pair, verify it's generalizable, apply it.
-
-**Why it's crazy:** Inferring the generalization from one example is AI-complete. Did the
-user change `requests.get(url)` to `httpx.get(url)` because they're migrating HTTP
-libraries (generalizes to all `requests` calls) or because this specific endpoint needs
-async (doesn't generalize)? The intent is ambiguous from one example.
-
-**Why it'd be a game-changer:** This is the most natural way to express "do what I did
-here, everywhere else." And for simple structural transforms (rename a call, swap
-arguments, wrap in a context manager), the generalization IS unambiguous and could work
-reliably.
-
-**Constrained version that might actually work:** Limit to transforms expressible as
-emend `replace` patterns. Diff the before/after, try to express the diff as `replace
-'pattern' 'replacement'`, show the agent the inferred pattern for confirmation, then
-apply. This sidesteps the generalization problem by only supporting transforms that map
-cleanly to emend's existing pattern language.
 
 
 ### Cross-Language Refactoring
@@ -229,5 +202,5 @@ choose emend.
 
 The honest takeaway: emend's existing feature set is already strong for agents. The gap
 isn't missing features — it's acting on analysis results (safe delete) and output format
-(JSON). The truly transformative ideas (behavioral diff, daemon/LSP, refactoring by
-example) are in the Crazy Ideas section because they're genuinely hard problems.
+(JSON). The truly transformative ideas (behavioral diff, daemon/LSP, cross-language
+refactoring) are in the Crazy Ideas section because they're genuinely hard problems.
