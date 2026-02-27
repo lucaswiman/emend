@@ -46,47 +46,15 @@ reasoning can substitute for.
 - **Workspace snapshots** — `git stash` exists.
 - **Semantic diff, API surface, codebase health, code provenance** — Agents read diffs,
   `__init__.py` files, and `git log -S` directly.
+- **MCP server** — The per-call savings (~300ms startup) are real but not transformative.
+  Parse cache persistence helps over multi-step workflows, but the magnitude is seconds.
+  A simpler approach — persisting the parse cache to disk (SQLite keyed by path + mtime)
+  — gets most of the benefit without the protocol complexity. MCP also makes more sense
+  for cloud services than local dev tools, and investing in it doesn't help human users.
 
 ---
 
-## 1. MCP Server Mode (`emend serve`)
-
-**Problem:** Every emend subprocess invocation starts cold: Python interpreter startup,
-importing LibCST/Lark/emend modules, discovering project files, and parsing any files it
-needs to visit. Emend's LRU parse cache (256 entries) is thrown away between calls because
-it lives in-process. In a multi-step refactoring where the agent calls emend 15 times,
-each call re-imports, re-discovers, and re-parses from scratch.
-
-The startup overhead per call is modest (~300-500ms), but the cache loss is the real cost:
-a 15-call workflow that repeatedly queries the same files re-parses each one every time.
-
-**Proposed feature:**
-```bash
-emend serve --mcp --stdio     # For agent/IDE integration
-```
-
-Exposes emend commands as MCP tools with typed JSON Schema parameters. The server stays
-warm between calls: parse cache persists, file list cache persists, modules stay loaded.
-
-**What this actually buys:**
-- Subsequent calls skip import and file discovery: ~10-50ms instead of ~300-500ms
-- Parse cache hits across calls: file that was parsed for `search` doesn't need re-parsing
-  for `refs` two calls later
-- Standard tool-use protocol: any MCP-compatible agent gets emend for free without custom
-  CLI integration code
-
-**What this doesn't buy (being honest):**
-- The per-call savings (~300ms) are noticeable but not transformative in isolation
-- The real value compounds over multi-step workflows where the same files are visited
-  repeatedly
-- An MCP wrapper could also be built externally using emend's Python API + `fastmcp`,
-  though it would need to call internal APIs (not subprocess) to benefit from the cache
-
-**Why an agent can't do this itself:** Infrastructure. No amount of prompting preserves
-state between subprocess invocations.
-
-
-## 2. Safe Delete (`emend delete`)
+## 1. Safe Delete (`emend delete`)
 
 **Problem:** `deadcode` finds unreferenced symbols. But removing a symbol creates
 cascading effects: its imports become unused, helper functions that only it called become
@@ -128,7 +96,7 @@ of thing where "tool does it atomically" is meaningfully more reliable than "age
 in 4 rounds of tool calls."
 
 
-## 3. Structured JSON Output (`--json` for all commands)
+## 2. Structured JSON Output (`--json` for all commands)
 
 **Problem:** `deadcode --json` and `refs --json` exist, but `search`, `edit`, `add`,
 `rename`, `move`, and `replace` output human-formatted text. Agents parse this fine — it's
@@ -235,30 +203,41 @@ behavior?" An agent that can verify "my refactoring didn't change behavior for a
 could find" would refactor with dramatically more confidence.
 
 
-### Incremental Persistent Index
+### Daemon Mode / LSP
 
-A daemon that watches the filesystem and maintains an always-current symbol index:
+A persistent daemon that watches the filesystem and maintains an always-current symbol
+index, potentially exposed as an LSP server so IDEs benefit too:
 
 ```bash
-emend index start                    # Background daemon, watches for file changes
+emend daemon start                   # Background process, watches for file changes
 emend search 'print($X)' src/       # Instant: reads from index, no parsing
 emend refs models.py::User           # Instant: pre-computed reference graph
 emend deadcode src/                  # Instant: pre-computed reference counts
 ```
 
+As an LSP, IDEs could get emend-powered features natively: "find all callers" backed by
+emend's scope-aware `QualifiedNameProvider` analysis, pattern-based lint diagnostics
+inline, dead code dimming, and refactoring code actions (rename, move, extract) that use
+emend's cross-project machinery rather than the IDE's own (often weaker) Python support.
+
 **Why it's crazy:** Incremental re-indexing is a hard systems problem. File watching has
 platform-specific gotchas. Memory management for large projects. Cache invalidation when
-files change during a query. This is building a language server, which is a multi-year
-project.
+files change during a query. And LSP is a large protocol surface — implementing even the
+common methods (textDocument/definition, textDocument/references, textDocument/rename,
+textDocument/codeAction, textDocument/diagnostic) is substantial.
+
+This is essentially building a language server, which is a multi-year project.
 
 **Why it'd be a game-changer:** Every emend query currently scans the project from
 scratch. For a 10,000-file project, `refs` takes seconds. With an index, it would take
-milliseconds. This would make emend usable in real-time interactive loops where the agent
-calls emend dozens of times per minute.
+milliseconds. This would make emend usable in real-time interactive loops — both for
+agents calling it dozens of times per minute and for humans getting instant feedback in
+their editor. Unlike MCP (which only helps agents), an LSP serves both audiences.
 
-**Pragmatic middle ground:** Don't build a daemon. Instead, persist the parse cache to
-disk between invocations (SQLite keyed by file path + mtime). Each call checks mtimes and
-only re-parses changed files. Gets 80% of the benefit with 10% of the complexity.
+**Pragmatic middle ground:** Don't build the full daemon/LSP. Instead, persist the parse
+cache to disk (SQLite keyed by file path + mtime). Each CLI call checks mtimes and only
+re-parses changed files. Gets 80% of the speed benefit with 10% of the complexity, and
+both agents and humans benefit.
 
 
 ---
@@ -268,17 +247,14 @@ only re-parses changed files. Gets 80% of the benefit with 10% of the complexity
 | # | Feature | Effort | Impact |
 |---|---------|--------|--------|
 | 1 | Safe Delete (cascade) | Medium | High |
-| 2 | MCP Server | Medium | Medium-High |
-| 3 | JSON output + captures | Low | Low-Medium |
+| 2 | JSON output + captures | Low | Low-Medium |
 
-Safe delete is #1 because it turns `deadcode` from a read-only report into an action,
-and the transitive cascade is something agents genuinely struggle with. MCP server is #2
-because the value compounds over multi-step workflows but the per-call improvement is
-modest. JSON output is #3 because it's incremental and low-effort — worth doing but not
-a reason to choose emend.
+Safe delete is the clear #1 because it turns `deadcode` from a read-only report into an
+action, and the transitive cascade is something agents genuinely struggle with. JSON
+output is worth doing because it's low-effort — but it's incremental, not a reason to
+choose emend.
 
 The honest takeaway: emend's existing feature set is already strong for agents. The gap
-isn't missing features — it's integration (MCP), acting on analysis results (safe delete),
-and output format (JSON). The truly transformative ideas (behavioral diff, incremental
-index, refactoring by example) are in the Crazy Ideas section because they're genuinely
-hard problems.
+isn't missing features — it's acting on analysis results (safe delete) and output format
+(JSON). The truly transformative ideas (behavioral diff, daemon/LSP, refactoring by
+example) are in the Crazy Ideas section because they're genuinely hard problems.
