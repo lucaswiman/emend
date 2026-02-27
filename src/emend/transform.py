@@ -4656,11 +4656,18 @@ def find_dead_code(
 
     dead_symbols.sort(key=lambda d: (d.file_path, d.line))
 
-    for d in dead_symbols:
-        if show_last_reference:
-            d.last_reference_commit = _get_last_reference_commit(
-                d.file_path, d.name)
-        yield d
+    if show_last_reference and dead_symbols:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _git_lookup(d: DeadSymbol) -> tuple[DeadSymbol, str | None]:
+            return d, _get_last_reference_commit(d.file_path, d.name)
+
+        with ThreadPoolExecutor() as pool:
+            for d, commit in pool.map(_git_lookup, dead_symbols):
+                d.last_reference_commit = commit
+                yield d
+    else:
+        yield from dead_symbols
 
 
 def _rename_symbol_in_file(
