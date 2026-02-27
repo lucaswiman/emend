@@ -27,6 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - name: Build manylinux wheels
         uses: PyO3/maturin-action@v1
@@ -46,6 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -73,6 +85,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -95,6 +113,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -120,6 +144,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -148,6 +178,12 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -177,6 +213,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -205,6 +247,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from release tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/^version = .*/version = \"$VERSION\"/" rust/Cargo.toml > rust/Cargo.toml.tmp
+          mv rust/Cargo.toml.tmp rust/Cargo.toml
       - uses: dtolnay/rust-toolchain@stable
       - name: Build sdist
         uses: PyO3/maturin-action@v1
