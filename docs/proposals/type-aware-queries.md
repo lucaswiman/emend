@@ -438,16 +438,118 @@ Python's `@overload`. It needs to answer "what is this thing, or what
 could it be?" — which is a name resolution + one-hop-flow problem,
 not a type theory problem.
 
+#### Can Layer 0.5 cross module boundaries?
+
+Yes — with a caveat. The tracking algorithm is generic, but **module
+resolution rules are language-specific data**.
+
+Layer 0.5 cross-module tracking requires three operations:
+
+1. **Resolve an import to a file.** `from foo.bar import Baz` →
+   where is `foo/bar.py`? `use crate::db::Connection` → where is
+   `src/db.rs`?
+
+2. **Find a symbol in that file.** Look up `Baz` in the file's
+   top-level definitions. (Tree-sitter, language-generic.)
+
+3. **Read the symbol's type information.** Its return type annotation,
+   its class definition, its field types. (Tree-sitter, generic.)
+
+Steps 2 and 3 are language-generic — they use tree-sitter node kinds
+from the language spec YAML. Step 1 is language-specific, but it's
+**rules, not code**:
+
+```yaml
+# lang_specs/python.yaml
+module_resolution:
+  separator: "."
+  file_patterns: ["{path}.py", "{path}/__init__.py"]
+  root_markers: ["pyproject.toml", "setup.py", "setup.cfg"]
+  src_layout: true        # detect src/ prefix via pyproject.toml
+
+# lang_specs/rust.yaml
+module_resolution:
+  separator: "::"
+  file_patterns: ["{path}.rs", "{path}/mod.rs"]
+  root_markers: ["Cargo.toml"]
+  strip_prefix: "crate"   # crate::foo::bar → foo/bar
+
+# lang_specs/typescript.yaml
+module_resolution:
+  relative: true           # './foo/bar', not 'foo.bar'
+  file_patterns: ["{path}.ts", "{path}.tsx", "{path}/index.ts"]
+  config_file: "tsconfig.json"   # path aliases
+  node_modules: true       # resolve from node_modules/
+
+# lang_specs/go.yaml
+module_resolution:
+  separator: "/"
+  root_markers: ["go.mod"]
+  package_scope: true      # imports are packages, not files
+
+# lang_specs/java.yaml
+module_resolution:
+  separator: "."
+  file_patterns: ["{path}.java"]
+  root_markers: ["pom.xml", "build.gradle"]
+  class_per_file: true     # com.foo.Bar → com/foo/Bar.java
+```
+
+The resolution *algorithm* is generic:
+
+```
+resolve_import(import_node, language_spec) → file_path:
+  1. Extract the module path string from the import node
+     (tree-sitter, node kinds from language spec)
+  2. Strip language-specific prefixes (crate::, ./, etc.)
+  3. Split on the language's separator
+  4. Try each file_pattern against the project root
+  5. Return the first match
+```
+
+This is the same structure as emend's existing Python-specific
+`_file_to_module()` and `_files_importing_module()`, but
+parameterized on the language spec instead of hardcoded.
+
+With cross-module resolution, Layer 0.5 can do multi-hop tracking:
+
+```python
+# file: src/db.py
+def get_connection() -> Connection: ...
+
+# file: src/app.py
+from db import get_connection
+conn = get_connection()    # Layer 0.5: conn is Connection
+                           # (followed import → found return annotation)
+pool = conn.get_pool()     # Layer 0.5: if Connection.get_pool has
+                           # a return annotation, pool has that type
+```
+
+The tracking chain is: assignment → import resolution → symbol lookup
+→ return type annotation → repeat. Each step uses tree-sitter +
+language spec data. No language-specific *code* beyond the resolution
+rules.
+
+**What Layer 0.5 can't do across modules:**
+
+- Resolve re-exports through complex `__init__.py` / `index.ts`
+  re-export chains (these get arbitrarily hairy)
+- Track types through generic instantiation (`get_or_create[User]()`)
+- Resolve types through dynamic dispatch, decorators, metaclasses
+- Handle conditional imports, lazy imports, star imports
+
+These are where Layer 1 (native type checker) earns its keep.
+
 ```
 Layer 0:   tree-sitter annotations    → declared types         (free)
-Layer 0.5: assignment tracking         → simple inferred types  (lightweight, language-generic)
+Layer 0.5: assignment + import tracking → cross-module types    (language spec data)
 Layer 1:   native type checker         → full inferred types    (per-language adapter)
 ```
 
 | Layer | What you get | Cost | Coverage |
 |-------|-------------|------|----------|
 | 0: tree-sitter | Annotated types | Free (already parsed) | Typed codebases |
-| 0.5: assignment tracking | Constructor calls, annotated returns | Light analysis pass | Most variables |
+| 0.5: assignment + imports | Cross-module types from annotations | Language spec YAML | Most variables |
 | 1: native type checker | Full inference, generics, subtyping | Per-language adapter | Everything |
 
 Layer 0 + 0.5 together cover the vast majority of practical type
@@ -455,8 +557,8 @@ queries. Layer 1 is for when you need deep generic resolution or
 subtype reasoning — the premium tier, not the prerequisite.
 
 This is what makes agent-generated adapters viable for 50+ languages
-quickly. Layer 0 + 0.5 are language-generic (same logic, different
-tree-sitter node kinds). Layer 1 is the per-language investment, and
+quickly. Layer 0 + 0.5 are language-generic (same algorithm, different
+language spec YAML). Layer 1 is the per-language investment, and
 it's optional.
 
 ### Prior Art: Semgrep Typed Metavariables
