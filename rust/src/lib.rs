@@ -227,5 +227,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
     Ok(())
 }

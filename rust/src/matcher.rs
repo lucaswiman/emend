@@ -683,20 +683,18 @@ fn any_ancestor_matches(ancestors: &[Node], source: &[u8], pattern: &PatternNode
 // Per-file matching
 // ---------------------------------------------------------------------------
 
-/// Find all pattern matches in a single source file.
-fn find_pattern_in_source(
-    source: &str,
+/// Find all pattern matches against a pre-parsed tree.
+///
+/// Separating tree parsing from matching lets callers reuse a single parse
+/// across multiple patterns (see `find_multi_patterns_in_files`).
+fn find_pattern_in_tree(
+    tree: &tree_sitter::Tree,
+    source_bytes: &[u8],
     file_path: &str,
     pattern: &PatternNode,
     inside: Option<&PatternNode>,
     not_inside: Option<&PatternNode>,
 ) -> Vec<(String, usize, usize, usize, usize, String)> {
-    let tree = match crate::pattern::parse_python(source) {
-        Some(t) => t,
-        None => return vec![],
-    };
-
-    let source_bytes = source.as_bytes();
     let mut results = Vec::new();
     let mut ancestors: Vec<Node> = Vec::new();
 
@@ -708,13 +706,11 @@ fn find_pattern_in_source(
             if !matches_node(node, source_bytes, pattern) {
                 return;
             }
-            // Check inside constraint: at least one ancestor must match
             if let Some(inside_pat) = inside {
                 if !any_ancestor_matches(ancs, source_bytes, inside_pat) {
                     return;
                 }
             }
-            // Check not_inside constraint: no ancestor should match
             if let Some(not_inside_pat) = not_inside {
                 if any_ancestor_matches(ancs, source_bytes, not_inside_pat) {
                     return;
@@ -740,6 +736,21 @@ fn find_pattern_in_source(
     );
 
     results
+}
+
+/// Find all pattern matches in a single source file.
+fn find_pattern_in_source(
+    source: &str,
+    file_path: &str,
+    pattern: &PatternNode,
+    inside: Option<&PatternNode>,
+    not_inside: Option<&PatternNode>,
+) -> Vec<(String, usize, usize, usize, usize, String)> {
+    let tree = match crate::pattern::parse_python(source) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    find_pattern_in_tree(&tree, source.as_bytes(), file_path, pattern, inside, not_inside)
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +799,63 @@ pub fn find_pattern_in_files(
                 )
             })
             .collect();
+
+        Ok(results.into_iter().flatten().collect())
+    })
+}
+
+/// Find multiple patterns across multiple files in a single parallel pass.
+///
+/// Parses each file **once** with tree-sitter and applies all patterns to
+/// that single parse tree, saving N_rules × parse overhead compared to
+/// calling `find_pattern_in_files` once per rule.
+///
+/// `file_contents`: list of `(path, source_text)` pairs.
+/// `patterns`: list of `(pattern_ir, not_inside_ir_or_None)` pairs, one per rule.
+///
+/// Returns a flat list of `(rule_idx, file, line, col, end_line, end_col, text)`.
+#[pyfunction]
+pub fn find_multi_patterns_in_files(
+    py: Python,
+    file_contents: Vec<(String, String)>,
+    patterns: Vec<(Bound<'_, PyAny>, Option<Bound<'_, PyAny>>)>,
+) -> PyResult<Vec<(usize, String, usize, usize, usize, usize, String)>> {
+    // Deserialize all patterns on the main thread (requires access to Python objects)
+    let compiled: Vec<(PatternNode, Option<PatternNode>)> = patterns
+        .iter()
+        .map(|(pat_ir, ni_ir)| {
+            let pat = deserialize_pattern(pat_ir)?;
+            let ni = ni_ir.as_ref().map(|ir| deserialize_pattern(ir)).transpose()?;
+            Ok((pat, ni))
+        })
+        .collect::<PyResult<_>>()?;
+
+    py.allow_threads(|| {
+        let results: Vec<Vec<(usize, String, usize, usize, usize, usize, String)>> =
+            file_contents
+                .par_iter()
+                .map(|(path, source)| {
+                    let tree = match crate::pattern::parse_python(source) {
+                        Some(t) => t,
+                        None => return vec![],
+                    };
+                    let source_bytes = source.as_bytes();
+                    let mut file_results = Vec::new();
+                    for (rule_idx, (pattern, not_inside)) in compiled.iter().enumerate() {
+                        for hit in find_pattern_in_tree(
+                            &tree,
+                            source_bytes,
+                            path,
+                            pattern,
+                            None,
+                            not_inside.as_ref(),
+                        ) {
+                            file_results.push((rule_idx, hit.0, hit.1, hit.2, hit.3, hit.4, hit.5));
+                        }
+                    }
+                    file_results
+                })
+                .collect();
 
         Ok(results.into_iter().flatten().collect())
     })
