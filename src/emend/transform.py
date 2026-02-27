@@ -4213,6 +4213,60 @@ def _get_all_exported_names(content: str) -> set[str]:
     return names
 
 
+class _BulkReferenceFinder(cst.CSTVisitor):
+    """Single-pass visitor that discovers which symbols from a candidate set
+    are referenced in a file.
+
+    For each Name node, resolves its qualified name and checks whether it
+    matches any of the candidate symbols.  Records which candidates were
+    seen, keyed by (defining_file, symbol_name).
+    """
+
+    METADATA_DEPENDENCIES = (
+        cst.metadata.QualifiedNameProvider,
+        cst.metadata.PositionProvider,
+    )
+
+    def __init__(
+        self,
+        file_path: str,
+        is_definition_file: bool,
+        # candidate_qns: maps qualified-name -> (defining_file, symbol_name)
+        candidate_qns: dict[str, tuple[str, str]],
+        # For each (file, name) that is a definition in *this* file,
+        # record the definition line so we can exclude self-references.
+        local_def_lines: dict[str, int],
+    ):
+        self.file_path = file_path
+        self.is_definition_file = is_definition_file
+        self.candidate_qns = candidate_qns
+        self.local_def_lines = local_def_lines
+        # Set of (defining_file, symbol_name) that are referenced
+        self.referenced: set[tuple[str, str]] = set()
+
+    def visit_Name(self, node: cst.Name) -> None:
+        try:
+            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
+        except KeyError:
+            return
+        for qn in qnames:
+            key = self.candidate_qns.get(qn.name)
+            if key is None:
+                continue
+            # If this name appears at the definition line in the
+            # defining file, skip it (it's the definition itself).
+            def_file, sym_name = key
+            if (str(Path(self.file_path).resolve()) == def_file
+                    and sym_name in self.local_def_lines):
+                try:
+                    pos = self.get_metadata(cst.metadata.PositionProvider, node)
+                    if pos.start.line == self.local_def_lines[sym_name]:
+                        continue
+                except KeyError:
+                    pass
+            self.referenced.add(key)
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
@@ -4220,9 +4274,12 @@ def find_dead_code(
 ) -> list[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
-    Scans all Python files in the project, collects top-level symbols,
-    then checks each one for references. Symbols with no references
-    outside their own definition are flagged as dead code.
+    Performs two passes over project files:
+      1. Collect all top-level symbol definitions and their qualified names.
+      2. Visit every file once to discover which candidate symbols are
+         actually referenced anywhere outside their definition site.
+
+    This is O(files) rather than O(symbols * files).
 
     Args:
         project_path: Project root directory.
@@ -4233,16 +4290,19 @@ def find_dead_code(
         List of DeadSymbol objects sorted by file path and line number.
     """
     from .query import _collect_symbols, SymbolInfo
-    from .component_selector import ExtendedSelector
 
     project_root = str(Path(project_path).resolve())
     py_files = _collect_python_files(project_root)
 
-    # Phase 1: Collect all top-level symbols across the project
-    all_symbols: list[tuple[str, SymbolInfo]] = []  # (file_path, symbol)
-
-    # Also collect __all__ exports per file
-    all_exports: dict[str, set[str]] = {}  # file_path -> set of exported names
+    # Phase 1: Collect candidate symbols and build QN lookup table
+    # candidate key = (resolved_file_path, symbol_name)
+    candidates: dict[tuple[str, str], tuple[str, SymbolInfo]] = {}
+    # Maps qualified-name-string -> candidate key
+    candidate_qns: dict[str, tuple[str, str]] = {}
+    # Per-file definition lines for self-reference filtering
+    file_def_lines: dict[str, dict[str, int]] = {}  # file -> {name -> line}
+    # __all__ exports per file
+    all_exports: dict[str, set[str]] = {}
 
     for py_file in py_files:
         try:
@@ -4250,74 +4310,73 @@ def find_dead_code(
         except Exception:
             continue
 
+        resolved_file = str(Path(py_file).resolve())
         symbols = _collect_symbols(Path(py_file), content)
         exports = _get_all_exported_names(content)
         if exports:
-            all_exports[py_file] = exports
+            all_exports[resolved_file] = exports
+
+        file_module = _file_to_module(py_file, project_root)
+        local_defs: dict[str, int] = {}
 
         for sym in symbols:
-            # Only top-level symbols (depth 1)
             if sym.depth != 1:
                 continue
-
-            # Filter by kind if requested
             if kind:
                 if kind == 'function' and sym.kind not in ('function', 'async_function'):
                     continue
                 if kind == 'class' and sym.kind != 'class':
                     continue
-
-            # Skip private symbols unless requested
             if not include_private and sym.name.startswith('_') and not _is_dunder(sym.name):
                 continue
-
-            # Skip entry points
             if _is_likely_entry_point(sym.name, sym.kind, sym.decorators, sym.depth):
                 continue
+            if sym.name in exports:
+                continue
 
-            all_symbols.append((py_file, sym))
+            cand_key = (resolved_file, sym.name)
+            candidates[cand_key] = (py_file, sym)
+            local_defs[sym.name] = sym.line
 
-    # Phase 2: Check each symbol for references
-    dead_symbols: list[DeadSymbol] = []
+            # In the definition file, QN is just the bare name (LOCAL).
+            candidate_qns[sym.name] = cand_key
+            # In other files, QN is module.name (IMPORT).
+            candidate_qns[f"{file_module}.{sym.name}"] = cand_key
 
-    for file_path, sym in all_symbols:
-        # Skip symbols that appear in __all__
-        exports = all_exports.get(file_path, set())
-        if sym.name in exports:
-            continue
+        if local_defs:
+            file_def_lines[resolved_file] = local_defs
 
-        selector = ExtendedSelector(
-            file_path=file_path,
-            symbol_path=[sym.name],
-            component=None,
-            accessor=None,
+    if not candidates:
+        return []
+
+    # Phase 2: Single pass over all files to find references
+    referenced: set[tuple[str, str]] = set()
+
+    # Build a name hint set for pre-filtering: only visit files that
+    # contain at least one candidate symbol name as an identifier.
+    candidate_names = {sym.name for (_, sym) in candidates.values()}
+
+    def factory(py_file: str, is_def_file: bool):
+        resolved = str(Path(py_file).resolve())
+        local_defs = file_def_lines.get(resolved, {})
+        return _BulkReferenceFinder(
+            py_file, is_def_file, candidate_qns, local_defs,
         )
 
-        try:
-            refs = find_references(
-                selector,
-                project_path=project_root,
-                include_definition=True,
-                include_imports=False,
-            )
-        except (ValueError, Exception):
-            # If we can't analyze references (e.g. parse error), skip
-            continue
+    for _py_file, _module, visitor in visit_project(
+        name_hint="",  # No single hint — we handle multi-name filtering below
+        visitor_factory=factory,
+        project_path=project_root,
+        metadata_providers=_BulkReferenceFinder.METADATA_DEPENDENCIES,
+        target_file=None,
+        candidate_files=None,
+    ):
+        referenced.update(visitor.referenced)
 
-        # Filter: a symbol is dead if its only references are at the
-        # definition site itself.  _ReferenceFinder can produce both a
-        # definition ref AND a Name ref at the same (line, column) for
-        # the defining identifier, so we deduplicate by location and
-        # only keep refs that are NOT at the definition site.
-        def_line = sym.line
-        resolved_file = str(Path(file_path).resolve())
-        usage_refs = [
-            r for r in refs
-            if not (str(Path(r.file_path).resolve()) == resolved_file
-                    and r.line == def_line)
-        ]
-
-        if not usage_refs:
+    # Phase 3: Build result — candidates not in referenced set
+    dead_symbols: list[DeadSymbol] = []
+    for cand_key, (file_path, sym) in candidates.items():
+        if cand_key not in referenced:
             dead_symbols.append(DeadSymbol(
                 file_path=file_path,
                 name=sym.name,
@@ -4327,7 +4386,6 @@ def find_dead_code(
                 reason="no references found",
             ))
 
-    # Sort by file path, then line number
     dead_symbols.sort(key=lambda d: (d.file_path, d.line))
     return dead_symbols
 
