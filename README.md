@@ -6,7 +6,27 @@ Two complementary systems: **structured edits** use selectors like `file.py::fun
 
 ## Installation
 
-### Using uv (recommended)
+### Using uv with free-threaded Python (recommended for best performance)
+
+```bash
+uv tool install --python 3.14t emend
+```
+
+Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
+GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
+`#[pymodule(gil_used = false)]`), so on free-threaded Python it can run parallel
+file scans with no lock contention — meaning `search`, `lint`, `refs`, and `rename`
+across large codebases are significantly faster.
+
+The `--python 3.14t` flag tells uv to use the free-threaded interpreter. Use
+`3.13t` if you prefer the stable free-threaded release:
+
+```bash
+uv tool install --python 3.13t emend   # free-threaded 3.13 (stable)
+uv tool install --python 3.14t emend   # free-threaded 3.14 (latest)
+```
+
+### Using uv (standard Python)
 
 ```bash
 uv tool install emend
@@ -385,12 +405,13 @@ Clone the repository and install for development:
 git clone https://github.com/lucaswiman/emend
 cd emend
 
-# Using make (creates virtual environment)
+# Using make (creates a 3.14t venv, compiles the Rust extension, installs dev deps)
 make venv
 
-# Or manually:
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+# Or manually (requires maturin and a Rust toolchain):
+uv venv .venv --python 3.14t
+uv pip install maturin
+.venv/bin/maturin develop -E dev
 ```
 
 ### Running Tests
@@ -418,13 +439,16 @@ emend/
 │   ├── ast_commands.py       # AST-based command implementations
 │   ├── ast_utils.py          # AST traversal utilities
 │   ├── component_selector.py # Extended selector parsing
-│   ├── lint.py              # Pattern-based linter engine
+│   ├── lint.py               # Pattern-based linter engine
 │   └── grammars/
 │       ├── selector.lark     # Extended selector grammar
 │       └── pattern.lark      # Pattern grammar
+├── rust/                     # emend_core Rust extension (bundled in wheel)
+│   ├── src/lib.rs            # PyO3 bindings, GIL-free module definition
+│   └── Cargo.toml
 ├── tests/test_emend/         # Test suite
 ├── Makefile
-└── pyproject.toml
+└── pyproject.toml            # maturin build (bundles Rust + Python in one wheel)
 ```
 
 ## License

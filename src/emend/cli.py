@@ -39,7 +39,7 @@ def resolve_files(path: str) -> tuple[list[Path], bool]:
     """
     path_obj = Path(path)
     if path_obj.is_dir():
-        import emend_core
+        from emend import emend_core
         abs_path = str(path_obj.resolve())
         return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
     elif "*" in path or "?" in path:
@@ -310,35 +310,19 @@ def search(
             file_path_obj = Path(file_for_summary)
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
                 files, _ = resolve_files(file_for_summary)
-                try:
-                    import emend_core
-                    file_strs = [str(fp) for fp in files]
-                    batch_results = emend_core.collect_symbols_batch(
-                        file_strs, max_depth=tree_depth, selector=selector_for_summary,
-                    )
-                    for file_path_str, symbol_dicts in batch_results:
-                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
-                        print(f"\nModule: {file_path_str}")
-                        if symbols:
-                            if flat_output:
-                                ast_commands._print_symbol_flat(symbols)
-                            else:
-                                ast_commands._print_symbol_tree(symbols, indent=1)
-                except Exception:
-                    # Fallback: process files sequentially with LibCST
-                    for fp in files:
-                        try:
-                            symbols = ast_commands.collect_symbols(
-                                str(fp), tree_depth=tree_depth, selector=selector_for_summary
-                            )
-                            print(f"\nModule: {fp}")
-                            if symbols:
-                                if flat_output:
-                                    ast_commands._print_symbol_flat(symbols)
-                                else:
-                                    ast_commands._print_symbol_tree(symbols, indent=1)
-                        except Exception:
-                            continue
+                from emend import emend_core
+                file_strs = [str(fp) for fp in files]
+                batch_results = emend_core.collect_symbols_batch(
+                    file_strs, max_depth=tree_depth, selector=selector_for_summary,
+                )
+                for file_path_str, symbol_dicts in batch_results:
+                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
+                    print(f"\nModule: {file_path_str}")
+                    if symbols:
+                        if flat_output:
+                            ast_commands._print_symbol_flat(symbols)
+                        else:
+                            ast_commands._print_symbol_tree(symbols, indent=1)
             else:
                 symbols = ast_commands.collect_symbols(
                     file_for_summary, tree_depth=tree_depth, selector=selector_for_summary
@@ -355,7 +339,7 @@ def search(
         if is_pattern_mode:
             target_path = path or "."
             import libcst as cst
-            import emend_core
+            from emend import emend_core
 
             files, is_multi_file = resolve_files(target_path)
 
@@ -369,25 +353,22 @@ def search(
                 # Try Rust batch fast-path (no scope/imported_from/scope_local constraints)
                 rust_path_used = False
                 if where_scope is None and imported_from is None and not scope_local:
-                    try:
-                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
-                        from emend.transform import PatternMatch
-                        pattern_ir = compile_pattern_to_rust_ir(query)
-                        if pattern_ir is not None:
-                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
-                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
-                            if (where_inside is None or inside_ir is not None) and \
-                               (where_not_inside is None or not_inside_ir is not None):
-                                raw_matches = emend_core.find_pattern_in_files(
-                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
-                                )
-                                for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
-                                    all_matches.append((file_path_str, PatternMatch(
-                                        node=None, captures={}, line=line, matched_text=text
-                                    )))
-                                rust_path_used = True
-                    except Exception:
-                        pass
+                    from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+                    from emend.transform import PatternMatch
+                    pattern_ir = compile_pattern_to_rust_ir(query)
+                    if pattern_ir is not None:
+                        inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
+                        not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
+                        if (where_inside is None or inside_ir is not None) and \
+                           (where_not_inside is None or not_inside_ir is not None):
+                            raw_matches = emend_core.find_pattern_in_files(
+                                list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                            )
+                            for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                                all_matches.append((file_path_str, PatternMatch(
+                                    node=None, captures={}, line=line, matched_text=text
+                                )))
+                            rust_path_used = True
 
                 if not rust_path_used:
                     for file_path_str, content in file_contents:

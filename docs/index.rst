@@ -17,6 +17,7 @@ A Python refactoring CLI built on `LibCST <https://github.com/Instagram/LibCST>`
    patterns
    linting
    recipes
+   technical_details
 
 Indices and tables
 ==================
