@@ -1383,6 +1383,90 @@ app.command("dead-code", hidden=True)(dead_code_cmd)
 app.command("dead_code", hidden=True)(dead_code_cmd)
 
 
+# ============================================================================
+# Type Inference Commands
+# ============================================================================
+
+@app.command("types")
+def types_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    engine: Annotated[str, typer.Option("--engine", help="Type inference engine")] = "pyrefly",
+    definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
+):
+    """Show inferred types for symbols in a file.
+
+    Uses Pyrefly (or another type inference engine) to analyze source
+    files and display inferred types for all symbols and expressions.
+
+    Examples:
+        emend types src/models/user.py
+        emend types src/models/user.py --name User
+        emend types src/models/ --definitions-only --json
+        emend types app.py --engine pyrefly
+    """
+    from emend.type_oracle import create_type_oracle
+    import json as json_mod
+
+    try:
+        oracle = create_type_oracle(engine=engine)
+
+        if not oracle.is_available():
+            print(f"Error: {engine} is not installed or not available on PATH.", file=sys.stderr)
+            raise typer.Exit(2)
+
+        target = Path(path)
+        if target.is_dir():
+            files, _ = resolve_files(path)
+        elif "*" in path or "?" in path:
+            files, _ = resolve_files(path)
+        else:
+            files = [target]
+
+        all_bindings = []
+        for f in files:
+            ft = oracle.infer_file(f)
+            for b in ft.bindings:
+                if name and b.name != name:
+                    continue
+                if kind and b.binding_kind != kind:
+                    continue
+                if definitions_only and b.binding_kind != "definition":
+                    continue
+                all_bindings.append((str(f), b))
+
+        if json_output:
+            data = []
+            for file_path, b in all_bindings:
+                entry = {
+                    "file": file_path,
+                    "name": b.name,
+                    "line": b.line,
+                    "col_start": b.col_start,
+                    "col_end": b.col_end,
+                    "type": b.raw_type,
+                    "kind": b.binding_kind,
+                }
+                data.append(entry)
+            print(json_mod.dumps(data, indent=2))
+        else:
+            if not all_bindings:
+                print("No type information found.")
+            else:
+                for file_path, b in all_bindings:
+                    col_range = f"{b.col_start}-{b.col_end}" if b.col_end else str(b.col_start)
+                    print(f"{file_path}:{b.line}:{col_range}  {b.name}: {b.raw_type}  ({b.binding_kind})")
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+
+
 def main():
     try:
         app()
