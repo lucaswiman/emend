@@ -7,13 +7,13 @@
 | File | Purpose |
 |------|---------|
 | `cli.py` | CLI entry point (Typer), all command definitions |
-| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph |
+| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code |
 | `pattern.py` | LibCST pattern matching with `$METAVAR` support |
 | `component_selector.py` | Selector parsing (`file.py::Sym[component][accessor]`) |
 | `ast_commands.py` | List-symbols and copy-to commands (LibCST `_ListSymbolsVisitor` with `PositionProvider`) |
 | `ast_utils.py` | AST traversal utilities using LibCST (`_NestedDefinitionVisitor` with `PositionProvider`) |
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
-| `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting |
+| `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
 | `grammars/pattern.lark` | Lark grammar for pattern syntax |
 
@@ -25,6 +25,7 @@
 | `test_ast_migration.py` | LibCST migration regression tests (ast_utils, query, search --output summary) |
 | `test_batch.py` | `batch` command (YAML/JSON operations) |
 | `test_callers.py` | `callers` command |
+| `test_dead_code.py` | `dead-code` command (detection, CLI, exclude-refs, strings-as-refs, noqa, git last-reference, lint integration) |
 | `test_callees.py` | `find_callees()` in transform.py |
 | `test_cli_transform.py` | CLI integration for transform operations |
 | `test_component_selector.py` | Extended selector parsing |
@@ -73,7 +74,8 @@
 | `refs` | Find all references to a symbol (`--writes-only`, `--reads-only`, `--calls-only` for call sites only) |
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
-| `lint` | Lint files using pattern rules from `.emend/patterns.yaml` |
+| `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
+| `dead-code` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
 
 ## Architecture
 
@@ -100,7 +102,18 @@ All cross-project functions use the shared `visit_project()` helper in `transfor
 `lint.py` loads rules from `.emend/patterns.yaml`:
 - `macros` section: named reusable pattern fragments
 - `rules` section: `find` + optional `not-inside` + `message` + optional `replace`
+- `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass
 - `--fix` flag auto-applies associated `replace` patterns
+
+### Dead Code Detection
+
+`transform.py` contains `find_dead_code()` and `_BulkReferenceFinder`:
+- Single-pass O(files) analysis using `QualifiedNameProvider`
+- `_find_python_source_root()` detects `src/` layout via `pyproject.toml`
+- Entry point heuristics skip decorated symbols, dunders, tests, `__all__` members
+- String literal scanning for dynamic references (getattr, serialization)
+- `git log -S` integration for last-reference tracking
+- `# noqa: emend:deadcode` inline suppression
 
 ## Running Tests
 

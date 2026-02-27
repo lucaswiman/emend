@@ -178,6 +178,11 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 - `emend lint src/ --rule no-print` to run a single rule
 - See [Linting documentation](https://lucaswiman.github.io/emend/linting.html) for full details
 
+**`dead-code`** - Find potentially dead (unreferenced) code
+- `emend dead-code src/`
+- `emend dead-code . --kind function --json`
+- `emend dead-code src/ --exclude-references-from tests/`
+
 **`graph`** - Generate a call graph for functions in a file
 - `emend graph src/module.py --format plain`
 - Formats: `plain`, `json`, `dot`
@@ -377,6 +382,40 @@ Suppress violations inline with `# noqa` comments:
 print("keep this")  # noqa
 print("keep this")  # noqa: emend:no-print
 print("keep this")  # noqa: E501, emend:no-print  # mixed with other linters
+```
+
+### Dead code detection
+
+emend includes a `deadcode` section in `.emend/patterns.yaml` to detect unreferenced symbols as part of linting:
+
+```yaml
+# .emend/patterns.yaml
+deadcode: true
+
+# Or with options:
+deadcode:
+  enabled: true
+  kind: function                          # Only functions (or "class")
+  exclude-references-from: ["tests/"]     # Ignore refs from tests
+  include-private: false                  # Skip _private symbols
+  strings-count-as-references: true       # String literals count as refs
+  message: "Symbol appears to be unused"
+```
+
+```bash
+# Run as part of lint
+emend lint src/
+
+# Or use the standalone command
+emend dead-code src/
+emend dead-code src/ --exclude-references-from tests/ --json
+```
+
+Suppress false positives inline:
+
+```python
+def my_entry_point():  # noqa: emend:deadcode
+    ...
 ```
 
 ### pre-commit integration

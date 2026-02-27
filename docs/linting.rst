@@ -315,6 +315,104 @@ Enforce testing conventions
        replace: "assert $X"
 
 
+Dead code detection
+-------------------
+
+emend can detect unreferenced (dead) code as part of linting. Add a ``deadcode`` section to your ``.emend/patterns.yaml`` config.
+
+Quick enable
+~~~~~~~~~~~~
+
+The simplest form:
+
+.. code-block:: yaml
+
+   deadcode: true
+
+This enables dead code detection with default settings.
+
+Full configuration
+~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   deadcode:
+     enabled: true
+     kind: function                           # "function", "class", or omit for all
+     include-private: false                   # Include _private symbols
+     exclude-references-from:                 # Ignore refs from these dirs
+       - tests/
+     strings-count-as-references: true        # String literals count as refs
+     message: "Symbol appears to be unused"   # Custom message prefix
+
++---------------------------------+----------+-----------------------------------------------+
+| Field                           | Default  | Description                                   |
++=================================+==========+===============================================+
+| ``enabled``                     | ``true`` | Enable/disable dead code detection            |
++---------------------------------+----------+-----------------------------------------------+
+| ``kind``                        | (all)    | Filter: ``function`` or ``class``             |
++---------------------------------+----------+-----------------------------------------------+
+| ``include-private``             | ``false``| Include ``_private`` symbols                  |
++---------------------------------+----------+-----------------------------------------------+
+| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs  |
++---------------------------------+----------+-----------------------------------------------+
+| ``strings-count-as-references`` | ``true`` | Treat string literals containing the symbol   |
+|                                 |          | name as references                            |
++---------------------------------+----------+-----------------------------------------------+
+| ``message``                     | "Symbol  | Custom message prefix for violations          |
+|                                 | appears  |                                               |
+|                                 | to be    |                                               |
+|                                 | unused"  |                                               |
++---------------------------------+----------+-----------------------------------------------+
+
+How it works
+~~~~~~~~~~~~
+
+Dead code detection uses LibCST's ``QualifiedNameProvider`` for scope-aware analysis. It:
+
+1. Collects all top-level function and class definitions across the project
+2. Visits every file once (O(files) not O(symbols * files)) to find references
+3. Reports symbols with zero references outside their own definition
+
+It automatically detects ``src/`` layout projects (via ``pyproject.toml``) and computes correct qualified names.
+
+Automatic exclusions are the same as the ``emend dead-code`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.
+
+Interaction with rules
+~~~~~~~~~~~~~~~~~~~~~~
+
+Dead code violations appear alongside pattern-rule violations with the rule name ``deadcode``:
+
+.. code-block:: text
+
+   src/utils.py:42:0: [deadcode] Symbol appears to be unused: old_helper
+
+You can run only dead code detection with ``--rule deadcode``:
+
+.. code-block:: bash
+
+   emend lint src/ --rule deadcode
+
+Inline suppression works the same way as for pattern rules:
+
+.. code-block:: python
+
+   def my_entry_point():  # noqa: emend:deadcode
+       ...
+
+Standalone command
+~~~~~~~~~~~~~~~~~~
+
+Dead code detection is also available as a standalone command with additional options (``--json``, ``--no-last-reference``):
+
+.. code-block:: bash
+
+   emend dead-code src/
+   emend dead-code src/ --exclude-references-from tests/ --json
+
+See :doc:`commands` for the full ``dead-code`` command reference.
+
+
 pre-commit integration
 ----------------------
 
