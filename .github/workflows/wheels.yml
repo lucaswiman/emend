@@ -145,7 +145,7 @@ jobs:
   # ── macOS Intel (x86_64) ──────────────────────────────────────────────────
   macos-intel:
     name: macOS x86_64 (all Python versions)
-    runs-on: macos-13
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
