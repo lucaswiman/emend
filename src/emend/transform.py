@@ -100,19 +100,112 @@ def _find_project_root(start_path: str) -> str:
     return str(path)
 
 
+@lru_cache(maxsize=64)
+def _find_python_source_root(project_root: str) -> str:
+    """Find the Python source root directory for a project.
+
+    Detects ``src/`` layout by checking (in order):
+    1. ``pyproject.toml`` settings (maturin, setuptools, hatch)
+    2. ``setup.cfg`` [options] package_dir
+    3. Heuristic: ``src/`` exists and contains a package (dir with ``__init__.py``)
+
+    Returns the resolved source root (e.g. ``/repo/src``), or the
+    project root itself if no ``src/`` layout is detected.
+    """
+    root = Path(project_root).resolve()
+
+    # --- pyproject.toml -------------------------------------------------
+    pyproject = root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+        except ModuleNotFoundError:          # Python < 3.11
+            try:
+                import tomli as tomllib      # type: ignore[no-redef]
+            except ModuleNotFoundError:
+                tomllib = None               # type: ignore[assignment]
+        if tomllib is not None:
+            try:
+                data = tomllib.loads(pyproject.read_text())
+                # maturin: python-source = "src"
+                ps = (data.get("tool", {}).get("maturin", {})
+                      .get("python-source"))
+                if ps:
+                    candidate = root / ps
+                    if candidate.is_dir():
+                        return str(candidate)
+                # setuptools: [tool.setuptools.packages.find] where = ["src"]
+                where = (data.get("tool", {}).get("setuptools", {})
+                         .get("packages", {}).get("find", {}).get("where"))
+                if isinstance(where, list) and where:
+                    candidate = root / where[0]
+                    if candidate.is_dir():
+                        return str(candidate)
+                # hatch / hatchling
+                where = (data.get("tool", {}).get("hatch", {})
+                         .get("build", {}).get("sources", {}).get("src"))
+                if isinstance(where, str):
+                    candidate = root / where
+                    if candidate.is_dir():
+                        return str(candidate)
+            except Exception:
+                pass
+
+    # --- setup.cfg ------------------------------------------------------
+    setup_cfg = root / "setup.cfg"
+    if setup_cfg.is_file():
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(str(setup_cfg))
+            pkg_dir = cfg.get("options", "package_dir", fallback=None)
+            if pkg_dir:
+                # Format: "= src" or "\n= src"
+                for part in pkg_dir.splitlines():
+                    part = part.strip()
+                    if part.startswith("="):
+                        src_dir = part[1:].strip()
+                        candidate = root / src_dir
+                        if candidate.is_dir():
+                            return str(candidate)
+        except Exception:
+            pass
+
+    # --- Heuristic: src/ with an __init__.py package --------------------
+    src_dir = root / "src"
+    if src_dir.is_dir():
+        for child in src_dir.iterdir():
+            if child.is_dir() and (child / "__init__.py").is_file():
+                return str(src_dir)
+
+    return str(root)
+
+
 def _file_to_module(file_path: str, project_path: str | None) -> str:
-    """Convert file path to Python module name."""
+    """Convert file path to Python module name.
+
+    Detects ``src/`` layout automatically so that
+    ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
+    """
     abs_file = Path(file_path).resolve()
     proj_root = Path(project_path or _find_project_root(file_path)).resolve()
+    source_root = Path(_find_python_source_root(str(proj_root)))
 
-    rel_path = abs_file.relative_to(proj_root)
+    # Use the source root if the file lives under it; otherwise fall
+    # back to the project root (e.g. for test files outside src/).
+    try:
+        rel_path = abs_file.relative_to(source_root)
+    except ValueError:
+        rel_path = abs_file.relative_to(proj_root)
+
     module_parts = list(rel_path.parts[:-1]) + [rel_path.stem]
     return '.'.join(module_parts)
 
 
 _SKIP_DIRS = frozenset({'.git', '__pycache__', '.venv', 'venv', '.tox', 'node_modules',
                         '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
-                        'dist', 'build', '.nox'})
+                        'dist', 'build', '.nox', '.uv-cache', '.pixi',
+                        '.cargo', '.cargo-cache'})
 
 # Module-level file-list cache: maps resolved project root to (mtime_ns, file_list)
 _file_list_cache: dict[str, tuple[int, list[str]]] = {}
@@ -123,13 +216,49 @@ def _collect_python_files_scandir(root_path: str) -> list[str]:
     return _rust.collect_python_files(root_path)
 
 
-def _collect_python_files(project_root: str) -> list[str]:
+def _collect_git_tracked_python_files(project_root: str) -> list[str] | None:
+    """Return git-tracked .py files, or None if not in a git repo."""
+    import subprocess
+    resolved = str(Path(project_root).resolve())
+    try:
+        result = subprocess.run(
+            ['git', 'ls-files', '-z', '*.py'],
+            capture_output=True, timeout=10,
+            cwd=resolved,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout
+        if not raw:
+            return []
+        # git ls-files -z uses null separators; paths are relative to cwd
+        rel_paths = raw.decode('utf-8', errors='replace').split('\0')
+        abs_paths = []
+        for p in rel_paths:
+            p = p.strip()
+            if p:
+                abs_paths.append(str(Path(resolved) / p))
+        return abs_paths
+    except Exception:
+        return None
+
+
+def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> list[str]:
     """Collect all Python files in project, with caching.
 
     Uses os.scandir for speed. Caches the file list per project root,
     invalidated when the root directory's mtime changes (which happens
     when files are added or removed).
+
+    If *git_tracked_only* is True, uses ``git ls-files`` to only return
+    files tracked by git.  Falls back to directory scan if not in a
+    git repository.
     """
+    if git_tracked_only:
+        tracked = _collect_git_tracked_python_files(project_root)
+        if tracked is not None:
+            return tracked
+
     import os
     resolved = str(Path(project_root).resolve())
     try:
@@ -4092,6 +4221,453 @@ def generate_graph(
             else:
                 lines.append(f"{caller} (no calls)")
         return "\n".join(lines)
+
+
+@dataclass
+class DeadSymbol:
+    """A symbol detected as potentially dead (unreferenced) code."""
+    file_path: str
+    name: str
+    kind: str  # 'function', 'class', 'async_function'
+    line: int
+    selector: str  # e.g. "file.py::func_name"
+    reason: str  # Why it's flagged (e.g. "no references found")
+    last_reference_commit: str | None = None  # git commit that last touched this symbol
+
+
+# Decorator prefixes that indicate a symbol is an entry point / framework hook
+_ENTRY_POINT_DECORATORS = frozenset({
+    'app.command', 'app.route', 'app.get', 'app.post', 'app.put',
+    'app.delete', 'app.patch',
+    'pytest.fixture', 'fixture',
+    'staticmethod', 'classmethod', 'property',
+    'abstractmethod', 'abc.abstractmethod',
+    'override',
+    'overload', 'typing.overload',
+    'click.command', 'click.group',
+    'celery.task',
+    'register',
+})
+
+# Decorator base names that indicate entry points
+_ENTRY_POINT_DECORATOR_BASENAMES = frozenset({
+    'route', 'get', 'post', 'put', 'delete', 'patch', 'head', 'options',
+    'command', 'task', 'hook', 'listener',
+    'receiver', 'signal', 'handler', 'middleware',
+    'register', 'export',
+})
+
+# Names that are conventional entry points and should never be flagged
+_ENTRY_POINT_NAMES = frozenset({
+    'main', 'setup', 'teardown', 'configure',
+    'setUp', 'tearDown', 'setUpClass', 'tearDownClass',
+    'setUpModule', 'tearDownModule',
+})
+
+
+def _is_dunder(name: str) -> bool:
+    """Check if a name is a dunder (double underscore) name."""
+    return name.startswith('__') and name.endswith('__') and len(name) > 4
+
+
+def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: int) -> bool:
+    """Check if a symbol is likely an entry point based on heuristics.
+
+    Entry points are symbols that are invoked by frameworks or conventions
+    rather than explicit code references.
+    """
+    # Dunder methods/functions are always entry points
+    if _is_dunder(name):
+        return True
+
+    # Conventional entry-point names
+    if name in _ENTRY_POINT_NAMES:
+        return True
+
+    # Names starting with test_ (pytest discovery)
+    if name.startswith('test_') or name.startswith('Test'):
+        return True
+
+    # Private names (single underscore prefix) at depth > 1 are methods,
+    # which may be called via getattr or framework internals
+    # We only flag private top-level symbols
+
+    # Check decorators
+    for dec in decorators:
+        # Strip @ prefix if present
+        dec_name = dec[1:] if dec.startswith('@') else dec
+        # Strip arguments: @app.command("name") -> app.command
+        if '(' in dec_name:
+            dec_name = dec_name[:dec_name.index('(')]
+
+        if dec_name in _ENTRY_POINT_DECORATORS:
+            return True
+
+        # Check basename: @anything.route -> "route" is entry point
+        basename = dec_name.rsplit('.', 1)[-1] if '.' in dec_name else dec_name
+        if basename in _ENTRY_POINT_DECORATOR_BASENAMES:
+            return True
+
+    return False
+
+
+def _get_all_exported_names(content: str) -> set[str]:
+    """Extract names listed in __all__ from file content."""
+    try:
+        module = _cached_parse(content)
+    except Exception:
+        return set()
+
+    names: set[str] = set()
+    for stmt in module.body:
+        # Match: __all__ = [...]  or  __all__ = (...)
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if (isinstance(item, cst.Assign)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0].target, cst.Name)
+                        and item.targets[0].target.value == '__all__'):
+                    value = item.value
+                    elements = None
+                    if isinstance(value, (cst.List, cst.Tuple)):
+                        elements = value.elements
+                    if elements:
+                        for el in elements:
+                            if isinstance(el, cst.Element) and isinstance(el.value, (cst.SimpleString, cst.ConcatenatedString)):
+                                # Extract the string value
+                                try:
+                                    raw = el.value.evaluated_value
+                                    if isinstance(raw, str):
+                                        names.add(raw)
+                                except Exception:
+                                    pass
+    return names
+
+
+class _BulkReferenceFinder(cst.CSTVisitor):
+    """Single-pass visitor that discovers which symbols from a candidate set
+    are referenced in a file.
+
+    For each Name/Attribute node, resolves its qualified name and checks
+    whether it matches any of the candidate symbols.  Optionally also
+    treats string literals containing the symbol name as references.
+
+    Records which candidates were seen, keyed by (defining_file, symbol_name).
+    """
+
+    METADATA_DEPENDENCIES = (
+        cst.metadata.QualifiedNameProvider,
+        cst.metadata.PositionProvider,
+    )
+
+    def __init__(
+        self,
+        file_path: str,
+        is_definition_file: bool,
+        # candidate_qns: maps qualified-name -> (defining_file, symbol_name)
+        candidate_qns: dict[str, tuple[str, str]],
+        # For each (file, name) that is a definition in *this* file,
+        # record the definition line so we can exclude self-references.
+        local_def_lines: dict[str, int],
+        # candidate_names_by_key: maps symbol_name -> set of candidate keys
+        # Used for string-based reference detection.
+        candidate_names_by_key: dict[str, set[tuple[str, str]]] | None = None,
+        # String patterns that count as references: maps pattern -> set of keys
+        string_patterns: dict[str, set[tuple[str, str]]] | None = None,
+    ):
+        self.file_path = file_path
+        self.is_definition_file = is_definition_file
+        self.candidate_qns = candidate_qns
+        self.local_def_lines = local_def_lines
+        self.candidate_names_by_key = candidate_names_by_key
+        self.string_patterns = string_patterns
+        # Set of (defining_file, symbol_name) that are referenced
+        self.referenced: set[tuple[str, str]] = set()
+
+    def _check_node(self, node: cst.CSTNode) -> None:
+        """Resolve the QN of *node* and mark matching candidates as referenced."""
+        try:
+            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
+        except KeyError:
+            return
+        for qn in qnames:
+            key = self.candidate_qns.get(qn.name)
+            if key is None:
+                continue
+            # If this name appears at the definition line in the
+            # defining file, skip it (it's the definition itself).
+            def_file, sym_name = key
+            if (str(Path(self.file_path).resolve()) == def_file
+                    and sym_name in self.local_def_lines):
+                try:
+                    pos = self.get_metadata(cst.metadata.PositionProvider, node)
+                    if pos.start.line == self.local_def_lines[sym_name]:
+                        continue
+                except KeyError:
+                    pass
+            self.referenced.add(key)
+
+    def visit_Name(self, node: cst.Name) -> None:
+        self._check_node(node)
+
+    def visit_Attribute(self, node: cst.Attribute) -> None:
+        # Catches module.symbol references like ast_commands.cmd_copy_to
+        self._check_node(node)
+
+    def _check_string(self, value: str) -> None:
+        """Check if a string literal contains any candidate symbol name."""
+        if not self.string_patterns:
+            return
+        for pattern, keys in self.string_patterns.items():
+            if pattern in value:
+                self.referenced.update(keys)
+
+    def visit_SimpleString(self, node: cst.SimpleString) -> None:
+        if self.string_patterns:
+            try:
+                val = node.evaluated_value
+                if isinstance(val, str):
+                    self._check_string(val)
+            except Exception:
+                pass
+
+    def visit_FormattedStringText(self, node: cst.FormattedStringText) -> None:
+        if self.string_patterns:
+            self._check_string(node.value)
+
+
+def _has_noqa_deadcode(source: str, line: int) -> bool:
+    """Check whether *line* has a ``# noqa: emend:deadcode`` comment."""
+    from .lint import parse_noqa_comments
+    noqa = parse_noqa_comments(source)
+    if line not in noqa:
+        return False
+    entry = noqa[line]
+    # None means bare noqa (suppresses everything)
+    if entry is None:
+        return True
+    return 'deadcode' in entry
+
+
+def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
+    """Use ``git log -S`` to find the last commit that added/removed *symbol_name*.
+
+    Returns a one-line summary like ``abc1234 2024-01-15 Fix: remove usage``
+    or None if git is unavailable or nothing found.
+    """
+    import subprocess
+    cwd = str(Path(file_path).resolve().parent)
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-S', symbol_name, '--format=%h %ai %s',
+             '-1', '--', file_path],
+            capture_output=True, text=True, timeout=10,
+            cwd=cwd,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def find_dead_code(
+    project_path: str,
+    kind: str | None = None,
+    include_private: bool = False,
+    exclude_references_from: list[str] | None = None,
+    strings_count_as_references: bool = True,
+    show_last_reference: bool = True,
+    all_files: bool = False,
+) -> Iterator[DeadSymbol]:
+    """Find potentially dead (unreferenced) code in a project.
+
+    Performs two passes over project files:
+      1. Collect all top-level symbol definitions and their qualified names.
+      2. Visit every file once to discover which candidate symbols are
+         actually referenced anywhere outside their definition site.
+
+    This is O(files) rather than O(symbols * files).
+
+    Args:
+        project_path: Project root directory.
+        kind: Optional filter: 'function', 'class', or None for all.
+        include_private: If True, include _private symbols (excluded by default).
+        exclude_references_from: Directories/globs to exclude when scanning for
+            references (e.g. ``["tests/"]``).  Symbols are still collected from
+            these paths but references *in* them are ignored.
+        strings_count_as_references: If True (default), string literals that
+            contain the symbol name are treated as references.  This reduces
+            false positives from dynamic dispatch, serialization, and similar.
+        show_last_reference: If True (default), annotate each dead symbol with
+            the last ``git log -S`` commit that touched its name.
+        all_files: If True, scan all Python files (including untracked).
+            By default only git-tracked files are scanned when inside a
+            git repository.
+
+    Yields:
+        DeadSymbol objects sorted by file path and line number.
+    """
+    from .query import _collect_symbols, SymbolInfo
+
+    # scan_root: where to collect files (respects the user-supplied path)
+    # module_root: project root for computing dotted module names (always
+    #              the real project root so that QNs match across files)
+    scan_root = str(Path(project_path).resolve())
+    module_root = _find_project_root(project_path)
+    py_files = _collect_python_files(scan_root, git_tracked_only=not all_files)
+
+    # Build resolved exclude set for reference scanning
+    exclude_resolved: set[str] = set()
+    if exclude_references_from:
+        for pattern in exclude_references_from:
+            p = Path(pattern).resolve()
+            exclude_resolved.add(str(p))
+
+    def _is_excluded_ref_file(py_file: str) -> bool:
+        """Check if a file should be excluded from reference scanning."""
+        if not exclude_resolved:
+            return False
+        resolved = str(Path(py_file).resolve())
+        return any(resolved.startswith(ex) for ex in exclude_resolved)
+
+    # Phase 1: Collect candidate symbols and build QN lookup table
+    # candidate key = (resolved_file_path, symbol_name)
+    candidates: dict[tuple[str, str], tuple[str, SymbolInfo]] = {}
+    # Maps qualified-name-string -> candidate key
+    candidate_qns: dict[str, tuple[str, str]] = {}
+    # Per-file definition lines for self-reference filtering
+    file_def_lines: dict[str, dict[str, int]] = {}  # file -> {name -> line}
+    # __all__ exports per file
+    all_exports: dict[str, set[str]] = {}
+    # file contents cache (needed for noqa checking)
+    file_contents_cache: dict[str, str] = {}
+
+    for py_file in py_files:
+        try:
+            content = Path(py_file).read_text()
+        except Exception:
+            continue
+
+        resolved_file = str(Path(py_file).resolve())
+        file_contents_cache[resolved_file] = content
+        symbols = _collect_symbols(Path(py_file), content)
+        exports = _get_all_exported_names(content)
+        if exports:
+            all_exports[resolved_file] = exports
+
+        file_module = _file_to_module(py_file, module_root)
+        local_defs: dict[str, int] = {}
+
+        for sym in symbols:
+            if sym.depth != 1:
+                continue
+            if kind:
+                if kind == 'function' and sym.kind not in ('function', 'async_function'):
+                    continue
+                if kind == 'class' and sym.kind != 'class':
+                    continue
+            if not include_private and sym.name.startswith('_') and not _is_dunder(sym.name):
+                continue
+            if _is_likely_entry_point(sym.name, sym.kind, sym.decorators, sym.depth):
+                continue
+            if sym.name in exports:
+                continue
+            # Check for # noqa: emend:deadcode on the definition line
+            if _has_noqa_deadcode(content, sym.line):
+                continue
+
+            cand_key = (resolved_file, sym.name)
+            candidates[cand_key] = (py_file, sym)
+            local_defs[sym.name] = sym.line
+
+            # In the definition file, QN is just the bare name (LOCAL).
+            candidate_qns[sym.name] = cand_key
+            # In other files, QN is module.name (IMPORT).
+            candidate_qns[f"{file_module}.{sym.name}"] = cand_key
+
+        if local_defs:
+            file_def_lines[resolved_file] = local_defs
+
+    if not candidates:
+        return []
+
+    # Build string-pattern lookup for string-as-reference detection.
+    # For each candidate we generate patterns that are likely to appear
+    # in dynamic references: the bare name, the qualified name, and
+    # the selector-style "::name".
+    candidate_names_by_key: dict[str, set[tuple[str, str]]] = {}
+    string_patterns: dict[str, set[tuple[str, str]]] | None = None
+
+    if strings_count_as_references:
+        string_patterns = {}
+        for cand_key, (file_path, sym) in candidates.items():
+            name = sym.name
+            # Bare name (e.g. "my_func")
+            string_patterns.setdefault(name, set()).add(cand_key)
+        # Filter out very short names (<=3 chars) to avoid false matches
+        # from strings like "x" or "id" appearing everywhere.
+        string_patterns = {
+            k: v for k, v in string_patterns.items() if len(k) > 3
+        }
+
+    # Phase 2: Single pass over all files to find references
+    referenced: set[tuple[str, str]] = set()
+
+    def factory(py_file: str, is_def_file: bool):
+        resolved = str(Path(py_file).resolve())
+        local_defs = file_def_lines.get(resolved, {})
+        return _BulkReferenceFinder(
+            py_file, is_def_file, candidate_qns, local_defs,
+            candidate_names_by_key=candidate_names_by_key or None,
+            string_patterns=string_patterns if not _is_excluded_ref_file(py_file) else None,
+        )
+
+    # Determine reference scan files: exclude_references_from excludes
+    # files from the reference scan but NOT from symbol collection.
+    ref_scan_files: set[str] | None = None
+    if exclude_resolved:
+        ref_scan_files = {
+            f for f in py_files if not _is_excluded_ref_file(f)
+        }
+
+    for _py_file, _module, visitor in visit_project(
+        name_hint="",  # No single hint — we handle multi-name filtering below
+        visitor_factory=factory,
+        project_path=scan_root,
+        metadata_providers=_BulkReferenceFinder.METADATA_DEPENDENCIES,
+        target_file=None,
+        candidate_files=ref_scan_files,
+    ):
+        referenced.update(visitor.referenced)
+
+    # Phase 3: Yield results — candidates not in referenced set
+    dead_symbols: list[DeadSymbol] = []
+    for cand_key, (file_path, sym) in candidates.items():
+        if cand_key not in referenced:
+            dead_symbols.append(DeadSymbol(
+                file_path=file_path,
+                name=sym.name,
+                kind=sym.kind,
+                line=sym.line,
+                selector=sym.path,
+                reason="no references found",
+            ))
+
+    dead_symbols.sort(key=lambda d: (d.file_path, d.line))
+
+    if show_last_reference and dead_symbols:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _git_lookup(d: DeadSymbol) -> tuple[DeadSymbol, str | None]:
+            return d, _get_last_reference_commit(d.file_path, d.name)
+
+        with ThreadPoolExecutor() as pool:
+            for d, commit in pool.map(_git_lookup, dead_symbols):
+                d.last_reference_commit = commit
+                yield d
+    else:
+        yield from dead_symbols
 
 
 def _rename_symbol_in_file(

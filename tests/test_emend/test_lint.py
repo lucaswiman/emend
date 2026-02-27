@@ -88,7 +88,7 @@ def test_lint_macro_in_rules(tmp_path):
     }
 
     config_file = _write_config(tmp_path, config)
-    rules, macros = load_rules(str(config_file))
+    rules, macros, _ = load_rules(str(config_file))
     assert len(rules) == 1
     assert rules[0].find == "print($...ARGS)"
 
@@ -182,7 +182,7 @@ def test_lint_custom_config(tmp_path):
     }
 
     config_file = _write_config(tmp_path, config)
-    rules, macros = load_rules(str(config_file))
+    rules, macros, _ = load_rules(str(config_file))
     assert len(rules) == 1
     assert rules[0].name == "no-bare-assert"
     assert rules[0].message == "Use pytest assertions instead"
@@ -674,7 +674,7 @@ def test_lint_union_to_pipe_config_file(tmp_path):
     }
 
     config_file = _write_config(tmp_path, config)
-    rules, macros = load_rules(str(config_file))
+    rules, macros, _ = load_rules(str(config_file))
 
     violations = run_lint(rules, [str(test_file)], fix=True)
     assert len(violations) >= 1

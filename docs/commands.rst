@@ -462,6 +462,97 @@ Generate a call graph for all functions in a file.
 
 ---
 
+deadcode
+--------
+
+Find potentially dead (unreferenced) code in a project. Scans all Python files and reports top-level symbols that have no references outside their own definition, using scope-aware analysis.
+
+Also available as: ``dead-code``, ``dead_code``.
+
+.. code-block:: text
+
+   emend deadcode [PATH] [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- Project directory to scan (default: ``.``)
+
+**Options:**
+
++------------------------------+-----------------------------------------------+
+| Option                       | Description                                   |
++==============================+===============================================+
+| ``--kind``, ``-k``          | Filter by symbol kind: ``function``, ``class``|
++------------------------------+-----------------------------------------------+
+| ``--include-private``        | Include ``_private`` symbols (excluded by      |
+|                              | default)                                      |
++------------------------------+-----------------------------------------------+
+| ``--json``                   | Output as JSON                                |
++------------------------------+-----------------------------------------------+
+| ``--exclude-references-from``| Directories to ignore when scanning for       |
+|                              | references (e.g. ``tests/``). Can be repeated.|
++------------------------------+-----------------------------------------------+
+| ``--no-strings``             | Don't count string literals as references     |
++------------------------------+-----------------------------------------------+
+| ``--no-last-reference``      | Don't show git last-reference info            |
++------------------------------+-----------------------------------------------+
+
+**Automatic exclusions:**
+
+The following are automatically skipped (not reported as dead):
+
+- Dunder methods (``__init__``, ``__str__``, etc.)
+- Test functions/classes (``test_*``, ``Test*``)
+- Decorated entry points (``@app.command``, ``@pytest.fixture``, ``@click.command``, ``@celery.task``, etc.)
+- Symbols listed in ``__all__``
+- Conventional entry points (``main``, ``setup``, ``teardown``)
+- Private symbols (``_name``) unless ``--include-private`` is set
+- Symbols with ``# noqa: emend:deadcode`` on the definition line
+
+**String-as-reference detection:**
+
+By default, string literals containing the symbol name are treated as references.
+This reduces false positives from dynamic dispatch (``getattr(obj, "method")``),
+serialization frameworks, and similar patterns. Disable with ``--no-strings``.
+
+**Last reference tracking:**
+
+By default, each dead symbol is annotated with the last git commit that mentioned
+its name (via ``git log -S``), helping you decide whether to remove it. Disable
+with ``--no-last-reference``.
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Scan a project for dead code
+   emend deadcode src/
+
+   # Only functions
+   emend deadcode . --kind function
+
+   # Include private symbols, output as JSON
+   emend deadcode . --include-private --json
+
+   # Ignore references from tests
+   emend deadcode src/ --exclude-references-from tests/
+
+   # Disable string matching and git annotation
+   emend deadcode . --no-strings --no-last-reference
+
+**Inline suppression:**
+
+Suppress false positives with ``# noqa: emend:deadcode``:
+
+.. code-block:: python
+
+   def my_entry_point():  # noqa: emend:deadcode
+       ...
+
+A bare ``# noqa`` also suppresses the deadcode rule.
+
+---
+
 copy-to
 -------
 
