@@ -301,6 +301,39 @@ class TestFindDeadCode:
         assert "my_handler" not in dead_names
         assert "truly_unused" in dead_names
 
+    def test_skips_fastapi_router_decorators(self, tmp_path):
+        """FastAPI-style @router.get/post/etc decorators are skipped."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        main_file = project / "main.py"
+        main_file.write_text(
+            "class Router:\n"
+            "    def get(self, path): return lambda f: f\n"
+            "    def post(self, path): return lambda f: f\n"
+            "\n"
+            "router = Router()\n"
+            "\n"
+            "@router.get('/users')\n"
+            "def list_users():\n"
+            "    return []\n"
+            "\n"
+            "@router.post('/users')\n"
+            "def create_user():\n"
+            "    return {}\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = find_dead_code(str(project))
+        dead_names = {d.name for d in dead}
+        assert "list_users" not in dead_names
+        assert "create_user" not in dead_names
+        assert "truly_unused" in dead_names
+
     def test_sorted_output(self, tmp_path):
         """Results are sorted by file path then line number."""
         from emend.transform import find_dead_code

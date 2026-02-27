@@ -4215,7 +4215,8 @@ _ENTRY_POINT_DECORATORS = frozenset({
 
 # Decorator base names that indicate entry points
 _ENTRY_POINT_DECORATOR_BASENAMES = frozenset({
-    'route', 'command', 'task', 'hook', 'listener',
+    'route', 'get', 'post', 'put', 'delete', 'patch', 'head', 'options',
+    'command', 'task', 'hook', 'listener',
     'receiver', 'signal', 'handler', 'middleware',
     'register', 'export',
 })
