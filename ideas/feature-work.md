@@ -486,3 +486,453 @@ The top 3 — structured JSON output, impact analysis, and safe delete — would
 fundamentally change how useful emend is for AI agents. JSON output is table stakes for
 any tool-using agent. Impact analysis is what lets agents act *confidently*. Safe delete
 turns "find dead code" from a report into an action.
+
+
+---
+
+## Additional Ideas
+
+
+## 18. MCP Server Mode (`emend serve`)
+
+**Problem:** AI agents today invoke emend as a subprocess, paying startup cost on every
+call (Python interpreter, import chain, file discovery). More importantly, the agent
+framework has to map between its internal tool-call format and shell command strings, which
+is lossy and error-prone. The Model Context Protocol (MCP) defines a standard way for
+agents to discover and call tools with typed parameters.
+
+**Proposed feature:**
+```bash
+emend serve --mcp --stdio
+emend serve --mcp --port 8080
+```
+
+This exposes every emend command as an MCP tool with a JSON Schema for its parameters:
+```json
+{
+  "name": "emend_search",
+  "description": "Search for code patterns or symbols",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string"},
+      "path": {"type": "string"},
+      "output": {"enum": ["code", "location", "selector", "summary", "json"]},
+      "kind": {"type": "string"},
+      "name": {"type": "string"}
+    },
+    "required": ["query"]
+  }
+}
+```
+
+**Why agents need this:**
+- Zero startup latency after initial connection (warm caches, loaded modules)
+- Native typed parameters instead of string-based CLI invocation
+- Persistent file cache and parse cache across calls (huge speedup for multi-step workflows)
+- Automatic tool discovery — the agent doesn't need to know emend's CLI syntax
+- Standard protocol means any MCP-compatible agent (Claude, Cursor, Windsurf, etc.) can
+  use it without custom integration
+
+
+## 19. Structural Validation / Invariant Checking (`emend check`)
+
+**Problem:** After an agent modifies code, how does it know the result is structurally
+valid? Python's syntax check only catches parse errors. Agents need to verify higher-level
+invariants: "every route handler has an `@auth` decorator," "all dataclass fields have
+type annotations," "no function exceeds 50 lines."
+
+**Proposed feature:**
+```yaml
+# .emend/invariants.yaml
+invariants:
+  auth-required:
+    find: "def $handler($...args)"
+    inside: "@app.route"
+    not-inside: "@auth_required"
+    message: "Route handler missing @auth_required decorator"
+
+  typed-dataclass-fields:
+    find: "$field = field($...args)"
+    inside: "@dataclass"
+    not-inside: "$field: $type"
+    message: "Dataclass field missing type annotation"
+
+  max-function-length:
+    selector: "**/*.py::*"
+    kind: function
+    max-lines: 50
+    message: "Function exceeds 50 lines"
+```
+
+```bash
+emend check src/                      # Check all invariants
+emend check src/ --rule auth-required  # Check specific rule
+emend check --changed                 # Check only modified files (for pre-commit)
+```
+
+**Why agents need this:** This is a "did I break any rules?" check that agents can run
+after every edit. It's like lint, but for *structural* invariants that the project defines.
+An agent that runs `emend check` after each change catches problems immediately rather
+than at PR review time. It's also a way for humans to define guardrails: "the agent should
+never remove an `@auth_required` decorator."
+
+
+## 20. Code Clone Detection (`emend clones`)
+
+**Problem:** Agents frequently introduce duplicate code, and existing codebases often have
+near-duplicate functions that should be consolidated. Detecting structural similarity
+(not just textual similarity) requires AST-level comparison.
+
+**Proposed feature:**
+```bash
+emend clones src/ --min-lines 10 --json
+# [
+#   {
+#     "group": 1,
+#     "similarity": 0.92,
+#     "instances": [
+#       {"file": "handlers/user.py", "symbol": "validate_user", "lines": "23-45"},
+#       {"file": "handlers/admin.py", "symbol": "validate_admin", "lines": "12-34"}
+#     ],
+#     "differences": ["variable names", "one extra condition in admin version"]
+#   }
+# ]
+
+# Find code similar to a specific function
+emend clones src/ --like handlers/user.py::validate_user --threshold 0.8
+```
+
+This uses structural hashing of the AST (normalizing variable names and literals) to find
+functions that have the same control flow but different names.
+
+**Why agents need this:** When asked to "reduce duplication" or "clean up the codebase,"
+agents need to find the duplicates first. Clone detection also helps agents avoid
+*creating* duplicates — before writing a new helper, check if a similar one already exists.
+
+
+## 21. Scaffold / Stub Generation (`emend scaffold`)
+
+**Problem:** When an agent needs to implement a protocol, abstract base class, or
+interface, it should be able to generate a complete stub with all required methods, correct
+signatures, and `raise NotImplementedError` bodies.
+
+**Proposed feature:**
+```bash
+# Generate stub implementing a Protocol
+emend scaffold protocols.py::Cacheable --output stubs.py --apply
+# Creates class with all required methods stubbed out
+
+# Generate test stubs for all public methods of a class
+emend scaffold models.py::UserService --test --output tests/test_user_service.py --apply
+# Creates test_<method> for each public method
+
+# Generate __init__ from dataclass-like fields
+emend scaffold models.py::Config --init --apply
+```
+
+**Why agents need this:** Agents spend many tokens figuring out what methods a protocol
+requires and writing boilerplate stubs. Emend already has the AST machinery to extract
+method signatures from a base class or protocol — it just needs to generate the stubs.
+
+
+## 22. Diff Minimization (`emend minimize-diff`)
+
+**Problem:** Agents often produce correct but unnecessarily large diffs — reformatting
+lines they didn't need to touch, reordering imports unnecessarily, adding blank lines.
+This makes code review harder and increases merge conflict risk. Given a desired end state,
+emend could compute the *minimal* set of changes needed.
+
+**Proposed feature:**
+```bash
+# Given a file the agent wants to write, compute minimal diff from current state
+emend minimize-diff models.py --target models_new.py --apply
+
+# Or from stdin
+cat models_new.py | emend minimize-diff models.py --apply
+```
+
+This performs AST-aware diffing: if only a function body changed, the diff only shows that
+function. Whitespace-only changes outside modified regions are discarded. Import reordering
+that doesn't change semantics is suppressed.
+
+**Why agents need this:** The #1 complaint about AI-generated code changes is unnecessary
+churn. This tool lets an agent write the file it *wants* and then compute the minimal edit
+to get there, keeping diffs clean and reviewable.
+
+
+## 23. Code Provenance / Symbol History (`emend history`)
+
+**Problem:** Agents often need to understand *why* code looks the way it does — when was
+this function last changed? Who wrote it? What was the commit message? `git blame` gives
+line-level attribution, but agents need *symbol-level* history.
+
+**Proposed feature:**
+```bash
+emend history utils.py::parse_date --json
+# {
+#   "created": {"commit": "abc123", "date": "2024-01-15", "author": "alice", "message": "Add date parsing"},
+#   "last_modified": {"commit": "def456", "date": "2024-11-03", "message": "Add strict mode"},
+#   "modifications": [
+#     {"commit": "def456", "date": "2024-11-03", "summary": "added param 'strict'"},
+#     {"commit": "789ghi", "date": "2024-06-20", "summary": "fixed timezone handling"}
+#   ],
+#   "age_days": 410,
+#   "churn_count": 3
+# }
+```
+
+**Why agents need this:** When deciding whether to refactor something, context matters.
+A function modified 12 times in the last month is probably under active development — the
+agent should be careful. A function untouched for 3 years might be stable and well-tested,
+or it might be abandoned. History gives agents judgment.
+
+
+## 24. Workspace Snapshots for Exploratory Refactoring (`emend snapshot`)
+
+**Problem:** Agents sometimes need to *try* a refactoring to see if it works — apply it,
+run tests, and roll back if tests fail. Git stash/branch works but is heavyweight and
+agents don't always manage git state cleanly.
+
+**Proposed feature:**
+```bash
+emend snapshot save "before-refactoring"   # Save current state
+emend rename models.py::User --to Account --apply
+make test                                  # Did it break?
+emend snapshot restore "before-refactoring"  # Roll back if needed
+emend snapshot list                        # See saved snapshots
+emend snapshot diff "before-refactoring"   # What changed since snapshot?
+```
+
+Implementation: thin wrapper around `git stash` or a shadow copy of modified files, but
+with a cleaner API that agents can use without managing git state.
+
+**Why agents need this:** Exploratory refactoring — "try this and see if it works" — is a
+natural pattern for agents. Snapshots make it safe by guaranteeing easy rollback without
+the agent needing to understand git branching.
+
+
+## 25. Bulk Rename with Mapping (`emend rename-map`)
+
+**Problem:** Sometimes a refactoring requires renaming many symbols at once in a
+coordinated way — renaming an enum's values, renaming multiple related functions, or
+applying a naming convention change. Doing them one by one risks inconsistency if later
+renames conflict with earlier ones.
+
+**Proposed feature:**
+```bash
+# From a mapping file
+emend rename-map mappings.yaml --apply
+
+# mappings.yaml:
+# renames:
+#   - from: models.py::UserStatus.ACTIVE
+#     to: ENABLED
+#   - from: models.py::UserStatus.INACTIVE
+#     to: DISABLED
+#   - from: models.py::UserStatus.PENDING
+#     to: AWAITING_APPROVAL
+
+# Or inline for simple cases
+emend rename-map models.py::UserStatus --case snake_to_pascal --apply
+```
+
+The key difference from running `rename` in a loop: all renames are computed against the
+*original* code, so renaming A→B and B→C doesn't accidentally turn A into C.
+
+**Why agents need this:** Agents doing large-scale renaming (migrating naming conventions,
+refactoring enums, aligning names with a new schema) need atomicity. Sequential renames
+are fragile and can introduce conflicts.
+
+
+## 26. Natural Language Search Compilation (`emend search --nl`)
+
+**Problem:** Agents internally think in natural language ("find all functions that take a
+database connection and return a list") but have to translate that into emend's pattern
+syntax or flag combinations. This translation step is error-prone and wastes agent
+reasoning tokens.
+
+**Proposed feature:**
+```bash
+emend search --nl "functions that take a database connection parameter" src/
+# Internally compiles to: emend search '**/*.py::*' --has-param db --kind function
+# Or: emend search 'def $func($...args, db: $T, $...rest)' src/
+
+emend search --nl "classes that inherit from BaseModel but don't have a Meta class" src/
+# Compiles to a combination of selector queries with filtering
+```
+
+This could use a small local model or a rule-based compiler to translate natural language
+descriptions into emend's query language, then execute the compiled query.
+
+**Why agents need this:** This is a force multiplier — agents can express intent directly
+and emend figures out the right query. It also makes emend accessible to agents that
+haven't been fine-tuned on emend's specific syntax.
+
+
+## 27. Cross-File Atomic Edits (`emend transaction`)
+
+**Problem:** Many refactorings require editing multiple files atomically — adding a
+parameter to a function AND updating all its call sites, or adding a method to a class AND
+updating the protocol it implements. If the agent edits file A but crashes before editing
+file B, the codebase is in an inconsistent state.
+
+**Proposed feature:**
+```bash
+emend transaction begin
+emend edit models.py::User.save[params] "validate: bool = True" --apply
+emend replace 'user.save()' 'user.save(validate=True)' src/ --apply
+emend edit protocols.py::Persistable.save[params] "validate: bool = True" --apply
+emend transaction commit
+# All changes applied atomically, or all rolled back on error
+
+emend transaction rollback  # Undo everything since begin
+```
+
+**Why agents need this:** Atomicity is the difference between "refactoring tool" and
+"reliable refactoring tool." Agents making multi-file changes need the guarantee that
+either all changes succeed or none do. This is especially important when the agent is
+running autonomously without human oversight.
+
+
+## 28. Contextual Code Completion Hints (`emend complete`)
+
+**Problem:** When an agent is writing new code at a specific location, it benefits from
+knowing what's available: what methods does this object have? What are the common patterns
+for calling this function? What arguments does this decorator expect?
+
+**Proposed feature:**
+```bash
+emend complete models.py:45 --after "user."
+# {
+#   "methods": ["save", "delete", "refresh", "validate"],
+#   "properties": ["id", "name", "email", "is_active"],
+#   "common_patterns": [
+#     "user.save(commit=True)",
+#     "user.validate(raise_errors=True)"
+#   ]
+# }
+
+emend complete models.py:10 --decorator "@"
+# {
+#   "available_decorators": ["staticmethod", "classmethod", "property", "cached_property"],
+#   "project_decorators": ["@login_required", "@cache(ttl=300)", "@retry(max_attempts=3)"]
+# }
+```
+
+**Why agents need this:** This is LSP-style completion but designed for batch/offline use
+by agents rather than keystroke-by-keystroke IDE use. It gives agents the same contextual
+awareness that a human developer gets from their IDE's autocomplete.
+
+
+## 29. Change Description Generation (`emend describe`)
+
+**Problem:** After an agent makes changes, it needs to generate commit messages, PR
+descriptions, and changelog entries. These should be structural ("added parameter
+`strict` to `parse_date`") not just textual ("modified line 23 of utils.py").
+
+**Proposed feature:**
+```bash
+emend describe --staged
+# "Added parameter `strict: bool = False` to `utils.parse_date()`.
+#  Updated 8 call sites in handlers/ to pass `strict=True`.
+#  Added test `test_parse_date_strict` in tests/test_utils.py."
+
+emend describe HEAD~3..HEAD --format changelog
+# - Added `validate_email()` function to utils module
+# - Renamed `User` to `Account` across 12 files
+# - Removed deprecated `LegacySerializer` class
+
+emend describe HEAD~1..HEAD --format commit-message
+# "feat(utils): add strict mode to parse_date
+#
+#  Add a `strict` parameter that raises ValueError on ambiguous dates.
+#  Update all existing call sites to use non-strict mode (preserving behavior)."
+```
+
+**Why agents need this:** Agents write terrible commit messages when they describe raw line
+changes. Structural change descriptions ("added parameter X to function Y") are more
+useful for both humans and other agents reviewing the changes later.
+
+
+## 30. Emend as a Linter for Agent-Generated Code (`emend review`)
+
+**Problem:** Agent-generated code frequently has specific categories of problems: unused
+imports, shadowed variables, inconsistent naming, missing error handling that the rest of
+the codebase uses, parameters added without updating docstrings. A purpose-built review
+command could catch these patterns.
+
+**Proposed feature:**
+```bash
+emend review --staged --json
+# {
+#   "issues": [
+#     {"severity": "warning", "file": "utils.py", "line": 5,
+#      "message": "Import 'os' added but unused"},
+#     {"severity": "style", "file": "utils.py", "line": 23,
+#      "message": "New function 'validate' doesn't match project naming pattern 'validate_*'"},
+#     {"severity": "warning", "file": "utils.py", "line": 30,
+#      "message": "Added parameter 'strict' but docstring not updated"},
+#     {"severity": "info", "file": "utils.py", "line": 23,
+#      "message": "Similar function 'validate_input' exists in handlers/validation.py"}
+#   ]
+# }
+
+emend review --diff HEAD~1..HEAD  # Review specific changes
+```
+
+This combines several analyses:
+- Unused import detection (within the diff)
+- Naming convention conformance
+- Docstring/signature sync
+- Duplicate/similar code detection
+- Missing test coverage for new symbols
+
+**Why agents need this:** Self-review is a critical agentic capability. If the agent can
+run `emend review` on its own changes and fix the issues before presenting them to the
+human, the quality bar goes up significantly. It's the equivalent of a human developer
+doing a self-review before requesting PR review.
+
+
+---
+
+## Updated Priority Ranking
+
+| Priority | Feature | Effort | Impact | Category |
+|----------|---------|--------|--------|----------|
+| 1 | Structured JSON output (#6) | Low | Very High | Foundation |
+| 2 | MCP Server mode (#18) | Medium | Very High | Integration |
+| 3 | Change impact analysis (#1) | Medium | Very High | Planning |
+| 4 | Safe delete with cascade (#3) | Medium | High | Action |
+| 5 | Agent code review (#30) | Medium | High | Validation |
+| 6 | Symbol docs & usage (#13) | Low | High | Understanding |
+| 7 | Structural invariants (#19) | Low | High | Validation |
+| 8 | Test-symbol mapping (#15) | Medium | High | Validation |
+| 9 | Semantic diff (#9) | Medium | High | Validation |
+| 10 | Dependency graph (#2) | Medium | High | Understanding |
+| 11 | Diff minimization (#22) | Medium | High | Quality |
+| 12 | Change description (#29) | Low | Medium | Quality |
+| 13 | Cross-file transactions (#27) | Medium | High | Reliability |
+| 14 | Bulk rename mapping (#25) | Low | Medium | Action |
+| 15 | Scope context (#8) | Medium | Medium | Understanding |
+| 16 | Extract function (#4) | High | High | Action |
+| 17 | Multi-step plans (#10) | High | High | Planning |
+| 18 | Convention detection (#7) | Medium | Medium | Understanding |
+| 19 | Clone detection (#20) | Medium | Medium | Understanding |
+| 20 | API surface analysis (#11) | Low | Medium | Understanding |
+| 21 | Code provenance (#23) | Medium | Medium | Understanding |
+| 22 | Scaffold generation (#21) | Medium | Medium | Action |
+| 23 | Insertion point (#14) | Medium | Medium | Quality |
+| 24 | Workspace snapshots (#24) | Low | Medium | Reliability |
+| 25 | Inline function (#5) | High | Medium | Action |
+| 26 | Codebase health (#17) | Medium | Medium | Understanding |
+| 27 | Completion hints (#28) | Medium | Medium | Understanding |
+| 28 | NL search compilation (#26) | High | Medium | Integration |
+| 29 | Type-aware matching (#12) | Very High | High | Foundation |
+| 30 | Patch application (#16) | Medium | Low | Action |
+
+The new entries — MCP server, agent code review, structural invariants, diff minimization,
+and cross-file transactions — fill the gaps in the original list. MCP server mode (#18) is
+arguably the single most impactful addition: it turns emend from a CLI tool that agents
+shell out to into a first-class tool-use integration with warm caches, typed parameters,
+and zero startup cost per call.
