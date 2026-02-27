@@ -422,16 +422,42 @@ For many queries this is enough. `$f:returns[Optional[$T]]` can be
 answered purely from syntax if the return type is annotated. Only
 `$x:type[Connection]` on an unannotated variable needs the type checker.
 
-This creates a natural progression:
+Between pure syntax and a full type checker, there's a **Layer 0.5**
+that covers most practical queries without invoking any external tool:
 
-| Layer | What you get | Cost |
-|-------|-------------|------|
-| Layer 0: tree-sitter | Declared/annotated types | Free (already parsed) |
-| Layer 1: native type checker | Inferred types, resolved generics, subtyping | Per-language adapter |
+**Simple assignment tracking.** `x = Connection()` → `x` is a
+`Connection`. `y = x.get_pool()` → if `get_pool` has a return type
+annotation, `y` has that type. This is one-hop flow analysis —
+follow assignments to constructors and annotated-return-type calls.
+No generics resolution, no constraint solving, no understanding of
+variance or lifetimes. Just "what did this name get assigned to?"
 
-Layer 0 is what makes agent-generated adapters viable for 50+ languages
-quickly. Layer 1 is the premium experience for languages with deep
-checker integration.
+This is significantly simpler than what Pyrefly or tsc do. It doesn't
+need to understand Rust lifetimes, TypeScript conditional types, or
+Python's `@overload`. It needs to answer "what is this thing, or what
+could it be?" — which is a name resolution + one-hop-flow problem,
+not a type theory problem.
+
+```
+Layer 0:   tree-sitter annotations    → declared types         (free)
+Layer 0.5: assignment tracking         → simple inferred types  (lightweight, language-generic)
+Layer 1:   native type checker         → full inferred types    (per-language adapter)
+```
+
+| Layer | What you get | Cost | Coverage |
+|-------|-------------|------|----------|
+| 0: tree-sitter | Annotated types | Free (already parsed) | Typed codebases |
+| 0.5: assignment tracking | Constructor calls, annotated returns | Light analysis pass | Most variables |
+| 1: native type checker | Full inference, generics, subtyping | Per-language adapter | Everything |
+
+Layer 0 + 0.5 together cover the vast majority of practical type
+queries. Layer 1 is for when you need deep generic resolution or
+subtype reasoning — the premium tier, not the prerequisite.
+
+This is what makes agent-generated adapters viable for 50+ languages
+quickly. Layer 0 + 0.5 are language-generic (same logic, different
+tree-sitter node kinds). Layer 1 is the per-language investment, and
+it's optional.
 
 ### Prior Art: Semgrep Typed Metavariables
 
