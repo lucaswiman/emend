@@ -462,17 +462,62 @@ This is the hardest phase. The type spec format needs to be expressive
 enough for real queries but simple enough to implement adapters for. The
 `rusttyc` crate does the heavy lifting for unification.
 
-**Phase C: Additional language adapters.**
+**Phase C: Agent-generated language adapters.**
 
-Add adapters for Rust, TypeScript, Go. Each is independent work.
-Community contributions become possible once the type spec format is
-stable.
+New language support is added by LLM agents, not human contributors.
+The inputs to the agent are well-defined and self-contained:
+
+1. The type spec format definition (a schema)
+2. The tree-sitter grammar for the target language (node kinds, structure)
+3. The language's type checker CLI and output format (or LSP)
+4. A few reference adapters (Python, Rust) as examples
+
+An agent can read the tree-sitter grammar, understand the node-kind
+mapping, read the type checker's output format, and generate both the
+language spec YAML and the adapter code. This is a **bounded,
+well-specified code generation task** — exactly the kind of thing agents
+are good at.
+
+The workflow:
+
+```bash
+# Human says:
+emend adapter generate --lang kotlin
+
+# Agent (via emend's own infrastructure):
+# 1. Fetches tree-sitter-kotlin grammar, inspects node kinds
+# 2. Reads type spec schema + Python/Rust adapter as examples
+# 3. Identifies Kotlin's type checker (kotlinc with -Xrender-internal-diagnostic-names,
+#    or the kotlin LSP)
+# 4. Generates lang_specs/kotlin.yaml (node-kind mapping)
+# 5. Generates adapters/kotlin.rs (type checker output → type spec)
+# 6. Generates test cases from the existing test patterns
+# 7. Runs tests, iterates
+```
+
+This changes the scaling model: instead of "N languages requires N
+human contributors," it's "N languages requires one good prompt and
+a CI pipeline that validates the output." Adding a new language
+becomes a PR that an agent generates and a human reviews.
+
+The type spec format should be designed with this in mind — clear,
+regular, well-documented, with a JSON schema. The reference adapters
+should be heavily commented explaining *why* each mapping exists, not
+just *what* it is. Agents learn from examples; good examples compound.
+
+Even the language spec YAML files (the tree-sitter node-kind mappings)
+are agent-generatable. A tree-sitter grammar is a JSON file. An agent
+can read it, identify which node kinds correspond to "function definition,"
+"class definition," "call expression," etc., and produce the mapping.
+The grammar *is* the documentation.
 
 **Phase D: Cross-language operations.**
 
 Monorepo support: resolve references across language boundaries using
 shared type specs (from protobuf/gRPC definitions, OpenAPI specs, or
-shared type declaration files).
+shared type declaration files). Agents can also generate the bridge
+adapters that map proto/OpenAPI definitions to type specs — another
+bounded code generation task.
 
 ## Open Questions
 
@@ -497,7 +542,11 @@ shared type declaration files).
    lower-level (byte ranges). Do we need a LibCST equivalent per
    language, or is byte-range replacement sufficient?
 
-5. **Community dynamics.** Would the type spec format attract contributors
-   from other language ecosystems? It's a big ask to write a language
-   adapter. The format needs to be simple enough that an adapter is a
-   weekend project, not a month-long effort.
+5. **Adapter quality validation.** Agent-generated adapters need automated
+   validation. A test suite of "canonical queries" per language — find a
+   function, find a class, find a call, find an expression of type X —
+   that the adapter must pass. The test inputs can be generated from
+   each language's tree-sitter corpus (the `corpus/` directory that every
+   tree-sitter grammar ships with). An agent generates the adapter, CI
+   runs the canonical tests, failures get fed back to the agent for
+   iteration.
