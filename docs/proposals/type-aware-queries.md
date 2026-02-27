@@ -91,22 +91,32 @@ pyrefly_graph = { git = "https://github.com/facebook/pyrefly", branch = "main" }
 New Rust functions exposed via PyO3:
 
 ```rust
-/// Infer types for all symbols in a file, returning a map of
-/// (line, col) -> type_string.
+/// Produce a type spec for a file: a map of (line, col) → type descriptor.
+/// The type descriptor is a tree structure (not a string) so the pattern
+/// matcher can operate on it directly.
 #[pyfunction]
-fn infer_types(source: &str, project_root: &str) -> PyResult<Vec<TypedSymbol>> { ... }
+fn type_spec_for_file(source: &str, project_root: &str) -> PyResult<TypeSpec> { ... }
 
-/// Check if the type at a position is assignable to a target type.
-#[pyfunction]
-fn type_matches(source: &str, line: usize, col: usize,
-                target_type: &str, project_root: &str) -> PyResult<bool> { ... }
+/// TypeSpec is the output — position-indexed type descriptors.
+/// No inference engine on emend's side. Pyrefly did the inference.
+/// emend just indexes the results by source position.
+struct TypeSpec {
+    /// Map from (line, col) to the type descriptor at that position
+    expressions: HashMap<(usize, usize), TypeDescriptor>,
+    /// Subtype relationships: "List" → ["Iterable", "Sized", ...]
+    /// Used for subtype pattern matching (`:type[Iterable[$T]]`)
+    supertypes: HashMap<String, Vec<TypeDescriptor>>,
+}
 
-/// Batch: for all matches from a pattern search, filter to those
-/// where the matched expression has a type assignable to `target_type`.
-#[pyfunction]
-fn filter_matches_by_type(
-    matches: Vec<Match>, target_type: &str, project_root: &str
-) -> PyResult<Vec<Match>> { ... }
+/// A type descriptor is a tree — structurally identical to a PatternNode.
+/// This is the key insight: type matching reuses the pattern matcher.
+enum TypeDescriptor {
+    Named(String),                              // Connection
+    Parameterized(String, Vec<TypeDescriptor>), // List<int>
+    Function(Vec<TypeDescriptor>, Box<TypeDescriptor>), // (str, int) -> User
+    Union(Vec<TypeDescriptor>),                 // str | None
+    Unknown,                                    // couldn't infer
+}
 ```
 
 ### Phase 3: LibCST Integration
@@ -351,67 +361,115 @@ For Python, the adapter wraps Pyrefly/ty. For other languages:
 The adapter doesn't need to be in-process. The type spec is a
 serialization format — produce it however you want, emend consumes it.
 
-### The Unification Engine
+### You Don't Need a Type Inference Engine
 
-For **cross-language** type queries and for **inference within a file
-where the language adapter provides partial info**, emend needs its own
-lightweight type inference engine. This is where it gets fun.
+The earlier version of this proposal described building a unification
+engine using `rusttyc` / `ena`. That's wrong. It solves a problem emend
+doesn't have.
 
-**Existing Rust crates for this:**
+**emend is not inferring types.** Pyrefly, tsc, kotlinc, go/types —
+those tools infer types. They've spent person-decades on it. Each
+language's type system has enough quirks (Rust lifetimes, TypeScript
+conditional types, Kotlin's declaration-site variance, Python's
+`@overload`) that a "universal inference engine" would either be too
+weak to handle any of them or so complex it reimplements all of them.
 
-- **[`ena`](https://crates.io/crates/ena)** — The union-find crate used
-  by rustc and Chalk. Provides efficient unification tables. This is the
-  foundational data structure.
+**What emend needs is type pattern matching.** Given:
+- A concrete type (from the language's type checker): `List[int]`
+- A type constraint (from the user's query): `Iterable[$T]`
 
-- **[`rusttyc`](https://crates.io/crates/rusttyc)** — A higher-level
-  library built on `ena` that provides lattice-based type checking with
-  Hindley-Milner-style inference. You define a `Variant` trait with a
-  `meet` operation (greatest lower bound), and `rusttyc` handles
-  constraint collection, unification, and error reporting. This is almost
-  exactly what we'd need.
+Answer: does the concrete type satisfy the constraint? Bind metavars.
 
-- **[Chalk](https://github.com/rust-lang/chalk)** — Rust's trait solver,
-  extracted as a library. Overkill for our needs but proves the model
-  works.
+This is **the same operation emend already does for syntax** — structural
+pattern matching on a tree, with metavar binding. The type spec is just
+another tree to match against.
 
-**How it fits together:**
+#### The three matching operations
 
-```rust
-use rusttyc::{TypeChecker, TcKey, Variant};
+**1. Exact match.** `$x:type[Connection]` — is this expression's type
+literally `Connection`? Pure string/structural equality on the type
+descriptor.
 
-/// emend's universal type representation
-enum EmendType {
-    Unknown,                              // top of lattice
-    Primitive(PrimitiveType),             // str, int, etc.
-    Named(String),                        // User, Connection
-    Parameterized(String, Vec<EmendType>),// List<int>, Dict<str, User>
-    Function(Vec<EmendType>, Box<EmendType>), // (params) -> return
-    Union(Vec<EmendType>),                // str | int
-    Protocol(String, Vec<Signature>),     // structural type
-}
+**2. Parameterized match.** `$x:type[List[$T]]` — is this type
+`List<something>`? Structural match with metavar binding. Identical to
+how `$f($x, $...)` matches syntax.
 
-impl Variant for EmendType {
-    type Err = TypeError;
-    fn top() -> Self { EmendType::Unknown }
-    fn meet(lhs: Partial<Self>, rhs: Partial<Self>) -> Result<Partial<Self>, TypeError> {
-        // Greatest lower bound: Unknown meets anything = that thing.
-        // Named("X") meets Named("X") = Named("X").
-        // Named("X") meets Named("Y") = error (or Union if we want).
-        // Parameterized("List", [T]) meets Parameterized("List", [U]) =
-        //   Parameterized("List", [meet(T, U)]).
-        ...
+**3. Subtype match.** `$x:type[Iterable[$T]]` — is this type a subtype
+of `Iterable`? This is the only one that needs extra information: the
+subtyping relationship. But that information comes FROM the language
+adapter. The adapter knows that `List` implements `Iterable` in its
+language.
+
+#### How the type spec encodes subtyping
+
+The type spec format should include, for each named type, its
+supertypes/protocols/interfaces:
+
+```json
+{
+  "types": {
+    "List": {
+      "params": ["T"],
+      "supertypes": ["Iterable<T>", "Sized", "Container<T>"]
     }
+  },
+  "expressions": {
+    "src/db.py:42:8": {
+      "type": "List<Connection>",
+      "resolved": true
+    }
+  }
 }
 ```
 
-For each file, emend would:
+Then matching `$x:type[Iterable[$T]]` against `List[Connection]`:
+1. Direct match? `List` vs `Iterable` — no.
+2. Check supertypes of `List`: `Iterable<T>`. Yes. Substitute
+   `T=Connection`. Bind `$T=Connection`.
 
-1. Parse with tree-sitter (get syntax)
-2. Load or compute the type spec (get types from language adapter)
-3. Build a `TypeChecker` and assign `TcKey`s to AST nodes
-4. Import constraints from the type spec
-5. Run unification
-6. Answer queries: "is the expression at line 42 of type `Connection`?"
+This is just tree matching with a fallback lookup. No lattice, no
+meet operation, no constraint solver.
+
+#### Why no unification engine
+
+| What unification engines do | What emend needs |
+|-|-|
+| Infer unknown types from constraints | Types are already known (from language checker) |
+| Propagate type information bidirectionally | One-directional: concrete type → matches constraint? |
+| Handle polymorphic instantiation | Language checker already monomorphized |
+| Solve constraint systems | Single-pair matching |
+
+The `rusttyc` crate is for building type checkers. emend is not a type
+checker. It's a type *consumer*. The right analogy: emend is `grep` for
+types. `grep` doesn't need to understand the semantics of what it's
+matching — it needs a pattern and a target.
+
+#### What this means for the architecture
+
+For each file, emend:
+
+1. Parses with tree-sitter (get syntax) — already works
+2. Loads the type spec (from language adapter cache)
+3. For each syntactic match, looks up the matched expression's type
+   in the type spec (by position)
+4. Pattern-matches the type constraint against the concrete type
+5. If the constraint has subtype semantics (`:type[Supertype]` vs
+   `:exact_type[ConcreteType]`), checks supertypes from the spec
+
+Step 4 can literally reuse `PatternNode` matching from `matcher.rs`,
+just operating on type descriptor trees instead of syntax trees.
+
+No new Cargo dependencies. No `ena`. No `rusttyc`. No `Chalk`.
+The complexity budget goes into the type spec format and the language
+adapters, which is where it belongs.
+
+#### The edge case: partial type information
+
+What if the language checker can't infer a type? (Untyped Python,
+`Any`, dynamic dispatch.) The type spec reports `Unknown` for that
+position. The pattern match returns `Unknown` — not "yes," not "no."
+The query can either skip unknowns (default) or include them
+(`--include-unknown`). Graceful degradation, no special machinery.
 
 ### What This Enables
 
@@ -521,10 +579,12 @@ bounded code generation task.
 
 ## Open Questions
 
-1. **How much type system do we actually need?** Full Hindley-Milner
-   inference is probably overkill. Most useful queries are "is this
-   expression of type X" — which is a subtype check, not inference. Maybe
-   the unification engine is simpler than described above.
+1. ~~**How much type system do we actually need?**~~ Resolved: none.
+   emend doesn't infer types; it pattern-matches on type descriptors
+   produced by language-native type checkers. The "type system" is a
+   data format (the type spec) and a structural matcher (reuse the
+   existing `PatternNode` machinery). See "You Don't Need a Type
+   Inference Engine" above.
 
 2. **Incremental computation.** Pyrefly uses Salsa-style incremental
    recomputation. If emend embeds Pyrefly, do we get incrementality for
