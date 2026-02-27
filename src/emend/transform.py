@@ -4196,6 +4196,7 @@ class DeadSymbol:
     line: int
     selector: str  # e.g. "file.py::func_name"
     reason: str  # Why it's flagged (e.g. "no references found")
+    last_reference_commit: str | None = None  # git commit that last touched this symbol
 
 
 # Decorator prefixes that indicate a symbol is an entry point / framework hook
@@ -4310,9 +4311,11 @@ class _BulkReferenceFinder(cst.CSTVisitor):
     """Single-pass visitor that discovers which symbols from a candidate set
     are referenced in a file.
 
-    For each Name node, resolves its qualified name and checks whether it
-    matches any of the candidate symbols.  Records which candidates were
-    seen, keyed by (defining_file, symbol_name).
+    For each Name/Attribute node, resolves its qualified name and checks
+    whether it matches any of the candidate symbols.  Optionally also
+    treats string literals containing the symbol name as references.
+
+    Records which candidates were seen, keyed by (defining_file, symbol_name).
     """
 
     METADATA_DEPENDENCIES = (
@@ -4329,11 +4332,18 @@ class _BulkReferenceFinder(cst.CSTVisitor):
         # For each (file, name) that is a definition in *this* file,
         # record the definition line so we can exclude self-references.
         local_def_lines: dict[str, int],
+        # candidate_names_by_key: maps symbol_name -> set of candidate keys
+        # Used for string-based reference detection.
+        candidate_names_by_key: dict[str, set[tuple[str, str]]] | None = None,
+        # String patterns that count as references: maps pattern -> set of keys
+        string_patterns: dict[str, set[tuple[str, str]]] | None = None,
     ):
         self.file_path = file_path
         self.is_definition_file = is_definition_file
         self.candidate_qns = candidate_qns
         self.local_def_lines = local_def_lines
+        self.candidate_names_by_key = candidate_names_by_key
+        self.string_patterns = string_patterns
         # Set of (defining_file, symbol_name) that are referenced
         self.referenced: set[tuple[str, str]] = set()
 
@@ -4367,11 +4377,70 @@ class _BulkReferenceFinder(cst.CSTVisitor):
         # Catches module.symbol references like ast_commands.cmd_copy_to
         self._check_node(node)
 
+    def _check_string(self, value: str) -> None:
+        """Check if a string literal contains any candidate symbol name."""
+        if not self.string_patterns:
+            return
+        for pattern, keys in self.string_patterns.items():
+            if pattern in value:
+                self.referenced.update(keys)
+
+    def visit_SimpleString(self, node: cst.SimpleString) -> None:
+        if self.string_patterns:
+            try:
+                val = node.evaluated_value
+                if isinstance(val, str):
+                    self._check_string(val)
+            except Exception:
+                pass
+
+    def visit_FormattedStringText(self, node: cst.FormattedStringText) -> None:
+        if self.string_patterns:
+            self._check_string(node.value)
+
+
+def _has_noqa_deadcode(source: str, line: int) -> bool:
+    """Check whether *line* has a ``# noqa: emend:deadcode`` comment."""
+    from .lint import parse_noqa_comments
+    noqa = parse_noqa_comments(source)
+    if line not in noqa:
+        return False
+    entry = noqa[line]
+    # None means bare noqa (suppresses everything)
+    if entry is None:
+        return True
+    return 'deadcode' in entry
+
+
+def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
+    """Use ``git log -S`` to find the last commit that added/removed *symbol_name*.
+
+    Returns a one-line summary like ``abc1234 2024-01-15 Fix: remove usage``
+    or None if git is unavailable or nothing found.
+    """
+    import subprocess
+    cwd = str(Path(file_path).resolve().parent)
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-S', symbol_name, '--format=%h %ai %s',
+             '-1', '--', file_path],
+            capture_output=True, text=True, timeout=10,
+            cwd=cwd,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
 
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
     include_private: bool = False,
+    exclude_references_from: list[str] | None = None,
+    strings_count_as_references: bool = True,
+    show_last_reference: bool = True,
 ) -> list[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
@@ -4386,6 +4455,14 @@ def find_dead_code(
         project_path: Project root directory.
         kind: Optional filter: 'function', 'class', or None for all.
         include_private: If True, include _private symbols (excluded by default).
+        exclude_references_from: Directories/globs to exclude when scanning for
+            references (e.g. ``["tests/"]``).  Symbols are still collected from
+            these paths but references *in* them are ignored.
+        strings_count_as_references: If True (default), string literals that
+            contain the symbol name are treated as references.  This reduces
+            false positives from dynamic dispatch, serialization, and similar.
+        show_last_reference: If True (default), annotate each dead symbol with
+            the last ``git log -S`` commit that touched its name.
 
     Returns:
         List of DeadSymbol objects sorted by file path and line number.
@@ -4399,6 +4476,20 @@ def find_dead_code(
     module_root = _find_project_root(project_path)
     py_files = _collect_python_files(scan_root)
 
+    # Build resolved exclude set for reference scanning
+    exclude_resolved: set[str] = set()
+    if exclude_references_from:
+        for pattern in exclude_references_from:
+            p = Path(pattern).resolve()
+            exclude_resolved.add(str(p))
+
+    def _is_excluded_ref_file(py_file: str) -> bool:
+        """Check if a file should be excluded from reference scanning."""
+        if not exclude_resolved:
+            return False
+        resolved = str(Path(py_file).resolve())
+        return any(resolved.startswith(ex) for ex in exclude_resolved)
+
     # Phase 1: Collect candidate symbols and build QN lookup table
     # candidate key = (resolved_file_path, symbol_name)
     candidates: dict[tuple[str, str], tuple[str, SymbolInfo]] = {}
@@ -4408,6 +4499,8 @@ def find_dead_code(
     file_def_lines: dict[str, dict[str, int]] = {}  # file -> {name -> line}
     # __all__ exports per file
     all_exports: dict[str, set[str]] = {}
+    # file contents cache (needed for noqa checking)
+    file_contents_cache: dict[str, str] = {}
 
     for py_file in py_files:
         try:
@@ -4416,6 +4509,7 @@ def find_dead_code(
             continue
 
         resolved_file = str(Path(py_file).resolve())
+        file_contents_cache[resolved_file] = content
         symbols = _collect_symbols(Path(py_file), content)
         exports = _get_all_exported_names(content)
         if exports:
@@ -4438,6 +4532,9 @@ def find_dead_code(
                 continue
             if sym.name in exports:
                 continue
+            # Check for # noqa: emend:deadcode on the definition line
+            if _has_noqa_deadcode(content, sym.line):
+                continue
 
             cand_key = (resolved_file, sym.name)
             candidates[cand_key] = (py_file, sym)
@@ -4454,19 +4551,44 @@ def find_dead_code(
     if not candidates:
         return []
 
+    # Build string-pattern lookup for string-as-reference detection.
+    # For each candidate we generate patterns that are likely to appear
+    # in dynamic references: the bare name, the qualified name, and
+    # the selector-style "::name".
+    candidate_names_by_key: dict[str, set[tuple[str, str]]] = {}
+    string_patterns: dict[str, set[tuple[str, str]]] | None = None
+
+    if strings_count_as_references:
+        string_patterns = {}
+        for cand_key, (file_path, sym) in candidates.items():
+            name = sym.name
+            # Bare name (e.g. "my_func")
+            string_patterns.setdefault(name, set()).add(cand_key)
+        # Filter out very short names (<=3 chars) to avoid false matches
+        # from strings like "x" or "id" appearing everywhere.
+        string_patterns = {
+            k: v for k, v in string_patterns.items() if len(k) > 3
+        }
+
     # Phase 2: Single pass over all files to find references
     referenced: set[tuple[str, str]] = set()
-
-    # Build a name hint set for pre-filtering: only visit files that
-    # contain at least one candidate symbol name as an identifier.
-    candidate_names = {sym.name for (_, sym) in candidates.values()}
 
     def factory(py_file: str, is_def_file: bool):
         resolved = str(Path(py_file).resolve())
         local_defs = file_def_lines.get(resolved, {})
         return _BulkReferenceFinder(
             py_file, is_def_file, candidate_qns, local_defs,
+            candidate_names_by_key=candidate_names_by_key or None,
+            string_patterns=string_patterns if not _is_excluded_ref_file(py_file) else None,
         )
+
+    # Determine reference scan files: exclude_references_from excludes
+    # files from the reference scan but NOT from symbol collection.
+    ref_scan_files: set[str] | None = None
+    if exclude_resolved:
+        ref_scan_files = {
+            f for f in py_files if not _is_excluded_ref_file(f)
+        }
 
     for _py_file, _module, visitor in visit_project(
         name_hint="",  # No single hint — we handle multi-name filtering below
@@ -4474,7 +4596,7 @@ def find_dead_code(
         project_path=scan_root,
         metadata_providers=_BulkReferenceFinder.METADATA_DEPENDENCIES,
         target_file=None,
-        candidate_files=None,
+        candidate_files=ref_scan_files,
     ):
         referenced.update(visitor.referenced)
 
@@ -4482,6 +4604,9 @@ def find_dead_code(
     dead_symbols: list[DeadSymbol] = []
     for cand_key, (file_path, sym) in candidates.items():
         if cand_key not in referenced:
+            last_commit = None
+            if show_last_reference:
+                last_commit = _get_last_reference_commit(file_path, sym.name)
             dead_symbols.append(DeadSymbol(
                 file_path=file_path,
                 name=sym.name,
@@ -4489,6 +4614,7 @@ def find_dead_code(
                 line=sym.line,
                 selector=sym.path,
                 reason="no references found",
+                last_reference_commit=last_commit,
             ))
 
     dead_symbols.sort(key=lambda d: (d.file_path, d.line))

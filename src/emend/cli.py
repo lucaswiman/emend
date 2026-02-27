@@ -755,12 +755,15 @@ def lint_cmd(
             print(f"Error: Config file not found: {config}", file=sys.stderr)
             raise typer.Exit(2)
 
-        rules, macros = load_rules(str(config_path))
+        rules, macros, deadcode_config = load_rules(str(config_path))
 
         resolved, _ = resolve_files(path)
         files = [str(f) for f in resolved]
 
-        violations = run_lint(rules, files, fix=fix, rule_filter=rule)
+        violations = run_lint(
+            rules, files, fix=fix, rule_filter=rule,
+            deadcode_config=deadcode_config, project_path=path,
+        )
 
         for v in violations:
             print(f"{v.file_path}:{v.line}:{v.col}: [{v.rule_name}] {v.message}")
@@ -1267,6 +1270,12 @@ def dead_code_cmd(
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
     include_private: Annotated[bool, typer.Option("--include-private", help="Include _private symbols")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    exclude_references_from: Annotated[
+        Optional[list[str]],
+        typer.Option("--exclude-references-from", help="Directories to ignore when scanning for references (e.g. tests/)")
+    ] = None,
+    no_strings: Annotated[bool, typer.Option("--no-strings", help="Don't count string literals as references")] = False,
+    no_last_reference: Annotated[bool, typer.Option("--no-last-reference", help="Don't show git last-reference info")] = False,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
@@ -1281,17 +1290,27 @@ def dead_code_cmd(
     - Symbols listed in __all__
     - Conventional entry points (main, setup, teardown)
     - Private symbols (_name) unless --include-private is set
+    - Symbols with # noqa: emend:deadcode on the definition line
+
+    By default, string literals containing the symbol name are treated
+    as references (e.g. getattr(obj, "method_name")).  Disable with
+    --no-strings.
 
     Examples:
         emend dead-code src/
         emend dead-code . --kind function
         emend dead-code . --include-private --json
+        emend dead-code src/ --exclude-references-from tests/
+        emend dead-code . --no-strings --no-last-reference
     """
     try:
         results = find_dead_code(
             project_path=path,
             kind=kind,
             include_private=include_private,
+            exclude_references_from=exclude_references_from,
+            strings_count_as_references=not no_strings,
+            show_last_reference=not no_last_reference,
         )
 
         if not results:
@@ -1308,13 +1327,18 @@ def dead_code_cmd(
                     "line": d.line,
                     "selector": d.selector,
                     "reason": d.reason,
+                    **({"last_reference_commit": d.last_reference_commit}
+                       if d.last_reference_commit else {}),
                 }
                 for d in results
             ]
             print(json.dumps(data, indent=2))
         else:
             for d in results:
-                print(f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}")
+                line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
+                if d.last_reference_commit:
+                    line += f"\n    last commit: {d.last_reference_commit}"
+                print(line)
 
         if not json_output:
             print(f"\nFound {len(results)} potentially dead symbol(s).", file=sys.stderr)

@@ -30,6 +30,17 @@ class LintRule:
 
 
 @dataclass
+class DeadCodeConfig:
+    """Configuration for the deadcode lint rule."""
+    enabled: bool = False
+    kind: str | None = None
+    include_private: bool = False
+    exclude_references_from: list[str] | None = None
+    strings_count_as_references: bool = True
+    message: str = "Symbol appears to be unused"
+
+
+@dataclass
 class LintViolation:
     """A lint violation found by a rule."""
     rule_name: str
@@ -129,15 +140,19 @@ def expand_macros(pattern: str, macros: dict[str, str]) -> str:
     return pattern
 
 
-def load_rules(config_path: str) -> tuple[list[LintRule], dict[str, str]]:
+def load_rules(
+    config_path: str,
+) -> tuple[list[LintRule], dict[str, str], DeadCodeConfig | None]:
     """Parse a YAML rules file into LintRule objects.
 
     Args:
         config_path: Path to the YAML config file
 
     Returns:
-        Tuple of (rules, macros) where rules is a list of LintRule and
-        macros is a dict of macro name to pattern string
+        Tuple of (rules, macros, deadcode_config) where rules is a list
+        of LintRule, macros is a dict of macro name to pattern string,
+        and deadcode_config is a DeadCodeConfig if the ``deadcode``
+        section is present.
 
     Raises:
         FileNotFoundError: If config file does not exist
@@ -163,7 +178,28 @@ def load_rules(config_path: str) -> tuple[list[LintRule], dict[str, str]]:
             replace=rule_def.get("replace"),
         ))
 
-    return rules, macros
+    # Parse deadcode section
+    deadcode_config = None
+    raw_dc = config.get("deadcode")
+    if raw_dc is not None:
+        if isinstance(raw_dc, bool):
+            deadcode_config = DeadCodeConfig(enabled=raw_dc)
+        elif isinstance(raw_dc, dict):
+            exclude = raw_dc.get("exclude-references-from")
+            if isinstance(exclude, str):
+                exclude = [exclude]
+            deadcode_config = DeadCodeConfig(
+                enabled=raw_dc.get("enabled", True),
+                kind=raw_dc.get("kind"),
+                include_private=raw_dc.get("include-private", False),
+                exclude_references_from=exclude,
+                strings_count_as_references=raw_dc.get(
+                    "strings-count-as-references", True),
+                message=raw_dc.get(
+                    "message", "Symbol appears to be unused"),
+            )
+
+    return rules, macros, deadcode_config
 
 
 def run_lint(
@@ -171,6 +207,8 @@ def run_lint(
     paths: list[str],
     fix: bool = False,
     rule_filter: str | None = None,
+    deadcode_config: DeadCodeConfig | None = None,
+    project_path: str | None = None,
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
@@ -418,5 +456,31 @@ def run_lint(
                     line=0,
                     match_text=f"{count} replacement(s) applied",
                 ))
+
+    # --- Dead code analysis (if configured) ---
+    if (deadcode_config is not None
+            and deadcode_config.enabled
+            and (rule_filter is None or rule_filter == "deadcode")):
+        from emend.transform import find_dead_code
+        dc_project = project_path or "."
+        try:
+            dead = find_dead_code(
+                project_path=dc_project,
+                kind=deadcode_config.kind,
+                include_private=deadcode_config.include_private,
+                exclude_references_from=deadcode_config.exclude_references_from,
+                strings_count_as_references=deadcode_config.strings_count_as_references,
+                show_last_reference=False,
+            )
+            for d in dead:
+                violations.append(LintViolation(
+                    rule_name="deadcode",
+                    message=f"{deadcode_config.message}: {d.name}",
+                    file_path=d.file_path,
+                    line=d.line,
+                    match_text=d.selector,
+                ))
+        except Exception:
+            logger.debug("Dead code analysis failed", exc_info=True)
 
     return violations
