@@ -13,7 +13,7 @@ from emend.transform import (
     find_pattern, replace_pattern,
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
-    find_callers, generate_graph,
+    find_callers, generate_graph, find_dead_code,
     extract_pattern_literals,
 )
 from emend import ast_commands
@@ -1250,6 +1250,74 @@ def graph_cmd(
     try:
         result = generate_graph(file, project_path=project, format=format)
         print(result)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command("dead-code")
+def dead_code_cmd(
+    path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
+    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
+    include_private: Annotated[bool, typer.Option("--include-private", help="Include _private symbols")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+):
+    """Find potentially dead (unreferenced) code in a project.
+
+    Scans all Python files and reports top-level symbols that have no
+    references outside their own definition. Uses scope-aware analysis
+    to avoid false positives from same-named symbols.
+
+    Automatically skips:
+    - Dunder methods (__init__, __str__, etc.)
+    - Test functions/classes (test_*, Test*)
+    - Decorated entry points (@app.command, @pytest.fixture, etc.)
+    - Symbols listed in __all__
+    - Conventional entry points (main, setup, teardown)
+    - Private symbols (_name) unless --include-private is set
+
+    Examples:
+        emend dead-code src/
+        emend dead-code . --kind function
+        emend dead-code . --include-private --json
+    """
+    try:
+        results = find_dead_code(
+            project_path=path,
+            kind=kind,
+            include_private=include_private,
+        )
+
+        if not results:
+            print("No dead code found.")
+            return
+
+        if json_output:
+            import json
+            data = [
+                {
+                    "file_path": d.file_path,
+                    "name": d.name,
+                    "kind": d.kind,
+                    "line": d.line,
+                    "selector": d.selector,
+                    "reason": d.reason,
+                }
+                for d in results
+            ]
+            print(json.dumps(data, indent=2))
+        else:
+            for d in results:
+                print(f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}")
+
+        if not json_output:
+            print(f"\nFound {len(results)} potentially dead symbol(s).", file=sys.stderr)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)

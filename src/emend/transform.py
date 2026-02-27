@@ -4094,6 +4094,244 @@ def generate_graph(
         return "\n".join(lines)
 
 
+@dataclass
+class DeadSymbol:
+    """A symbol detected as potentially dead (unreferenced) code."""
+    file_path: str
+    name: str
+    kind: str  # 'function', 'class', 'async_function'
+    line: int
+    selector: str  # e.g. "file.py::func_name"
+    reason: str  # Why it's flagged (e.g. "no references found")
+
+
+# Decorator prefixes that indicate a symbol is an entry point / framework hook
+_ENTRY_POINT_DECORATORS = frozenset({
+    'app.command', 'app.route', 'app.get', 'app.post', 'app.put',
+    'app.delete', 'app.patch',
+    'pytest.fixture', 'fixture',
+    'staticmethod', 'classmethod', 'property',
+    'abstractmethod', 'abc.abstractmethod',
+    'override',
+    'overload', 'typing.overload',
+    'click.command', 'click.group',
+    'celery.task',
+    'register',
+})
+
+# Decorator base names that indicate entry points
+_ENTRY_POINT_DECORATOR_BASENAMES = frozenset({
+    'route', 'command', 'task', 'hook', 'listener',
+    'receiver', 'signal', 'handler', 'middleware',
+    'register', 'export',
+})
+
+# Names that are conventional entry points and should never be flagged
+_ENTRY_POINT_NAMES = frozenset({
+    'main', 'setup', 'teardown', 'configure',
+    'setUp', 'tearDown', 'setUpClass', 'tearDownClass',
+    'setUpModule', 'tearDownModule',
+})
+
+
+def _is_dunder(name: str) -> bool:
+    """Check if a name is a dunder (double underscore) name."""
+    return name.startswith('__') and name.endswith('__') and len(name) > 4
+
+
+def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: int) -> bool:
+    """Check if a symbol is likely an entry point based on heuristics.
+
+    Entry points are symbols that are invoked by frameworks or conventions
+    rather than explicit code references.
+    """
+    # Dunder methods/functions are always entry points
+    if _is_dunder(name):
+        return True
+
+    # Conventional entry-point names
+    if name in _ENTRY_POINT_NAMES:
+        return True
+
+    # Names starting with test_ (pytest discovery)
+    if name.startswith('test_') or name.startswith('Test'):
+        return True
+
+    # Private names (single underscore prefix) at depth > 1 are methods,
+    # which may be called via getattr or framework internals
+    # We only flag private top-level symbols
+
+    # Check decorators
+    for dec in decorators:
+        # Strip @ prefix if present
+        dec_name = dec[1:] if dec.startswith('@') else dec
+        # Strip arguments: @app.command("name") -> app.command
+        if '(' in dec_name:
+            dec_name = dec_name[:dec_name.index('(')]
+
+        if dec_name in _ENTRY_POINT_DECORATORS:
+            return True
+
+        # Check basename: @anything.route -> "route" is entry point
+        basename = dec_name.rsplit('.', 1)[-1] if '.' in dec_name else dec_name
+        if basename in _ENTRY_POINT_DECORATOR_BASENAMES:
+            return True
+
+    return False
+
+
+def _get_all_exported_names(content: str) -> set[str]:
+    """Extract names listed in __all__ from file content."""
+    try:
+        module = _cached_parse(content)
+    except Exception:
+        return set()
+
+    names: set[str] = set()
+    for stmt in module.body:
+        # Match: __all__ = [...]  or  __all__ = (...)
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if (isinstance(item, cst.Assign)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0].target, cst.Name)
+                        and item.targets[0].target.value == '__all__'):
+                    value = item.value
+                    elements = None
+                    if isinstance(value, (cst.List, cst.Tuple)):
+                        elements = value.elements
+                    if elements:
+                        for el in elements:
+                            if isinstance(el, cst.Element) and isinstance(el.value, (cst.SimpleString, cst.ConcatenatedString)):
+                                # Extract the string value
+                                try:
+                                    raw = el.value.evaluated_value
+                                    if isinstance(raw, str):
+                                        names.add(raw)
+                                except Exception:
+                                    pass
+    return names
+
+
+def find_dead_code(
+    project_path: str,
+    kind: str | None = None,
+    include_private: bool = False,
+) -> list[DeadSymbol]:
+    """Find potentially dead (unreferenced) code in a project.
+
+    Scans all Python files in the project, collects top-level symbols,
+    then checks each one for references. Symbols with no references
+    outside their own definition are flagged as dead code.
+
+    Args:
+        project_path: Project root directory.
+        kind: Optional filter: 'function', 'class', or None for all.
+        include_private: If True, include _private symbols (excluded by default).
+
+    Returns:
+        List of DeadSymbol objects sorted by file path and line number.
+    """
+    from .query import _collect_symbols, SymbolInfo
+    from .component_selector import ExtendedSelector
+
+    project_root = str(Path(project_path).resolve())
+    py_files = _collect_python_files(project_root)
+
+    # Phase 1: Collect all top-level symbols across the project
+    all_symbols: list[tuple[str, SymbolInfo]] = []  # (file_path, symbol)
+
+    # Also collect __all__ exports per file
+    all_exports: dict[str, set[str]] = {}  # file_path -> set of exported names
+
+    for py_file in py_files:
+        try:
+            content = Path(py_file).read_text()
+        except Exception:
+            continue
+
+        symbols = _collect_symbols(Path(py_file), content)
+        exports = _get_all_exported_names(content)
+        if exports:
+            all_exports[py_file] = exports
+
+        for sym in symbols:
+            # Only top-level symbols (depth 1)
+            if sym.depth != 1:
+                continue
+
+            # Filter by kind if requested
+            if kind:
+                if kind == 'function' and sym.kind not in ('function', 'async_function'):
+                    continue
+                if kind == 'class' and sym.kind != 'class':
+                    continue
+
+            # Skip private symbols unless requested
+            if not include_private and sym.name.startswith('_') and not _is_dunder(sym.name):
+                continue
+
+            # Skip entry points
+            if _is_likely_entry_point(sym.name, sym.kind, sym.decorators, sym.depth):
+                continue
+
+            all_symbols.append((py_file, sym))
+
+    # Phase 2: Check each symbol for references
+    dead_symbols: list[DeadSymbol] = []
+
+    for file_path, sym in all_symbols:
+        # Skip symbols that appear in __all__
+        exports = all_exports.get(file_path, set())
+        if sym.name in exports:
+            continue
+
+        selector = ExtendedSelector(
+            file_path=file_path,
+            symbol_path=[sym.name],
+            component=None,
+            accessor=None,
+        )
+
+        try:
+            refs = find_references(
+                selector,
+                project_path=project_root,
+                include_definition=True,
+                include_imports=False,
+            )
+        except (ValueError, Exception):
+            # If we can't analyze references (e.g. parse error), skip
+            continue
+
+        # Filter: a symbol is dead if its only references are at the
+        # definition site itself.  _ReferenceFinder can produce both a
+        # definition ref AND a Name ref at the same (line, column) for
+        # the defining identifier, so we deduplicate by location and
+        # only keep refs that are NOT at the definition site.
+        def_line = sym.line
+        resolved_file = str(Path(file_path).resolve())
+        usage_refs = [
+            r for r in refs
+            if not (str(Path(r.file_path).resolve()) == resolved_file
+                    and r.line == def_line)
+        ]
+
+        if not usage_refs:
+            dead_symbols.append(DeadSymbol(
+                file_path=file_path,
+                name=sym.name,
+                kind=sym.kind,
+                line=sym.line,
+                selector=sym.path,
+                reason="no references found",
+            ))
+
+    # Sort by file path, then line number
+    dead_symbols.sort(key=lambda d: (d.file_path, d.line))
+    return dead_symbols
+
+
 def _rename_symbol_in_file(
     content: str, old_name: str, new_name: str,
     target_qns: set[str] | None = None,
