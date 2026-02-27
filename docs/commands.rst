@@ -462,14 +462,16 @@ Generate a call graph for all functions in a file.
 
 ---
 
-dead-code
----------
+deadcode
+--------
 
 Find potentially dead (unreferenced) code in a project. Scans all Python files and reports top-level symbols that have no references outside their own definition, using scope-aware analysis.
 
+Also available as: ``dead-code``, ``dead_code``.
+
 .. code-block:: text
 
-   emend dead-code [PATH] [OPTIONS]
+   emend deadcode [PATH] [OPTIONS]
 
 **Arguments:**
 
@@ -524,19 +526,19 @@ with ``--no-last-reference``.
 .. code-block:: bash
 
    # Scan a project for dead code
-   emend dead-code src/
+   emend deadcode src/
 
    # Only functions
-   emend dead-code . --kind function
+   emend deadcode . --kind function
 
    # Include private symbols, output as JSON
-   emend dead-code . --include-private --json
+   emend deadcode . --include-private --json
 
    # Ignore references from tests
-   emend dead-code src/ --exclude-references-from tests/
+   emend deadcode src/ --exclude-references-from tests/
 
    # Disable string matching and git annotation
-   emend dead-code . --no-strings --no-last-reference
+   emend deadcode . --no-strings --no-last-reference
 
 **Inline suppression:**
 

@@ -75,7 +75,7 @@
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
-| `dead-code` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
+| `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
 
 ## Architecture
 

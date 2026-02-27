@@ -1264,7 +1264,7 @@ def graph_cmd(
         raise typer.Exit(1)
 
 
-@app.command("dead-code")
+@app.command("deadcode")
 def dead_code_cmd(
     path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
@@ -1297,11 +1297,11 @@ def dead_code_cmd(
     --no-strings.
 
     Examples:
-        emend dead-code src/
-        emend dead-code . --kind function
-        emend dead-code . --include-private --json
-        emend dead-code src/ --exclude-references-from tests/
-        emend dead-code . --no-strings --no-last-reference
+        emend deadcode src/
+        emend deadcode . --kind function
+        emend deadcode . --include-private --json
+        emend deadcode src/ --exclude-references-from tests/
+        emend deadcode . --no-strings --no-last-reference
     """
     try:
         results = find_dead_code(
@@ -1351,6 +1351,10 @@ def dead_code_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+app.command("dead-code", hidden=True)(dead_code_cmd)
+app.command("dead_code", hidden=True)(dead_code_cmd)
 
 
 def main():

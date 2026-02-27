@@ -178,10 +178,10 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 - `emend lint src/ --rule no-print` to run a single rule
 - See [Linting documentation](https://lucaswiman.github.io/emend/linting.html) for full details
 
-**`dead-code`** - Find potentially dead (unreferenced) code
-- `emend dead-code src/`
-- `emend dead-code . --kind function --json`
-- `emend dead-code src/ --exclude-references-from tests/`
+**`deadcode`** - Find potentially dead (unreferenced) code
+- `emend deadcode src/`
+- `emend deadcode . --kind function --json`
+- `emend deadcode src/ --exclude-references-from tests/`
 
 **`graph`** - Generate a call graph for functions in a file
 - `emend graph src/module.py --format plain`
@@ -407,8 +407,8 @@ deadcode:
 emend lint src/
 
 # Or use the standalone command
-emend dead-code src/
-emend dead-code src/ --exclude-references-from tests/ --json
+emend deadcode src/
+emend deadcode src/ --exclude-references-from tests/ --json
 ```
 
 Suppress false positives inline:

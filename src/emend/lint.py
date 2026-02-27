@@ -460,7 +460,7 @@ def run_lint(
     # --- Dead code analysis (if configured) ---
     if (deadcode_config is not None
             and deadcode_config.enabled
-            and (rule_filter is None or rule_filter == "deadcode")):
+            and (rule_filter is None or rule_filter in {"deadcode", "dead-code", "dead_code"})):
         from emend.transform import find_dead_code
         dc_project = project_path or "."
         try:

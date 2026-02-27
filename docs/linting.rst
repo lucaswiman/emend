@@ -376,7 +376,7 @@ Dead code detection uses LibCST's ``QualifiedNameProvider`` for scope-aware anal
 
 It automatically detects ``src/`` layout projects (via ``pyproject.toml``) and computes correct qualified names.
 
-Automatic exclusions are the same as the ``emend dead-code`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.
+Automatic exclusions are the same as the ``emend deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.
 
 Interaction with rules
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -407,10 +407,10 @@ Dead code detection is also available as a standalone command with additional op
 
 .. code-block:: bash
 
-   emend dead-code src/
-   emend dead-code src/ --exclude-references-from tests/ --json
+   emend deadcode src/
+   emend deadcode src/ --exclude-references-from tests/ --json
 
-See :doc:`commands` for the full ``dead-code`` command reference.
+See :doc:`commands` for the full ``deadcode`` command reference.
 
 
 pre-commit integration

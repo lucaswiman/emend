@@ -408,7 +408,7 @@ class TestDeadCodeCLI:
             "result = used_func()\n"
         )
 
-        result = run_emend_cmd(["dead-code", str(project)])
+        result = run_emend_cmd(["deadcode", str(project)])
         assert "dead_func" in result.stdout
         assert "used_func" not in result.stdout
 
@@ -423,7 +423,7 @@ class TestDeadCodeCLI:
             "    return 42\n"
         )
 
-        result = run_emend_cmd(["dead-code", str(project), "--json"])
+        result = run_emend_cmd(["deadcode", str(project), "--json"])
         data = json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) == 1
@@ -445,7 +445,7 @@ class TestDeadCodeCLI:
             "    pass\n"
         )
 
-        result = run_emend_cmd(["dead-code", str(project), "--kind", "function"])
+        result = run_emend_cmd(["deadcode", str(project), "--kind", "function"])
         assert "unused_func" in result.stdout
         assert "UnusedClass" not in result.stdout
 
@@ -462,7 +462,7 @@ class TestDeadCodeCLI:
             "result = helper()\n"
         )
 
-        result = run_emend_cmd(["dead-code", str(project)])
+        result = run_emend_cmd(["deadcode", str(project)])
         assert "No dead code found" in result.stdout
 
     def test_cli_include_private(self, tmp_path, run_emend_cmd):
@@ -477,11 +477,11 @@ class TestDeadCodeCLI:
         )
 
         # Without --include-private
-        result = run_emend_cmd(["dead-code", str(project)])
+        result = run_emend_cmd(["deadcode", str(project)])
         assert "_private_unused" not in result.stdout
 
         # With --include-private
-        result = run_emend_cmd(["dead-code", str(project), "--include-private"])
+        result = run_emend_cmd(["deadcode", str(project), "--include-private"])
         assert "_private_unused" in result.stdout
 
 
@@ -547,7 +547,7 @@ class TestExcludeReferencesFrom:
         )
 
         result = run_emend_cmd([
-            "dead-code", str(project),
+            "deadcode", str(project),
             "--exclude-references-from", str(tests_dir),
             "--no-last-reference",
         ])
@@ -626,13 +626,13 @@ class TestStringsCountAsReferences:
 
         # Default: not flagged because string contains the name
         result = run_emend_cmd([
-            "dead-code", str(project), "--no-last-reference",
+            "deadcode", str(project), "--no-last-reference",
         ])
         assert "dynamic_handler" not in result.stdout or "No dead code" in result.stdout
 
         # --no-strings: flagged
         result = run_emend_cmd([
-            "dead-code", str(project), "--no-strings", "--no-last-reference",
+            "deadcode", str(project), "--no-strings", "--no-last-reference",
         ])
         assert "dynamic_handler" in result.stdout
 
