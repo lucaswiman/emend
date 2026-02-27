@@ -28,10 +28,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # fetch full history so git tags are available
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Get version from latest git tag
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "EMEND_VERSION=${VERSION#v}" >> "$GITHUB_ENV"
 
       - name: Install Sphinx dependencies
         # Docs are hand-authored RST; no autodoc import of emend needed,

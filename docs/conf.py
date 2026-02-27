@@ -1,9 +1,11 @@
 # Configuration file for the Sphinx documentation builder.
 
+import os
+
 project = 'emend'
 copyright = '2024, emend contributors'
 author = 'emend contributors'
-release = '0.0.1'
+release = os.environ.get('EMEND_VERSION', '0.0.0+dev')
 
 extensions = [
     'sphinx.ext.autodoc',
