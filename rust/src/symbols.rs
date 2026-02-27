@@ -6,6 +6,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
+use std::collections::HashSet;
 
 /// Internal symbol representation (not a pyclass to avoid recursive Vec issues).
 struct RustSymbol {
@@ -252,12 +253,11 @@ fn collect_from_body(
                             let start_line = child.start_position().row + 1;
                             let end_line = child.end_position().row + 1;
 
-                            let mut child_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            let child_defined: HashSet<String> = HashSet::new();
                             defined_names_stack.push(child_defined);
 
                             let children = if let Some(body) = class_node.child_by_field_name("body") {
-                                let ch = collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack);
-                                ch
+                                collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack)
                             } else {
                                 vec![]
                             };
@@ -311,7 +311,7 @@ fn collect_from_body(
                     let sig = extract_signature(func_node, source);
 
                     // Collect child symbols from function body
-                    let mut child_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let child_defined: HashSet<String> = HashSet::new();
                     defined_names_stack.push(child_defined);
 
                     let mut children = if let Some(body) = func_node.child_by_field_name("body") {
@@ -330,7 +330,7 @@ fn collect_from_body(
                             // defined_names_stack still has the inner scope on top
                             // We need to check all scopes BELOW the current top
                             let stack_len = defined_names_stack.len();
-                            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            let mut seen: HashSet<String> = HashSet::new();
                             for name_ref in &loaded {
                                 if seen.contains(name_ref) {
                                     continue;
@@ -396,7 +396,7 @@ fn collect_from_body(
                     let start_line = child.start_position().row + 1;
                     let end_line = child.end_position().row + 1;
 
-                    let mut child_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let child_defined: HashSet<String> = HashSet::new();
                     defined_names_stack.push(child_defined);
 
                     let children = if let Some(body) = child.child_by_field_name("body") {
@@ -521,10 +521,6 @@ pub fn collect_symbols_batch(
         .into_par_iter()
         .filter_map(|path| {
             let content = std::fs::read_to_string(&path).ok()?;
-            // Skip non-UTF-8 or binary files
-            if !content.is_ascii() {
-                // Still process — UTF-8 is fine; tree-sitter handles it
-            }
             let syms = collect_symbols_from_source(&content, depth, &selector_path);
             Some((path, syms))
         })

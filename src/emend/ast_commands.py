@@ -480,7 +480,7 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
         _print_symbol_flat(sym.children, full_path)
 
 
-def _dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
+def dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
     """Convert Rust collect_symbols_batch dicts to TreeSymbol objects."""
     return [
         TreeSymbol(
@@ -488,7 +488,7 @@ def _dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
             kind=d["kind"],
             signature=d.get("signature"),
             type_annotation=d.get("type_annotation"),
-            children=_dicts_to_tree_symbols(d.get("children", [])),
+            children=dicts_to_tree_symbols(d.get("children", [])),
             depth=d["depth"],
             line=d.get("line") or None,
             end_line=d.get("end_line") or None,
@@ -513,7 +513,7 @@ def collect_symbols(
             [file], max_depth=tree_depth, selector=selector,
         )
         if result_dicts:
-            return _dicts_to_tree_symbols(result_dicts[0][1])
+            return dicts_to_tree_symbols(result_dicts[0][1])
         return []
     except Exception:
         pass

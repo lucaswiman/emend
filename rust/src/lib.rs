@@ -4,9 +4,8 @@
 //! tree-sitter-based pattern matching exposed to Python via PyO3.
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 use rayon::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod scanner;
 mod pattern;
@@ -214,7 +213,7 @@ fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<V
 }
 
 /// Python module definition.
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_function(wrap_pyfunction!(collect_python_files, m)?)?;

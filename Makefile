@@ -6,18 +6,20 @@ TESTS ?=
 
 RUST_SOURCES := $(wildcard rust/src/*.rs)
 
+# Use local caches for sandboxed environments
+export CARGO_HOME := $(CURDIR)/.cargo-cache
+export UV_CACHE_DIR := $(CURDIR)/.uv-cache
+
 $(VENV)/bin/activate: pyproject.toml rust/Cargo.toml rust/pyproject.toml
-	python3 -m venv $(VENV) --without-pip
-	curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-	$(VENV)/bin/python3 /tmp/get-pip.py
-	$(VENV)/bin/pip install maturin
+	uv venv $(VENV) --python 3.14t
+	uv pip install --python $(VENV) maturin
 	$(VENV)/bin/maturin develop --manifest-path rust/Cargo.toml
-	$(VENV)/bin/pip install -e ".[dev]"
+	uv pip install --python $(VENV) -e ".[dev]"
 	touch $(VENV)/bin/activate
 
 # Rebuild Rust extension when source files change
 $(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
-	$(VENV)/bin/pip install -q maturin
+	uv pip install --python $(VENV) -q maturin
 	$(VENV)/bin/maturin develop --manifest-path rust/Cargo.toml
 	@mkdir -p $(@D) && touch $@
 

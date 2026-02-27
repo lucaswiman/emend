@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml
 import libcst as cst
 
-from emend.transform import find_pattern, replace_pattern, prefilter_files_for_pattern, extract_pattern_literals
+from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 
 _NOQA_RE = re.compile(r"#\s*noqa\b(?:\s*:\s*(.+))?", re.IGNORECASE)
 

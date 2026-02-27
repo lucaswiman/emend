@@ -14,7 +14,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph,
-    prefilter_files_for_pattern, extract_pattern_literals,
+    extract_pattern_literals,
 )
 from emend import ast_commands
 
@@ -317,7 +317,7 @@ def search(
                         file_strs, max_depth=tree_depth, selector=selector_for_summary,
                     )
                     for file_path_str, symbol_dicts in batch_results:
-                        symbols = ast_commands._dicts_to_tree_symbols(symbol_dicts)
+                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
                         print(f"\nModule: {file_path_str}")
                         if symbols:
                             if flat_output:

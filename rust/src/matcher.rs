@@ -324,7 +324,7 @@ fn glob_matches(glob: &str, text: &str) -> bool {
 /// - Keyword args: `keyword_argument` nodes
 /// - *args: `list_splat` nodes
 /// - **kwargs: `dictionary_splat` nodes
-fn collect_call_args<'a>(arg_list: Node<'a>, _source: &[u8]) -> Vec<Node<'a>> {
+fn collect_call_args<'a>(arg_list: Node<'a>) -> Vec<Node<'a>> {
     let mut args = Vec::new();
     let mut cursor = arg_list.walk();
     for child in arg_list.children(&mut cursor) {
@@ -338,7 +338,7 @@ fn collect_call_args<'a>(arg_list: Node<'a>, _source: &[u8]) -> Vec<Node<'a>> {
 }
 
 /// Collect named children from a `parameters` node, skipping punctuation.
-fn collect_params<'a>(params_node: Node<'a>, _source: &[u8]) -> Vec<Node<'a>> {
+fn collect_params<'a>(params_node: Node<'a>) -> Vec<Node<'a>> {
     let mut params = Vec::new();
     let mut cursor = params_node.walk();
     for child in params_node.children(&mut cursor) {
@@ -506,7 +506,7 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             }
             match node.child_by_field_name("arguments") {
                 Some(arg_list) => {
-                    let call_args = collect_call_args(arg_list, source);
+                    let call_args = collect_call_args(arg_list);
                     match_args(args, &call_args, source, *exact_args)
                 }
                 None => args.is_empty(),
@@ -543,7 +543,7 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 Some(n) => n,
                 None => return false,
             };
-            let param_nodes = collect_params(params_node, source);
+            let param_nodes = collect_params(params_node);
             match_params(params, &param_nodes, source)
         }
 

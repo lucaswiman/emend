@@ -1,7 +1,7 @@
 //! Tree-sitter-based pattern matching for Python code.
 
 use crate::Match;
-use tree_sitter::{Language, Parser, Node, Tree};
+use tree_sitter::{Parser, Node, Tree};
 
 /// Get a thread-local Python parser.
 fn get_parser() -> Parser {
