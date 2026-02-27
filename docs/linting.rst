@@ -424,7 +424,7 @@ Add the following to your ``.pre-commit-config.yaml``:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.1.0  # replace with desired version tag
+       rev: v0.2.0  # replace with desired version tag
        hooks:
          - id: emend-lint
 
@@ -436,7 +436,7 @@ To use a custom config path:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.1.0
+       rev: v0.2.0
        hooks:
          - id: emend-lint
            args: ["--config", "custom/patterns.yaml"]
@@ -447,7 +447,7 @@ To also auto-fix violations:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.1.0
+       rev: v0.2.0
        hooks:
          - id: emend-lint
            args: ["--fix"]
