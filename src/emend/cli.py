@@ -1482,7 +1482,6 @@ def types_cmd(
             print(f"Error: {resolved_engine} is not installed or not available on PATH.", file=sys.stderr)
             raise typer.Exit(2)
 
-        target = Path(path)
         if target.is_dir():
             files, _ = resolve_files(path)
         elif "*" in path or "?" in path:

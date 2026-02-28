@@ -36,7 +36,7 @@ from emend.type_oracle import (
     _parse_pyright_output,
     _parse_ty_concise,
     _parse_ty_diagnostics,
-    _parse_type_string,
+    parse_type_string,
     _split_params,
     _split_union,
     create_type_oracle,
@@ -49,38 +49,38 @@ from emend.type_oracle import (
 # ---------------------------------------------------------------------------
 
 class TestParseTypeString:
-    """Tests for _parse_type_string()."""
+    """Tests for parse_type_string()."""
 
     def test_simple_named(self):
-        td = _parse_type_string("int")
+        td = parse_type_string("int")
         assert td.kind == "named"
         assert td.name == "int"
 
     def test_str_type(self):
-        td = _parse_type_string("str")
+        td = parse_type_string("str")
         assert td.kind == "named"
         assert td.name == "str"
 
     def test_none_type(self):
-        td = _parse_type_string("None")
+        td = parse_type_string("None")
         assert td.kind == "named"
         assert td.name == "None"
 
     def test_class_type(self):
-        td = _parse_type_string("Connection")
+        td = parse_type_string("Connection")
         assert td.kind == "named"
         assert td.name == "Connection"
 
     def test_unknown(self):
-        td = _parse_type_string("Unknown")
+        td = parse_type_string("Unknown")
         assert td.kind == "unknown"
 
     def test_empty_string(self):
-        td = _parse_type_string("")
+        td = parse_type_string("")
         assert td.kind == "unknown"
 
     def test_parameterized_list(self):
-        td = _parse_type_string("list[int]")
+        td = parse_type_string("list[int]")
         assert td.kind == "parameterized"
         assert td.name == "list"
         assert len(td.params) == 1
@@ -88,7 +88,7 @@ class TestParseTypeString:
         assert td.params[0].name == "int"
 
     def test_parameterized_dict(self):
-        td = _parse_type_string("dict[str, int]")
+        td = parse_type_string("dict[str, int]")
         assert td.kind == "parameterized"
         assert td.name == "dict"
         assert len(td.params) == 2
@@ -96,7 +96,7 @@ class TestParseTypeString:
         assert td.params[1].name == "int"
 
     def test_nested_parameterized(self):
-        td = _parse_type_string("dict[str, list[int]]")
+        td = parse_type_string("dict[str, list[int]]")
         assert td.kind == "parameterized"
         assert td.name == "dict"
         assert len(td.params) == 2
@@ -105,32 +105,32 @@ class TestParseTypeString:
         assert td.params[1].params[0].name == "int"
 
     def test_union_simple(self):
-        td = _parse_type_string("str | None")
+        td = parse_type_string("str | None")
         assert td.kind == "union"
         assert len(td.params) == 2
         assert td.params[0].name == "str"
         assert td.params[1].name == "None"
 
     def test_union_three_members(self):
-        td = _parse_type_string("str | int | None")
+        td = parse_type_string("str | int | None")
         assert td.kind == "union"
         assert len(td.params) == 3
 
     def test_callable_simple(self):
-        td = _parse_type_string("() -> Pool")
+        td = parse_type_string("() -> Pool")
         assert td.kind == "callable"
         assert len(td.params) == 0
         assert td.return_type.name == "Pool"
 
     def test_callable_with_params(self):
-        td = _parse_type_string("(conn: Connection) -> str")
+        td = parse_type_string("(conn: Connection) -> str")
         assert td.kind == "callable"
         assert len(td.params) == 1
         assert td.params[0].name == "Connection"
         assert td.return_type.name == "str"
 
     def test_callable_with_self(self):
-        td = _parse_type_string("(self: Self@Connection, host: str, port: int) -> None")
+        td = parse_type_string("(self: Self@Connection, host: str, port: int) -> None")
         assert td.kind == "callable"
         assert len(td.params) == 3
         assert td.params[0].name == "Connection"  # Self@Connection -> Connection
@@ -139,18 +139,18 @@ class TestParseTypeString:
         assert td.return_type.name == "None"
 
     def test_self_at_type(self):
-        td = _parse_type_string("Self@Pool")
+        td = parse_type_string("Self@Pool")
         assert td.kind == "named"
         assert td.name == "Pool"
 
     def test_type_bracket(self):
-        td = _parse_type_string("type[Connection]")
+        td = parse_type_string("type[Connection]")
         assert td.kind == "parameterized"
         assert td.name == "type"
         assert td.params[0].name == "Connection"
 
     def test_overload(self):
-        td = _parse_type_string("Overload[\n  [...] -> int\n  [...] -> str\n]")
+        td = parse_type_string("Overload[\n  [...] -> int\n  [...] -> str\n]")
         assert td.kind == "named"
         assert td.name == "Overload"
 
@@ -406,7 +406,7 @@ class TestFileTypes:
             line=line,
             col_start=col,
             col_end=col + len(name),
-            type_descriptor=_parse_type_string(raw_type),
+            type_descriptor=parse_type_string(raw_type),
             raw_type=raw_type,
             binding_kind=kind,
         )
@@ -1201,16 +1201,16 @@ class TestTypesCLI:
 # ---------------------------------------------------------------------------
 
 class TestParseTypeStringEdgeCases:
-    """Stress tests for _parse_type_string with tricky inputs."""
+    """Stress tests for parse_type_string with tricky inputs."""
 
     def test_whitespace_padded(self):
-        td = _parse_type_string("  int  ")
+        td = parse_type_string("  int  ")
         assert td.kind == "named"
         assert td.name == "int"
 
     def test_deeply_nested_parameterized(self):
         raw = "dict[str, list[tuple[int, Optional[set[frozenset[bytes]]]]]]"
-        td = _parse_type_string(raw)
+        td = parse_type_string(raw)
         assert td.kind == "parameterized"
         assert td.name == "dict"
         assert td.params[1].kind == "parameterized"
@@ -1220,7 +1220,7 @@ class TestParseTypeStringEdgeCases:
         assert inner_tuple.name == "tuple"
 
     def test_union_with_parameterized_members(self):
-        td = _parse_type_string("list[int] | dict[str, float] | None")
+        td = parse_type_string("list[int] | dict[str, float] | None")
         assert td.kind == "union"
         assert len(td.params) == 3
         assert td.params[0].kind == "parameterized"
@@ -1231,7 +1231,7 @@ class TestParseTypeStringEdgeCases:
         assert td.params[2].name == "None"
 
     def test_callable_positional_only(self):
-        td = _parse_type_string("(x: int, /, y: str) -> bool")
+        td = parse_type_string("(x: int, /, y: str) -> bool")
         assert td.kind == "callable"
         # / should be skipped, yielding 2 param types
         assert len(td.params) == 2
@@ -1240,7 +1240,7 @@ class TestParseTypeStringEdgeCases:
         assert td.return_type.name == "bool"
 
     def test_callable_keyword_only(self):
-        td = _parse_type_string("(x: int, *, key: str) -> None")
+        td = parse_type_string("(x: int, *, key: str) -> None")
         assert td.kind == "callable"
         # * should be skipped, yielding 2 param types
         assert len(td.params) == 2
@@ -1249,26 +1249,26 @@ class TestParseTypeStringEdgeCases:
 
     def test_callable_no_arrow(self):
         """Parenthesized expression without -> should fall through."""
-        td = _parse_type_string("(int, str)")
+        td = parse_type_string("(int, str)")
         # No " -> " in this string, so it's not a callable
         assert td.kind == "named"
         assert td.name == "(int, str)"
 
     def test_callable_with_union_return(self):
-        td = _parse_type_string("(x: int) -> str | None")
+        td = parse_type_string("(x: int) -> str | None")
         assert td.kind == "callable"
         assert td.return_type.kind == "union"
         assert len(td.return_type.params) == 2
 
     def test_callable_with_nested_callable_param(self):
-        td = _parse_type_string("(callback: (int) -> str, x: int) -> None")
+        td = parse_type_string("(callback: (int) -> str, x: int) -> None")
         assert td.kind == "callable"
         # The callback param type itself is a callable
         assert td.params[0].kind == "callable"
         assert td.params[0].return_type.name == "str"
 
     def test_empty_parameterized(self):
-        td = _parse_type_string("tuple[]")
+        td = parse_type_string("tuple[]")
         assert td.kind == "parameterized"
         assert td.name == "tuple"
         # Empty params list — single empty-string param gets parsed as named("")
@@ -1281,24 +1281,24 @@ class TestParseTypeStringEdgeCases:
             "  [T](iterable: Iterable[T]) -> T\n"
             "]"
         )
-        td = _parse_type_string(raw)
+        td = parse_type_string(raw)
         assert td.kind == "named"
         assert td.name == "Overload"
 
     def test_self_at_with_dotted_path(self):
-        td = _parse_type_string("Self@MyModule.Connection")
+        td = parse_type_string("Self@MyModule.Connection")
         assert td.kind == "named"
         assert td.name == "MyModule.Connection"
 
     def test_pipe_in_identifier(self):
         """A | without spaces should NOT be treated as union."""
-        td = _parse_type_string("BitwiseOr")
+        td = parse_type_string("BitwiseOr")
         assert td.kind == "named"
         assert td.name == "BitwiseOr"
 
     def test_type_with_quoted_literal(self):
         """Literal types from pyrefly."""
-        td = _parse_type_string("Literal[True]")
+        td = parse_type_string("Literal[True]")
         assert td.kind == "parameterized"
         assert td.name == "Literal"
 
@@ -1459,9 +1459,9 @@ class TestDisplayRoundtrip:
         "(str, int) -> bool",
     ])
     def test_roundtrip(self, raw):
-        td1 = _parse_type_string(raw)
+        td1 = parse_type_string(raw)
         displayed = td1.display()
-        td2 = _parse_type_string(displayed)
+        td2 = parse_type_string(displayed)
         assert td1 == td2, f"Roundtrip failed: {raw!r} -> {displayed!r}"
 
 

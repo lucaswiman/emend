@@ -26,7 +26,7 @@ from emend.type_oracle import (
     FileTypes,
     TypeBinding,
     TypeDescriptor,
-    _parse_type_string,
+    parse_type_string,
     create_type_oracle,
 )
 

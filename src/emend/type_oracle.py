@@ -415,11 +415,12 @@ class TypeOracle(ABC):
 # Tokenizer for type strings like "list[Connection]", "str | None",
 # "(self: Self@Connection, host: str) -> None"
 
-def _parse_type_string(raw: str) -> TypeDescriptor:
-    """Parse a Pyrefly result type string into a TypeDescriptor tree.
+def parse_type_string(raw: str) -> TypeDescriptor:
+    """Parse a type checker result type string into a TypeDescriptor tree.
 
-    Handles: named types, parameterized types, unions, callable signatures.
-    Falls back to TypeDescriptor.named(raw) for anything unparseable.
+    Handles output from Pyrefly, Pyright, and ty: named types, parameterized
+    types, union types, and callable signatures.  Falls back to
+    ``TypeDescriptor.named(raw)`` for anything unparseable.
     """
     raw = raw.strip()
     if not raw or raw == "Unknown":
@@ -430,7 +431,7 @@ def _parse_type_string(raw: str) -> TypeDescriptor:
     if " | " in raw and not raw.startswith("("):
         parts = _split_union(raw)
         if len(parts) > 1:
-            return TypeDescriptor.union(tuple(_parse_type_string(p) for p in parts))
+            return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
 
     # Handle callable: "(args...) -> ReturnType"
     if raw.startswith("(") and " -> " in raw:
@@ -447,7 +448,7 @@ def _parse_type_string(raw: str) -> TypeDescriptor:
         inner = raw[bracket_pos + 1:-1]
         params = _split_params(inner)
         return TypeDescriptor.parameterized(
-            name, tuple(_parse_type_string(p) for p in params)
+            name, tuple(parse_type_string(p) for p in params)
         )
 
     # Plain named type
@@ -563,11 +564,11 @@ def _parse_callable(raw: str) -> TypeDescriptor:
                 continue
             if ": " in param:
                 type_part = param.split(": ", 1)[1]
-                param_types.append(_parse_type_string(type_part))
+                param_types.append(parse_type_string(type_part))
             else:
-                param_types.append(_parse_type_string(param))
+                param_types.append(parse_type_string(param))
 
-    return TypeDescriptor.callable_(tuple(param_types), _parse_type_string(ret_str))
+    return TypeDescriptor.callable_(tuple(param_types), parse_type_string(ret_str))
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +687,7 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
             else:
                 continue
 
-        type_desc = _parse_type_string(result)
+        type_desc = parse_type_string(result)
         binding = TypeBinding(
             name=name,
             line=line,
@@ -985,7 +986,7 @@ def _parse_pyright_output(json_data: dict, file_path: str) -> FileTypes:
 
         # The last quoted string is often the most specific type
         raw_type = type_mentions[-1]
-        type_desc = _parse_type_string(raw_type)
+        type_desc = parse_type_string(raw_type)
 
         # Derive a name from the message: look for variable/symbol names
         name = ""
@@ -1085,7 +1086,7 @@ class PyrightAdapter(TypeOracle):
             if not raw_type:
                 continue
 
-            type_desc = _parse_type_string(raw_type)
+            type_desc = parse_type_string(raw_type)
             binding = TypeBinding(
                 name=name,
                 line=line,
@@ -1168,7 +1169,7 @@ def _parse_ty_diagnostics(diagnostics: list[dict], file_path: str) -> FileTypes:
             continue
 
         raw_type = type_mentions[-1]
-        type_desc = _parse_type_string(raw_type)
+        type_desc = parse_type_string(raw_type)
 
         name = ""
         if len(type_mentions) >= 2:
@@ -1286,7 +1287,7 @@ class TyAdapter(TypeOracle):
             if not raw_type:
                 continue
 
-            type_desc = _parse_type_string(raw_type)
+            type_desc = parse_type_string(raw_type)
             binding = TypeBinding(
                 name=name,
                 line=line,
