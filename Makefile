@@ -9,6 +9,8 @@ RUST_SOURCES := $(wildcard rust/src/*.rs)
 # Use local caches for sandboxed environments
 export CARGO_HOME := $(CURDIR)/.cargo-cache
 export UV_CACHE_DIR := $(CURDIR)/.uv-cache
+export VIRTUAL_ENV := $(CURDIR)/$(VENV)
+export PATH := $(VIRTUAL_ENV)/bin:$(shell echo $$PATH)
 
 $(VENV)/bin/activate: pyproject.toml rust/Cargo.toml
 	uv venv $(VENV) --python 3.14t
