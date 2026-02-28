@@ -86,6 +86,9 @@ class TypeDescriptor:
             return True  # wildcard
         if self.kind == "unknown":
             return False
+        # If self is a union, check if any member matches the constraint
+        if self.kind == "union" and constraint.kind != "union":
+            return any(m.matches(constraint) for m in self.params)
         if constraint.kind == "named":
             if self.kind == "named":
                 return self.name == constraint.name
@@ -99,8 +102,25 @@ class TypeDescriptor:
                 return all(a.matches(b) for a, b in zip(self.params, constraint.params))
             return False
         if constraint.kind == "union":
+            if self.kind == "union":
+                # At least one member of self matches at least one constraint member
+                return any(
+                    sm.matches(cm)
+                    for sm in self.params
+                    for cm in constraint.params
+                )
             # Self must match at least one member of the constraint union
             return any(self.matches(m) for m in constraint.params)
+        if constraint.kind == "callable":
+            if self.kind != "callable":
+                return False
+            if len(self.params) != len(constraint.params):
+                return False
+            if not all(a.matches(b) for a, b in zip(self.params, constraint.params)):
+                return False
+            if constraint.return_type and self.return_type:
+                return self.return_type.matches(constraint.return_type)
+            return constraint.return_type is None
         return False
 
 
@@ -210,7 +230,7 @@ def _parse_type_string(raw: str) -> TypeDescriptor:
     if raw.startswith("Overload["):
         return TypeDescriptor.named("Overload")
 
-    # Handle parameterized: "list[Connection]", "dict[str, int]"
+    # Handle parameterized: "list[Connection]", "dict[str, int]", "type[X]"
     bracket_pos = raw.find("[")
     if bracket_pos != -1 and raw.endswith("]"):
         name = raw[:bracket_pos].strip()
@@ -219,11 +239,6 @@ def _parse_type_string(raw: str) -> TypeDescriptor:
         return TypeDescriptor.parameterized(
             name, tuple(_parse_type_string(p) for p in params)
         )
-
-    # Handle type[X] — keep it as parameterized
-    if raw.startswith("type[") and raw.endswith("]"):
-        inner = raw[5:-1]
-        return TypeDescriptor.parameterized("type", (_parse_type_string(inner),))
 
     # Plain named type
     # Strip Self@ prefix: "Self@Connection" -> "Connection"
@@ -390,24 +405,40 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
     ft = FileTypes(path=file_path)
 
     modules = debug_json.get("modules", {})
-    # Find the module that corresponds to our file
-    # Pyrefly uses module names (e.g., "example" for "example.py")
+    # Find the module that corresponds to our file.
+    # Pyrefly uses dotted module names (e.g., "example" for "example.py",
+    # "pkg.sub" for "pkg/sub.py").  Match against the file stem first,
+    # then try converting dots to path separators for deeper matches.
     target_module = None
     file_stem = Path(file_path).stem
+    file_path_normalized = file_path.replace("\\", "/")
     for mod_name in modules:
-        if mod_name == file_stem or mod_name.replace(".", "/") in file_path:
+        if mod_name == file_stem:
             target_module = mod_name
+            break
+        # Convert "pkg.sub" to "pkg/sub" and check it appears as a
+        # complete path segment (not a substring of another word).
+        mod_as_path = mod_name.replace(".", "/")
+        # Ensure we match a full segment: /pkg/sub.py not /xpkg/sub.py
+        for suffix in (f"/{mod_as_path}.py", f"/{mod_as_path}/__init__.py"):
+            if file_path_normalized.endswith(suffix):
+                target_module = mod_name
+                break
+        if target_module:
             break
 
     if target_module is None:
-        # Try the first (or only) module
+        # Fall back to the first (or only) module
         if modules:
             target_module = next(iter(modules))
         else:
             return ft
 
     bindings_data = modules[target_module].get("bindings", [])
-    seen_positions: set[tuple[str, int, int]] = set()
+    # Track positions we've seen.  Maps (name, line, col) -> index in
+    # ft.bindings so we can replace a non-definition with a definition
+    # if the definition arrives later.
+    seen_positions: dict[tuple[str, int, int], int] = {}
 
     for entry in bindings_data:
         key = entry.get("key", "")
@@ -436,11 +467,14 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
 
         binding_kind = _classify_binding_kind(key)
 
-        # Deduplicate: prefer Definition over other kinds at same position
+        # Deduplicate: prefer Definition over other kinds at same position.
         pos_key = (name, line, col_start)
-        if pos_key in seen_positions and binding_kind != "definition":
-            continue
-        seen_positions.add(pos_key)
+        if pos_key in seen_positions:
+            if binding_kind == "definition":
+                # Replace the earlier non-definition entry
+                ft.bindings[seen_positions[pos_key]] = None  # type: ignore[call-overload]
+            else:
+                continue
 
         type_desc = _parse_type_string(result)
         binding = TypeBinding(
@@ -452,8 +486,11 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
             raw_type=result,
             binding_kind=binding_kind,
         )
+        seen_positions[pos_key] = len(ft.bindings)
         ft.bindings.append(binding)
 
+    # Remove None placeholders left by deduplication replacements
+    ft.bindings = [b for b in ft.bindings if b is not None]
     ft.build_index()
     return ft
 
@@ -467,6 +504,7 @@ class _FileTypeCache:
 
     This avoids re-running pyrefly when a file hasn't changed.
     The cache is bounded by max_entries to prevent unbounded memory growth.
+    Eviction is FIFO (first-inserted entries are evicted first).
     """
 
     def __init__(self, max_entries: int = 256):
@@ -481,7 +519,7 @@ class _FileTypeCache:
     def put(self, content_hash: str, ft: FileTypes) -> None:
         with self._lock:
             if len(self._cache) >= self._max_entries:
-                # Evict oldest ~25%
+                # Evict first-inserted ~25% (FIFO)
                 keys = list(self._cache.keys())[:self._max_entries // 4]
                 for k in keys:
                     del self._cache[k]
@@ -610,18 +648,25 @@ class PyreflyAdapter(TypeOracle):
 
         More efficient than calling infer_file() per file because pyrefly
         can share module resolution across files.
+
+        Returns a dict keyed by resolved absolute path strings.
         """
         results: dict[str, FileTypes] = {}
         to_check: list[Path] = []
 
-        for p in paths:
-            p = p.resolve()
-            content_hash = _content_hash(p)
+        # Resolve all paths up front for consistent dict keys.
+        resolved = [p.resolve() for p in paths]
+
+        for rp in resolved:
+            if not rp.exists():
+                results[str(rp)] = FileTypes(path=str(rp))
+                continue
+            content_hash = _content_hash(rp)
             cached = self._cache.get(content_hash)
             if cached is not None:
-                results[str(p)] = cached
+                results[str(rp)] = cached
             else:
-                to_check.append(p)
+                to_check.append(rp)
 
         if not to_check:
             return results
@@ -653,8 +698,6 @@ class PyreflyAdapter(TypeOracle):
                 with open(debug_path) as f:
                     debug_json = json.load(f)
 
-                # Parse each module in the debug output
-                modules = debug_json.get("modules", {})
                 for path_obj in to_check:
                     ft = _parse_pyrefly_debug(debug_json, str(path_obj))
                     content_hash = _content_hash(path_obj)
@@ -669,8 +712,8 @@ class PyreflyAdapter(TypeOracle):
                 pass
 
         # Fill in empty results for files that weren't in the output
-        for p in to_check:
-            key = str(p.resolve())
+        for rp in to_check:
+            key = str(rp)
             if key not in results:
                 results[key] = FileTypes(path=key)
 

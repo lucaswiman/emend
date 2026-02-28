@@ -5,7 +5,7 @@ Tests cover:
 - TypeDescriptor structural matching
 - Pyrefly debug-info JSON parsing into FileTypes
 - FileTypes indexing (by position, by name)
-- _FileTypeCache behavior (LRU eviction, thread safety)
+- _FileTypeCache behavior (FIFO eviction, thread safety)
 - PyreflyAdapter integration (requires pyrefly installed)
 - CLI `types` command integration
 """
@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
@@ -26,7 +24,6 @@ from emend.type_oracle import (
     TypeBinding,
     TypeDescriptor,
     _FileTypeCache,
-    _parse_callable,
     _parse_pyrefly_debug,
     _parse_type_string,
     _split_params,
@@ -692,8 +689,8 @@ class TestTypesCLI:
         config.write_text('[default]\nproject_includes = ["."]\n')
 
         result = run_emend_cmd(["types", str(test_file)], check=False)
-        # Should succeed or show some type info
-        assert result.returncode == 0 or "add" in result.stdout
+        assert result.returncode == 0
+        assert "add" in result.stdout
 
     def test_types_json_output(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"
@@ -753,3 +750,634 @@ class TestTypesCLI:
 
         result = run_emend_cmd(["types", str(test_file), "--engine", "nonexistent"], check=False)
         assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: parsing edge cases
+# ---------------------------------------------------------------------------
+
+class TestParseTypeStringEdgeCases:
+    """Stress tests for _parse_type_string with tricky inputs."""
+
+    def test_whitespace_padded(self):
+        td = _parse_type_string("  int  ")
+        assert td.kind == "named"
+        assert td.name == "int"
+
+    def test_deeply_nested_parameterized(self):
+        raw = "dict[str, list[tuple[int, Optional[set[frozenset[bytes]]]]]]"
+        td = _parse_type_string(raw)
+        assert td.kind == "parameterized"
+        assert td.name == "dict"
+        assert td.params[1].kind == "parameterized"
+        assert td.params[1].name == "list"
+        inner_tuple = td.params[1].params[0]
+        assert inner_tuple.kind == "parameterized"
+        assert inner_tuple.name == "tuple"
+
+    def test_union_with_parameterized_members(self):
+        td = _parse_type_string("list[int] | dict[str, float] | None")
+        assert td.kind == "union"
+        assert len(td.params) == 3
+        assert td.params[0].kind == "parameterized"
+        assert td.params[0].name == "list"
+        assert td.params[1].kind == "parameterized"
+        assert td.params[1].name == "dict"
+        assert td.params[2].kind == "named"
+        assert td.params[2].name == "None"
+
+    def test_callable_positional_only(self):
+        td = _parse_type_string("(x: int, /, y: str) -> bool")
+        assert td.kind == "callable"
+        # / should be skipped, yielding 2 param types
+        assert len(td.params) == 2
+        assert td.params[0].name == "int"
+        assert td.params[1].name == "str"
+        assert td.return_type.name == "bool"
+
+    def test_callable_keyword_only(self):
+        td = _parse_type_string("(x: int, *, key: str) -> None")
+        assert td.kind == "callable"
+        # * should be skipped, yielding 2 param types
+        assert len(td.params) == 2
+        assert td.params[0].name == "int"
+        assert td.params[1].name == "str"
+
+    def test_callable_no_arrow(self):
+        """Parenthesized expression without -> should fall through."""
+        td = _parse_type_string("(int, str)")
+        # No " -> " in this string, so it's not a callable
+        assert td.kind == "named"
+        assert td.name == "(int, str)"
+
+    def test_callable_with_union_return(self):
+        td = _parse_type_string("(x: int) -> str | None")
+        assert td.kind == "callable"
+        assert td.return_type.kind == "union"
+        assert len(td.return_type.params) == 2
+
+    def test_callable_with_nested_callable_param(self):
+        td = _parse_type_string("(callback: (int) -> str, x: int) -> None")
+        assert td.kind == "callable"
+        # The callback param type itself is a callable
+        assert td.params[0].kind == "callable"
+        assert td.params[0].return_type.name == "str"
+
+    def test_empty_parameterized(self):
+        td = _parse_type_string("tuple[]")
+        assert td.kind == "parameterized"
+        assert td.name == "tuple"
+        # Empty params list — single empty-string param gets parsed as named("")
+        # This is an edge case; just verify it doesn't crash
+
+    def test_multiline_overload(self):
+        raw = (
+            "Overload[\n"
+            "  [T](arg1: T, arg2: T) -> T\n"
+            "  [T](iterable: Iterable[T]) -> T\n"
+            "]"
+        )
+        td = _parse_type_string(raw)
+        assert td.kind == "named"
+        assert td.name == "Overload"
+
+    def test_self_at_with_dotted_path(self):
+        td = _parse_type_string("Self@MyModule.Connection")
+        assert td.kind == "named"
+        assert td.name == "MyModule.Connection"
+
+    def test_pipe_in_identifier(self):
+        """A | without spaces should NOT be treated as union."""
+        td = _parse_type_string("BitwiseOr")
+        assert td.kind == "named"
+        assert td.name == "BitwiseOr"
+
+    def test_type_with_quoted_literal(self):
+        """Literal types from pyrefly."""
+        td = _parse_type_string("Literal[True]")
+        assert td.kind == "parameterized"
+        assert td.name == "Literal"
+
+
+class TestSplitUnionEdgeCases:
+
+    def test_union_inside_nested_brackets(self):
+        """Union inside double-nested brackets should not split."""
+        parts = _split_union("dict[str, list[int | float]] | None")
+        assert parts == ["dict[str, list[int | float]]", "None"]
+
+    def test_single_type_no_pipe(self):
+        parts = _split_union("int")
+        assert parts == ["int"]
+
+    def test_pipe_without_spaces(self):
+        """'int|str' (no spaces) should NOT split."""
+        parts = _split_union("int|str")
+        assert parts == ["int|str"]
+
+    def test_three_way_union(self):
+        parts = _split_union("int | str | None")
+        assert parts == ["int", "str", "None"]
+
+    def test_union_with_callable(self):
+        """Callable inside parens should not be split."""
+        parts = _split_union("(int) -> str | None")
+        assert parts == ["(int) -> str", "None"]
+
+
+class TestSplitParamsEdgeCases:
+
+    def test_empty_string(self):
+        parts = _split_params("")
+        assert parts == []
+
+    def test_deeply_nested(self):
+        parts = _split_params("dict[str, list[int]], tuple[float, complex]")
+        assert parts == ["dict[str, list[int]]", "tuple[float, complex]"]
+
+    def test_callable_param(self):
+        parts = _split_params("(int) -> str, int")
+        assert parts == ["(int) -> str", "int"]
+
+    def test_trailing_comma(self):
+        parts = _split_params("int, str, ")
+        assert len(parts) == 3
+        assert parts[2] == ""
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: matches() edge cases
+# ---------------------------------------------------------------------------
+
+class TestMatchesEdgeCases:
+
+    def test_callable_exact_match(self):
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        assert td.matches(constraint)
+
+    def test_callable_param_mismatch(self):
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("float"),),
+            TypeDescriptor.named("str"),
+        )
+        assert not td.matches(constraint)
+
+    def test_callable_return_mismatch(self):
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("int"),
+        )
+        assert not td.matches(constraint)
+
+    def test_callable_arity_mismatch(self):
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"), TypeDescriptor.named("str")),
+            TypeDescriptor.named("None"),
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("None"),
+        )
+        assert not td.matches(constraint)
+
+    def test_callable_vs_named(self):
+        td = TypeDescriptor.named("Callable")
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        assert not td.matches(constraint)
+
+    def test_named_callable_constraint_doesnt_match_callable_type(self):
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor.named("Callable")
+        assert not td.matches(constraint)
+
+    def test_parameterized_with_unknown_wildcard(self):
+        """Unknown params in constraint should match anything."""
+        td = TypeDescriptor.parameterized("list", (TypeDescriptor.named("int"),))
+        constraint = TypeDescriptor.parameterized("list", (TypeDescriptor.unknown(),))
+        assert td.matches(constraint)
+
+    def test_union_self_matches_constraint_member(self):
+        """A union type should match a union constraint if any member matches."""
+        td = TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("None")))
+        constraint = TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("int")))
+        # td's "str" matches constraint's "str" member
+        assert td.matches(constraint)
+
+    def test_deeply_nested_parameterized_match(self):
+        td = TypeDescriptor.parameterized("dict", (
+            TypeDescriptor.named("str"),
+            TypeDescriptor.parameterized("list", (TypeDescriptor.named("int"),)),
+        ))
+        constraint = TypeDescriptor.parameterized("dict", (
+            TypeDescriptor.named("str"),
+            TypeDescriptor.parameterized("list", (TypeDescriptor.named("int"),)),
+        ))
+        assert td.matches(constraint)
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: display() roundtrip
+# ---------------------------------------------------------------------------
+
+class TestDisplayRoundtrip:
+    """Verify display() output can be re-parsed to an equivalent descriptor."""
+
+    @pytest.mark.parametrize("raw", [
+        "int",
+        "str",
+        "list[int]",
+        "dict[str, int]",
+        "str | None",
+        "int | str | None",
+        "(int) -> str",
+        "() -> None",
+        "(str, int) -> bool",
+    ])
+    def test_roundtrip(self, raw):
+        td1 = _parse_type_string(raw)
+        displayed = td1.display()
+        td2 = _parse_type_string(displayed)
+        assert td1 == td2, f"Roundtrip failed: {raw!r} -> {displayed!r}"
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: deduplication ordering
+# ---------------------------------------------------------------------------
+
+class TestDeduplicationOrdering:
+
+    def test_definition_after_reference_wins(self):
+        """If a reference binding arrives before the definition, the definition should win."""
+        debug = {
+            "modules": {
+                "test_module": {
+                    "bindings": [
+                        {
+                            "key": "Key::CompletedPartialType(x 5:1-2)",
+                            "location": "5:1-2",
+                            "binding": "CompletedPartialType(...)",
+                            "result": "int",
+                        },
+                        {
+                            "key": "Key::Definition(x 5:1-2)",
+                            "location": "5:1-2",
+                            "binding": "NameAssign(x, None, 42)",
+                            "result": "int",
+                        },
+                    ]
+                }
+            }
+        }
+        ft = _parse_pyrefly_debug(debug, "test_module.py")
+        assert len(ft.bindings) == 1
+        assert ft.bindings[0].binding_kind == "definition"
+
+    def test_two_references_at_same_position(self):
+        """Only the first non-definition at a position should be kept."""
+        debug = {
+            "modules": {
+                "test_module": {
+                    "bindings": [
+                        {
+                            "key": "Key::BoundName(x 5:1-2)",
+                            "location": "5:1-2",
+                            "binding": "Forward(...)",
+                            "result": "int",
+                        },
+                        {
+                            "key": "Key::CompletedPartialType(x 5:1-2)",
+                            "location": "5:1-2",
+                            "binding": "CompletedPartialType(...)",
+                            "result": "int",
+                        },
+                    ]
+                }
+            }
+        }
+        ft = _parse_pyrefly_debug(debug, "test_module.py")
+        assert len(ft.bindings) == 1
+        assert ft.bindings[0].binding_kind == "reference"
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: module matching in _parse_pyrefly_debug
+# ---------------------------------------------------------------------------
+
+class TestModuleMatching:
+
+    def test_exact_stem_match(self):
+        debug = {
+            "modules": {
+                "mymod": {"bindings": [
+                    {"key": "Key::Definition(x 1:1-2)", "location": "1:1-2",
+                     "binding": "NameAssign(x, None, 1)", "result": "int"},
+                ]},
+                "other": {"bindings": []},
+            }
+        }
+        ft = _parse_pyrefly_debug(debug, "/some/path/mymod.py")
+        assert len(ft.bindings) == 1
+
+    def test_dotted_module_matches_path(self):
+        debug = {
+            "modules": {
+                "pkg.sub": {"bindings": [
+                    {"key": "Key::Definition(x 1:1-2)", "location": "1:1-2",
+                     "binding": "NameAssign(x, None, 1)", "result": "int"},
+                ]}
+            }
+        }
+        ft = _parse_pyrefly_debug(debug, "/project/src/pkg/sub.py")
+        assert len(ft.bindings) == 1
+
+    def test_substring_does_not_match(self):
+        """Module 'a' should NOT match file 'bar.py' (substring match)."""
+        debug = {
+            "modules": {
+                "a": {"bindings": [
+                    {"key": "Key::Definition(x 1:1-2)", "location": "1:1-2",
+                     "binding": "NameAssign(x, None, 1)", "result": "int"},
+                ]},
+            }
+        }
+        # File is "bar.py" — stem is "bar", not "a".
+        # The old code would match "a" as a substring of "bar" via
+        # `mod_name.replace('.', '/') in file_path`.
+        ft = _parse_pyrefly_debug(debug, "/some/path/bar.py")
+        # Falls through to first module (fallback), so still gets bindings.
+        # But the important thing is it doesn't match on substring.
+        # With only one module, fallback is fine. Test with two modules:
+        debug2 = {
+            "modules": {
+                "bar": {"bindings": [
+                    {"key": "Key::Definition(correct 1:1-2)", "location": "1:1-2",
+                     "binding": "NameAssign(correct, None, 1)", "result": "int"},
+                ]},
+                "a": {"bindings": [
+                    {"key": "Key::Definition(wrong 1:1-2)", "location": "1:1-2",
+                     "binding": "NameAssign(wrong, None, 1)", "result": "str"},
+                ]},
+            }
+        }
+        ft2 = _parse_pyrefly_debug(debug2, "/some/path/bar.py")
+        assert len(ft2.bindings) == 1
+        assert ft2.bindings[0].name == "correct"
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: cache under concurrent access
+# ---------------------------------------------------------------------------
+
+class TestCacheConcurrency:
+
+    def test_concurrent_puts(self):
+        """Multiple threads writing to cache simultaneously should not corrupt it."""
+        import threading
+
+        cache = _FileTypeCache(max_entries=100)
+        errors = []
+
+        def writer(thread_id):
+            try:
+                for i in range(50):
+                    key = f"thread{thread_id}_key{i}"
+                    cache.put(key, FileTypes(path=f"test{thread_id}_{i}.py"))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(cache) <= 100
+
+    def test_concurrent_get_and_put(self):
+        """Readers and writers concurrently should not crash."""
+        import threading
+
+        cache = _FileTypeCache(max_entries=50)
+        errors = []
+
+        def writer():
+            try:
+                for i in range(100):
+                    cache.put(f"key{i}", FileTypes(path=f"test{i}.py"))
+            except Exception as e:
+                errors.append(e)
+
+        def reader():
+            try:
+                for i in range(100):
+                    cache.get(f"key{i}")
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=writer),
+            threading.Thread(target=reader),
+            threading.Thread(target=reader),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: PyreflyAdapter with malformed inputs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _has_pyrefly, reason="pyrefly not installed")
+class TestPyreflyAdapterEdgeCases:
+
+    def test_syntax_error_file(self, tmp_path):
+        """Pyrefly should still produce some output for files with syntax errors."""
+        test_file = tmp_path / "bad.py"
+        test_file.write_text("def foo(\n")  # intentional syntax error
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        # Should not raise — just return empty or partial results
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+    def test_empty_file(self, tmp_path):
+        test_file = tmp_path / "empty.py"
+        test_file.write_text("")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+    def test_file_with_only_comments(self, tmp_path):
+        test_file = tmp_path / "comments.py"
+        test_file.write_text("# This is a comment\n# Another comment\n")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+    def test_large_file(self, tmp_path):
+        """Test with a file that has many symbols."""
+        lines = []
+        for i in range(100):
+            lines.append(f"var_{i}: int = {i}")
+        test_file = tmp_path / "large.py"
+        test_file.write_text("\n".join(lines) + "\n")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        defs = ft.definitions()
+        # Should find at least some of the 100 variables
+        assert len(defs) >= 50
+
+    def test_batch_partial_cache(self, tmp_path):
+        """Batch infer where some files are cached and some are not."""
+        f1 = tmp_path / "cached_file.py"
+        f1.write_text("x: int = 1\n")
+        f2 = tmp_path / "uncached_file.py"
+        f2.write_text("y: str = 'hello'\n")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+
+        # Pre-cache f1
+        adapter.infer_file(f1, project_root=tmp_path)
+        assert len(adapter._cache) == 1
+
+        # Batch should use cache for f1 and run pyrefly for f2
+        results = adapter.infer_batch([f1, f2], project_root=tmp_path)
+        assert str(f1.resolve()) in results
+        assert str(f2.resolve()) in results
+
+    def test_cross_module_inference(self, tmp_path):
+        """Test that pyrefly can resolve types across modules."""
+        mod_a = tmp_path / "mod_a.py"
+        mod_a.write_text(textwrap.dedent("""\
+            class Widget:
+                name: str
+                def __init__(self, name: str) -> None:
+                    self.name = name
+        """))
+
+        mod_b = tmp_path / "mod_b.py"
+        mod_b.write_text(textwrap.dedent("""\
+            from mod_a import Widget
+
+            w = Widget("button")
+        """))
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        ft = adapter.infer_file(mod_b, project_root=tmp_path)
+
+        # w should be inferred as Widget
+        w_bindings = ft.types_for_name("w")
+        if w_bindings:
+            w_types = {b.raw_type for b in w_bindings}
+            assert "Widget" in w_types
+
+    def test_nonexistent_batch_file(self, tmp_path):
+        """Batch with a nonexistent file should produce empty FileTypes for it."""
+        f1 = tmp_path / "exists.py"
+        f1.write_text("x: int = 1\n")
+        f2 = tmp_path / "does_not_exist.py"
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        adapter = PyreflyAdapter()
+        results = adapter.infer_batch([f1, f2], project_root=tmp_path)
+
+        assert str(f2.resolve()) in results
+        assert len(results[str(f2.resolve())].bindings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Stress tests: CLI edge cases
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _has_pyrefly, reason="pyrefly not installed")
+class TestTypesCLIEdgeCases:
+
+    def test_types_empty_file(self, tmp_path, run_emend_cmd):
+        test_file = tmp_path / "empty.py"
+        test_file.write_text("")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        result = run_emend_cmd(["types", str(test_file)], check=False)
+        assert result.returncode == 0
+
+    def test_types_json_empty_result(self, tmp_path, run_emend_cmd):
+        test_file = tmp_path / "empty.py"
+        test_file.write_text("")
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        result = run_emend_cmd(["types", str(test_file), "--json"], check=False)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            assert isinstance(data, list)
+
+    def test_types_kind_filter(self, tmp_path, run_emend_cmd):
+        test_file = tmp_path / "example.py"
+        test_file.write_text(textwrap.dedent("""\
+            x: int = 42
+            y = x + 1
+        """))
+
+        config = tmp_path / "pyrefly.toml"
+        config.write_text('[default]\nproject_includes = ["."]\n')
+
+        result = run_emend_cmd(
+            ["types", str(test_file), "--kind", "definition", "--json"],
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            for entry in data:
+                assert entry["kind"] == "definition"
