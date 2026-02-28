@@ -9,16 +9,222 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
+
+import libcst as cst
+from libcst.metadata import PositionProvider, MetadataWrapper
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LSP Client implementation
+# ---------------------------------------------------------------------------
+
+class LSPClient:
+    """A minimal LSP client for querying type information."""
+
+    def __init__(self, command: list[str], root_path: Path):
+        self.command = command
+        self.root_path = root_path
+        self.process: subprocess.Popen | None = None
+        self._id_counter = 0
+        self._responses: dict[int, Any] = {}
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._read_thread: threading.Thread | None = None
+
+    def start(self) -> bool:
+        """Start the LSP server process and initialize it."""
+        try:
+            self.process = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except FileNotFoundError:
+            return False
+
+        self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._read_thread.start()
+
+        # Initialize
+        init_res = self.send_request("initialize", {
+            "processId": os.getpid(),
+            "rootPath": str(self.root_path),
+            "rootUri": self.root_path.as_uri(),
+            "capabilities": {
+                "textDocument": {
+                    "hover": {"contentFormat": ["markdown", "plaintext"]}
+                }
+            },
+        })
+        if init_res is None:
+            return False
+
+        self.send_notification("initialized", {})
+        return True
+
+    def stop(self):
+        """Stop the LSP server."""
+        if self.process:
+            self.process.terminate()
+            self.process = None
+
+    def _read_loop(self):
+        """Read responses from the LSP server."""
+        if not self.process or not self.process.stdout:
+            return
+
+        while self.process.poll() is None:
+            line = self.process.stdout.readline()
+            if not line:
+                break
+            if line.startswith(b"Content-Length: "):
+                length = int(line[16:].strip())
+                # Read until \r\n\r\n
+                while line.strip():
+                    line = self.process.stdout.readline()
+                
+                content = self.process.stdout.read(length)
+                if not content:
+                    break
+                
+                try:
+                    message = json.loads(content.decode("utf-8"))
+                    if "id" in message:
+                        with self._lock:
+                            self._responses[message["id"]] = message
+                            self._condition.notify_all()
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+    def send_request(self, method: str, params: dict, timeout: float = 10.0) -> Any:
+        """Send an LSP request and wait for the response."""
+        if not self.process or not self.process.stdin:
+            return None
+
+        with self._lock:
+            msg_id = self._id_counter
+            self._id_counter += 1
+
+        message = {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "method": method,
+            "params": params,
+        }
+        body = json.dumps(message).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+        
+        try:
+            self.process.stdin.write(header + body)
+            self.process.stdin.flush()
+        except OSError:
+            return None
+
+        # Wait for response
+        start_time = time.time()
+        with self._condition:
+            while msg_id not in self._responses:
+                remaining = timeout - (time.time() - start_time)
+                if remaining <= 0:
+                    return None
+                if not self._condition.wait(remaining):
+                    return None
+            return self._responses.pop(msg_id)
+
+    def send_notification(self, method: str, params: dict):
+        """Send an LSP notification."""
+        if not self.process or not self.process.stdin:
+            return
+
+        message = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+        body = json.dumps(message).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+        
+        try:
+            self.process.stdin.write(header + body)
+            self.process.stdin.flush()
+        except OSError:
+            pass
+
+    def did_open(self, path: Path, text: str):
+        """Send textDocument/didOpen."""
+        self.send_notification("textDocument/didOpen", {
+            "textDocument": {
+                "uri": path.as_uri(),
+                "languageId": "python",
+                "version": 1,
+                "text": text,
+            }
+        })
+
+    def hover(self, path: Path, line: int, col: int) -> str | None:
+        """Send textDocument/hover and return the type string."""
+        res = self.send_request("textDocument/hover", {
+            "textDocument": {"uri": path.as_uri()},
+            "position": {"line": line - 1, "character": col - 1},
+        })
+        if not res or "result" not in res or res["result"] is None:
+            return None
+        
+        contents = res["result"].get("contents", "")
+        if isinstance(contents, dict):
+            return contents.get("value")
+        if isinstance(contents, list):
+            # Extract from first markdown/text block
+            for item in contents:
+                if isinstance(item, dict):
+                    return item.get("value")
+                return item
+        return contents
+
+
+# ---------------------------------------------------------------------------
+# AST traversal for symbol collection
+# ---------------------------------------------------------------------------
+
+class _SymbolCollector(cst.CSTVisitor):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self):
+        self.positions: list[tuple[str, int, int, int]] = []
+
+    def visit_Name(self, node: cst.Name):
+        pos = self.get_metadata(PositionProvider, node)
+        # We only care about name usages/definitions that aren't keywords
+        self.positions.append((node.value, pos.start.line, pos.start.column + 1, pos.end.column + 1))
+
+    def visit_Attribute(self, node: cst.Attribute):
+        pos = self.get_metadata(PositionProvider, node.attr)
+        self.positions.append((node.attr.value, pos.start.line, pos.start.column + 1, pos.end.column + 1))
+
+
+def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
+    """Collect all identifiers and their positions in the source."""
+    module = cst.parse_module(source)
+    wrapper = MetadataWrapper(module)
+    collector = _SymbolCollector()
+    wrapper.visit(collector)
+    return collector.positions
 
 
 # ---------------------------------------------------------------------------
@@ -804,16 +1010,10 @@ def _parse_pyright_output(json_data: dict, file_path: str) -> FileTypes:
 # ---------------------------------------------------------------------------
 
 class PyrightAdapter(TypeOracle):
-    """TypeOracle implementation backed by the Pyright CLI.
+    """TypeOracle implementation backed by the Pyright LSP.
 
-    Shells out to ``pyright --outputjson`` and parses the JSON diagnostics
-    to extract type information.  Pyright embeds type names in diagnostic
-    messages (e.g., ``'Type of "x" is "int"'``); we regex-extract those
-    into TypeBinding objects with ``binding_kind="diagnostic"``.
-
-    Note: Pyright does not provide a full type-binding dump like Pyrefly's
-    ``--debug-info``.  The bindings produced here are limited to locations
-    where Pyright emits diagnostics that mention types.
+    Starts a pyright-langserver instance and queries individual symbols
+    via textDocument/hover to build a comprehensive type index for a file.
     """
 
     def __init__(
@@ -822,19 +1022,23 @@ class PyrightAdapter(TypeOracle):
         cache_size: int = 256,
         extra_args: list[str] | None = None,
     ):
-        self._pyright = pyright_path or shutil.which("pyright") or "pyright"
+        self._pyright = pyright_path or shutil.which("pyright-langserver") or "pyright-langserver"
         self._cache = _FileTypeCache(max_entries=cache_size)
         self._extra_args = extra_args or []
+        self._lsp: LSPClient | None = None
+        self._lsp_lock = threading.Lock()
 
     def is_available(self) -> bool:
-        try:
-            result = subprocess.run(
-                [self._pyright, "--version"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return shutil.which(self._pyright) is not None
+
+    def _get_lsp(self, project_root: Path) -> LSPClient | None:
+        with self._lsp_lock:
+            if self._lsp is None:
+                cmd = [self._pyright, "--stdio", *self._extra_args]
+                self._lsp = LSPClient(cmd, project_root)
+                if not self._lsp.start():
+                    self._lsp = None
+            return self._lsp
 
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         path = path.resolve()
@@ -846,14 +1050,58 @@ class PyrightAdapter(TypeOracle):
         if cached is not None:
             return cached
 
-        json_data = self._run_pyright(path, project_root)
-        if json_data is None:
+        root = project_root or path.parent
+        lsp = self._get_lsp(root)
+        if not lsp:
             ft = FileTypes(path=str(path))
-        else:
-            ft = _parse_pyright_output(json_data, str(path))
+            self._cache.put(content_hash, ft)
+            return ft
 
+        source = path.read_text(encoding="utf-8")
+        lsp.did_open(path, source)
+
+        symbols = _collect_symbols(source)
+        ft = FileTypes(path=str(path))
+
+        for name, line, col_start, col_end in symbols:
+            hover_text = lsp.hover(path, line, col_start)
+            if not hover_text:
+                continue
+
+            # Extract type from pyright hover: "```python\n(variable) x: int\n```"
+            # or "```python\n(function) f: (int) -> str\n```"
+            raw_type = self._parse_hover_type(hover_text)
+            if not raw_type:
+                continue
+
+            type_desc = _parse_type_string(raw_type)
+            binding = TypeBinding(
+                name=name,
+                line=line,
+                col_start=col_start,
+                col_end=col_end,
+                type_descriptor=type_desc,
+                raw_type=raw_type,
+                binding_kind="inferred",
+            )
+            ft.bindings.append(binding)
+
+        ft.build_index()
         self._cache.put(content_hash, ft)
         return ft
+
+    def _parse_hover_type(self, hover_text: str) -> str | None:
+        """Extract the type part from Pyright's hover markdown."""
+        # Find the code block
+        match = re.search(r"```python\n(.*?)\n```", hover_text, re.DOTALL)
+        if not match:
+            return None
+        
+        line = match.group(1).strip()
+        # line is often "(variable) name: type" or "(function) name: type"
+        if ": " in line:
+            return line.split(": ", 1)[1].strip()
+        return None
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
@@ -862,34 +1110,10 @@ class PyrightAdapter(TypeOracle):
 
     def clear_cache(self) -> None:
         self._cache.clear()
-
-    def _run_pyright(self, path: Path, project_root: Path | None) -> dict | None:
-        """Run pyright on a single file and return JSON output."""
-        try:
-            cmd = [
-                self._pyright,
-                "--outputjson",
-                *self._extra_args,
-                str(path),
-            ]
-
-            cwd = str(project_root) if project_root else str(path.parent)
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=cwd,
-            )
-
-            # pyright returns non-zero for type errors — that's fine,
-            # we still get JSON output
-            if result.stdout.strip():
-                return json.loads(result.stdout)
-            return None
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            return None
+        with self._lsp_lock:
+            if self._lsp:
+                self._lsp.stop()
+                self._lsp = None
 
 
 # ---------------------------------------------------------------------------
@@ -987,14 +1211,10 @@ def _parse_ty_concise(text: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 class TyAdapter(TypeOracle):
-    """TypeOracle implementation backed by the ty CLI (Astral).
+    """TypeOracle implementation backed by the ty LSP.
 
-    Shells out to ``ty check --output-format concise`` and parses the
-    single-line diagnostics.  Type names are extracted from backtick-quoted
-    spans in messages (e.g., ``'Object of type \\`int\\` is not assignable …'``).
-
-    Note: ty does not yet provide a full type-binding dump.  The bindings
-    produced here are limited to locations where ty emits diagnostics.
+    Starts a ty lsp instance and queries individual symbols
+    via textDocument/hover to build a comprehensive type index for a file.
     """
 
     def __init__(
@@ -1006,16 +1226,21 @@ class TyAdapter(TypeOracle):
         self._ty = ty_path or shutil.which("ty") or "ty"
         self._cache = _FileTypeCache(max_entries=cache_size)
         self._extra_args = extra_args or []
+        self._lsp: LSPClient | None = None
+        self._lsp_lock = threading.Lock()
 
     def is_available(self) -> bool:
-        try:
-            result = subprocess.run(
-                [self._ty, "--version"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return shutil.which(self._ty) is not None
+
+    def _get_lsp(self, project_root: Path) -> LSPClient | None:
+        with self._lsp_lock:
+            if self._lsp is None:
+                # Assuming 'ty lsp' is the command to start the LSP server
+                cmd = [self._ty, "lsp", *self._extra_args]
+                self._lsp = LSPClient(cmd, project_root)
+                if not self._lsp.start():
+                    self._lsp = None
+            return self._lsp
 
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         path = path.resolve()
@@ -1027,14 +1252,60 @@ class TyAdapter(TypeOracle):
         if cached is not None:
             return cached
 
-        diagnostics = self._run_ty(path, project_root)
-        if diagnostics is None:
+        root = project_root or path.parent
+        lsp = self._get_lsp(root)
+        if not lsp:
             ft = FileTypes(path=str(path))
-        else:
-            ft = _parse_ty_diagnostics(diagnostics, str(path))
+            self._cache.put(content_hash, ft)
+            return ft
 
+        source = path.read_text(encoding="utf-8")
+        lsp.did_open(path, source)
+
+        symbols = _collect_symbols(source)
+        ft = FileTypes(path=str(path))
+
+        for name, line, col_start, col_end in symbols:
+            hover_text = lsp.hover(path, line, col_start)
+            if not hover_text:
+                continue
+
+            raw_type = self._parse_hover_type(hover_text)
+            if not raw_type:
+                continue
+
+            type_desc = _parse_type_string(raw_type)
+            binding = TypeBinding(
+                name=name,
+                line=line,
+                col_start=col_start,
+                col_end=col_end,
+                type_descriptor=type_desc,
+                raw_type=raw_type,
+                binding_kind="inferred",
+            )
+            ft.bindings.append(binding)
+
+        ft.build_index()
         self._cache.put(content_hash, ft)
         return ft
+
+    def _parse_hover_type(self, hover_text: str) -> str | None:
+        """Extract the type part from ty's hover markdown."""
+        # Try to find a python code block
+        match = re.search(r"```python\n(.*?)\n```", hover_text, re.DOTALL)
+        if match:
+            line = match.group(1).strip()
+            if ": " in line:
+                return line.split(": ", 1)[1].strip()
+            return line
+        
+        # Try backticks
+        match = re.search(r"`([^`]+)`", hover_text)
+        if match:
+            return match.group(1).strip()
+            
+        return hover_text.strip()
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
@@ -1043,34 +1314,10 @@ class TyAdapter(TypeOracle):
 
     def clear_cache(self) -> None:
         self._cache.clear()
-
-    def _run_ty(self, path: Path, project_root: Path | None) -> list[dict] | None:
-        """Run ty check on a single file and return parsed diagnostics."""
-        try:
-            cmd = [
-                self._ty, "check",
-                "--output-format", "concise",
-                *self._extra_args,
-                str(path),
-            ]
-
-            cwd = str(project_root) if project_root else str(path.parent)
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=cwd,
-            )
-
-            # ty returns non-zero for type errors — that's fine
-            output = result.stdout or result.stderr or ""
-            if output.strip():
-                return _parse_ty_concise(output)
-            return None
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return None
+        with self._lsp_lock:
+            if self._lsp:
+                self._lsp.stop()
+                self._lsp = None
 
 
 # ---------------------------------------------------------------------------
