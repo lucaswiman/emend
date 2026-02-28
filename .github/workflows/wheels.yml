@@ -81,6 +81,7 @@ jobs:
           manylinux: off
           args: >-
             --release --out dist
+            --compatibility manylinux_2_28
             --interpreter python3.13t python3.14 python3.14t
       - uses: actions/upload-artifact@v4
         with:
@@ -148,6 +149,7 @@ jobs:
           manylinux: off
           args: >-
             --release --out dist
+            --compatibility manylinux_2_28
             --interpreter python3.13t python3.14 python3.14t
       - uses: actions/upload-artifact@v4
         with:
