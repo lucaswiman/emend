@@ -1,9 +1,9 @@
 """Type inference adapter layer.
 
 Provides an abstract TypeOracle interface for querying inferred types,
-with a concrete implementation backed by Pyrefly. The adapter is designed
-to be swappable — when ty (Astral) or another engine ships stable APIs,
-a new adapter can be written against the same interface.
+with concrete implementations backed by Pyrefly, Pyright, and ty.
+The adapter is designed to be swappable — consumers select an engine
+via ``create_type_oracle()`` or let autodetection pick one.
 """
 from __future__ import annotations
 
@@ -721,18 +721,435 @@ class PyreflyAdapter(TypeOracle):
 
 
 # ---------------------------------------------------------------------------
+# Pyright diagnostic JSON parser
+# ---------------------------------------------------------------------------
+
+# Pyright messages often include type names in double quotes:
+#   'Expression of type "int" is incompatible with declared type "str"'
+#   'Type of "x" is "list[int]"'
+_PYRIGHT_TYPE_RE = re.compile(r'"([^"]+)"')
+
+
+def _parse_pyright_output(json_data: dict, file_path: str) -> FileTypes:
+    """Parse pyright --outputjson output into a FileTypes object.
+
+    Pyright doesn't expose a full type-binding dump (like Pyrefly's
+    --debug-info).  Instead, we extract type information from diagnostic
+    messages where Pyright embeds quoted type names.
+    """
+    ft = FileTypes(path=file_path)
+
+    file_path_normalized = str(Path(file_path).resolve())
+
+    for diagnostic in json_data.get("generalDiagnostics", []):
+        diag_file = diagnostic.get("file", "")
+        # Normalise for comparison
+        try:
+            diag_file_resolved = str(Path(diag_file).resolve())
+        except (ValueError, OSError):
+            diag_file_resolved = diag_file
+        if diag_file_resolved != file_path_normalized:
+            continue
+
+        range_info = diagnostic.get("range", {})
+        start = range_info.get("start", {})
+        end = range_info.get("end", {})
+        line = start.get("line", 0) + 1  # pyright uses 0-based lines
+        col_start = start.get("character", 0) + 1
+        col_end = end.get("character")
+        if col_end is not None:
+            col_end += 1
+
+        message = diagnostic.get("message", "")
+        rule = diagnostic.get("rule", "")
+
+        # Extract type mentions from the message
+        type_mentions = _PYRIGHT_TYPE_RE.findall(message)
+        if not type_mentions:
+            continue
+
+        # The last quoted string is often the most specific type
+        raw_type = type_mentions[-1]
+        type_desc = _parse_type_string(raw_type)
+
+        # Derive a name from the message: look for variable/symbol names
+        name = ""
+        if len(type_mentions) >= 2:
+            # First mention is often the symbol name
+            candidate = type_mentions[0]
+            # Heuristic: if it looks like a simple identifier (not a type),
+            # use it as the name
+            if candidate.isidentifier():
+                name = candidate
+        if not name:
+            name = rule or "unknown"
+
+        binding = TypeBinding(
+            name=name,
+            line=line,
+            col_start=col_start,
+            col_end=col_end,
+            type_descriptor=type_desc,
+            raw_type=raw_type,
+            binding_kind="diagnostic",
+        )
+        ft.bindings.append(binding)
+
+    ft.build_index()
+    return ft
+
+
+# ---------------------------------------------------------------------------
+# Pyright adapter
+# ---------------------------------------------------------------------------
+
+class PyrightAdapter(TypeOracle):
+    """TypeOracle implementation backed by the Pyright CLI.
+
+    Shells out to ``pyright --outputjson`` and parses the JSON diagnostics
+    to extract type information.  Pyright embeds type names in diagnostic
+    messages (e.g., ``'Type of "x" is "int"'``); we regex-extract those
+    into TypeBinding objects with ``binding_kind="diagnostic"``.
+
+    Note: Pyright does not provide a full type-binding dump like Pyrefly's
+    ``--debug-info``.  The bindings produced here are limited to locations
+    where Pyright emits diagnostics that mention types.
+    """
+
+    def __init__(
+        self,
+        pyright_path: str | None = None,
+        cache_size: int = 256,
+        extra_args: list[str] | None = None,
+    ):
+        self._pyright = pyright_path or shutil.which("pyright") or "pyright"
+        self._cache = _FileTypeCache(max_entries=cache_size)
+        self._extra_args = extra_args or []
+
+    def is_available(self) -> bool:
+        try:
+            result = subprocess.run(
+                [self._pyright, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
+        path = path.resolve()
+        if not path.exists():
+            return FileTypes(path=str(path))
+
+        content_hash = _content_hash(path)
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+
+        json_data = self._run_pyright(path, project_root)
+        if json_data is None:
+            ft = FileTypes(path=str(path))
+        else:
+            ft = _parse_pyright_output(json_data, str(path))
+
+        self._cache.put(content_hash, ft)
+        return ft
+
+    def type_at(self, path: Path, line: int, col: int,
+                project_root: Path | None = None) -> TypeBinding | None:
+        ft = self.infer_file(path, project_root)
+        return ft.type_at(line, col)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+    def _run_pyright(self, path: Path, project_root: Path | None) -> dict | None:
+        """Run pyright on a single file and return JSON output."""
+        try:
+            cmd = [
+                self._pyright,
+                "--outputjson",
+                *self._extra_args,
+                str(path),
+            ]
+
+            cwd = str(project_root) if project_root else str(path.parent)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=cwd,
+            )
+
+            # pyright returns non-zero for type errors — that's fine,
+            # we still get JSON output
+            if result.stdout.strip():
+                return json.loads(result.stdout)
+            return None
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+            return None
+
+
+# ---------------------------------------------------------------------------
+# ty diagnostic JSON parser
+# ---------------------------------------------------------------------------
+
+# ty messages embed type names in backticks:
+#   'Object of type `int` is not assignable to `str`'
+_TY_TYPE_RE = re.compile(r"`([^`]+)`")
+
+
+def _parse_ty_diagnostics(diagnostics: list[dict], file_path: str) -> FileTypes:
+    """Parse a list of ty diagnostic dicts into a FileTypes object.
+
+    Each dict should have keys: ``file``, ``line``, ``col``, ``message``,
+    ``code``.  These are normalised from ty's ``--output-format concise``
+    output by :func:`_parse_ty_concise`.
+
+    We regex-extract type names from backtick-quoted spans in messages.
+    """
+    ft = FileTypes(path=file_path)
+
+    file_path_normalized = str(Path(file_path).resolve())
+
+    for diagnostic in diagnostics:
+        diag_file = diagnostic.get("file", "")
+        try:
+            diag_file_resolved = str(Path(diag_file).resolve())
+        except (ValueError, OSError):
+            diag_file_resolved = diag_file
+        if diag_file_resolved != file_path_normalized:
+            continue
+
+        line = diagnostic.get("line", 0)
+        col_start = diagnostic.get("col", 0)
+        message = diagnostic.get("message", "")
+        code = diagnostic.get("code", "")
+
+        type_mentions = _TY_TYPE_RE.findall(message)
+        if not type_mentions:
+            continue
+
+        raw_type = type_mentions[-1]
+        type_desc = _parse_type_string(raw_type)
+
+        name = ""
+        if len(type_mentions) >= 2:
+            candidate = type_mentions[0]
+            if candidate.isidentifier():
+                name = candidate
+        if not name:
+            name = code or "unknown"
+
+        binding = TypeBinding(
+            name=name,
+            line=line,
+            col_start=col_start,
+            col_end=None,
+            type_descriptor=type_desc,
+            raw_type=raw_type,
+            binding_kind="diagnostic",
+        )
+        ft.bindings.append(binding)
+
+    ft.build_index()
+    return ft
+
+
+# Concise format: "path/file.py:42:13: error[invalid-assignment] message..."
+_TY_CONCISE_RE = re.compile(
+    r"^(.+?):(\d+):(\d+): \w+\[([^\]]+)\] (.+)$"
+)
+
+
+def _parse_ty_concise(text: str) -> list[dict]:
+    """Parse ty ``--output-format concise`` text into diagnostic dicts."""
+    diagnostics: list[dict] = []
+    for raw_line in text.splitlines():
+        raw_line = raw_line.strip()
+        m = _TY_CONCISE_RE.match(raw_line)
+        if not m:
+            continue
+        diagnostics.append({
+            "file": m.group(1),
+            "line": int(m.group(2)),
+            "col": int(m.group(3)),
+            "code": m.group(4),
+            "message": m.group(5),
+        })
+    return diagnostics
+
+
+# ---------------------------------------------------------------------------
+# ty adapter
+# ---------------------------------------------------------------------------
+
+class TyAdapter(TypeOracle):
+    """TypeOracle implementation backed by the ty CLI (Astral).
+
+    Shells out to ``ty check --output-format concise`` and parses the
+    single-line diagnostics.  Type names are extracted from backtick-quoted
+    spans in messages (e.g., ``'Object of type \\`int\\` is not assignable …'``).
+
+    Note: ty does not yet provide a full type-binding dump.  The bindings
+    produced here are limited to locations where ty emits diagnostics.
+    """
+
+    def __init__(
+        self,
+        ty_path: str | None = None,
+        cache_size: int = 256,
+        extra_args: list[str] | None = None,
+    ):
+        self._ty = ty_path or shutil.which("ty") or "ty"
+        self._cache = _FileTypeCache(max_entries=cache_size)
+        self._extra_args = extra_args or []
+
+    def is_available(self) -> bool:
+        try:
+            result = subprocess.run(
+                [self._ty, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
+        path = path.resolve()
+        if not path.exists():
+            return FileTypes(path=str(path))
+
+        content_hash = _content_hash(path)
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+
+        diagnostics = self._run_ty(path, project_root)
+        if diagnostics is None:
+            ft = FileTypes(path=str(path))
+        else:
+            ft = _parse_ty_diagnostics(diagnostics, str(path))
+
+        self._cache.put(content_hash, ft)
+        return ft
+
+    def type_at(self, path: Path, line: int, col: int,
+                project_root: Path | None = None) -> TypeBinding | None:
+        ft = self.infer_file(path, project_root)
+        return ft.type_at(line, col)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+    def _run_ty(self, path: Path, project_root: Path | None) -> list[dict] | None:
+        """Run ty check on a single file and return parsed diagnostics."""
+        try:
+            cmd = [
+                self._ty, "check",
+                "--output-format", "concise",
+                *self._extra_args,
+                str(path),
+            ]
+
+            cwd = str(project_root) if project_root else str(path.parent)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=cwd,
+            )
+
+            # ty returns non-zero for type errors — that's fine
+            output = result.stdout or result.stderr or ""
+            if output.strip():
+                return _parse_ty_concise(output)
+            return None
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Autodetection
+# ---------------------------------------------------------------------------
+
+# Config files/sections that indicate a project uses a particular type checker.
+_ENGINE_CONFIG_SIGNALS: list[tuple[str, str | None, str]] = [
+    # (filename, pyproject.toml section, engine)
+    ("pyrightconfig.json", "tool.pyright", "pyright"),
+    ("ty.toml", "tool.ty", "ty"),
+    ("pyrefly.toml", None, "pyrefly"),
+]
+
+
+def _pyproject_has_section(pyproject: Path, dotted_key: str) -> bool:
+    """Check if a pyproject.toml contains a ``[dotted.key]`` table."""
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # Match [tool.pyright], [tool.ty], etc.  This is a lightweight check —
+    # we don't parse full TOML, just look for the section header.
+    pattern = r"^\[" + re.escape(dotted_key) + r"\]"
+    return bool(re.search(pattern, text, re.MULTILINE))
+
+
+def detect_type_engine(project_root: Path | None = None) -> str:
+    """Detect which type checking engine a project is configured for.
+
+    Detection order:
+    1. Config files in the project root (pyrightconfig.json, ty.toml,
+       pyrefly.toml).
+    2. Sections in ``pyproject.toml`` ([tool.pyright], [tool.ty]).
+    3. First available tool on PATH (pyrefly → ty → pyright).
+
+    Returns the engine name: ``"pyrefly"``, ``"pyright"``, ``"ty"``,
+    or ``"pyrefly"`` as the fallback default.
+    """
+    root = project_root or Path.cwd()
+
+    # Phase 1: config file presence
+    pyproject = root / "pyproject.toml"
+    for filename, pyproject_section, engine in _ENGINE_CONFIG_SIGNALS:
+        if (root / filename).exists():
+            return engine
+        if pyproject_section and pyproject.exists():
+            if _pyproject_has_section(pyproject, pyproject_section):
+                return engine
+
+    # Phase 2: tool availability on PATH
+    for tool, engine in [("pyrefly", "pyrefly"), ("ty", "ty"), ("pyright", "pyright")]:
+        if shutil.which(tool):
+            return engine
+
+    # Fallback
+    return "pyrefly"
+
+
+# ---------------------------------------------------------------------------
 # Factory function
 # ---------------------------------------------------------------------------
 
+_ENGINE_NAMES = ("pyrefly", "pyright", "ty", "auto")
+
+
 def create_type_oracle(
-    engine: str = "pyrefly",
+    engine: str = "auto",
+    project_root: Path | None = None,
     **kwargs,
 ) -> TypeOracle:
     """Create a TypeOracle instance for the specified engine.
 
     Args:
-        engine: The type inference engine to use. Currently only "pyrefly"
-                is supported.
+        engine: The type inference engine to use.  ``"auto"`` detects the
+                engine from project config files and installed tools.
+                Explicit choices: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
+        project_root: Project root directory used for config-file detection
+                      when *engine* is ``"auto"``.
         **kwargs: Additional keyword arguments passed to the adapter constructor.
 
     Returns:
@@ -741,9 +1158,16 @@ def create_type_oracle(
     Raises:
         ValueError: If the engine is not recognized.
     """
+    if engine == "auto":
+        engine = detect_type_engine(project_root)
+
     if engine == "pyrefly":
         return PyreflyAdapter(**kwargs)
+    if engine == "pyright":
+        return PyrightAdapter(**kwargs)
+    if engine == "ty":
+        return TyAdapter(**kwargs)
     raise ValueError(
         f"Unknown type inference engine: {engine!r}. "
-        f"Supported engines: pyrefly"
+        f"Supported engines: {', '.join(_ENGINE_NAMES)}"
     )

@@ -4,9 +4,14 @@ Tests cover:
 - TypeDescriptor parsing from pyrefly type strings
 - TypeDescriptor structural matching
 - Pyrefly debug-info JSON parsing into FileTypes
+- Pyright diagnostic JSON parsing
+- ty diagnostic JSON parsing
 - FileTypes indexing (by position, by name)
 - _FileTypeCache behavior (FIFO eviction, thread safety)
 - PyreflyAdapter integration (requires pyrefly installed)
+- PyrightAdapter integration (requires pyright installed)
+- TyAdapter integration (requires ty installed)
+- Engine autodetection (detect_type_engine)
 - CLI `types` command integration
 """
 from __future__ import annotations
@@ -20,15 +25,22 @@ import pytest
 
 from emend.type_oracle import (
     FileTypes,
+    PyrightAdapter,
     PyreflyAdapter,
+    TyAdapter,
     TypeBinding,
     TypeDescriptor,
     _FileTypeCache,
+    _TY_CONCISE_RE,
     _parse_pyrefly_debug,
+    _parse_pyright_output,
+    _parse_ty_concise,
+    _parse_ty_diagnostics,
     _parse_type_string,
     _split_params,
     _split_union,
     create_type_oracle,
+    detect_type_engine,
 )
 
 
@@ -478,9 +490,441 @@ class TestCreateTypeOracle:
         oracle = create_type_oracle("pyrefly")
         assert isinstance(oracle, PyreflyAdapter)
 
+    def test_creates_pyright(self):
+        oracle = create_type_oracle("pyright")
+        assert isinstance(oracle, PyrightAdapter)
+
+    def test_creates_ty(self):
+        oracle = create_type_oracle("ty")
+        assert isinstance(oracle, TyAdapter)
+
+    def test_auto_detection(self, tmp_path):
+        """Auto mode should return *some* TypeOracle without error."""
+        oracle = create_type_oracle("auto", project_root=tmp_path)
+        assert isinstance(oracle, (PyreflyAdapter, PyrightAdapter, TyAdapter))
+
     def test_unknown_engine(self):
         with pytest.raises(ValueError, match="Unknown type inference engine"):
             create_type_oracle("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# Pyright output parsing
+# ---------------------------------------------------------------------------
+
+class TestParsePyrightOutput:
+    """Tests for _parse_pyright_output()."""
+
+    def test_empty_diagnostics(self):
+        data = {"generalDiagnostics": [], "summary": {}}
+        ft = _parse_pyright_output(data, "/test/example.py")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_basic_diagnostic_with_type(self, tmp_path):
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x = 1\n")
+        data = {
+            "generalDiagnostics": [
+                {
+                    "file": str(test_file),
+                    "severity": "error",
+                    "message": 'Expression of type "int" is incompatible with declared type "str"',
+                    "range": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 5},
+                    },
+                    "rule": "reportAssignmentType",
+                }
+            ],
+        }
+        ft = _parse_pyright_output(data, str(test_file))
+        assert len(ft.bindings) == 1
+        b = ft.bindings[0]
+        assert b.line == 1  # 0-based → 1-based
+        assert b.col_start == 5
+        assert b.raw_type == "str"  # last quoted type
+        assert b.binding_kind == "diagnostic"
+
+    def test_type_of_message(self, tmp_path):
+        """Pyright 'Type of "x" is "int"' message."""
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x: int = 1\n")
+        data = {
+            "generalDiagnostics": [
+                {
+                    "file": str(test_file),
+                    "severity": "information",
+                    "message": 'Type of "x" is "list[int]"',
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                    "rule": "reportGeneralClassIssues",
+                }
+            ],
+        }
+        ft = _parse_pyright_output(data, str(test_file))
+        assert len(ft.bindings) == 1
+        b = ft.bindings[0]
+        assert b.name == "x"  # first quoted is the identifier
+        assert b.raw_type == "list[int]"
+        assert b.type_descriptor.kind == "parameterized"
+        assert b.type_descriptor.name == "list"
+
+    def test_filters_other_files(self, tmp_path):
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        other = tmp_path / "other.py"
+        other.write_text("y = 2\n")
+        data = {
+            "generalDiagnostics": [
+                {
+                    "file": str(other),
+                    "severity": "error",
+                    "message": 'Type of "y" is "int"',
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                    "rule": "test",
+                }
+            ],
+        }
+        ft = _parse_pyright_output(data, str(target))
+        assert len(ft.bindings) == 0
+
+    def test_no_quoted_types_skipped(self, tmp_path):
+        """Diagnostics without quoted type strings are skipped."""
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x = 1\n")
+        data = {
+            "generalDiagnostics": [
+                {
+                    "file": str(test_file),
+                    "severity": "error",
+                    "message": "Import could not be resolved",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                    "rule": "reportMissingImports",
+                }
+            ],
+        }
+        ft = _parse_pyright_output(data, str(test_file))
+        assert len(ft.bindings) == 0
+
+    def test_empty_json(self):
+        ft = _parse_pyright_output({}, "/test/example.py")
+        assert len(ft.bindings) == 0
+
+
+# ---------------------------------------------------------------------------
+# ty output parsing
+# ---------------------------------------------------------------------------
+
+class TestParseTyConcise:
+    """Tests for _parse_ty_concise() and _parse_ty_diagnostics()."""
+
+    def test_parse_concise_line(self):
+        text = "example.py:1:5: error[invalid-assignment] Object of type `int` is not assignable to `str`"
+        result = _parse_ty_concise(text)
+        assert len(result) == 1
+        d = result[0]
+        assert d["file"] == "example.py"
+        assert d["line"] == 1
+        assert d["col"] == 5
+        assert d["code"] == "invalid-assignment"
+        assert "int" in d["message"]
+        assert "str" in d["message"]
+
+    def test_parse_concise_multiple_lines(self):
+        text = (
+            "a.py:10:3: error[invalid-assignment] Object of type `int` is not assignable to `str`\n"
+            "b.py:20:7: warning[possibly-unbound] Name `x` used when possibly unbound\n"
+        )
+        result = _parse_ty_concise(text)
+        assert len(result) == 2
+        assert result[0]["file"] == "a.py"
+        assert result[1]["file"] == "b.py"
+
+    def test_parse_concise_empty(self):
+        assert _parse_ty_concise("") == []
+        assert _parse_ty_concise("\n\n") == []
+
+    def test_parse_concise_ignores_non_matching(self):
+        text = "Some random output\nerror: something\n"
+        assert _parse_ty_concise(text) == []
+
+    def test_empty_diagnostics(self):
+        ft = _parse_ty_diagnostics([], "/test/example.py")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_basic_diagnostic_with_type(self, tmp_path):
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x = 1\n")
+        data = [
+            {
+                "file": str(test_file),
+                "line": 1,
+                "col": 5,
+                "message": "Object of type `int` is not assignable to `str`",
+                "code": "invalid-assignment",
+            }
+        ]
+        ft = _parse_ty_diagnostics(data, str(test_file))
+        assert len(ft.bindings) == 1
+        b = ft.bindings[0]
+        assert b.line == 1
+        assert b.col_start == 5
+        assert b.raw_type == "str"  # last backtick-quoted type
+        assert b.binding_kind == "diagnostic"
+
+    def test_extracts_identifier_name(self, tmp_path):
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x: str = 1\n")
+        data = [
+            {
+                "file": str(test_file),
+                "line": 1,
+                "col": 0,
+                "message": "Object of type `int` is not assignable to `str`",
+                "code": "invalid-assignment",
+            }
+        ]
+        ft = _parse_ty_diagnostics(data, str(test_file))
+        assert len(ft.bindings) == 1
+        b = ft.bindings[0]
+        # "int" is a valid identifier, used as name
+        assert b.name == "int"
+        assert b.raw_type == "str"
+
+    def test_filters_other_files(self, tmp_path):
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        other = tmp_path / "other.py"
+        other.write_text("y = 2\n")
+        data = [
+            {
+                "file": str(other),
+                "line": 1,
+                "col": 0,
+                "message": "Object of type `int` is not assignable to `str`",
+                "code": "invalid-assignment",
+            }
+        ]
+        ft = _parse_ty_diagnostics(data, str(target))
+        assert len(ft.bindings) == 0
+
+    def test_no_backtick_types_skipped(self, tmp_path):
+        """Diagnostics without backtick-quoted types are skipped."""
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x = 1\n")
+        data = [
+            {
+                "file": str(test_file),
+                "line": 1,
+                "col": 0,
+                "message": "Cannot resolve import",
+                "code": "unresolved-import",
+            }
+        ]
+        ft = _parse_ty_diagnostics(data, str(test_file))
+        assert len(ft.bindings) == 0
+
+    def test_complex_type_in_backticks(self, tmp_path):
+        test_file = tmp_path / "example.py"
+        test_file.write_text("x = {}\n")
+        data = [
+            {
+                "file": str(test_file),
+                "line": 1,
+                "col": 0,
+                "message": "Object of type `dict[str, list[int]]` is not assignable to `tuple[int]`",
+                "code": "invalid-assignment",
+            }
+        ]
+        ft = _parse_ty_diagnostics(data, str(test_file))
+        assert len(ft.bindings) == 1
+        b = ft.bindings[0]
+        assert b.raw_type == "tuple[int]"
+        assert b.type_descriptor.kind == "parameterized"
+        assert b.type_descriptor.name == "tuple"
+
+
+# ---------------------------------------------------------------------------
+# Engine autodetection
+# ---------------------------------------------------------------------------
+
+class TestDetectTypeEngine:
+    """Tests for detect_type_engine()."""
+
+    def test_pyrightconfig_json(self, tmp_path):
+        (tmp_path / "pyrightconfig.json").write_text("{}")
+        assert detect_type_engine(tmp_path) == "pyright"
+
+    def test_ty_toml(self, tmp_path):
+        (tmp_path / "ty.toml").write_text("[default]\n")
+        assert detect_type_engine(tmp_path) == "ty"
+
+    def test_pyrefly_toml(self, tmp_path):
+        (tmp_path / "pyrefly.toml").write_text("[default]\n")
+        assert detect_type_engine(tmp_path) == "pyrefly"
+
+    def test_pyproject_tool_pyright(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\nname = 'foo'\n\n[tool.pyright]\ntypeCheckingMode = 'strict'\n"
+        )
+        assert detect_type_engine(tmp_path) == "pyright"
+
+    def test_pyproject_tool_ty(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\nname = 'foo'\n\n[tool.ty]\n"
+        )
+        assert detect_type_engine(tmp_path) == "ty"
+
+    def test_config_file_takes_precedence(self, tmp_path):
+        """An explicit config file wins over pyproject.toml sections."""
+        (tmp_path / "pyrightconfig.json").write_text("{}")
+        (tmp_path / "pyproject.toml").write_text("[tool.ty]\n")
+        assert detect_type_engine(tmp_path) == "pyright"
+
+    def test_no_config_fallback(self, tmp_path):
+        """Without config files, detect_type_engine falls through to PATH or default."""
+        result = detect_type_engine(tmp_path)
+        # Should return one of the valid engine names
+        assert result in ("pyrefly", "pyright", "ty")
+
+    def test_pyproject_without_tool_section(self, tmp_path):
+        """pyproject.toml without [tool.pyright] or [tool.ty] should not match."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'foo'\n")
+        # Falls through to PATH detection
+        result = detect_type_engine(tmp_path)
+        assert result in ("pyrefly", "pyright", "ty")
+
+
+# ---------------------------------------------------------------------------
+# PyrightAdapter unit tests
+# ---------------------------------------------------------------------------
+
+class TestPyrightAdapter:
+
+    def test_not_available_when_missing(self):
+        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
+        assert not adapter.is_available()
+
+    def test_nonexistent_file(self, tmp_path):
+        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
+        ft = adapter.infer_file(tmp_path / "nofile.py")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_cache_behavior(self, tmp_path):
+        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = 1\n")
+        # First call fills cache (returns empty because pyright isn't available)
+        ft1 = adapter.infer_file(test_file)
+        ft2 = adapter.infer_file(test_file)
+        assert ft1 is ft2  # same object from cache
+        adapter.clear_cache()
+        ft3 = adapter.infer_file(test_file)
+        assert ft3 is not ft1
+
+
+# ---------------------------------------------------------------------------
+# TyAdapter unit tests
+# ---------------------------------------------------------------------------
+
+class TestTyAdapter:
+
+    def test_not_available_when_missing(self):
+        adapter = TyAdapter(ty_path="/nonexistent/ty")
+        assert not adapter.is_available()
+
+    def test_nonexistent_file(self, tmp_path):
+        adapter = TyAdapter(ty_path="/nonexistent/ty")
+        ft = adapter.infer_file(tmp_path / "nofile.py")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_cache_behavior(self, tmp_path):
+        adapter = TyAdapter(ty_path="/nonexistent/ty")
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = 1\n")
+        ft1 = adapter.infer_file(test_file)
+        ft2 = adapter.infer_file(test_file)
+        assert ft1 is ft2
+        adapter.clear_cache()
+        ft3 = adapter.infer_file(test_file)
+        assert ft3 is not ft1
+
+
+# ---------------------------------------------------------------------------
+# PyrightAdapter integration tests (require pyright installed)
+# ---------------------------------------------------------------------------
+
+_has_pyright = shutil.which("pyright") is not None
+
+
+@pytest.mark.skipif(not _has_pyright, reason="pyright not installed")
+class TestPyrightAdapterIntegration:
+
+    def test_is_available(self):
+        adapter = PyrightAdapter()
+        assert adapter.is_available()
+
+    def test_infer_file_with_error(self, tmp_path):
+        """Pyright should produce diagnostics for type errors."""
+        test_file = tmp_path / "bad_types.py"
+        test_file.write_text(textwrap.dedent("""\
+            x: str = 42
+        """))
+        adapter = PyrightAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+    def test_infer_clean_file(self, tmp_path):
+        """A clean file may produce no diagnostics (no bindings)."""
+        test_file = tmp_path / "clean.py"
+        test_file.write_text(textwrap.dedent("""\
+            def add(a: int, b: int) -> int:
+                return a + b
+        """))
+        adapter = PyrightAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+
+# ---------------------------------------------------------------------------
+# TyAdapter integration tests (require ty installed)
+# ---------------------------------------------------------------------------
+
+_has_ty = shutil.which("ty") is not None
+
+
+@pytest.mark.skipif(not _has_ty, reason="ty not installed")
+class TestTyAdapterIntegration:
+
+    def test_is_available(self):
+        adapter = TyAdapter()
+        assert adapter.is_available()
+
+    def test_infer_file_with_error(self, tmp_path):
+        """ty should produce diagnostics for type errors."""
+        test_file = tmp_path / "bad_types.py"
+        test_file.write_text(textwrap.dedent("""\
+            x: str = 42
+        """))
+        adapter = TyAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
+
+    def test_infer_clean_file(self, tmp_path):
+        test_file = tmp_path / "clean.py"
+        test_file.write_text(textwrap.dedent("""\
+            def add(a: int, b: int) -> int:
+                return a + b
+        """))
+        adapter = TyAdapter()
+        ft = adapter.infer_file(test_file, project_root=tmp_path)
+        assert isinstance(ft, FileTypes)
 
 
 # ---------------------------------------------------------------------------

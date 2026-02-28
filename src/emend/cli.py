@@ -1391,30 +1391,43 @@ app.command("dead_code", hidden=True)(dead_code_cmd)
 def types_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
-    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import, diagnostic")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-    engine: Annotated[str, typer.Option("--engine", help="Type inference engine")] = "pyrefly",
+    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: auto, pyrefly, pyright, ty")] = "auto",
     definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
 ):
     """Show inferred types for symbols in a file.
 
-    Uses Pyrefly (or another type inference engine) to analyze source
-    files and display inferred types for all symbols and expressions.
+    Uses a type inference engine (Pyrefly, Pyright, or ty) to analyze
+    source files and display inferred types for all symbols and expressions.
+
+    The engine is auto-detected from project configuration files
+    (pyrightconfig.json, ty.toml, pyrefly.toml, or pyproject.toml sections)
+    and installed tools.  Use --engine to override.
 
     Examples:
         emend types src/models/user.py
         emend types src/models/user.py --name User
         emend types src/models/ --definitions-only --json
-        emend types app.py --engine pyrefly
+        emend types app.py --engine pyright
+        emend types app.py --engine ty
     """
     from emend.type_oracle import create_type_oracle
+
     import json as json_mod
 
     try:
-        oracle = create_type_oracle(engine=engine)
+        target = Path(path)
+        # Use the target's parent as project root for autodetection
+        project_root = target.parent if target.is_file() else target
+        oracle = create_type_oracle(engine=engine, project_root=project_root)
+
+        resolved_engine = engine
+        if engine == "auto":
+            resolved_engine = type(oracle).__name__.replace("Adapter", "").lower()
 
         if not oracle.is_available():
-            print(f"Error: {engine} is not installed or not available on PATH.", file=sys.stderr)
+            print(f"Error: {resolved_engine} is not installed or not available on PATH.", file=sys.stderr)
             raise typer.Exit(2)
 
         target = Path(path)
