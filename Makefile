@@ -13,13 +13,11 @@ export UV_CACHE_DIR := $(CURDIR)/.uv-cache
 $(VENV)/bin/activate: pyproject.toml rust/Cargo.toml
 	uv venv $(VENV) --python 3.14t
 	uv pip install --python $(VENV) maturin
-	$(VENV)/bin/maturin develop -E dev
 	touch $(VENV)/bin/activate
 
 # Rebuild Rust extension when source files change
 $(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
-	uv pip install --python $(VENV) -q maturin
-	$(VENV)/bin/maturin develop
+	$(VENV)/bin/maturin develop --extras dev
 	@mkdir -p $(@D) && touch $@
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
