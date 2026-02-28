@@ -646,14 +646,13 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
             return ft
 
     bindings_data = modules[target_module].get("bindings", [])
-    # Track positions we've seen.  Maps (name, line, col) -> index in
-    # ft.bindings so we can replace a non-definition with a definition
-    # if the definition arrives later.
+    # Build the binding list, preferring Definition over other kinds at the
+    # same (name, line, col) position.  Maps pos_key -> index in `bindings`.
     seen_positions: dict[tuple[str, int, int], int] = {}
+    bindings: list[TypeBinding] = []
 
     for entry in bindings_data:
         key = entry.get("key", "")
-        loc_str = entry.get("location", "")
         result = entry.get("result", "")
 
         if not result or result == "()":
@@ -678,17 +677,25 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
 
         binding_kind = _classify_binding_kind(key)
 
-        # Deduplicate: prefer Definition over other kinds at same position.
         pos_key = (name, line, col_start)
         if pos_key in seen_positions:
             if binding_kind == "definition":
-                # Replace the earlier non-definition entry
-                ft.bindings[seen_positions[pos_key]] = None  # type: ignore[call-overload]
-            else:
-                continue
+                # Upgrade the earlier non-definition entry in-place
+                type_desc = parse_type_string(result)
+                bindings[seen_positions[pos_key]] = TypeBinding(
+                    name=name,
+                    line=line,
+                    col_start=col_start,
+                    col_end=col_end,
+                    type_descriptor=type_desc,
+                    raw_type=result,
+                    binding_kind=binding_kind,
+                )
+            continue
 
         type_desc = parse_type_string(result)
-        binding = TypeBinding(
+        seen_positions[pos_key] = len(bindings)
+        bindings.append(TypeBinding(
             name=name,
             line=line,
             col_start=col_start,
@@ -696,12 +703,9 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
             type_descriptor=type_desc,
             raw_type=result,
             binding_kind=binding_kind,
-        )
-        seen_positions[pos_key] = len(ft.bindings)
-        ft.bindings.append(binding)
+        ))
 
-    # Remove None placeholders left by deduplication replacements
-    ft.bindings = [b for b in ft.bindings if b is not None]
+    ft.bindings = bindings
     ft.build_index()
     return ft
 
@@ -1342,7 +1346,7 @@ _ENGINE_CONFIG_SIGNALS: list[tuple[str, str | None, str]] = [
     # (filename, pyproject.toml section, engine)
     ("pyrightconfig.json", "tool.pyright", "pyright"),
     ("ty.toml", "tool.ty", "ty"),
-    ("pyrefly.toml", None, "pyrefly"),
+    ("pyrefly.toml", "tool.pyrefly", "pyrefly"),
 ]
 
 
@@ -1361,10 +1365,11 @@ def _pyproject_has_section(pyproject: Path, dotted_key: str) -> bool:
 def detect_type_engine(project_root: Path | None = None) -> str:
     """Detect which type checking engine a project is configured for.
 
-    Detection order:
-    1. Config files in the project root (pyrightconfig.json, ty.toml,
-       pyrefly.toml).
-    2. Sections in ``pyproject.toml`` ([tool.pyright], [tool.ty]).
+    Detection order (per engine, in priority order: pyright → ty → pyrefly):
+    1. Standalone config file in the project root (e.g. ``pyrightconfig.json``,
+       ``ty.toml``, ``pyrefly.toml``).
+    2. Matching ``[tool.*]`` section in ``pyproject.toml`` (e.g.
+       ``[tool.pyright]``, ``[tool.ty]``, ``[tool.pyrefly]``).
     3. First available tool on PATH (pyrefly → ty → pyright).
 
     Returns the engine name: ``"pyrefly"``, ``"pyright"``, ``"ty"``,
