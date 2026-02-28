@@ -5,8 +5,8 @@
 # binary dependency.
 #
 # Platforms built:
-#   - Linux x86_64   (manylinux_2_28 for 3.10–3.14; host build for 3.13t/3.14t)
-#   - Linux aarch64  (manylinux_2_28 for 3.10–3.14; native ARM runner for 3.13t/3.14t)
+#   - Linux x86_64   (manylinux_2_28 for 3.10–3.14 + free-threaded 3.13t/3.14t)
+#   - Linux aarch64  (manylinux_2_28 for 3.10–3.14 + free-threaded 3.13t/3.14t)
 #   - macOS arm64    (Apple Silicon, 3.10–3.14 + free-threaded 3.13t/3.14t)
 #   - macOS x86_64   (Intel, 3.10–3.14 + free-threaded 3.13t/3.14t)
 #   - Windows x86_64 (3.10–3.14 + free-threaded 3.13t/3.14t)
@@ -15,11 +15,13 @@
 # described in the installation docs.
 #
 # NOTE: Each free-threaded interpreter must be built in its own maturin
-# invocation.  Passing multiple free-threaded interpreters (e.g.
-# --interpreter python3.13t python3.14t) causes maturin to fail with
-# "Expected only one platform tag but found 2" because each free-threaded
-# ABI (cp313t, cp314t) produces a distinct platform tag.  The matrix
+# invocation because each free-threaded ABI (cp313t, cp314t) produces a
+# distinct platform tag and maturin expects exactly one.  The matrix
 # strategy below ensures one maturin call per interpreter.
+#
+# Free-threaded interpreters are pre-installed inside the manylinux
+# containers at /opt/python/cp<ver>t-cp<ver>t/bin/python<ver>t, so no
+# setup-python step or host build is needed.
 
 name: Build Wheels
 
@@ -64,6 +66,11 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.13t', '3.14t']
+        include:
+          - python-version: '3.13t'
+            python-tag: cp313t
+          - python-version: '3.14t'
+            python-tag: cp314t
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -77,20 +84,13 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
-          # Disable Docker so the free-threaded interpreter installed above
-          # is visible to maturin.  Use container (not manylinux) to avoid
-          # injecting a second --manylinux/--compatibility flag.
-          container: off
+          manylinux: 2_28
           args: >-
             --release --out dist
-            --compatibility manylinux_2_28
-            --interpreter python${{ matrix.python-version }}
+            --interpreter /opt/python/${{ matrix.python-tag }}-${{ matrix.python-tag }}/bin/python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64-freethread-${{ matrix.python-version }}
@@ -135,6 +135,11 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.13t', '3.14t']
+        include:
+          - python-version: '3.13t'
+            python-tag: cp313t
+          - python-version: '3.14t'
+            python-tag: cp314t
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -148,17 +153,13 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Build free-threaded aarch64 wheels
         uses: PyO3/maturin-action@v1
         with:
-          container: off
+          manylinux: 2_28
           args: >-
             --release --out dist
-            --compatibility manylinux_2_28
-            --interpreter python${{ matrix.python-version }}
+            --interpreter /opt/python/${{ matrix.python-tag }}-${{ matrix.python-tag }}/bin/python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64-freethread-${{ matrix.python-version }}
