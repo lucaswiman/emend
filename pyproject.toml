@@ -24,7 +24,7 @@ classifiers = [
 dependencies = ["typer", "libcst", "lark", "pyyaml"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-xdist", "sphinx", "furo"]
+dev = ["pytest", "pytest-xdist", "sphinx", "furo", "pyright", "ty"]
 
 [project.urls]
 Homepage = "https://github.com/lucaswiman/emend"
