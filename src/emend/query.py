@@ -542,7 +542,7 @@ def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: object | No
     # Build TypeOracle index for this file if needed for returns filtering
     file_types = None
     if type_oracle is not None and filters.returns_patterns:
-        _logger.info("Building type index for lookup returns filtering: %s", filepath)
+        _logger.debug("Building type index for lookup returns filtering: %s", filepath)
         file_types = type_oracle.infer_file(filepath)
 
     # Apply filters (different filter types use AND logic)

@@ -2634,7 +2634,7 @@ def _filter_matches_by_type_oracle(
 
     # Build the type index for this file once
     file_types: FileTypes = type_oracle.infer_file(Path(file_path))
-    logger.info("Filtering %d matches by type oracle constraints", len(matches))
+    logger.debug("Filtering %d matches by type oracle constraints", len(matches))
 
     filtered = []
     for match in matches:
@@ -2695,7 +2695,7 @@ def _filter_matches_by_type_oracle(
         if keep:
             filtered.append(match)
 
-    logger.info(
+    logger.debug(
         "Type oracle filtering: %d/%d matches passed", len(filtered), len(matches),
     )
     return filtered
@@ -5791,8 +5791,6 @@ def cmd_edit(
     - If accessor present + value, modify specific item (e.g., [params][x])
     - If no accessor + value, replace entire component (e.g., [returns])
     """
-    if type_oracle is not None:
-        logger.info("TypeOracle available for edit operation on %s", selector_str)
     selector = parse_extended_selector(selector_str)
 
     # Multi-file dispatch for file globs
@@ -5851,8 +5849,6 @@ def cmd_add(
     - Default is to append to end
     - Pseudo-class (e.g., :KEYWORD_ONLY) specifies parameter kind
     """
-    if type_oracle is not None:
-        logger.info("TypeOracle available for add operation on %s", selector_str)
     selector = parse_extended_selector(selector_str)
 
     # Multi-file dispatch for file globs

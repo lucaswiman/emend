@@ -358,15 +358,14 @@ class FileTypes:
 
     def build_index(self) -> None:
         """Build positional and name indexes from bindings."""
-        logger.info("Building type index for %s (%d bindings)", self.path, len(self.bindings))
         self._by_position.clear()
         self._by_name.clear()
         for b in self.bindings:
             self._by_position[(b.line, b.col_start)] = b
             self._by_name.setdefault(b.name, []).append(b)
-        logger.info(
-            "Type index built for %s: %d positions, %d unique names",
-            self.path, len(self._by_position), len(self._by_name),
+        logger.debug(
+            "Type index built for %s: %d bindings, %d positions, %d unique names",
+            self.path, len(self.bindings), len(self._by_position), len(self._by_name),
         )
 
     def type_at(self, line: int, col: int) -> TypeBinding | None:
@@ -795,7 +794,6 @@ class PyreflyAdapter(TypeOracle):
         content_hash = _content_hash(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
-            logger.debug("Type cache hit for %s", path)
             return cached
 
         # Run pyrefly
@@ -1045,6 +1043,7 @@ class PyrightAdapter(TypeOracle):
     def _get_lsp(self, project_root: Path) -> LSPClient | None:
         with self._lsp_lock:
             if self._lsp is None:
+                logger.info("Starting pyright LSP server…")
                 cmd = [self._pyright, "--stdio", *self._extra_args]
                 self._lsp = LSPClient(cmd, project_root)
                 if not self._lsp.start():
@@ -1059,7 +1058,6 @@ class PyrightAdapter(TypeOracle):
         content_hash = _content_hash(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
-            logger.debug("Type cache hit for %s", path)
             return cached
 
         root = project_root or path.parent
@@ -1248,7 +1246,7 @@ class TyAdapter(TypeOracle):
     def _get_lsp(self, project_root: Path) -> LSPClient | None:
         with self._lsp_lock:
             if self._lsp is None:
-                # Assuming 'ty lsp' is the command to start the LSP server
+                logger.info("Starting ty LSP server…")
                 cmd = [self._ty, "lsp", *self._extra_args]
                 self._lsp = LSPClient(cmd, project_root)
                 if not self._lsp.start():
@@ -1263,7 +1261,6 @@ class TyAdapter(TypeOracle):
         content_hash = _content_hash(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
-            logger.debug("Type cache hit for %s", path)
             return cached
 
         root = project_root or path.parent

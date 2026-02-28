@@ -362,10 +362,9 @@ class TestBuildIndexLogging:
                 raw_type="int", binding_kind="definition",
             ),
         ]
-        with caplog.at_level(logging.INFO, logger="emend.type_oracle"):
+        with caplog.at_level(logging.DEBUG, logger="emend.type_oracle"):
             ft.build_index()
 
-        assert any("Building type index" in msg for msg in caplog.messages)
         assert any("Type index built" in msg for msg in caplog.messages)
 
 
