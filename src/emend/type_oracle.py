@@ -79,38 +79,54 @@ class LSPClient:
         return True
 
     def stop(self):
-        """Stop the LSP server."""
-        if self.process:
-            self.process.terminate()
-            self.process = None
+        """Stop the LSP server gracefully via the LSP protocol."""
+        if not self.process:
+            return
+        proc = self.process
+        # Send LSP shutdown request followed by exit notification
+        try:
+            self.send_request("shutdown", {}, timeout=5)
+            self.send_notification("exit", {})
+        except OSError:
+            pass
+        self.process = None
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
 
     def _read_loop(self):
         """Read responses from the LSP server."""
-        if not self.process or not self.process.stdout:
+        proc = self.process
+        if not proc or not proc.stdout:
             return
 
-        while self.process.poll() is None:
-            line = self.process.stdout.readline()
-            if not line:
-                break
-            if line.startswith(b"Content-Length: "):
-                length = int(line[16:].strip())
-                # Read until \r\n\r\n
-                while line.strip():
-                    line = self.process.stdout.readline()
-                
-                content = self.process.stdout.read(length)
-                if not content:
+        try:
+            while proc.poll() is None:
+                line = proc.stdout.readline()
+                if not line:
                     break
-                
-                try:
-                    message = json.loads(content.decode("utf-8"))
-                    if "id" in message:
-                        with self._lock:
-                            self._responses[message["id"]] = message
-                            self._condition.notify_all()
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
+                if line.startswith(b"Content-Length: "):
+                    length = int(line[16:].strip())
+                    # Read until \r\n\r\n
+                    while line.strip():
+                        line = proc.stdout.readline()
+
+                    content = proc.stdout.read(length)
+                    if not content:
+                        break
+
+                    try:
+                        message = json.loads(content.decode("utf-8"))
+                        if "id" in message:
+                            with self._lock:
+                                self._responses[message["id"]] = message
+                                self._condition.notify_all()
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+        except (OSError, ValueError):
+            pass
 
     def send_request(self, method: str, params: dict, timeout: float = 10.0) -> Any:
         """Send an LSP request and wait for the response."""
@@ -190,17 +206,23 @@ class LSPClient:
         if isinstance(contents, dict):
             return contents.get("value")
         if isinstance(contents, list):
-            # Extract from first markdown/text block
+            # Prefer the first dict item (MarkupContent), then fall back to strings
             for item in contents:
                 if isinstance(item, dict):
                     return item.get("value")
-                return item
+            # No dict items found — return the first string item
+            for item in contents:
+                if isinstance(item, str):
+                    return item
         return contents
 
 
 # ---------------------------------------------------------------------------
 # AST traversal for symbol collection
 # ---------------------------------------------------------------------------
+
+_PYTHON_KEYWORDS = frozenset({"True", "False", "None"})
+
 
 class _SymbolCollector(cst.CSTVisitor):
     METADATA_DEPENDENCIES = (PositionProvider,)
@@ -209,8 +231,9 @@ class _SymbolCollector(cst.CSTVisitor):
         self.positions: list[tuple[str, int, int, int]] = []
 
     def visit_Name(self, node: cst.Name):
+        if node.value in _PYTHON_KEYWORDS:
+            return
         pos = self.get_metadata(PositionProvider, node)
-        # We only care about name usages/definitions that aren't keywords
         self.positions.append((node.value, pos.start.line, pos.start.column + 1, pos.end.column + 1))
 
     def visit_Attribute(self, node: cst.Attribute):
@@ -606,8 +629,6 @@ def _classify_binding_kind(key: str) -> str:
         return "import"
     if "CompletedPartialType" in key:
         return "inferred"
-    if "Annotation" in key:
-        return "annotation"
     return "other"
 
 
@@ -837,14 +858,13 @@ class PyreflyAdapter(TypeOracle):
 
             cwd = str(project_root) if project_root else str(path.parent)
 
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=60,
                 cwd=cwd,
             )
-
             # pyrefly may return non-zero for type errors — that's fine,
             # we still get debug-info
             if os.path.exists(debug_path) and os.path.getsize(debug_path) > 0:
@@ -869,6 +889,9 @@ class PyreflyAdapter(TypeOracle):
         """
         results: dict[str, FileTypes] = {}
         to_check: list[Path] = []
+        # Pre-computed hashes for files that need checking, to avoid
+        # recomputing after pyrefly returns.
+        hashes: dict[str, str] = {}
 
         # Resolve all paths up front for consistent dict keys.
         resolved = [p.resolve() for p in paths]
@@ -883,6 +906,7 @@ class PyreflyAdapter(TypeOracle):
                 results[str(rp)] = cached
             else:
                 to_check.append(rp)
+                hashes[str(rp)] = content_hash
 
         if not to_check:
             return results
@@ -920,7 +944,7 @@ class PyreflyAdapter(TypeOracle):
 
                 for path_obj in to_check:
                     ft = _parse_pyrefly_debug(debug_json, str(path_obj))
-                    content_hash = _content_hash(path_obj)
+                    content_hash = hashes[str(path_obj)]
                     self._cache.put(content_hash, ft)
                     results[str(path_obj)] = ft
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
@@ -938,85 +962,6 @@ class PyreflyAdapter(TypeOracle):
                 results[key] = FileTypes(path=key)
 
         return results
-
-
-# ---------------------------------------------------------------------------
-# Pyright diagnostic JSON parser
-# ---------------------------------------------------------------------------
-
-# Pyright messages often include type names in double quotes:
-#   'Expression of type "int" is incompatible with declared type "str"'
-#   'Type of "x" is "list[int]"'
-_PYRIGHT_TYPE_RE = re.compile(r'"([^"]+)"')
-
-
-def _parse_pyright_output(json_data: dict, file_path: str) -> FileTypes:
-    """Parse pyright --outputjson output into a FileTypes object.
-
-    Pyright doesn't expose a full type-binding dump (like Pyrefly's
-    --debug-info).  Instead, we extract type information from diagnostic
-    messages where Pyright embeds quoted type names.
-    """
-    ft = FileTypes(path=file_path)
-
-    file_path_normalized = str(Path(file_path).resolve())
-
-    for diagnostic in json_data.get("generalDiagnostics", []):
-        diag_file = diagnostic.get("file", "")
-        # Normalise for comparison
-        try:
-            diag_file_resolved = str(Path(diag_file).resolve())
-        except (ValueError, OSError):
-            diag_file_resolved = diag_file
-        if diag_file_resolved != file_path_normalized:
-            continue
-
-        range_info = diagnostic.get("range", {})
-        start = range_info.get("start", {})
-        end = range_info.get("end", {})
-        line = start.get("line", 0) + 1  # pyright uses 0-based lines
-        col_start = start.get("character", 0) + 1
-        col_end = end.get("character")
-        if col_end is not None:
-            col_end += 1
-
-        message = diagnostic.get("message", "")
-        rule = diagnostic.get("rule", "")
-
-        # Extract type mentions from the message
-        type_mentions = _PYRIGHT_TYPE_RE.findall(message)
-        if not type_mentions:
-            continue
-
-        # The last quoted string is often the most specific type
-        raw_type = type_mentions[-1]
-        type_desc = parse_type_string(raw_type)
-
-        # Derive a name from the message: look for variable/symbol names
-        name = ""
-        if len(type_mentions) >= 2:
-            # First mention is often the symbol name
-            candidate = type_mentions[0]
-            # Heuristic: if it looks like a simple identifier (not a type),
-            # use it as the name
-            if candidate.isidentifier():
-                name = candidate
-        if not name:
-            name = rule or "unknown"
-
-        binding = TypeBinding(
-            name=name,
-            line=line,
-            col_start=col_start,
-            col_end=col_end,
-            type_descriptor=type_desc,
-            raw_type=raw_type,
-            binding_kind="diagnostic",
-        )
-        ft.bindings.append(binding)
-
-    ft.build_index()
-    return ft
 
 
 # ---------------------------------------------------------------------------
@@ -1133,96 +1078,6 @@ class PyrightAdapter(TypeOracle):
 
 
 # ---------------------------------------------------------------------------
-# ty diagnostic JSON parser
-# ---------------------------------------------------------------------------
-
-# ty messages embed type names in backticks:
-#   'Object of type `int` is not assignable to `str`'
-_TY_TYPE_RE = re.compile(r"`([^`]+)`")
-
-
-def _parse_ty_diagnostics(diagnostics: list[dict], file_path: str) -> FileTypes:
-    """Parse a list of ty diagnostic dicts into a FileTypes object.
-
-    Each dict should have keys: ``file``, ``line``, ``col``, ``message``,
-    ``code``.  These are normalised from ty's ``--output-format concise``
-    output by :func:`_parse_ty_concise`.
-
-    We regex-extract type names from backtick-quoted spans in messages.
-    """
-    ft = FileTypes(path=file_path)
-
-    file_path_normalized = str(Path(file_path).resolve())
-
-    for diagnostic in diagnostics:
-        diag_file = diagnostic.get("file", "")
-        try:
-            diag_file_resolved = str(Path(diag_file).resolve())
-        except (ValueError, OSError):
-            diag_file_resolved = diag_file
-        if diag_file_resolved != file_path_normalized:
-            continue
-
-        line = diagnostic.get("line", 0)
-        col_start = diagnostic.get("col", 0)
-        message = diagnostic.get("message", "")
-        code = diagnostic.get("code", "")
-
-        type_mentions = _TY_TYPE_RE.findall(message)
-        if not type_mentions:
-            continue
-
-        raw_type = type_mentions[-1]
-        type_desc = parse_type_string(raw_type)
-
-        name = ""
-        if len(type_mentions) >= 2:
-            candidate = type_mentions[0]
-            if candidate.isidentifier():
-                name = candidate
-        if not name:
-            name = code or "unknown"
-
-        binding = TypeBinding(
-            name=name,
-            line=line,
-            col_start=col_start,
-            col_end=None,
-            type_descriptor=type_desc,
-            raw_type=raw_type,
-            binding_kind="diagnostic",
-        )
-        ft.bindings.append(binding)
-
-    ft.build_index()
-    return ft
-
-
-# Concise format: "path/file.py:42:13: error[invalid-assignment] message..."
-_TY_CONCISE_RE = re.compile(
-    r"^(.+?):(\d+):(\d+): \w+\[([^\]]+)\] (.+)$"
-)
-
-
-def _parse_ty_concise(text: str) -> list[dict]:
-    """Parse ty ``--output-format concise`` text into diagnostic dicts."""
-    diagnostics: list[dict] = []
-    for raw_line in text.splitlines():
-        raw_line = raw_line.strip()
-        m = _TY_CONCISE_RE.match(raw_line)
-        if not m:
-            continue
-        diagnostics.append({
-            "file": m.group(1),
-            "line": int(m.group(2)),
-            "col": int(m.group(3)),
-            "code": m.group(4),
-            "message": m.group(5),
-        })
-    return diagnostics
-
-
-# ---------------------------------------------------------------------------
 # ty adapter
 # ---------------------------------------------------------------------------
 
@@ -1316,13 +1171,15 @@ class TyAdapter(TypeOracle):
             if ": " in line:
                 return line.split(": ", 1)[1].strip()
             return line
-        
+
         # Try backticks
         match = re.search(r"`([^`]+)`", hover_text)
         if match:
             return match.group(1).strip()
-            
-        return hover_text.strip()
+
+        # Plain text — return it if non-empty, otherwise None
+        stripped = hover_text.strip()
+        return stripped or None
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:

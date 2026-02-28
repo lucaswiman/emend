@@ -26,7 +26,6 @@ from emend.type_oracle import (
     FileTypes,
     TypeBinding,
     TypeDescriptor,
-    parse_type_string,
     create_type_oracle,
 )
 
@@ -412,9 +411,11 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_edit
 
+        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_edit(
             selector_str=f"{f}::greet[returns]",
             value="int",
+            type_oracle=None,
         )
         assert "int" in result
 
@@ -428,8 +429,10 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_add
 
+        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_add(
             selector_str=f"{f}::greet[params]",
             value="age: int",
+            type_oracle=None,
         )
         assert "age" in result

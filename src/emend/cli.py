@@ -1,6 +1,7 @@
 """emend - Python refactoring CLI with structured edits and pattern transforms."""
 
 import glob as glob_mod
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -312,7 +313,6 @@ def search(
             engine = type_engine or "auto"
             oracle = create_type_oracle(engine=engine)
             if not oracle.is_available():
-                import logging
                 logging.getLogger("emend.type_oracle").warning(
                     "Type engine not available; type constraints will have no effect"
                 )
@@ -592,17 +592,17 @@ def edit(
         emend edit api.py::deprecated_function --rm --apply
     """
     try:
+        oracle = None
         if type_engine is not None:
-            import logging
-            logging.getLogger("emend").warning(
-                "--type-engine is not yet implemented for 'edit'; option ignored"
-            )
+            from emend.type_oracle import create_type_oracle
+            oracle = create_type_oracle(engine=type_engine)
 
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -668,11 +668,10 @@ def add(
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
     """
     try:
+        oracle = None
         if type_engine is not None:
-            import logging
-            logging.getLogger("emend").warning(
-                "--type-engine is not yet implemented for 'add'; option ignored"
-            )
+            from emend.type_oracle import create_type_oracle
+            oracle = create_type_oracle(engine=type_engine)
 
         result = cmd_add(
             selector_str=selector,
@@ -681,6 +680,7 @@ def add(
             after=after,
             at=at,
             apply=apply,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -1458,8 +1458,15 @@ def types_cmd(
 
     try:
         target = Path(path)
-        # Use the target's parent as project root for autodetection
-        project_root = target.parent if target.is_file() else target
+        is_glob = "*" in path or "?" in path
+        # Use the target's parent as project root for autodetection;
+        # for globs use CWD since Path("src/*.py") is not a real path.
+        if is_glob:
+            project_root = Path.cwd()
+        elif target.is_file():
+            project_root = target.parent
+        else:
+            project_root = target
         oracle = create_type_oracle(engine=engine, project_root=project_root)
 
         resolved_engine = engine
@@ -1470,9 +1477,9 @@ def types_cmd(
             print(f"Error: {resolved_engine} is not installed or not available on PATH.", file=sys.stderr)
             raise typer.Exit(2)
 
-        if target.is_dir():
+        if is_glob:
             files, _ = resolve_files(path)
-        elif "*" in path or "?" in path:
+        elif target.is_dir():
             files, _ = resolve_files(path)
         else:
             files = [target]
