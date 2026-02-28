@@ -83,9 +83,10 @@ jobs:
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
-          # Build on the host (no manylinux container) so the free-threaded
-          # interpreter installed above is visible to maturin.
-          manylinux: off
+          # Disable Docker so the free-threaded interpreter installed above
+          # is visible to maturin.  Use container (not manylinux) to avoid
+          # injecting a second --manylinux/--compatibility flag.
+          container: off
           args: >-
             --release --out dist
             --compatibility manylinux_2_28
@@ -153,7 +154,7 @@ jobs:
       - name: Build free-threaded aarch64 wheels
         uses: PyO3/maturin-action@v1
         with:
-          manylinux: off
+          container: off
           args: >-
             --release --out dist
             --compatibility manylinux_2_28
