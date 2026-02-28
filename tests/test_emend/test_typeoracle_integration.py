@@ -415,7 +415,6 @@ class TestCmdEditAddTypeOracle:
         result = cmd_edit(
             selector_str=f"{f}::greet[returns]",
             value="int",
-            type_oracle=None,
         )
         assert "int" in result
 
@@ -432,6 +431,5 @@ class TestCmdEditAddTypeOracle:
         result = cmd_add(
             selector_str=f"{f}::greet[params]",
             value="age: int",
-            type_oracle=None,
         )
         assert "age" in result

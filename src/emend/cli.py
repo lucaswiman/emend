@@ -312,8 +312,8 @@ def search(
             engine = type_engine or "auto"
             oracle = create_type_oracle(engine=engine)
             if not oracle.is_available():
-                import logging as _logging
-                _logging.getLogger("emend.type_oracle").warning(
+                import logging
+                logging.getLogger("emend.type_oracle").warning(
                     "Type engine not available; type constraints will have no effect"
                 )
                 oracle = None
@@ -592,23 +592,17 @@ def edit(
         emend edit api.py::deprecated_function --rm --apply
     """
     try:
-        oracle = None
         if type_engine is not None:
-            from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
-            if not oracle.is_available():
-                import logging as _logging
-                _logging.getLogger("emend.type_oracle").warning(
-                    "Type engine not available; type features disabled"
-                )
-                oracle = None
+            import logging
+            logging.getLogger("emend").warning(
+                "--type-engine is not yet implemented for 'edit'; option ignored"
+            )
 
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
-            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -674,16 +668,11 @@ def add(
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
     """
     try:
-        oracle = None
         if type_engine is not None:
-            from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
-            if not oracle.is_available():
-                import logging as _logging
-                _logging.getLogger("emend.type_oracle").warning(
-                    "Type engine not available; type features disabled"
-                )
-                oracle = None
+            import logging
+            logging.getLogger("emend").warning(
+                "--type-engine is not yet implemented for 'add'; option ignored"
+            )
 
         result = cmd_add(
             selector_str=selector,
@@ -692,7 +681,6 @@ def add(
             after=after,
             at=at,
             apply=apply,
-            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:

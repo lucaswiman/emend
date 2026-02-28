@@ -5783,7 +5783,6 @@ def cmd_edit(
     value: str | None = None,
     rm: bool = False,
     apply: bool = False,
-    type_oracle: object | None = None,
 ) -> str:
     """Edit or replace existing symbol components.
 
@@ -5841,7 +5840,6 @@ def cmd_add(
     after: str | None = None,
     at: int | None = None,
     apply: bool = False,
-    type_oracle: object | None = None,
 ) -> str:
     """Add new items to symbol components.
 

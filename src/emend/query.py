@@ -6,6 +6,7 @@ designed for AI agent refactoring workflows.
 
 import fnmatch
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from pathlib import Path
 
 import libcst as cst
 from libcst.metadata import PositionProvider, MetadataWrapper
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -531,9 +534,6 @@ def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: object | No
     Returns:
         List of matching SymbolInfo objects
     """
-    import logging as _logging
-    _logger = _logging.getLogger(__name__)
-
     with open(filepath) as f:
         source = f.read()
 
