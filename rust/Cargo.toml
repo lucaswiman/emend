@@ -3,6 +3,7 @@ name = "emend-core"
 version = "0.1.0"
 edition = "2021"
 description = "Fast Python pattern matching engine for emend"
+license = "MPL-2.0"
 
 [lib]
 name = "emend_core"

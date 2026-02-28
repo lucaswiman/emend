@@ -4,7 +4,8 @@ dynamic = ["version"]
 description = "A Python refactoring CLI tool with structured edits and pattern transforms"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MPL-2.0"}
+license = "MPL-2.0"
+license-files = ["LICENSE"]
 authors = [{name = "Lucas Wiman", email = "lucas.wiman@gmail.com"}]
 keywords = ["refactoring", "python", "code-transformation", "libcst"]
 classifiers = [
