@@ -14,12 +14,12 @@
 # Free-threaded Python (3.13t, 3.14t) wheels enable the GIL-free speedups
 # described in the installation docs.
 #
-# NOTE: python3.14 must NOT appear in the free-threaded interpreter list.
-# The free-threaded 3.14t installation provides a python3.14 binary that is
-# actually free-threaded (cp314t), so maturin would see two interpreters
-# (python3.14 and python3.14t) resolving to the same ABI and fail with
-# "Expected only one platform tag but found 2".  Non-free-threaded 3.14
-# wheels are built in the manylinux jobs instead.
+# NOTE: Each free-threaded interpreter must be built in its own maturin
+# invocation.  Passing multiple free-threaded interpreters (e.g.
+# --interpreter python3.13t python3.14t) causes maturin to fail with
+# "Expected only one platform tag but found 2" because each free-threaded
+# ABI (cp313t, cp314t) produces a distinct platform tag.  The matrix
+# strategy below ensures one maturin call per interpreter.
 
 name: Build Wheels
 
@@ -57,10 +57,13 @@ jobs:
           name: wheels-linux-x86_64-manylinux
           path: dist/*.whl
 
-  # ── Linux x86_64: free-threaded 3.13t, 3.14t ──────────────────────────────
+  # ── Linux x86_64: free-threaded (one job per interpreter) ──────────────────
   linux-x86-freethread:
-    name: Linux x86_64 (free-threaded 3.13t, 3.14t)
+    name: Linux x86_64 (free-threaded ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.13t', '3.14t']
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -76,22 +79,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13t
-            3.14t
+          python-version: ${{ matrix.python-version }}
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           # Build on the host (no manylinux container) so the free-threaded
-          # interpreters installed above are visible to maturin.
+          # interpreter installed above is visible to maturin.
           manylinux: off
           args: >-
             --release --out dist
             --compatibility manylinux_2_28
-            --interpreter python3.13t python3.14t
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-x86_64-freethread
+          name: wheels-linux-x86_64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
   # ── Linux aarch64: manylinux for 3.10–3.14 ────────────────────────────────
@@ -126,10 +127,13 @@ jobs:
           name: wheels-linux-aarch64-manylinux
           path: dist/*.whl
 
-  # ── Linux aarch64: free-threaded 3.13t, 3.14t ─────────────────────────────
+  # ── Linux aarch64: free-threaded (one job per interpreter) ─────────────────
   linux-aarch64-freethread:
-    name: Linux aarch64 (free-threaded 3.13t, 3.14t)
+    name: Linux aarch64 (free-threaded ${{ matrix.python-version }})
     runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        python-version: ['3.13t', '3.14t']
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -145,9 +149,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13t
-            3.14t
+          python-version: ${{ matrix.python-version }}
       - name: Build free-threaded aarch64 wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -155,10 +157,10 @@ jobs:
           args: >-
             --release --out dist
             --compatibility manylinux_2_28
-            --interpreter python3.13t python3.14t
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-aarch64-freethread
+          name: wheels-linux-aarch64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
   # ── macOS Apple Silicon (arm64): standard 3.10–3.14 ──────────────────────
@@ -197,10 +199,13 @@ jobs:
           name: wheels-macos-arm64
           path: dist/*.whl
 
-  # ── macOS Apple Silicon (arm64): free-threaded 3.13t, 3.14t ────────────
+  # ── macOS Apple Silicon (arm64): free-threaded (one job per interpreter) ──
   macos-arm-freethread:
-    name: macOS arm64 (free-threaded 3.13t, 3.14t)
+    name: macOS arm64 (free-threaded ${{ matrix.python-version }})
     runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: ['3.13t', '3.14t']
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -216,18 +221,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13t
-            3.14t
+          python-version: ${{ matrix.python-version }}
       - name: Build macOS arm64 free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           args: >-
             --release --out dist
-            --interpreter python3.13t python3.14t
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-arm64-freethread
+          name: wheels-macos-arm64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
   # ── macOS Intel (x86_64): standard 3.10–3.14 ────────────────────────────
@@ -267,10 +270,13 @@ jobs:
           name: wheels-macos-x86_64
           path: dist/*.whl
 
-  # ── macOS Intel (x86_64): free-threaded 3.13t, 3.14t ──────────────────
+  # ── macOS Intel (x86_64): free-threaded (one job per interpreter) ────────
   macos-intel-freethread:
-    name: macOS x86_64 (free-threaded 3.13t, 3.14t)
+    name: macOS x86_64 (free-threaded ${{ matrix.python-version }})
     runs-on: macos-15
+    strategy:
+      matrix:
+        python-version: ['3.13t', '3.14t']
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -286,19 +292,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13t
-            3.14t
+          python-version: ${{ matrix.python-version }}
       - name: Build macOS x86_64 free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64-apple-darwin
           args: >-
             --release --out dist
-            --interpreter python3.13t python3.14t
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-x86_64-freethread
+          name: wheels-macos-x86_64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
   # ── Windows x86_64: standard 3.10–3.14 ──────────────────────────────────
@@ -337,10 +341,13 @@ jobs:
           name: wheels-windows-x86_64
           path: dist/*.whl
 
-  # ── Windows x86_64: free-threaded 3.13t, 3.14t ────────────────────────
+  # ── Windows x86_64: free-threaded (one job per interpreter) ──────────────
   windows-freethread:
-    name: Windows x86_64 (free-threaded 3.13t, 3.14t)
+    name: Windows x86_64 (free-threaded ${{ matrix.python-version }})
     runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.13t', '3.14t']
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -356,18 +363,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13t
-            3.14t
+          python-version: ${{ matrix.python-version }}
       - name: Build Windows free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           args: >-
             --release --out dist
-            --interpreter python3.13t python3.14t
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-x86_64-freethread
+          name: wheels-windows-x86_64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
   # ── Source distribution ───────────────────────────────────────────────────
