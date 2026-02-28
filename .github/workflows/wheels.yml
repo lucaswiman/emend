@@ -6,7 +6,7 @@
 #
 # Platforms built:
 #   - Linux x86_64   (manylinux_2_28 for 3.10–3.14 + free-threaded 3.13t/3.14t)
-#   - Linux aarch64  (manylinux_2_28 for 3.10–3.14 + free-threaded 3.13t/3.14t)
+#   - Linux aarch64  (manylinux_2_28 for 3.10–3.14; manylinux_2_39 for 3.13t/3.14t)
 #   - macOS arm64    (Apple Silicon, 3.10–3.14 + free-threaded 3.13t/3.14t)
 #   - macOS x86_64   (Intel, 3.10–3.14 + free-threaded 3.13t/3.14t)
 #   - Windows x86_64 (3.10–3.14 + free-threaded 3.13t/3.14t)
@@ -135,11 +135,6 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.13t', '3.14t']
-        include:
-          - python-version: '3.13t'
-            python-tag: cp313t
-          - python-version: '3.14t'
-            python-tag: cp314t
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
@@ -153,13 +148,21 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Build free-threaded aarch64 wheels
         uses: PyO3/maturin-action@v1
         with:
-          manylinux: 2_28
+          # Build on the host (no Docker) because maturin inside the
+          # manylinux container treats this as cross-compilation and can't
+          # parse the 't' suffix in interpreter names like python3.14t.
+          # manylinux_2_39 matches the Ubuntu 24.04 ARM runner's glibc.
+          container: off
           args: >-
             --release --out dist
-            --interpreter /opt/python/${{ matrix.python-tag }}-${{ matrix.python-tag }}/bin/python${{ matrix.python-version }}
+            --compatibility manylinux_2_39
+            --interpreter python${{ matrix.python-version }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64-freethread-${{ matrix.python-version }}
