@@ -425,7 +425,7 @@ emend can run as a [pre-commit](https://pre-commit.com/) hook. Add to your `.pre
 ```yaml
 repos:
   - repo: https://github.com/lucaswiman/emend
-    rev: v0.1.0  # replace with desired version tag
+    rev: v0.2.0  # replace with desired version tag
     hooks:
       - id: emend-lint
 ```
