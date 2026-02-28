@@ -2,12 +2,16 @@ start: pattern
 
 pattern: (code_chunk | metavar)+
 
-metavar: DOLLAR (ELLIPSIS)? METAVAR_NAME TYPE_CONSTRAINT?
+metavar: DOLLAR (ELLIPSIS)? METAVAR_NAME type_constraint?
        | DOLLAR UNDERSCORE
+
+type_constraint: SIMPLE_TYPE_CONSTRAINT
+               | ORACLE_TYPE_CONSTRAINT
 
 DOLLAR: "$"
 ELLIPSIS: "..."
 UNDERSCORE: "_"
 METAVAR_NAME: /[A-Z][A-Z0-9_]*/
-TYPE_CONSTRAINT: /:!?(?:expr|stmt|identifier|int|str|float|call|attr|any)/
+SIMPLE_TYPE_CONSTRAINT: /:!?(?:expr|stmt|identifier|int|str|float|call|attr|any)/
+ORACLE_TYPE_CONSTRAINT: /:(?:type|returns)\[(?:[^\[\]]*(?:\[[^\[\]]*\])?)*\]/
 code_chunk: /[^$:]+/ | ":"

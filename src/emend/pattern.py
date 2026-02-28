@@ -35,16 +35,23 @@ class PatternTransformer(Transformer):
         # Items are code chunks and metavars - we just need to extract metavars
         return None
 
+    def type_constraint(self, items):
+        """Handle the type_constraint rule wrapping either terminal."""
+        return str(items[0])
+
     def metavar(self, items):
-        # Separate TYPE_CONSTRAINT tokens from other items
-        type_constraint_token = None
+        # Separate type constraint strings from other items
+        type_constraint_str = None
         other_items = []
 
         for item in items:
             if isinstance(item, Token):
-                if item.type == "TYPE_CONSTRAINT":
-                    type_constraint_token = item
+                if item.type in ("SIMPLE_TYPE_CONSTRAINT", "ORACLE_TYPE_CONSTRAINT"):
+                    type_constraint_str = str(item)
                 # Skip DOLLAR, UNDERSCORE, etc.
+            elif isinstance(item, str) and item.startswith(":"):
+                # Result of type_constraint rule
+                type_constraint_str = item
             else:
                 other_items.append(item)
 
@@ -61,7 +68,7 @@ class PatternTransformer(Transformer):
                 ellipsis = False
 
             # Extract type constraint (remove leading ':')
-            type_constraint = str(type_constraint_token)[1:] if type_constraint_token else None
+            type_constraint = type_constraint_str[1:] if type_constraint_str else None
 
             metavar = MetaVar(
                 name=name,
@@ -163,6 +170,26 @@ def _comp_for_to_matcher(
         return m.CompFor(target=target_matcher, iter=iter_matcher)
 
 
+def is_oracle_type_constraint(constraint: str | None) -> bool:
+    """Check if a type constraint requires the TypeOracle (type[X] or returns[X])."""
+    if constraint is None:
+        return False
+    return constraint.startswith("type[") or constraint.startswith("returns[")
+
+
+def parse_oracle_type_constraint(constraint: str) -> tuple[str, str]:
+    """Parse an oracle type constraint like 'type[Connection]' or 'returns[Optional[str]]'.
+
+    Returns:
+        (kind, type_string) where kind is 'type' or 'returns'.
+    """
+    bracket_pos = constraint.index("[")
+    kind = constraint[:bracket_pos]
+    # Extract the inner type string, handling nested brackets
+    inner = constraint[bracket_pos + 1:-1]
+    return kind, inner
+
+
 def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
     """Convert type constraint string to appropriate matcher.
 
@@ -170,6 +197,8 @@ def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
         constraint: Type constraint string like "int", "str", "!int", "!str",
             "identifier", "float", "call", "attr", "stmt", "expr", or None.
             Prefix with "!" for negation (matches anything except that type).
+            Also supports "type[X]" and "returns[X]" for TypeOracle constraints,
+            which match any node syntactically (post-filtered by type at match time).
 
     Returns:
         Matcher for the specified type
@@ -178,6 +207,11 @@ def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
         # Negated constraint: match anything EXCEPT the specified type
         inner = _type_constraint_matcher(constraint[1:])
         return m.DoesNotMatch(inner)
+
+    # Oracle type constraints match any node syntactically;
+    # actual type checking is done post-match by the finder.
+    if constraint is not None and is_oracle_type_constraint(constraint):
+        return m.DoNotCare()
 
     if constraint == "int":
         return m.Integer()

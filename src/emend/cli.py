@@ -191,6 +191,10 @@ def search(
         bool,
         typer.Option("--scope-local", help="Only match locally-defined names, exclude imports (pattern mode)")
     ] = False,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine", help="Type inference engine for :type[X] and :returns[X] constraints: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -301,6 +305,19 @@ def search(
         effective_output = "selector"
 
     try:
+        # ---- Create TypeOracle if needed ----
+        oracle = None
+        if type_engine is not None or (is_pattern_mode and (":type[" in query or ":returns[" in query)):
+            from emend.type_oracle import create_type_oracle
+            engine = type_engine or "auto"
+            oracle = create_type_oracle(engine=engine)
+            if not oracle.is_available():
+                import logging as _logging
+                _logging.getLogger("emend.type_oracle").warning(
+                    "Type engine not available; type constraints will have no effect"
+                )
+                oracle = None
+
         # ---- SUMMARY MODE ----
         if effective_output == "summary" and not is_pattern_mode:
             unsupported = []
@@ -367,9 +384,9 @@ def search(
                 literals = extract_pattern_literals(query)
                 file_contents = emend_core.read_and_filter_files(file_strs, literals)
 
-                # Try Rust batch fast-path (no scope/imported_from/scope_local constraints)
+                # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
                 rust_path_used = False
-                if where_scope is None and imported_from is None and not scope_local:
+                if where_scope is None and imported_from is None and not scope_local and oracle is None:
                     from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
                     from emend.transform import PatternMatch
                     pattern_ir = compile_pattern_to_rust_ir(query)
@@ -398,6 +415,7 @@ def search(
                                 imported_from=imported_from,
                                 scope_local=scope_local,
                                 source_override=content,
+                                type_oracle=oracle,
                             )
                             for match in file_matches:
                                 all_matches.append((file_path_str, match))
@@ -414,6 +432,7 @@ def search(
                             not_inside=where_not_inside,
                             imported_from=imported_from,
                             scope_local=scope_local,
+                            type_oracle=oracle,
                         )
                         for match in file_matches:
                             all_matches.append((file_path_str, match))
@@ -511,6 +530,7 @@ def search(
             count=count_output,
             dedent=dedent_output,
             matching=lookup_matching,
+            type_oracle=oracle,
         )
         print(result, end='')
 
@@ -548,6 +568,10 @@ def edit(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Edit or replace existing symbol components.
 
@@ -568,11 +592,23 @@ def edit(
         emend edit api.py::deprecated_function --rm --apply
     """
     try:
+        oracle = None
+        if type_engine is not None:
+            from emend.type_oracle import create_type_oracle
+            oracle = create_type_oracle(engine=type_engine)
+            if not oracle.is_available():
+                import logging as _logging
+                _logging.getLogger("emend.type_oracle").warning(
+                    "Type engine not available; type features disabled"
+                )
+                oracle = None
+
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -606,6 +642,10 @@ def add(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Add new items to symbol components.
 
@@ -634,6 +674,17 @@ def add(
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
     """
     try:
+        oracle = None
+        if type_engine is not None:
+            from emend.type_oracle import create_type_oracle
+            oracle = create_type_oracle(engine=type_engine)
+            if not oracle.is_available():
+                import logging as _logging
+                _logging.getLogger("emend.type_oracle").warning(
+                    "Type engine not available; type features disabled"
+                )
+                oracle = None
+
         result = cmd_add(
             selector_str=selector,
             value=value,
@@ -641,6 +692,7 @@ def add(
             after=after,
             at=at,
             apply=apply,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:

@@ -363,6 +363,10 @@ class FileTypes:
         for b in self.bindings:
             self._by_position[(b.line, b.col_start)] = b
             self._by_name.setdefault(b.name, []).append(b)
+        logger.debug(
+            "Type index built for %s: %d bindings, %d positions, %d unique names",
+            self.path, len(self.bindings), len(self._by_position), len(self._by_name),
+        )
 
     def type_at(self, line: int, col: int) -> TypeBinding | None:
         return self._by_position.get((line, col))
@@ -793,6 +797,7 @@ class PyreflyAdapter(TypeOracle):
             return cached
 
         # Run pyrefly
+        logger.info("Building type index for %s via pyrefly", path)
         debug_json = self._run_pyrefly(path, project_root)
         if debug_json is None:
             ft = FileTypes(path=str(path))
@@ -877,6 +882,10 @@ class PyreflyAdapter(TypeOracle):
         if not to_check:
             return results
 
+        logger.info(
+            "Building type indexes for %d files via pyrefly (batch)",
+            len(to_check),
+        )
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             debug_path = tmp.name
 
@@ -1034,6 +1043,7 @@ class PyrightAdapter(TypeOracle):
     def _get_lsp(self, project_root: Path) -> LSPClient | None:
         with self._lsp_lock:
             if self._lsp is None:
+                logger.info("Starting pyright LSP server…")
                 cmd = [self._pyright, "--stdio", *self._extra_args]
                 self._lsp = LSPClient(cmd, project_root)
                 if not self._lsp.start():
@@ -1057,6 +1067,7 @@ class PyrightAdapter(TypeOracle):
             self._cache.put(content_hash, ft)
             return ft
 
+        logger.info("Building type index for %s via pyright", path)
         source = path.read_text(encoding="utf-8")
         lsp.did_open(path, source)
 
@@ -1235,7 +1246,7 @@ class TyAdapter(TypeOracle):
     def _get_lsp(self, project_root: Path) -> LSPClient | None:
         with self._lsp_lock:
             if self._lsp is None:
-                # Assuming 'ty lsp' is the command to start the LSP server
+                logger.info("Starting ty LSP server…")
                 cmd = [self._ty, "lsp", *self._extra_args]
                 self._lsp = LSPClient(cmd, project_root)
                 if not self._lsp.start():
@@ -1259,6 +1270,7 @@ class TyAdapter(TypeOracle):
             self._cache.put(content_hash, ft)
             return ft
 
+        logger.info("Building type index for %s via ty", path)
         source = path.read_text(encoding="utf-8")
         lsp.did_open(path, source)
 

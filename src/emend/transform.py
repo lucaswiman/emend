@@ -7,6 +7,7 @@ from pathlib import Path
 import ast
 import difflib
 import hashlib
+import logging
 import threading
 import libcst as cst
 from libcst import matchers as m
@@ -16,7 +17,9 @@ import sys
 import io
 import json
 from .component_selector import ExtendedSelector, parse_extended_selector
-from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern
+from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -2430,6 +2433,7 @@ def find_pattern(
     where: str | None = None,
     scope_local: bool = False,
     source_override: str | None = None,
+    type_oracle: object | None = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -2450,6 +2454,7 @@ def find_pattern(
         scope_local: If True, only match names that are locally defined
                      (not imported). Uses QualifiedNameProvider.
         source_override: If provided, search this source string instead of reading from file_path.
+        type_oracle: Optional TypeOracle instance for :type[X] and :returns[X] constraints.
 
     Returns:
         List of matches with locations and captured values
@@ -2493,6 +2498,12 @@ def find_pattern(
     # Extract metavar names for validation
     metavar_names = {mv.name for mv in pattern.metavars}
 
+    # Detect oracle type constraints on metavars
+    oracle_constraints: dict[str, tuple[str, str]] = {}
+    for mv in pattern.metavars:
+        if is_oracle_type_constraint(mv.type_constraint):
+            oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
+
     # Read and parse file (or use source_override)
     if source_override is not None:
         source_code = source_override
@@ -2506,8 +2517,10 @@ def find_pattern(
     # Fast path: for basic pattern matching (no constraints, no scope,
     # no import/scope filters), skip the expensive MetadataWrapper and
     # compute line numbers from the source text afterwards.
+    # Oracle type constraints need position info for TypeOracle lookups.
     needs_wrapper = bool(inside or not_inside or scope is not None
-                         or imported_from is not None or scope_local)
+                         or imported_from is not None or scope_local
+                         or oracle_constraints)
 
     if not needs_wrapper:
         # Basic pattern matching without MetadataWrapper
@@ -2543,6 +2556,13 @@ def find_pattern(
     # Post-filter by scope locality if requested
     if scope_local:
         matches = _filter_matches_by_scope_local(matches, wrapper)
+
+    # Post-filter by TypeOracle type constraints
+    if oracle_constraints and type_oracle is not None:
+        matches = _filter_matches_by_type_oracle(
+            matches, oracle_constraints, type_oracle,
+            file_path, position_provider,
+        )
 
     return matches
 
@@ -2586,6 +2606,98 @@ def _filter_matches_by_scope_local(
         if any(qn.source == cst.metadata.QualifiedNameSource.LOCAL for qn in qnames):
             filtered.append(match)
 
+    return filtered
+
+
+def _filter_matches_by_type_oracle(
+    matches: list[PatternMatch],
+    oracle_constraints: dict[str, tuple[str, str]],
+    type_oracle: object,
+    file_path: str,
+    position_provider: dict,
+) -> list[PatternMatch]:
+    """Post-filter pattern matches using TypeOracle type constraints.
+
+    For each match, checks whether captured metavar values satisfy their
+    :type[X] or :returns[X] constraints by querying the TypeOracle for
+    inferred types at the capture's source position.
+
+    Args:
+        matches: Pattern matches to filter.
+        oracle_constraints: Mapping from metavar name to (kind, type_string)
+            where kind is 'type' or 'returns'.
+        type_oracle: A TypeOracle instance.
+        file_path: Path to the source file being searched.
+        position_provider: LibCST PositionProvider for resolving node positions.
+    """
+    from .type_oracle import FileTypes, TypeDescriptor, _parse_type_string
+
+    # Build the type index for this file once
+    file_types: FileTypes = type_oracle.infer_file(Path(file_path))
+    logger.debug("Filtering %d matches by type oracle constraints", len(matches))
+
+    filtered = []
+    for match in matches:
+        keep = True
+        for metavar_name, (kind, type_string) in oracle_constraints.items():
+            captured = match.captures.get(metavar_name)
+            if captured is None:
+                continue
+
+            constraint_td = _parse_type_string(type_string)
+
+            if kind == "type":
+                # Look up the inferred type at the captured node's position
+                try:
+                    pos = position_provider[captured]
+                    binding = file_types.type_at(pos.start.line, pos.start.column + 1)
+                except (KeyError, AttributeError):
+                    binding = None
+
+                if binding is None:
+                    # No type info — skip this match (can't confirm)
+                    keep = False
+                    break
+
+                if not binding.type_descriptor.matches(constraint_td):
+                    keep = False
+                    break
+
+            elif kind == "returns":
+                # For :returns[X], the captured node should be a function definition.
+                # Look up the function's return type from the oracle.
+                try:
+                    pos = position_provider[captured]
+                    line = pos.start.line
+                except (KeyError, AttributeError):
+                    keep = False
+                    break
+
+                # Find function definitions at or near this line
+                matched_return = False
+                for binding in file_types.bindings:
+                    if binding.line == line and binding.binding_kind == "definition":
+                        # Check if the binding's type is callable with a return type
+                        td = binding.type_descriptor
+                        if td.kind == "callable" and td.return_type is not None:
+                            if td.return_type.matches(constraint_td):
+                                matched_return = True
+                                break
+                        # Also check raw type string for return annotation
+                        elif td.matches(constraint_td):
+                            matched_return = True
+                            break
+
+                if not matched_return:
+                    keep = False
+                    break
+
+        if keep:
+            filtered.append(match)
+
+    logger.debug(
+        "Type oracle filtering: %d/%d matches passed", len(filtered), len(matches),
+    )
     return filtered
 
 
@@ -5481,6 +5593,7 @@ def cmd_lookup(
     count: bool = False,
     dedent: bool = False,
     matching: str | None = None,
+    type_oracle: object | None = None,
 ) -> str:
     """Unified lookup command combining get, query, and show.
 
@@ -5523,6 +5636,7 @@ def cmd_lookup(
                     output_json=json_output,
                     paths_only=paths_only,
                     count_only=count,
+                    type_oracle=type_oracle,
                 )
             finally:
                 sys.stdout = old_stdout
@@ -5669,6 +5783,7 @@ def cmd_edit(
     value: str | None = None,
     rm: bool = False,
     apply: bool = False,
+    type_oracle: object | None = None,
 ) -> str:
     """Edit or replace existing symbol components.
 
@@ -5726,6 +5841,7 @@ def cmd_add(
     after: str | None = None,
     at: int | None = None,
     apply: bool = False,
+    type_oracle: object | None = None,
 ) -> str:
     """Add new items to symbol components.
 
