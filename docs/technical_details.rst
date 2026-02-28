@@ -123,7 +123,80 @@ Metavariable types:
 - ``$X`` — captures any expression node
 - ``$_`` — anonymous, matches any expression and discards the capture
 - ``$...ARGS`` — variadic capture (sequence of arguments)
-- ``$X:str`` / ``$X:int`` / ``$X:call`` / ``$X:attr`` — type-constrained capture
+- ``$X:str`` / ``$X:int`` / ``$X:call`` / ``$X:attr`` — syntactic type-constrained capture
+- ``$X:type[T]`` / ``$X:returns[T]`` — inferred type constraint (requires TypeOracle; see below)
+
+TypeOracle layer
+----------------
+
+``type_oracle.py`` provides a pluggable type inference adapter used by ``search``
+(for ``:type[X]`` / ``:returns[X]`` pattern constraints and ``--returns`` lookup
+filtering) and the ``types`` command.
+
+Abstract interface: ``TypeOracle``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``TypeOracle`` is an abstract base class with four abstract methods:
+
+- ``infer_file(path, project_root) → FileTypes`` — return all type bindings for a file
+- ``type_at(path, line, col) → TypeBinding | None`` — return the binding at a position
+- ``clear_cache()`` — evict cached results
+- ``is_available() → bool`` — check if the backing tool is installed
+
+Results are returned as ``FileTypes`` (a list of ``TypeBinding`` objects with
+positional and name indexes built by ``FileTypes.build_index()``).  ``TypeBinding``
+records the name, source location, ``raw_type`` string from the engine, and a
+parsed ``TypeDescriptor`` tree.
+
+Backends
+~~~~~~~~
+
+Three backends are provided:
+
+- **PyreflyAdapter** — shells out to ``pyrefly check --debug-info`` and parses the
+  JSON binding dump.  This is the most comprehensive source of type information
+  (full binding dump, not just diagnostics) but requires pyrefly to be installed.
+  Supports ``infer_batch()`` for multi-file queries in one subprocess call.
+
+- **PyrightAdapter** — starts ``pyright-langserver`` via the LSP protocol and
+  queries ``textDocument/hover`` for each identifier collected by ``_collect_symbols()``.
+  Type strings are extracted from the hover markdown and parsed into ``TypeDescriptor``
+  trees.  The LSP process is started once and reused across calls.
+
+- **TyAdapter** — same approach as PyrightAdapter but using ``ty lsp``.
+
+All three cache results keyed on the MD5 of the file's content (``_FileTypeCache``,
+bounded at 256 entries with FIFO eviction) so unchanged files are not re-analyzed.
+
+Type string parsing
+~~~~~~~~~~~~~~~~~~~
+
+``parse_type_string(raw)`` converts type strings from any backend into a
+``TypeDescriptor`` tree, handling named types, parameterized generics
+(``list[int]``, ``dict[str, int]``), union types (``str | None``), callable
+signatures (``(x: int) -> str``), and ``Self@ClassName`` prefixes from Pyrefly.
+``TypeDescriptor.matches(constraint)`` performs structural matching: an unknown
+constraint acts as a wildcard, a named constraint matches parameterized types by
+base name, and union types match if any member satisfies the constraint.
+
+Integration with pattern matching
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``:type[X]`` and ``:returns[X]`` constraint tokens are matched syntactically by
+``m.DoNotCare()`` (any node passes) and then *post-filtered* by
+``_filter_matches_by_type_oracle()`` in ``transform.py``.  This keeps the Rust
+fast-path bypass simple: any oracle constraint skips the Rust engine and runs
+the full LibCST path (which provides ``PositionProvider`` metadata needed to
+look up nodes by position).
+
+Engine autodetection
+~~~~~~~~~~~~~~~~~~~~~
+
+``detect_type_engine(project_root)`` checks for config files in order
+(``pyrightconfig.json`` → ``ty.toml`` → ``pyrefly.toml`` → ``pyproject.toml``
+sections), then falls back to tool availability on PATH
+(pyrefly → ty → pyright).  ``create_type_oracle(engine="auto")`` combines
+detection and instantiation in one call.
 
 Lint engine
 -----------

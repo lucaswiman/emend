@@ -443,7 +443,7 @@ def _filter_by_returns_with_oracle(
 
     # No annotation — try TypeOracle if available
     if file_types is not None:
-        from emend.type_oracle import _parse_type_string
+        from emend.type_oracle import parse_type_string
         bindings = file_types.types_for_name(symbol.name)
         for binding in bindings:
             if binding.line == symbol.line and binding.binding_kind == "definition":
@@ -455,7 +455,7 @@ def _filter_by_returns_with_oracle(
                         if _match_pattern(ret_str, pattern, case_insensitive, smart_case):
                             return True
                         # Also try structural matching via TypeDescriptor
-                        constraint_td = _parse_type_string(pattern)
+                        constraint_td = parse_type_string(pattern)
                         if td.return_type.matches(constraint_td):
                             return True
                 # For non-callable definitions, check the raw type string

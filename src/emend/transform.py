@@ -2630,7 +2630,7 @@ def _filter_matches_by_type_oracle(
         file_path: Path to the source file being searched.
         position_provider: LibCST PositionProvider for resolving node positions.
     """
-    from .type_oracle import FileTypes, TypeDescriptor, _parse_type_string
+    from .type_oracle import FileTypes, TypeDescriptor, parse_type_string
 
     # Build the type index for this file once
     file_types: FileTypes = type_oracle.infer_file(Path(file_path))
@@ -2644,7 +2644,7 @@ def _filter_matches_by_type_oracle(
             if captured is None:
                 continue
 
-            constraint_td = _parse_type_string(type_string)
+            constraint_td = parse_type_string(type_string)
 
             if kind == "type":
                 # Look up the inferred type at the captured node's position
