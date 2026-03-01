@@ -142,6 +142,104 @@ def _cached_parse(source: str) -> cst.Module:
 
 
 # ---------------------------------------------------------------------------
+# Qualified-name index cache: per-file set of QN strings for pre-filtering
+# ---------------------------------------------------------------------------
+# After the first cross-project operation populates this cache, subsequent
+# operations can skip MetadataWrapper for files whose QN set doesn't overlap
+# with the target.  Content-hash keyed, persisted in the same SQLite DB.
+
+def _ensure_qn_table() -> None:
+    """Create the qn_index table if it doesn't exist (idempotent)."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    try:
+        with _disk_cache_lock:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS qn_index "
+                "(hash BLOB PRIMARY KEY, qnames BLOB)"
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+_qn_table_ready = False
+
+
+def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
+    """Look up cached qualified-name set for a file by content hash."""
+    global _qn_table_ready
+    conn = _get_disk_cache()
+    if conn is None:
+        return None
+    if not _qn_table_ready:
+        _ensure_qn_table()
+        _qn_table_ready = True
+    try:
+        import pickle
+        import zlib
+        row = conn.execute(
+            "SELECT qnames FROM qn_index WHERE hash = ?", (content_hash,)
+        ).fetchone()
+        if row is not None:
+            return pickle.loads(zlib.decompress(row[0]))
+    except Exception:
+        pass
+    return None
+
+
+def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
+    """Cache a file's qualified-name set (best-effort)."""
+    global _qn_table_ready
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    if not _qn_table_ready:
+        _ensure_qn_table()
+        _qn_table_ready = True
+    try:
+        import pickle
+        import zlib
+        data = zlib.compress(
+            pickle.dumps(qnames, protocol=pickle.HIGHEST_PROTOCOL), level=1
+        )
+        with _disk_cache_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)",
+                (content_hash, data),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+class _QNCollector(cst.CSTVisitor):
+    """Lightweight visitor that collects all qualified-name strings in a file.
+
+    Designed to run as a second pass on an already-resolved MetadataWrapper
+    (so QualifiedNameProvider metadata is already computed — this just reads it).
+    """
+    METADATA_DEPENDENCIES = (cst.metadata.QualifiedNameProvider,)
+
+    def __init__(self) -> None:
+        self.all_qnames: set[str] = set()
+
+    def visit_Name(self, node: cst.Name) -> None:
+        try:
+            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
+                self.all_qnames.add(qn.name)
+        except KeyError:
+            pass
+
+    def visit_Attribute(self, node: cst.Attribute) -> None:
+        try:
+            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
+                self.all_qnames.add(qn.name)
+        except KeyError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Rust accelerator (bundled with the emend wheel via maturin)
 # ---------------------------------------------------------------------------
 from emend import emend_core as _rust
@@ -404,6 +502,7 @@ def visit_project(
     metadata_providers: Sequence = (),
     target_file: str | None = None,
     candidate_files: set[str] | None = None,
+    target_qnames: set[str] | None = None,
 ) -> Iterator[tuple[str, cst.Module, object]]:
     """Iterate over Python files in the project, yielding (file_path, module, visitor).
 
@@ -414,6 +513,8 @@ def visit_project(
         metadata_providers: LibCST metadata providers to use with MetadataWrapper.
         target_file: The resolved path of the file defining the symbol (for is_def_file).
         candidate_files: If provided, only visit these files (pre-filtered by import graph).
+        target_qnames: If provided, use QN index cache to skip files whose cached
+                       qualified-name set has no overlap with these names.
     """
     t_start = time.monotonic()
     project_root = project_path or "."
@@ -455,6 +556,37 @@ def visit_project(
             except Exception:
                 pass
 
+    # QN-index pre-filter: skip files whose cached qualified-name set
+    # has no overlap with the target QNs.  Files without cached data are
+    # kept (they'll be cached after MetadataWrapper runs).
+    _uses_qnp = cst.metadata.QualifiedNameProvider in metadata_providers
+    if target_qnames and _uses_qnp:
+        before = len(file_contents)
+        t0 = time.monotonic()
+        filtered_contents: list[tuple[str, str]] = []
+        n_cache_hits = 0
+        for py_file, content in file_contents:
+            # Always visit the definition file
+            if target_file and str(Path(py_file).resolve()) == target_file:
+                filtered_contents.append((py_file, content))
+                continue
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            cached_qns = _get_cached_qnames(content_hash)
+            if cached_qns is not None:
+                n_cache_hits += 1
+                if not target_qnames.intersection(cached_qns):
+                    continue  # no overlap → skip
+            filtered_contents.append((py_file, content))
+        logger.info(
+            "visit_project: qn_index filter %d -> %d in %.3fs "
+            "(%d cache hits)",
+            before, len(filtered_contents),
+            time.monotonic() - t0, n_cache_hits,
+        )
+        file_contents = filtered_contents
+
     if metadata_providers and len(file_contents) > 1:
         # Parallel path: each MetadataWrapper is independent per file — no shared state
         def _visit_one(args: tuple[str, str]) -> tuple[str, cst.Module, object] | None:
@@ -466,6 +598,18 @@ def visit_project(
                 visitor = visitor_factory(py_file, is_def_file)
                 wrapper = cst.metadata.MetadataWrapper(module)
                 result_module = wrapper.visit(visitor)
+                # Cache QN data as a side-effect (second pass is cheap
+                # because QualifiedNameProvider is already resolved).
+                if _uses_qnp:
+                    try:
+                        collector = _QNCollector()
+                        wrapper.visit(collector)
+                        content_hash = hashlib.md5(
+                            content.encode(), usedforsecurity=False
+                        ).digest()
+                        _store_qnames(content_hash, collector.all_qnames)
+                    except Exception:
+                        pass
                 return (py_file, result_module, visitor)
             except Exception:
                 return None
@@ -492,6 +636,17 @@ def visit_project(
                 if metadata_providers:
                     wrapper = cst.metadata.MetadataWrapper(module)
                     result_module = wrapper.visit(visitor)
+                    # Cache QN data
+                    if _uses_qnp:
+                        try:
+                            collector = _QNCollector()
+                            wrapper.visit(collector)
+                            content_hash = hashlib.md5(
+                                content.encode(), usedforsecurity=False
+                            ).digest()
+                            _store_qnames(content_hash, collector.all_qnames)
+                        except Exception:
+                            pass
                 else:
                     result_module = module.visit(visitor)
                 logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
@@ -4249,6 +4404,9 @@ def find_references(
     # from the module defining the target symbol.
     candidates = _files_importing_module(scan_root, target_module)
 
+    # Compute the set of qualified names we're looking for (for QN-index filtering)
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     references = []
     for _py_file, _module, finder in visit_project(
         name_hint=symbol_name,
@@ -4257,6 +4415,7 @@ def find_references(
         metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         references.extend(finder.references)
 
@@ -4390,6 +4549,8 @@ def find_callers(
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
 
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     callers = []
     for _py_file, _module, visitor in visit_project(
         name_hint=symbol_name,
@@ -4398,6 +4559,7 @@ def find_callers(
         metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         callers.extend(visitor.call_references)
 
@@ -5081,6 +5243,8 @@ def rename_symbol(
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
 
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     diffs = {}
     for py_file, result_module, renamer in visit_project(
         name_hint=symbol_name,
@@ -5089,6 +5253,7 @@ def rename_symbol(
         metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         if not renamer.changed:
             continue
