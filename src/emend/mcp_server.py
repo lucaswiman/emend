@@ -721,9 +721,36 @@ def copy_to(
 # ---------------------------------------------------------------------------
 
 
+def _warm_caches_background() -> None:
+    """Warm parse and QN-index caches in a background process.
+
+    Launched at MCP server start so that subsequent tool calls are fast.
+    Uses multiprocessing so the cache-warming work doesn't block the
+    event loop serving MCP requests.
+    """
+    import multiprocessing
+    import logging as _logging
+
+    def _worker() -> None:
+        try:
+            from emend.transform import warm_caches
+            _logging.basicConfig(level=_logging.WARNING)
+            warm_caches(".")
+        except Exception:
+            pass  # best-effort; don't crash the server
+
+    proc = multiprocessing.Process(target=_worker, daemon=True)
+    proc.start()
+
+
 def run_server(transport: str = "stdio", port: int = 8000) -> None:
     """Start the MCP server."""
     if transport not in ("stdio", "sse"):
         raise ValueError(f"Unknown transport: {transport!r}. Use 'stdio' or 'sse'.")
+
+    # Kick off cache warming in a background process so the first tool
+    # call doesn't pay the full indexing cost.
+    _warm_caches_background()
+
     mcp_app.settings.port = port
     mcp_app.run(transport=transport)

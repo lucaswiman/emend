@@ -15,7 +15,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph, find_dead_code,
-    extract_pattern_literals,
+    extract_pattern_literals, warm_caches,
 )
 from emend import ast_commands
 
@@ -1641,6 +1641,63 @@ def types_cmd(
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(2)
+
+
+@app.command("index")
+def index_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root directory")
+    ] = ".",
+    jobs: Annotated[
+        Optional[int],
+        typer.Option("--jobs", "-j", help="Max parallel workers (default: CPU count)")
+    ] = None,
+):
+    """Pre-build caches for faster cross-project operations.
+
+    Parses every Python file in the project and builds:
+    - LibCST parse cache (speeds up all pattern operations)
+    - Qualified-name index (speeds up refs, rename, callers)
+
+    Run this once after cloning a repo or when starting work on a new
+    codebase. Subsequent emend commands will be significantly faster.
+
+    Examples:
+        emend index
+        emend index src/ --jobs 8
+    """
+    import time as _time
+    t0 = _time.monotonic()
+
+    n_done = 0
+    total = None
+
+    def _progress(phase: str, file_path: str) -> None:
+        nonlocal n_done
+        n_done += 1
+        if total and sys.stderr.isatty():
+            pct = n_done * 100 // total
+            print(f"\r  [{pct:3d}%] {n_done}/{total} files indexed", end="", file=sys.stderr)
+
+    # Quick count for progress bar
+    from emend.transform import _collect_python_files_scandir
+    from pathlib import Path as _Path
+    scan_root = str(_Path(path).resolve())
+    total = len(_collect_python_files_scandir(scan_root))
+    print(f"Indexing {total} Python files in {scan_root}...", file=sys.stderr)
+
+    stats = warm_caches(path, jobs=jobs, callback=_progress)
+
+    if sys.stderr.isatty():
+        print("", file=sys.stderr)  # newline after progress
+
+    elapsed = _time.monotonic() - t0
+    print(
+        f"Indexed {stats['files']} files in {elapsed:.1f}s "
+        f"(parse: {stats['parse_cached']}, qn: {stats['qn_cached']})",
+        file=sys.stderr,
+    )
 
 
 @app.command("mcp")

@@ -112,6 +112,23 @@ for details on scopes, environment variables, and managed configurations.
 
 Run `emend --help` to verify. Full documentation at [lucaswiman.github.io/emend](https://lucaswiman.github.io/emend/).
 
+### Indexing (recommended for large codebases)
+
+After installing, run `emend index` in your project root to pre-build caches:
+
+```bash
+emend index                  # index current directory
+emend index src/ --jobs 8    # index specific directory with 8 workers
+```
+
+This parses every Python file and builds a qualified-name index, so subsequent
+cross-project operations (`refs`, `rename`, `callers`, `deadcode`) are
+significantly faster. The cache is stored in `.emend/cache/` (automatically
+gitignored and dockerignored). Re-run after large merges or branch switches.
+
+When using the MCP server (`emend mcp`), indexing happens automatically in the
+background on startup.
+
 ## Usage
 
 ```bash
