@@ -9,7 +9,7 @@ Using uv with free-threaded Python (recommended)
 
 .. code-block:: bash
 
-   uv tool install --python 3.14t emend
+   uv tool install --python 3.13t emend
 
 Python 3.13+ ships a **free-threaded** variant (``3.13t``, ``3.14t``) that removes
 the Global Interpreter Lock (GIL). emend's Rust core is already GIL-free, so on a
@@ -17,12 +17,14 @@ free-threaded interpreter it can parallelize file I/O and pattern-matching with 
 lock contention — giving substantially faster results on multi-file operations like
 ``search``, ``lint``, ``refs``, and ``rename`` across large codebases.
 
-Use ``3.13t`` for the stable free-threaded release:
+We recommend **3.13t** for the free-threaded interpreter. The ``3.14t`` variant also
+works for core emend commands, but the optional MCP server (``emend mcp``) depends on
+Pydantic which does not yet support Python 3.14t (as of February 28, 2026):
 
 .. code-block:: bash
 
-   uv tool install --python 3.13t emend   # free-threaded 3.13 (stable)
-   uv tool install --python 3.14t emend   # free-threaded 3.14 (latest)
+   uv tool install --python 3.13t emend   # free-threaded 3.13 (recommended)
+   uv tool install --python 3.14t emend   # free-threaded 3.14 (no MCP server support)
 
 Using uv (standard Python)
 --------------------------
@@ -37,6 +39,28 @@ Using pip
 .. code-block:: bash
 
    pip install emend
+
+MCP server
+----------
+
+To use emend as an `MCP <https://modelcontextprotocol.io/>`_ server for LLM-based
+clients, install the optional ``mcp`` extra:
+
+.. code-block:: bash
+
+   pip install emend[mcp]
+
+Then start the server:
+
+.. code-block:: bash
+
+   emend mcp                              # stdio transport (default)
+   emend mcp --transport sse --port 8080  # SSE transport
+
+.. note::
+
+   The MCP server requires Pydantic, which does not support Python 3.14t as of
+   February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
 
 Verifying installation
 ----------------------
@@ -80,6 +104,6 @@ Or manually:
 
 .. code-block:: bash
 
-   uv venv .venv --python 3.14t
+   uv venv .venv --python 3.13t
    uv pip install maturin
    .venv/bin/maturin develop -E dev
