@@ -317,7 +317,7 @@ class TestPyrightIntegration:
         f = tmp_path / "test.py"
         f.write_text(source)
 
-        oracle = create_type_oracle(engine="pyright")
+        oracle = create_type_oracle(engine="pyright", project_root=tmp_path)
         with caplog.at_level(logging.INFO, logger="emend.type_oracle"):
             ft = oracle.infer_file(f, project_root=tmp_path)
 

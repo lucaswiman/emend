@@ -14,7 +14,7 @@
 | `ast_utils.py` | AST traversal utilities using LibCST (`_NestedDefinitionVisitor` with `PositionProvider`) |
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
-| `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine` |
+| `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
 | `grammars/pattern.lark` | Lark grammar for pattern syntax |
 
@@ -80,7 +80,7 @@
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
-| `index` | Pre-build parse and QN-index caches for faster cross-project operations (`--jobs`) |
+| `index` | Pre-build parse, QN-index, and type-cache schema in `parse.db` for faster cross-project operations (`--jobs`) |
 
 ## Architecture
 
@@ -122,6 +122,8 @@ All cross-project functions use the shared `visit_project()` helper in `transfor
 - `FileTypes` / `TypeBinding` -- structured result types; `FileTypes.build_index()` enables O(1) positional lookup
 
 Pattern constraints `:type[X]` and `:returns[X]` are parsed by the `ORACLE_TYPE_CONSTRAINT` grammar terminal and post-filtered by `_filter_matches_by_type_oracle()` in `transform.py`.  Lookup (`search` / `query_symbols`) uses `_filter_by_returns_with_oracle()` in `query.py` as a fallback when no annotation is present.
+
+Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the shared `.emend/cache/parse.db` database (`type_cache` table, keyed by file content hash).  All oracle calls check this cache before invoking the underlying type engine.
 
 ### Dead Code Detection
 
