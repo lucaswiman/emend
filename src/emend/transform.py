@@ -72,6 +72,98 @@ def _get_disk_cache() -> sqlite3.Connection | None:
                 "CREATE TABLE IF NOT EXISTS type_cache "
                 "(hash TEXT PRIMARY KEY, data BLOB)"
             )
+            # --- New index tables (schema v2) ---
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS index_meta "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS file_manifest ("
+                "  path TEXT PRIMARY KEY,"
+                "  mtime_ns INTEGER NOT NULL,"
+                "  size INTEGER NOT NULL,"
+                "  content_hash BLOB NOT NULL,"
+                "  indexed_at REAL NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
+                "ON file_manifest(content_hash)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS symbol_index ("
+                "  content_hash BLOB NOT NULL,"
+                "  file_path TEXT NOT NULL,"
+                "  name TEXT NOT NULL,"
+                "  qualified_name TEXT NOT NULL,"
+                "  kind TEXT NOT NULL,"
+                "  line INTEGER NOT NULL,"
+                "  end_line INTEGER NOT NULL,"
+                "  depth INTEGER NOT NULL DEFAULT 1,"
+                "  parent TEXT,"
+                "  signature TEXT,"
+                "  returns TEXT,"
+                "  decorators TEXT"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_name "
+                "ON symbol_index(name)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_qn "
+                "ON symbol_index(qualified_name)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_file "
+                "ON symbol_index(file_path)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_hash "
+                "ON symbol_index(content_hash)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_kind "
+                "ON symbol_index(kind)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS import_graph ("
+                "  content_hash BLOB NOT NULL,"
+                "  file_path TEXT NOT NULL,"
+                "  imported_module TEXT NOT NULL,"
+                "  PRIMARY KEY (content_hash, imported_module)"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_import_module "
+                "ON import_graph(imported_module)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_import_hash "
+                "ON import_graph(content_hash)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS reference_index ("
+                "  content_hash BLOB NOT NULL,"
+                "  target_qn TEXT NOT NULL,"
+                "  file_path TEXT NOT NULL,"
+                "  line INTEGER NOT NULL,"
+                "  col INTEGER NOT NULL,"
+                "  ref_kind TEXT NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ref_qn "
+                "ON reference_index(target_qn)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ref_file "
+                "ON reference_index(file_path)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ref_hash "
+                "ON reference_index(content_hash)"
+            )
             conn.commit()
             _disk_cache_conn = conn
             logger.debug("disk parse cache opened at %s", db_path)
@@ -245,32 +337,115 @@ class _QNCollector(cst.CSTVisitor):
             pass
 
 
-def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int]:
+class _RefIndexCollector(cst.CSTVisitor):
+    """Visitor that collects reference index entries for every Name/Attribute node.
+
+    Records (target_qn, line, col, ref_kind) for each resolved qualified name.
+    Designed to run on an already-resolved MetadataWrapper (like _QNCollector).
+    """
+    METADATA_DEPENDENCIES = (
+        cst.metadata.QualifiedNameProvider,
+        cst.metadata.PositionProvider,
+        cst.metadata.ParentNodeProvider,
+    )
+
+    def __init__(self) -> None:
+        self.refs: list[tuple[str, int, int, str]] = []  # (qn, line, col, kind)
+        self._in_import = False
+
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
+        self._in_import = True
+        return True
+
+    def leave_ImportFrom(self, node: cst.ImportFrom) -> None:
+        self._in_import = False
+
+    def visit_Import(self, node: cst.Import) -> bool:
+        self._in_import = True
+        return True
+
+    def leave_Import(self, node: cst.Import) -> None:
+        self._in_import = False
+
+    def _classify(self, node: cst.CSTNode) -> str:
+        """Determine the reference kind for a node."""
+        if self._in_import:
+            return "import"
+        try:
+            parent = self.get_metadata(cst.metadata.ParentNodeProvider, node)
+            # Check if this is a call target
+            if isinstance(parent, cst.Call) and parent.func is node:
+                return "call"
+            # Check if parent is an Attribute and that Attribute is the call target
+            if isinstance(parent, cst.Attribute):
+                try:
+                    grandparent = self.get_metadata(
+                        cst.metadata.ParentNodeProvider, parent
+                    )
+                    if isinstance(grandparent, cst.Call) and grandparent.func is parent:
+                        return "call"
+                except KeyError:
+                    pass
+            # Check for write contexts
+            if isinstance(parent, cst.AssignTarget):
+                return "write"
+            if isinstance(parent, (cst.AugAssign,)):
+                return "write"
+        except KeyError:
+            pass
+        return "read"
+
+    def _record(self, node: cst.CSTNode) -> None:
+        try:
+            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
+        except KeyError:
+            return
+        try:
+            pos = self.get_metadata(cst.metadata.PositionProvider, node)
+        except KeyError:
+            return
+        kind = self._classify(node)
+        for qn in qnames:
+            self.refs.append((qn.name, pos.start.line, pos.start.column, kind))
+
+    def visit_Name(self, node: cst.Name) -> None:
+        self._record(node)
+
+    def visit_Attribute(self, node: cst.Attribute) -> None:
+        self._record(node)
+
+
+def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
     Runs in a subprocess.  Parses a batch of files, resolves qualified
-    names, and writes directly to the SQLite disk cache — avoiding the
-    cost of serialising LibCST modules back to the main process.
+    names, collects symbol definitions, import relationships, and
+    reference entries, then writes directly to the SQLite disk cache.
 
-    Files whose content hash is already present in both cache tables are
+    Files whose content hash is already present in all cache tables are
     skipped without parsing (cache-hit fast path).
 
     Args:
         args: (db_path, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count, skipped_count) — entries written / skipped.
+        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count).
     """
     import pickle
     import sqlite3
     import zlib
+    from .query import _SymbolCollector
+    from libcst.metadata import PositionProvider, MetadataWrapper
 
     db_path, file_batch = args
     parse_rows: list[tuple[bytes, bytes]] = []
     qn_rows: list[tuple[bytes, bytes]] = []
+    sym_rows: list[tuple] = []
+    import_rows: list[tuple[bytes, str, str]] = []
+    ref_rows: list[tuple] = []
 
     if not file_batch:
-        return (0, 0, 0)
+        return (0, 0, 0, 0, 0, 0)
 
     # Compute content hashes up-front so we can bulk-check the cache.
     file_hashes: list[tuple[bytes, str, str]] = [
@@ -279,47 +454,70 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
     ]
     all_hashes = [h for h, _, _ in file_hashes]
 
-    # Pre-check which hashes are already present in both cache tables.
+    # Pre-check which hashes are already present in cache tables.
     cached_parse: set[bytes] = set()
     cached_qn: set[bytes] = set()
+    cached_sym: set[bytes] = set()
+    cached_import: set[bytes] = set()
+    cached_ref: set[bytes] = set()
     try:
         conn_check = sqlite3.connect(db_path, timeout=30)
         conn_check.execute("PRAGMA journal_mode=WAL")
         conn_check.execute("PRAGMA synchronous=NORMAL")
         placeholders = ",".join("?" * len(all_hashes))
-        try:
-            cached_parse = {
-                row[0]
-                for row in conn_check.execute(
-                    f"SELECT hash FROM parse_cache WHERE hash IN ({placeholders})",
-                    all_hashes,
-                ).fetchall()
-            }
-        except Exception:
-            pass
-        try:
-            cached_qn = {
-                row[0]
-                for row in conn_check.execute(
-                    f"SELECT hash FROM qn_index WHERE hash IN ({placeholders})",
-                    all_hashes,
-                ).fetchall()
-            }
-        except Exception:
-            pass
+        for table, target_set in [
+            ("parse_cache", cached_parse),
+            ("qn_index", cached_qn),
+        ]:
+            try:
+                target_set.update(
+                    row[0]
+                    for row in conn_check.execute(
+                        f"SELECT hash FROM {table} WHERE hash IN ({placeholders})",
+                        all_hashes,
+                    ).fetchall()
+                )
+            except Exception:
+                pass
+        # For the new tables, check by content_hash column
+        for table, target_set in [
+            ("symbol_index", cached_sym),
+            ("import_graph", cached_import),
+            ("reference_index", cached_ref),
+        ]:
+            try:
+                target_set.update(
+                    row[0]
+                    for row in conn_check.execute(
+                        f"SELECT DISTINCT content_hash FROM {table} "
+                        f"WHERE content_hash IN ({placeholders})",
+                        all_hashes,
+                    ).fetchall()
+                )
+            except Exception:
+                pass
         conn_check.close()
     except Exception:
         pass  # If pre-check fails, process everything
 
     skipped = 0
-    for content_hash, _py_file, content in file_hashes:
+    for content_hash, py_file, content in file_hashes:
         need_parse = content_hash not in cached_parse
         need_qn = content_hash not in cached_qn
+        need_sym = content_hash not in cached_sym
+        need_import = content_hash not in cached_import
+        need_ref = content_hash not in cached_ref
+        # Skip if the core caches (parse + QN) are populated.
+        # The derived tables (symbol_index, import_graph, reference_index)
+        # may legitimately have zero rows for a given file (e.g., a file
+        # with only assignments has no symbols, a file with no imports has
+        # no import_graph rows).  We re-derive them only when the core
+        # caches need updating.
         if not need_parse and not need_qn:
             skipped += 1
             continue
 
-        # Parse (required for both cache types).
+        # Parse (required for all index types).
         try:
             module = cst.parse_module(content)
         except Exception:
@@ -334,10 +532,16 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
             except Exception:
                 pass
 
-        if need_qn:
-            # QN index
+        # MetadataWrapper is needed for QN, symbols, and references.
+        wrapper = None
+        if need_qn or need_sym or need_ref:
             try:
                 wrapper = cst.metadata.MetadataWrapper(module)
+            except Exception:
+                wrapper = None
+
+        if need_qn and wrapper is not None:
+            try:
                 collector = _QNCollector()
                 wrapper.visit(collector)
                 qn_blob = zlib.compress(
@@ -348,9 +552,70 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
             except Exception:
                 pass
 
+        if need_sym:
+            try:
+                if wrapper is not None:
+                    sym_collector = _SymbolCollector(py_file)
+                    wrapper.visit(sym_collector)
+                else:
+                    # Fallback: create wrapper just for PositionProvider
+                    w = cst.metadata.MetadataWrapper(module)
+                    sym_collector = _SymbolCollector(py_file)
+                    w.visit(sym_collector)
+                for sym in sym_collector.symbols:
+                    # Build qualified_name from file module path + symbol path
+                    # For index batch, use the dotted symbol path from the selector
+                    parts = sym.path.split("::", 1)
+                    dotted = parts[1] if len(parts) > 1 else sym.name
+                    sig = None
+                    if sym.parameters:
+                        ret_str = f" -> {sym.returns}" if sym.returns else ""
+                        sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
+                    sym_rows.append((
+                        content_hash,
+                        py_file,
+                        sym.name,
+                        dotted,
+                        sym.kind,
+                        sym.line,
+                        sym.end_line,
+                        sym.depth,
+                        sym.parent,
+                        sig,
+                        sym.returns,
+                        ",".join(sym.decorators) if sym.decorators else None,
+                    ))
+            except Exception:
+                pass
+
+        if need_import:
+            try:
+                # Use a lightweight regex-based import extraction
+                # (avoids importing the Rust module in subprocesses)
+                import_re = re.compile(
+                    r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+                    re.MULTILINE,
+                )
+                for m_match in import_re.finditer(content):
+                    mod = m_match.group(1) or m_match.group(2)
+                    if mod:
+                        import_rows.append((content_hash, py_file, mod))
+            except Exception:
+                pass
+
+        if need_ref and wrapper is not None:
+            try:
+                ref_collector = _RefIndexCollector()
+                wrapper.visit(ref_collector)
+                for qn_str, line, col, kind in ref_collector.refs:
+                    ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
+            except Exception:
+                pass
+
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
-    if parse_rows or qn_rows:
+    has_data = parse_rows or qn_rows or sym_rows or import_rows or ref_rows
+    if has_data:
         try:
             conn = sqlite3.connect(db_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -371,12 +636,577 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                 conn.executemany(
                     "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
                 )
+            if sym_rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS symbol_index ("
+                    "  content_hash BLOB NOT NULL,"
+                    "  file_path TEXT NOT NULL,"
+                    "  name TEXT NOT NULL,"
+                    "  qualified_name TEXT NOT NULL,"
+                    "  kind TEXT NOT NULL,"
+                    "  line INTEGER NOT NULL,"
+                    "  end_line INTEGER NOT NULL,"
+                    "  depth INTEGER NOT NULL DEFAULT 1,"
+                    "  parent TEXT,"
+                    "  signature TEXT,"
+                    "  returns TEXT,"
+                    "  decorators TEXT"
+                    ")"
+                )
+                # Delete old entries for these hashes before inserting
+                hashes_with_syms = list({r[0] for r in sym_rows})
+                for h in hashes_with_syms:
+                    conn.execute(
+                        "DELETE FROM symbol_index WHERE content_hash = ?", (h,)
+                    )
+                conn.executemany(
+                    "INSERT INTO symbol_index "
+                    "(content_hash, file_path, name, qualified_name, kind, "
+                    "line, end_line, depth, parent, signature, returns, decorators) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    sym_rows,
+                )
+            if import_rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS import_graph ("
+                    "  content_hash BLOB NOT NULL,"
+                    "  file_path TEXT NOT NULL,"
+                    "  imported_module TEXT NOT NULL,"
+                    "  PRIMARY KEY (content_hash, imported_module)"
+                    ")"
+                )
+                hashes_with_imports = list({r[0] for r in import_rows})
+                for h in hashes_with_imports:
+                    conn.execute(
+                        "DELETE FROM import_graph WHERE content_hash = ?", (h,)
+                    )
+                conn.executemany(
+                    "INSERT OR IGNORE INTO import_graph "
+                    "(content_hash, file_path, imported_module) "
+                    "VALUES (?, ?, ?)",
+                    import_rows,
+                )
+            if ref_rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS reference_index ("
+                    "  content_hash BLOB NOT NULL,"
+                    "  target_qn TEXT NOT NULL,"
+                    "  file_path TEXT NOT NULL,"
+                    "  line INTEGER NOT NULL,"
+                    "  col INTEGER NOT NULL,"
+                    "  ref_kind TEXT NOT NULL"
+                    ")"
+                )
+                hashes_with_refs = list({r[0] for r in ref_rows})
+                for h in hashes_with_refs:
+                    conn.execute(
+                        "DELETE FROM reference_index WHERE content_hash = ?", (h,)
+                    )
+                conn.executemany(
+                    "INSERT INTO reference_index "
+                    "(content_hash, target_qn, file_path, line, col, ref_kind) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ref_rows,
+                )
             conn.commit()
             conn.close()
         except Exception:
             pass
 
-    return (len(parse_rows), len(qn_rows), skipped)
+    return (len(parse_rows), len(qn_rows), skipped,
+            len(sym_rows), len(import_rows), len(ref_rows))
+
+
+# ---------------------------------------------------------------------------
+# Staleness detection and incremental index helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ManifestScanResult:
+    """Result of scanning the file manifest for staleness."""
+    unchanged: list[str]             # files with matching mtime+size
+    changed: list[tuple[str, bytes, bytes]]  # (path, old_hash, new_hash)
+    new_files: list[str]             # files not in manifest
+    deleted: list[str]               # manifest entries with no file on disk
+    git_head_changed: bool           # True if HEAD differs from stored HEAD
+
+
+def _scan_manifest(
+    project_path: str,
+    conn: sqlite3.Connection | None = None,
+) -> ManifestScanResult:
+    """Three-tier staleness check against the file manifest.
+
+    Tier 1: Git HEAD check (~1ms).
+    Tier 2: File stat scan (mtime_ns + size, no I/O).
+    Tier 3: Content hash verification (only for stat-mismatched files).
+
+    Returns a ManifestScanResult with categorized files.
+    """
+    import os as _os
+    import sqlite3 as _sql3
+
+    result = ManifestScanResult(
+        unchanged=[], changed=[], new_files=[], deleted=[],
+        git_head_changed=False,
+    )
+
+    project_root = _find_project_root(project_path)
+    scan_root = str(Path(project_path).resolve())
+    py_files = _collect_python_files_scandir(scan_root)
+    py_files_resolved = {str(Path(f).resolve()): f for f in py_files}
+
+    # Open DB (use provided conn or open fresh)
+    close_conn = False
+    if conn is None:
+        cache_dir = Path(project_root) / ".emend" / "cache"
+        db_path = cache_dir / "parse.db"
+        if not db_path.exists():
+            # No index at all — everything is new
+            result.new_files = py_files
+            return result
+        try:
+            conn = _sql3.connect(str(db_path), timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            close_conn = True
+        except Exception:
+            result.new_files = py_files
+            return result
+
+    try:
+        # Tier 1: Git HEAD check
+        try:
+            import subprocess as _sp
+            git_result = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, timeout=5,
+                cwd=project_root,
+            )
+            if git_result.returncode == 0:
+                current_head = git_result.stdout.decode().strip()
+                stored = conn.execute(
+                    "SELECT value FROM index_meta WHERE key = 'git_head'"
+                ).fetchone()
+                if stored and stored[0] != current_head:
+                    result.git_head_changed = True
+        except Exception:
+            pass
+
+        # Tier 2 + 3: Stat scan + hash verification
+        # Load manifest into memory for fast lookup
+        manifest: dict[str, tuple[int, int, bytes]] = {}
+        try:
+            for row in conn.execute(
+                "SELECT path, mtime_ns, size, content_hash FROM file_manifest"
+            ).fetchall():
+                manifest[row[0]] = (row[1], row[2], row[3])
+        except Exception:
+            # Table might not exist yet
+            result.new_files = py_files
+            return result
+
+        manifest_paths = set(manifest.keys())
+        current_paths = set(py_files_resolved.keys())
+
+        # Deleted files
+        result.deleted = list(manifest_paths - current_paths)
+
+        for resolved_path, original_path in py_files_resolved.items():
+            if resolved_path not in manifest:
+                result.new_files.append(original_path)
+                continue
+
+            stored_mtime, stored_size, stored_hash = manifest[resolved_path]
+
+            # Tier 2: stat check
+            try:
+                st = _os.stat(resolved_path)
+            except OSError:
+                result.deleted.append(resolved_path)
+                continue
+
+            if st.st_mtime_ns == stored_mtime and st.st_size == stored_size:
+                result.unchanged.append(original_path)
+                continue
+
+            # Tier 3: content hash verification
+            try:
+                content = Path(resolved_path).read_text()
+                actual_hash = hashlib.md5(
+                    content.encode(), usedforsecurity=False
+                ).digest()
+                if actual_hash == stored_hash:
+                    # Content identical — just mtime changed (e.g. git checkout)
+                    # Update manifest mtime in-place
+                    try:
+                        conn.execute(
+                            "UPDATE file_manifest SET mtime_ns = ?, size = ? "
+                            "WHERE path = ?",
+                            (st.st_mtime_ns, st.st_size, resolved_path),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+                    result.unchanged.append(original_path)
+                else:
+                    result.changed.append((original_path, stored_hash, actual_hash))
+            except Exception:
+                result.new_files.append(original_path)
+    finally:
+        if close_conn and conn:
+            conn.close()
+
+    return result
+
+
+def _ensure_index_fresh(
+    project_path: str,
+    *,
+    max_inline_reindex: int = 50,
+) -> bool:
+    """Lightweight freshness check for the index.
+
+    If the index is fresh, returns True immediately.
+    If a small number of files changed, re-indexes them inline and returns True.
+    If many files changed or no index exists, returns False (caller should
+    fall back to cold path or suggest ``emend index``).
+    """
+    import sqlite3 as _sql3
+
+    project_root = _find_project_root(project_path)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+    if not db_path.exists():
+        return False
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        return False
+
+    try:
+        # Check if index tables exist and have data
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM symbol_index").fetchone()[0]
+        except Exception:
+            conn.close()
+            return False
+        if count == 0:
+            conn.close()
+            return False
+
+        scan = _scan_manifest(project_path, conn=conn)
+        n_stale = len(scan.changed) + len(scan.new_files)
+        if n_stale == 0 and not scan.deleted:
+            conn.close()
+            return True
+
+        if n_stale > max_inline_reindex:
+            conn.close()
+            return False
+
+        # Inline re-index the small number of changed/new files
+        files_to_index: list[tuple[str, str]] = []
+        for path in scan.new_files:
+            try:
+                content = Path(path).read_text()
+                files_to_index.append((path, content))
+            except Exception:
+                pass
+        for path, _old_hash, _new_hash in scan.changed:
+            try:
+                content = Path(path).read_text()
+                files_to_index.append((path, content))
+            except Exception:
+                pass
+
+        if files_to_index:
+            _index_batch((str(db_path), files_to_index))
+            # Update manifest for re-indexed files
+            import os as _os
+            now = time.time()
+            for py_file, content in files_to_index:
+                content_hash = hashlib.md5(
+                    content.encode(), usedforsecurity=False
+                ).digest()
+                resolved = str(Path(py_file).resolve())
+                try:
+                    st = _os.stat(resolved)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO file_manifest "
+                        "(path, mtime_ns, size, content_hash, indexed_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (resolved, st.st_mtime_ns, st.st_size, content_hash, now),
+                    )
+                except Exception:
+                    pass
+            conn.commit()
+
+        # Clean up deleted files
+        for deleted_path in scan.deleted:
+            try:
+                # Get the content_hash for this path to clean derived tables
+                row = conn.execute(
+                    "SELECT content_hash FROM file_manifest WHERE path = ?",
+                    (deleted_path,),
+                ).fetchone()
+                if row:
+                    old_hash = row[0]
+                    conn.execute(
+                        "DELETE FROM symbol_index WHERE content_hash = ?", (old_hash,)
+                    )
+                    conn.execute(
+                        "DELETE FROM import_graph WHERE content_hash = ?", (old_hash,)
+                    )
+                    conn.execute(
+                        "DELETE FROM reference_index WHERE content_hash = ?", (old_hash,)
+                    )
+                conn.execute(
+                    "DELETE FROM file_manifest WHERE path = ?", (deleted_path,)
+                )
+            except Exception:
+                pass
+        if scan.deleted:
+            conn.commit()
+
+        conn.close()
+        return True
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def query_symbol_index(
+    project_path: str,
+    *,
+    name_pattern: str | None = None,
+    kind: str | None = None,
+    file_path: str | None = None,
+    qualified_name: str | None = None,
+    limit: int = 0,
+) -> list[dict] | None:
+    """Query the symbol_index table directly for fast symbol lookup.
+
+    Returns a list of dicts with symbol info, or None if the index
+    is not available or not fresh.
+    """
+    import sqlite3 as _sql3
+
+    if not _ensure_index_fresh(project_path):
+        return None
+
+    project_root = _find_project_root(project_path)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        return None
+
+    try:
+        conditions = []
+        params: list = []
+
+        if name_pattern:
+            if "*" in name_pattern or "?" in name_pattern:
+                # Convert glob to SQL GLOB
+                conditions.append("name GLOB ?")
+                params.append(name_pattern)
+            else:
+                conditions.append("name = ?")
+                params.append(name_pattern)
+
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+
+        if file_path:
+            resolved = str(Path(file_path).resolve())
+            conditions.append("file_path = ?")
+            params.append(resolved)
+
+        if qualified_name:
+            conditions.append("qualified_name = ?")
+            params.append(qualified_name)
+
+        where = " AND ".join(conditions) if conditions else "1=1"
+        query = (
+            f"SELECT name, qualified_name, kind, file_path, line, end_line, "
+            f"depth, parent, signature, returns, decorators "
+            f"FROM symbol_index WHERE {where} ORDER BY name, file_path, line"
+        )
+        if limit > 0:
+            query += f" LIMIT {limit}"
+
+        rows = conn.execute(query, params).fetchall()
+        results = []
+        for row in rows:
+            results.append({
+                "name": row[0],
+                "qualified_name": row[1],
+                "kind": row[2],
+                "file_path": row[3],
+                "line": row[4],
+                "end_line": row[5],
+                "depth": row[6],
+                "parent": row[7],
+                "signature": row[8],
+                "returns": row[9],
+                "decorators": row[10].split(",") if row[10] else [],
+            })
+        conn.close()
+        return results
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+
+
+def query_reference_index(
+    project_path: str,
+    target_qn: str,
+    *,
+    ref_kind: str | None = None,
+) -> list[dict] | None:
+    """Query the reference_index table for fast find-references.
+
+    Returns a list of dicts with reference info, or None if the index
+    is not available or not fresh.
+    """
+    import sqlite3 as _sql3
+
+    if not _ensure_index_fresh(project_path):
+        return None
+
+    project_root = _find_project_root(project_path)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        return None
+
+    try:
+        if ref_kind:
+            rows = conn.execute(
+                "SELECT file_path, line, col, ref_kind FROM reference_index "
+                "WHERE target_qn = ? AND ref_kind = ? "
+                "ORDER BY file_path, line",
+                (target_qn, ref_kind),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT file_path, line, col, ref_kind FROM reference_index "
+                "WHERE target_qn = ? ORDER BY file_path, line",
+                (target_qn,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            results.append({
+                "file_path": row[0],
+                "line": row[1],
+                "col": row[2],
+                "ref_kind": row[3],
+            })
+        conn.close()
+        return results
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+
+
+def query_import_graph(
+    project_path: str,
+    imported_module: str,
+) -> list[str] | None:
+    """Query the import_graph for files importing a module.
+
+    Returns file paths, or None if index not available.
+    """
+    import sqlite3 as _sql3
+
+    project_root = _find_project_root(project_path)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+    if not db_path.exists():
+        return None
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        rows = conn.execute(
+            "SELECT DISTINCT file_path FROM import_graph "
+            "WHERE imported_module = ?",
+            (imported_module,),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+    except Exception:
+        return None
+
+
+def get_index_status(project_path: str) -> dict | None:
+    """Return index freshness stats, or None if no index exists."""
+    import sqlite3 as _sql3
+
+    project_root = _find_project_root(project_path)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+    if not db_path.exists():
+        return None
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        return None
+
+    try:
+        info: dict = {}
+
+        # Index metadata
+        for row in conn.execute("SELECT key, value FROM index_meta").fetchall():
+            info[row[0]] = row[1]
+
+        # Counts
+        for table in ("file_manifest", "symbol_index", "import_graph", "reference_index"):
+            try:
+                info[f"{table}_count"] = conn.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+            except Exception:
+                info[f"{table}_count"] = 0
+
+        # Staleness scan
+        scan = _scan_manifest(project_path, conn=conn)
+        info["unchanged_files"] = len(scan.unchanged)
+        info["changed_files"] = len(scan.changed)
+        info["new_files"] = len(scan.new_files)
+        info["deleted_files"] = len(scan.deleted)
+        info["git_head_changed"] = scan.git_head_changed
+
+        conn.close()
+        return info
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
 
 
 def warm_caches(
@@ -430,7 +1260,11 @@ def warm_caches(
     file_contents = _rust.read_and_filter_files(py_files, [])
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
-    stats: dict[str, int | str] = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0, "skipped": 0, "type_cached": 0, "type_engine": ""}
+    stats: dict[str, int | str] = {
+        "files": len(file_contents), "parse_cached": 0, "qn_cached": 0,
+        "skipped": 0, "sym_cached": 0, "import_cached": 0, "ref_cached": 0,
+        "type_cached": 0, "type_engine": "",
+    }
 
     # Phase 2: parse + QN index in subprocesses.
     # Resolve the DB path and ensure the directory exists before spawning workers.
@@ -453,6 +1287,93 @@ def warm_caches(
         _init_conn.execute(
             "CREATE TABLE IF NOT EXISTS type_cache (hash TEXT PRIMARY KEY, data BLOB)"
         )
+        # --- New index tables ---
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS index_meta "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_manifest ("
+            "  path TEXT PRIMARY KEY,"
+            "  mtime_ns INTEGER NOT NULL,"
+            "  size INTEGER NOT NULL,"
+            "  content_hash BLOB NOT NULL,"
+            "  indexed_at REAL NOT NULL"
+            ")"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
+            "ON file_manifest(content_hash)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS symbol_index ("
+            "  content_hash BLOB NOT NULL,"
+            "  file_path TEXT NOT NULL,"
+            "  name TEXT NOT NULL,"
+            "  qualified_name TEXT NOT NULL,"
+            "  kind TEXT NOT NULL,"
+            "  line INTEGER NOT NULL,"
+            "  end_line INTEGER NOT NULL,"
+            "  depth INTEGER NOT NULL DEFAULT 1,"
+            "  parent TEXT,"
+            "  signature TEXT,"
+            "  returns TEXT,"
+            "  decorators TEXT"
+            ")"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sym_name ON symbol_index(name)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sym_qn ON symbol_index(qualified_name)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sym_file ON symbol_index(file_path)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sym_hash ON symbol_index(content_hash)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sym_kind ON symbol_index(kind)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS import_graph ("
+            "  content_hash BLOB NOT NULL,"
+            "  file_path TEXT NOT NULL,"
+            "  imported_module TEXT NOT NULL,"
+            "  PRIMARY KEY (content_hash, imported_module)"
+            ")"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_import_module "
+            "ON import_graph(imported_module)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_import_hash "
+            "ON import_graph(content_hash)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS reference_index ("
+            "  content_hash BLOB NOT NULL,"
+            "  target_qn TEXT NOT NULL,"
+            "  file_path TEXT NOT NULL,"
+            "  line INTEGER NOT NULL,"
+            "  col INTEGER NOT NULL,"
+            "  ref_kind TEXT NOT NULL"
+            ")"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ref_qn "
+            "ON reference_index(target_qn)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ref_file "
+            "ON reference_index(file_path)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ref_hash "
+            "ON reference_index(content_hash)"
+        )
         _init_conn.commit()
         _init_conn.close()
     except Exception:
@@ -468,12 +1389,15 @@ def warm_caches(
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
-        for batch_idx, (parse_n, qn_n, skip_n) in enumerate(
+        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
             stats["parse_cached"] += parse_n
             stats["qn_cached"] += qn_n
             stats["skipped"] += skip_n
+            stats["sym_cached"] += sym_n
+            stats["import_cached"] += import_n
+            stats["ref_cached"] += ref_n
             # Report progress for all files in this batch
             if callback:
                 _db_path, chunk = batches[batch_idx]
@@ -481,10 +1405,71 @@ def warm_caches(
                     callback("index", py_file)
 
     logger.info(
-        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d)",
+        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d)",
         stats["files"], time.monotonic() - t0,
         stats["parse_cached"], stats["qn_cached"],
+        stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
     )
+
+    # Phase 2.5: Update file_manifest and index_meta with freshness data.
+    try:
+        import os as _os
+        import sqlite3 as _sqlite3
+        _mf_conn = _sqlite3.connect(db_path, timeout=30)
+        _mf_conn.execute("PRAGMA journal_mode=WAL")
+        _mf_conn.execute("PRAGMA synchronous=NORMAL")
+        now = time.time()
+        manifest_rows = []
+        for py_file, content in file_contents:
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            try:
+                st = _os.stat(py_file)
+                manifest_rows.append((
+                    str(Path(py_file).resolve()),
+                    st.st_mtime_ns,
+                    st.st_size,
+                    content_hash,
+                    now,
+                ))
+            except OSError:
+                pass
+        if manifest_rows:
+            _mf_conn.executemany(
+                "INSERT OR REPLACE INTO file_manifest "
+                "(path, mtime_ns, size, content_hash, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                manifest_rows,
+            )
+        # Update git HEAD
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, timeout=5,
+                cwd=project_root,
+            )
+            if result.returncode == 0:
+                head_sha = result.stdout.decode().strip()
+                _mf_conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                    ("git_head", head_sha),
+                )
+        except Exception:
+            pass
+        _mf_conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+            ("indexed_at", str(now)),
+        )
+        _mf_conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+            ("schema_version", "2"),
+        )
+        _mf_conn.commit()
+        _mf_conn.close()
+    except Exception:
+        pass
 
     # Phase 3: type indexing — populate the type_cache table.
     # Runs in the main process.  Pyrefly handles its own parallelism
@@ -778,12 +1763,18 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
 def _files_importing_module(project_root: str, module_dotted: str) -> set[str] | None:
     """Return the set of files that import from *module_dotted*, or None if unknown.
 
-    Uses the Rust targeted import filter: text-prefilters then tree-sitter-parses
-    only candidate files, avoiding building the full import graph.
+    First tries the cached import_graph (instant).  Falls back to the Rust
+    targeted import filter which text-prefilters then tree-sitter-parses
+    only candidate files.
 
     Returns None if the filter cannot be applied (caller should fall back
     to scanning all files).
     """
+    # Fast path: try cached import graph
+    cached = query_import_graph(project_root, module_dotted)
+    if cached is not None:
+        return set(cached) if cached else set()
+
     py_files = _collect_python_files(project_root)
     try:
         matching = _rust.files_importing_module(py_files, module_dotted)
@@ -4699,6 +5690,41 @@ def find_references(
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
 
+    # Compute the set of qualified names we're looking for
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
+    # Warm path: try reference_index first
+    cached_refs = query_reference_index(scan_root, f"{target_module}.{symbol_name}")
+    if cached_refs is None and symbol_name:
+        cached_refs = query_reference_index(scan_root, symbol_name)
+
+    if cached_refs is not None:
+        def _gen_warm() -> Iterator[Reference]:
+            for entry in cached_refs:
+                ref_kind = entry["ref_kind"]
+                is_def = ref_kind == "definition"
+                is_imp = ref_kind == "import"
+                is_wr = ref_kind == "write"
+                if not include_definition and is_def:
+                    continue
+                if not include_imports and is_imp:
+                    continue
+                if writes_only and not is_wr:
+                    continue
+                if reads_only and is_wr:
+                    continue
+                yield Reference(
+                    file_path=entry["file_path"],
+                    line=entry["line"],
+                    column=entry["col"],
+                    offset=0,
+                    is_definition=is_def,
+                    is_import=is_imp,
+                    is_write=is_wr,
+                )
+        return _gen_warm()
+
+    # Cold path: full project scan
     def factory(py_file: str, is_def_file: bool):
         target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
         return _ReferenceFinder(
@@ -4708,9 +5734,6 @@ def find_references(
     # Use import graph to pre-filter: only check files that import
     # from the module defining the target symbol.
     candidates = _files_importing_module(scan_root, target_module)
-
-    # Compute the set of qualified names we're looking for (for QN-index filtering)
-    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
 
     # Use an inner generator so validation above runs eagerly on call, not on first iteration.
     def _gen() -> Iterator[Reference]:
