@@ -717,6 +717,24 @@ def copy_to(
 
 
 # ---------------------------------------------------------------------------
+# grammar_and_cookbook
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def grammar_and_cookbook() -> str:
+    """Return the full emend grammar reference and cookbook.
+
+    Call this tool when you need detailed syntax help for constructing
+    selectors, patterns, or command invocations.  The response covers
+    selector syntax, pattern metavariables, every command with examples,
+    and common refactoring recipes.
+    """
+    import importlib.resources
+    return importlib.resources.read_text("emend", "grammar_and_cookbook.rst")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
