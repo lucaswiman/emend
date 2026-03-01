@@ -17,7 +17,9 @@ import io
 import json
 import sys
 from contextlib import redirect_stdout, redirect_stderr
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -149,19 +151,19 @@ def _capture_output(func: Any, *args: Any, **kwargs: Any) -> str:
 
 @mcp_app.tool()
 def search(
-    query: str,
-    path: str | None = None,
-    kind: str | None = None,
-    name: str | None = None,
-    returns: str | None = None,
-    depth: str | None = None,
-    has_param: str | None = None,
-    output: str = "code",
-    where: str | None = None,
-    imported_from: str | None = None,
-    scope_local: bool = False,
-    case_insensitive: bool = False,
-    smart_case: bool = False,
+    query: Annotated[str, Field(description="Pattern with $X metavars (e.g. 'print($X)'), selector (e.g. 'file.py::func'), or file/dir path.")],
+    path: Annotated[str | None, Field(description="File, glob, or directory to search in (pattern mode).")] = None,
+    kind: Annotated[str | None, Field(description="Symbol kind filter: function, method, class, async_function, async_method.")] = None,
+    name: Annotated[str | None, Field(description="Name pattern filter (glob like 'test_*' or /regex/).")] = None,
+    returns: Annotated[str | None, Field(description="Return type filter.")] = None,
+    depth: Annotated[str | None, Field(description="Nesting depth filter (lookup) or display depth (summary).")] = None,
+    has_param: Annotated[str | None, Field(description="Parameter filter.")] = None,
+    output: Annotated[str, Field(description="Output format: code, location, selector, summary, metadata, json, count, code::dedent, summary::flat.")] = "code",
+    where: Annotated[str | None, Field(description="Scope constraint: 'def', 'class', 'def test_*', 'not class', 'MyClass.method', '@decorator'.")] = None,
+    imported_from: Annotated[str | None, Field(description="Only match when root name is imported from this module.")] = None,
+    scope_local: Annotated[bool, Field(description="Only match locally-defined names, exclude imports.")] = False,
+    case_insensitive: Annotated[bool, Field(description="Case-insensitive matching.")] = False,
+    smart_case: Annotated[bool, Field(description="Match naming convention variants (snake_case/camelCase/etc).")] = False,
 ) -> str:
     """Search for code patterns or symbols in Python files.
 
@@ -169,24 +171,6 @@ def search(
     - Pattern mode: query contains $X metavariables (e.g. 'print($X)')
     - Lookup mode:  query contains :: or is file:line (e.g. 'file.py::func')
     - Summary mode:  bare file/directory path lists symbols
-
-    Args:
-        query: Pattern with $X metavars, selector (file.py::sym), or file/dir.
-        path:  File, glob, or directory for pattern mode search scope.
-        kind:  Symbol kind filter: function, method, class, async_function, async_method.
-        name:  Name pattern filter (glob like 'test_*' or /regex/).
-        returns: Return type filter.
-        depth: Nesting depth filter (lookup) or display depth (summary).
-        has_param: Parameter filter.
-        output: Output format: code, location, selector, summary, metadata, json, count.
-        where: Scope/filter constraint: 'def test_*', 'not class', 'MyClass.method', '@decorator', 'print($X)'.
-        imported_from: Only match when root name is imported from this module.
-        scope_local: Only match locally-defined names, exclude imports.
-        case_insensitive: Case-insensitive matching.
-        smart_case: Match naming convention variants.
-
-    Returns:
-        Search results in the requested output format.
     """
     import re as _re
     from emend.cli import resolve_files, parse_where_clause
@@ -390,26 +374,16 @@ def search(
 
 @mcp_app.tool()
 def replace(
-    pattern: str,
-    replacement: str,
-    path: str,
-    apply: bool = False,
-    where: str | None = None,
+    pattern: Annotated[str, Field(description="Pattern to find (e.g. 'print($X)').")],
+    replacement: Annotated[str, Field(description="Replacement pattern using same $X captures (e.g. 'logger.info($X)').")],
+    path: Annotated[str, Field(description="Python file, glob, or directory to modify.")],
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
+    where: Annotated[str | None, Field(description="Scope constraint: 'def test_*', 'not class', 'MyClass.method'.")] = None,
 ) -> str:
     """Replace pattern matches in Python file(s).
 
     Supports $X metavariables in both pattern and replacement.
     By default shows a diff (dry-run). Set apply=True to write changes.
-
-    Args:
-        pattern: Pattern to find (e.g. 'print($X)').
-        replacement: Replacement pattern (e.g. 'logger.info($X)').
-        path: Python file, glob, or directory to modify.
-        apply: If True, write changes to disk. Default is dry-run.
-        where: Scope constraint: 'def test_*', 'not class', 'MyClass.method'.
-
-    Returns:
-        Unified diff showing the changes (or empty string if no matches).
     """
     from emend.cli import resolve_files, parse_where_clause
 
@@ -456,22 +430,12 @@ def replace(
 
 @mcp_app.tool()
 def edit(
-    selector: str,
-    value: str | None = None,
-    rm: bool = False,
-    apply: bool = False,
+    selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::func[returns]', 'file.py::Class.method[params][x]').")],
+    value: Annotated[str | None, Field(description="New value for the component (omit when using rm=True).")] = None,
+    rm: Annotated[bool, Field(description="Remove the component or entire symbol.")] = False,
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
 ) -> str:
-    """Edit or remove existing symbol components.
-
-    Args:
-        selector: Symbol selector (e.g. 'file.py::func[returns]', 'file.py::Class.method[params][x]').
-        value: New value for the component (omit when using rm=True).
-        rm: If True, remove the component or entire symbol.
-        apply: If True, write changes to disk. Default is dry-run.
-
-    Returns:
-        Unified diff showing the changes.
-    """
+    """Edit or remove existing symbol components."""
     return cmd_edit(selector_str=selector, value=value, rm=rm, apply=apply)
 
 
@@ -482,26 +446,14 @@ def edit(
 
 @mcp_app.tool()
 def add(
-    selector: str,
-    value: str,
-    before: str | None = None,
-    after: str | None = None,
-    at: int | None = None,
-    apply: bool = False,
+    selector: Annotated[str, Field(description="Symbol selector targeting a list component (e.g. 'file.py::func[params]', 'file.py::Class[bases]').")],
+    value: Annotated[str, Field(description="Value to add (e.g. 'ctx: Context', 'BaseClass').")],
+    before: Annotated[str | None, Field(description="Insert before this named item.")] = None,
+    after: Annotated[str | None, Field(description="Insert after this named item.")] = None,
+    at: Annotated[int | None, Field(description="Insert at this position (0-indexed).")] = None,
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
 ) -> str:
-    """Add new items to symbol components.
-
-    Args:
-        selector: Symbol selector (e.g. 'file.py::func[params]', 'file.py::Class[bases]').
-        value: Value to add (e.g. 'ctx: Context', 'BaseClass').
-        before: Insert before this named item.
-        after: Insert after this named item.
-        at: Insert at this position (0-indexed).
-        apply: If True, write changes to disk. Default is dry-run.
-
-    Returns:
-        Unified diff showing the changes.
-    """
+    """Add new items to symbol components (params, bases, decorators)."""
     return cmd_add(
         selector_str=selector,
         value=value,
@@ -519,28 +471,15 @@ def add(
 
 @mcp_app.tool()
 def refs(
-    selector: str,
-    exclude_definition: bool = False,
-    exclude_imports: bool = False,
-    writes_only: bool = False,
-    reads_only: bool = False,
-    calls_only: bool = False,
-    project: str | None = None,
+    selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::func_name').")],
+    exclude_definition: Annotated[bool, Field(description="Exclude the definition itself from results.")] = False,
+    exclude_imports: Annotated[bool, Field(description="Exclude import statements from results.")] = False,
+    writes_only: Annotated[bool, Field(description="Only show write (assignment) references.")] = False,
+    reads_only: Annotated[bool, Field(description="Only show read (load) references.")] = False,
+    calls_only: Annotated[bool, Field(description="Only show actual call sites.")] = False,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Find all references to a symbol across the project.
-
-    Args:
-        selector: Symbol selector (e.g. 'file.py::func_name').
-        exclude_definition: Exclude the definition itself from results.
-        exclude_imports: Exclude import statements from results.
-        writes_only: Only show write (assignment) references.
-        reads_only: Only show read (load) references.
-        calls_only: Only show actual call sites.
-        project: Project root directory.
-
-    Returns:
-        References as file:line entries (one per line).
-    """
+    """Find all references to a symbol across the project. Returns JSON."""
     parsed = parse_extended_selector(selector)
 
     if calls_only:
@@ -577,30 +516,15 @@ def refs(
 
 @mcp_app.tool()
 def rename(
-    selector: str,
-    to: str,
-    apply: bool = False,
-    docs: bool = False,
-    no_hierarchy: bool = False,
-    unsure: bool = False,
-    project: str | None = None,
+    selector: Annotated[str, Field(description="Symbol selector (file.py::name) or module path (file.py). Uses :: for symbols, bare path for modules.")],
+    to: Annotated[str, Field(description="New name for the symbol or module.")],
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
+    docs: Annotated[bool, Field(description="Also rename in docstrings (symbol mode only).")] = False,
+    no_hierarchy: Annotated[bool, Field(description="Don't rename in class hierarchy (symbol mode only).")] = False,
+    unsure: Annotated[bool, Field(description="Rename uncertain occurrences (symbol mode only).")] = False,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Rename a symbol or module across the project.
-
-    If selector contains '::', renames a symbol. Otherwise renames a module.
-
-    Args:
-        selector: Symbol selector (file.py::name) or module path (file.py).
-        to: New name.
-        apply: If True, write changes to disk. Default is dry-run.
-        docs: Also rename in docstrings (symbol mode only).
-        no_hierarchy: Don't rename in class hierarchy (symbol mode only).
-        unsure: Rename uncertain occurrences (symbol mode only).
-        project: Project root directory.
-
-    Returns:
-        Unified diff showing the changes.
-    """
+    """Rename a symbol or module across the project, updating all references."""
     if "::" in selector:
         parsed = parse_extended_selector(selector)
         diffs = rename_symbol(
@@ -636,28 +560,14 @@ def rename(
 
 @mcp_app.tool()
 def move(
-    selector: str,
-    destination: str,
-    dedent: bool = False,
-    no_update_imports: bool = False,
-    apply: bool = False,
-    project: str | None = None,
+    selector: Annotated[str, Field(description="Symbol selector (file.py::name) or module path (file.py). Uses :: for symbols, bare path for modules.")],
+    destination: Annotated[str, Field(description="Destination file or package.")],
+    dedent: Annotated[bool, Field(description="Dedent nested symbols (symbol mode only).")] = False,
+    no_update_imports: Annotated[bool, Field(description="Don't update imports across the project (symbol mode only).")] = False,
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
+    project: Annotated[str | None, Field(description="Project root directory (module mode only).")] = None,
 ) -> str:
-    """Move a symbol or module with automatic import updates.
-
-    If selector contains '::', moves a symbol. Otherwise moves a module.
-
-    Args:
-        selector: Symbol selector (file.py::name) or module path (file.py).
-        destination: Destination file or package.
-        dedent: Dedent nested symbols (symbol mode only).
-        no_update_imports: Don't update imports (symbol mode only).
-        apply: If True, write changes to disk. Default is dry-run.
-        project: Project root directory (module mode only).
-
-    Returns:
-        Unified diff showing the changes.
-    """
+    """Move a symbol or module to another file, updating all imports."""
     if "::" in selector:
         parsed = parse_extended_selector(selector)
         diffs = move_symbol(
@@ -691,20 +601,11 @@ def move(
 
 @mcp_app.tool()
 def graph(
-    file_path: str,
-    format: str = "json",
-    project: str | None = None,
+    file_path: Annotated[str, Field(description="Python file to analyze.")],
+    format: Annotated[str, Field(description="Output format: plain, json, or dot (Graphviz).")] = "json",
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Generate a call graph for functions in a Python file.
-
-    Args:
-        file_path: Python file to analyze.
-        format: Output format: plain, json, or dot (Graphviz).
-        project: Project root directory.
-
-    Returns:
-        Call graph in the requested format.
-    """
+    """Generate a call graph for functions in a Python file."""
     return generate_graph(file_path, project_path=project, format=format)
 
 
@@ -715,33 +616,18 @@ def graph(
 
 @mcp_app.tool()
 def deadcode(
-    path: str = ".",
-    kind: str | None = None,
-    include_private: bool = False,
-    exclude_references_from: list[str] | None = None,
-    no_strings: bool = False,
-    no_last_reference: bool = False,
-    all_files: bool = False,
+    path: Annotated[str, Field(description="Project directory to scan.")] = ".",
+    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class.")] = None,
+    include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
+    exclude_references_from: Annotated[list[str] | None, Field(description="Directories to ignore when scanning for references.")] = None,
+    no_strings: Annotated[bool, Field(description="Don't count string literals as references.")] = False,
+    no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
+    all_files: Annotated[bool, Field(description="Scan all Python files, not just git-tracked ones.")] = False,
 ) -> str:
-    """Find potentially dead (unreferenced) code in a project.
+    """Find potentially dead (unreferenced) code. Returns JSON.
 
-    Scans Python files and reports top-level symbols with no external
-    references. Uses scope-aware analysis with QualifiedNameProvider.
-
-    Automatically skips dunder methods, test functions, decorated entry
-    points, __all__ members, and conventional entry points.
-
-    Args:
-        path: Project directory to scan.
-        kind: Symbol kind filter: function, class.
-        include_private: Include _private symbols.
-        exclude_references_from: Directories to ignore when scanning for references.
-        no_strings: Don't count string literals as references.
-        no_last_reference: Don't show git last-reference info.
-        all_files: Scan all Python files, not just git-tracked ones.
-
-    Returns:
-        JSON array of dead code findings.
+    Skips dunder methods, test functions, decorated entry points,
+    __all__ members, and conventional entry points.
     """
     results = find_dead_code(
         project_path=path,
@@ -775,22 +661,12 @@ def deadcode(
 
 @mcp_app.tool()
 def lint(
-    path: str,
-    config: str | None = None,
-    fix: bool = False,
-    rule: str | None = None,
+    path: Annotated[str, Field(description="File or directory to lint.")],
+    config: Annotated[str | None, Field(description="Path to patterns.yaml config file (default: .emend/patterns.yaml).")] = None,
+    fix: Annotated[bool, Field(description="Auto-apply fix replacements.")] = False,
+    rule: Annotated[str | None, Field(description="Run only a specific rule by name.")] = None,
 ) -> str:
-    """Lint Python files using pattern rules from a YAML config.
-
-    Args:
-        path: File or directory to lint.
-        config: Path to patterns.yaml config file (default: .emend/patterns.yaml).
-        fix: Auto-apply fix replacements.
-        rule: Run only a specific rule by name.
-
-    Returns:
-        Lint violations (one per line) or empty string if clean.
-    """
+    """Lint Python files using pattern rules from .emend/patterns.yaml."""
     from pathlib import Path as _Path
     from emend.lint import load_rules, run_lint
     from emend.cli import resolve_files
@@ -825,24 +701,13 @@ def lint(
 
 @mcp_app.tool()
 def copy_to(
-    selector: str,
-    destination: str,
-    append: bool = False,
-    dedent: bool = False,
-    apply: bool = False,
+    selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::my_function').")],
+    destination: Annotated[str, Field(description="Destination file path.")],
+    append: Annotated[bool, Field(description="Append to destination file instead of creating new.")] = False,
+    dedent: Annotated[bool, Field(description="Dedent the copied symbol (useful for nested functions).")] = False,
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
 ) -> str:
-    """Copy a symbol to another file.
-
-    Args:
-        selector: Symbol selector (e.g. 'file.py::my_function').
-        destination: Destination file path.
-        append: Append to destination file instead of creating new.
-        dedent: Dedent the copied symbol (useful for nested functions).
-        apply: If True, write changes to disk. Default is dry-run.
-
-    Returns:
-        Diff showing what would be written/changed.
-    """
+    """Copy a symbol to another file."""
     buf = io.StringIO()
     with redirect_stdout(buf):
         ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
