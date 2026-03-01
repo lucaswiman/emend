@@ -326,6 +326,19 @@ def search(
     is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
     has_selector = '::' in query and not is_pattern_mode
 
+    # Handle file_scope::pattern syntax (e.g. "**::print($X)", "src/::func($A)")
+    # When :: and $ coexist, split the file scope from the pattern.
+    if is_pattern_mode and '::' in query:
+        _file_part, _pattern_part = query.split('::', 1)
+        if '$' in _pattern_part:
+            query = _pattern_part
+            _file_scope = _file_part.strip()
+            # Use file scope from the selector when no explicit path argument
+            if not path:
+                if _file_scope and _file_scope != '**':
+                    path = _file_scope
+                # else: ** or empty means "all files", which is the default (path=None → ".")
+
     # Normalize ::name → **::name (unspecified path defaults to recursive search)
     if has_selector and query.startswith('::'):
         query = '**' + query

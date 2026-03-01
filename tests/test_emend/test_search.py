@@ -176,3 +176,94 @@ class TestSearchEdgeCases:
         result = runner.invoke(app, ["search", "nonexistent.py"])
 
         assert result.exit_code != 0
+
+
+class TestSearchFileScopePattern:
+    """Tests for file_scope::pattern syntax (e.g. **::print($X))."""
+
+    def test_double_star_pattern(self, tmp_path, monkeypatch):
+        """**::pattern searches all files for the pattern."""
+        monkeypatch.chdir(tmp_path)
+        f1 = tmp_path / "a.py"
+        f1.write_text("print('hello')\n")
+        f2 = tmp_path / "b.py"
+        f2.write_text("x = 1\n")
+
+        result = runner.invoke(
+            app, ["search", "**::print($X)"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 0
+        assert "a.py:1" in result.stdout
+        assert "b.py" not in result.stdout
+
+    def test_directory_scope_pattern(self, tmp_path, monkeypatch):
+        """dir/::pattern scopes the search to that directory."""
+        monkeypatch.chdir(tmp_path)
+        subdir = tmp_path / "pkg"
+        subdir.mkdir()
+        (subdir / "a.py").write_text("print('inside')\n")
+        (tmp_path / "b.py").write_text("print('outside')\n")
+
+        result = runner.invoke(
+            app,
+            ["search", f"{subdir}::print($X)"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "a.py:1" in result.stdout
+        assert "b.py" not in result.stdout
+
+    def test_specific_file_pattern(self, tmp_path):
+        """file.py::pattern searches only that file."""
+        f1 = tmp_path / "target.py"
+        f1.write_text("print('yes')\nfoo(1)\n")
+        f2 = tmp_path / "other.py"
+        f2.write_text("print('no')\n")
+
+        result = runner.invoke(
+            app,
+            ["search", f"{f1}::print($X)"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "target.py:1" in result.stdout
+        assert "other.py" not in result.stdout
+
+    def test_glob_scope_pattern(self, tmp_path, monkeypatch):
+        """glob::pattern searches matching files."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "test_a.py").write_text("print('a')\n")
+        (tmp_path / "test_b.py").write_text("print('b')\n")
+        (tmp_path / "lib.py").write_text("print('lib')\n")
+
+        result = runner.invoke(
+            app,
+            ["search", f"{tmp_path}/test_*.py::print($X)"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "test_a.py" in result.stdout
+        assert "test_b.py" in result.stdout
+        assert "lib.py" not in result.stdout
+
+    def test_explicit_path_arg_overrides_double_star(self, tmp_path, monkeypatch):
+        """When both **::pattern and a path arg are given, path arg takes precedence."""
+        monkeypatch.chdir(tmp_path)
+        subdir = tmp_path / "sub"
+        subdir.mkdir()
+        (subdir / "a.py").write_text("print('inside')\n")
+        (tmp_path / "b.py").write_text("print('outside')\n")
+
+        result = runner.invoke(
+            app,
+            ["search", "**::print($X)", str(subdir)],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "a.py" in result.stdout
+        assert "b.py" not in result.stdout
