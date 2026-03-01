@@ -208,3 +208,85 @@ class TestTypeCacheWarming:
 
         assert stats["type_cached"] == 0
         assert stats["type_engine"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Error caching — files that fail type inference should be cached so they
+# are not re-computed on every run.
+# ---------------------------------------------------------------------------
+
+
+class TestErrorFileCaching:
+    """Verify that files causing errors during infer_file are cached."""
+
+    def test_base_infer_batch_caches_on_error(self, tmp_path):
+        """Base class infer_batch returns empty FileTypes for files that raise."""
+        from unittest.mock import patch
+        from emend.type_oracle import FileTypes, _FileTypeCache, TypeOracle
+
+        # Create a concrete adapter with a real cache to test the base class
+        # infer_batch fallback.
+        class _StubAdapter(TypeOracle):
+            def __init__(self):
+                self._cache = _FileTypeCache(max_entries=16)
+
+            def infer_file(self, path, project_root=None):
+                raise RuntimeError("simulated parse failure")
+
+            def type_at(self, path, line, col, project_root=None):
+                return None
+
+            def clear_cache(self):
+                self._cache.clear()
+
+            def is_available(self):
+                return True
+
+        adapter = _StubAdapter()
+        py = tmp_path / "bad.py"
+        py.write_text("this is not valid: python [\n")
+
+        results = adapter.infer_batch([py])
+        key = str(py.resolve())
+        assert key in results
+        assert isinstance(results[key], FileTypes)
+        assert results[key].bindings == []
+
+    def test_pyright_infer_file_caches_on_error(self, tmp_path):
+        """PyrightAdapter.infer_file caches an empty result when a file errors."""
+        import hashlib
+        from emend.type_oracle import PyrightAdapter, _content_hash
+
+        db_path = str(tmp_path / "parse.db")
+        adapter = PyrightAdapter(db_path=db_path)
+
+        py = tmp_path / "bad.py"
+        # Write non-UTF-8 bytes to trigger UnicodeDecodeError in read_text()
+        py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
+
+        content_hash = _content_hash(py)
+        # First call — should catch the error and cache an empty result
+        ft = adapter.infer_file(py)
+        assert ft.bindings == []
+
+        # Verify the empty result was cached
+        cached = adapter._cache.get(content_hash)
+        assert cached is not None
+        assert cached.bindings == []
+
+    def test_ty_infer_file_caches_on_error(self, tmp_path):
+        """TyAdapter.infer_file caches an empty result when a file errors."""
+        from emend.type_oracle import TyAdapter, _content_hash
+
+        db_path = str(tmp_path / "parse.db")
+        adapter = TyAdapter(db_path=db_path)
+
+        py = tmp_path / "bad.py"
+        py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
+
+        content_hash = _content_hash(py)
+        ft = adapter.infer_file(py)
+        assert ft.bindings == []
+
+        cached = adapter._cache.get(content_hash)
+        assert cached is not None

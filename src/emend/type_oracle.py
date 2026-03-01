@@ -451,7 +451,11 @@ class TypeOracle(ABC):
         for path in paths:
             resolved = path.resolve()
             if resolved.exists():
-                results[str(resolved)] = self.infer_file(resolved, project_root)
+                try:
+                    results[str(resolved)] = self.infer_file(resolved, project_root)
+                except Exception:
+                    logger.debug("infer_file failed for %s", resolved, exc_info=True)
+                    results[str(resolved)] = FileTypes(path=str(resolved))
         return results
 
 
@@ -1076,7 +1080,11 @@ class PyreflyAdapter(TypeOracle):
                     debug_json = json.load(f)
 
                 for path_obj in to_check:
-                    ft = _parse_pyrefly_debug(debug_json, str(path_obj))
+                    try:
+                        ft = _parse_pyrefly_debug(debug_json, str(path_obj))
+                    except Exception:
+                        logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
+                        ft = FileTypes(path=str(path_obj))
                     content_hash = hashes[str(path_obj)]
                     self._cache.put(content_hash, ft)
                     results[str(path_obj)] = ft
@@ -1154,37 +1162,42 @@ class PyrightAdapter(TypeOracle):
             self._cache.put(content_hash, ft)
             return ft
 
-        logger.info("Building type index for %s via pyright", path)
-        source = path.read_text(encoding="utf-8")
-        lsp.did_open(path, source)
+        try:
+            logger.info("Building type index for %s via pyright", path)
+            source = path.read_text(encoding="utf-8")
+            lsp.did_open(path, source)
 
-        symbols = _collect_symbols(source)
-        ft = FileTypes(path=str(path))
+            symbols = _collect_symbols(source)
+            ft = FileTypes(path=str(path))
 
-        for name, line, col_start, col_end in symbols:
-            hover_text = lsp.hover(path, line, col_start)
-            if not hover_text:
-                continue
+            for name, line, col_start, col_end in symbols:
+                hover_text = lsp.hover(path, line, col_start)
+                if not hover_text:
+                    continue
 
-            # Extract type from pyright hover: "```python\n(variable) x: int\n```"
-            # or "```python\n(function) f: (int) -> str\n```"
-            raw_type = self._parse_hover_type(hover_text)
-            if not raw_type:
-                continue
+                # Extract type from pyright hover: "```python\n(variable) x: int\n```"
+                # or "```python\n(function) f: (int) -> str\n```"
+                raw_type = self._parse_hover_type(hover_text)
+                if not raw_type:
+                    continue
 
-            type_desc = parse_type_string(raw_type)
-            binding = TypeBinding(
-                name=name,
-                line=line,
-                col_start=col_start,
-                col_end=col_end,
-                type_descriptor=type_desc,
-                raw_type=raw_type,
-                binding_kind="inferred",
-            )
-            ft.bindings.append(binding)
+                type_desc = parse_type_string(raw_type)
+                binding = TypeBinding(
+                    name=name,
+                    line=line,
+                    col_start=col_start,
+                    col_end=col_end,
+                    type_descriptor=type_desc,
+                    raw_type=raw_type,
+                    binding_kind="inferred",
+                )
+                ft.bindings.append(binding)
 
-        ft.build_index()
+            ft.build_index()
+        except Exception:
+            logger.debug("pyright infer_file failed for %s", path, exc_info=True)
+            ft = FileTypes(path=str(path))
+
         self._cache.put(content_hash, ft)
         return ft
 
@@ -1274,35 +1287,40 @@ class TyAdapter(TypeOracle):
             self._cache.put(content_hash, ft)
             return ft
 
-        logger.info("Building type index for %s via ty", path)
-        source = path.read_text(encoding="utf-8")
-        lsp.did_open(path, source)
+        try:
+            logger.info("Building type index for %s via ty", path)
+            source = path.read_text(encoding="utf-8")
+            lsp.did_open(path, source)
 
-        symbols = _collect_symbols(source)
-        ft = FileTypes(path=str(path))
+            symbols = _collect_symbols(source)
+            ft = FileTypes(path=str(path))
 
-        for name, line, col_start, col_end in symbols:
-            hover_text = lsp.hover(path, line, col_start)
-            if not hover_text:
-                continue
+            for name, line, col_start, col_end in symbols:
+                hover_text = lsp.hover(path, line, col_start)
+                if not hover_text:
+                    continue
 
-            raw_type = self._parse_hover_type(hover_text)
-            if not raw_type:
-                continue
+                raw_type = self._parse_hover_type(hover_text)
+                if not raw_type:
+                    continue
 
-            type_desc = parse_type_string(raw_type)
-            binding = TypeBinding(
-                name=name,
-                line=line,
-                col_start=col_start,
-                col_end=col_end,
-                type_descriptor=type_desc,
-                raw_type=raw_type,
-                binding_kind="inferred",
-            )
-            ft.bindings.append(binding)
+                type_desc = parse_type_string(raw_type)
+                binding = TypeBinding(
+                    name=name,
+                    line=line,
+                    col_start=col_start,
+                    col_end=col_end,
+                    type_descriptor=type_desc,
+                    raw_type=raw_type,
+                    binding_kind="inferred",
+                )
+                ft.bindings.append(binding)
 
-        ft.build_index()
+            ft.build_index()
+        except Exception:
+            logger.debug("ty infer_file failed for %s", path, exc_info=True)
+            ft = FileTypes(path=str(path))
+
         self._cache.put(content_hash, ft)
         return ft
 
