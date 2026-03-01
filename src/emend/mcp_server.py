@@ -41,12 +41,96 @@ from emend import ast_commands
 
 mcp_app = FastMCP(
     "emend",
-    instructions=(
-        "emend is a Python refactoring tool with structured edits and pattern "
-        "transforms. Use these tools to search, edit, and refactor Python code. "
-        "All write operations (edit, add, replace, rename, move) default to "
-        "dry-run mode showing diffs. Set apply=True to write changes to disk."
-    ),
+    instructions="""\
+emend is a Python refactoring tool with structured edits and pattern transforms.
+Use these tools to search, edit, and refactor Python code.
+All write operations (edit, add, replace, rename, move) default to dry-run mode
+showing diffs. Set apply=True to write changes to disk.
+
+## Selector syntax
+
+Selectors identify symbols and their components in Python files.
+
+### Symbol selectors
+  file.py::func                  # module-level function
+  file.py::Class                 # class
+  file.py::Class.method          # method
+  file.py::Class.method.nested   # nested function inside a method
+
+### Extended selectors (with components)
+  file.py::func[params]          # all parameters
+  file.py::func[params][ctx]     # parameter by name
+  file.py::func[params][0]       # parameter by index
+  file.py::func[returns]         # return annotation
+  file.py::func[decorators]      # decorator list
+  file.py::Class[bases]          # base classes
+  file.py::func[body]            # function body
+
+### Pseudo-class selectors
+  file.py::func[params]:KEYWORD_ONLY       # keyword-only parameter slot
+  file.py::func[params]:POSITIONAL_ONLY    # positional-only parameter slot
+
+### Wildcard selectors
+  file.py::*[params]             # all function parameters in file
+  file.py::Test*[decorators]     # symbols starting with "Test"
+  file.py::*.*[returns]          # all method return types
+  file.py::Class.*[body]         # all method bodies in Class
+
+### Line selectors
+  file.py:42                     # single line
+  file.py:42-100                 # line range
+
+### File globs
+  'src/**/*.py::func'            # match across files
+
+## Pattern syntax
+
+Patterns match code structures using metavariables (prefixed with $).
+
+### Metavariables
+  $X                # capture any single expression
+  $NAME             # named capture (uppercase)
+  $_                # anonymous (match but don't capture)
+  $...ARGS          # capture variable number of arguments (ellipsis)
+  $X:int            # type-constrained (int, str, float, expr, stmt, identifier, call, attr)
+
+### Examples
+  print($X)                     # function call with one arg
+  func($A, $B)                  # call with two args
+  func($...ARGS)                # call with any number of args
+  $A + $B                       # binary operation
+  $X[$Y]                        # subscript
+  return $X                     # return statement
+  assert $A == $B               # assert with comparison
+  [$X, $Y]                      # list with two elements
+
+### String content interpolation
+  ${X.content}                  # in replacement: strips quotes from a captured string literal
+
+## Where constraints (search and replace)
+
+The where parameter filters by scope/context:
+  'def'                         # inside any function
+  'async def'                   # inside any async function
+  'class'                       # inside any class
+  'def test_*'                  # inside functions matching glob
+  'MyClass.method'              # inside a specific method
+  'not class'                   # NOT inside a class
+  'not def test_*'              # NOT inside test functions
+  '@decorator'                  # inside decorated symbols
+
+## Output formats (search)
+
+  code       # matched source code (default for lookup)
+  location   # file:line (default for pattern mode)
+  selector   # emend selectors
+  summary    # symbol tree (default for bare file/dir)
+  metadata   # detailed symbol metadata
+  json       # JSON output
+  count      # match count only
+  code::dedent    # dedented source
+  summary::flat   # flat symbol list
+""",
 )
 
 
