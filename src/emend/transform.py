@@ -30,28 +30,110 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module parse cache: avoids re-parsing the same source text
 # ---------------------------------------------------------------------------
-# Uses a hash of the source as key to keep memory bounded.
-# LRU cache of 256 entries covers typical project operations.
+# Two-tier cache:
+#   1. In-memory dict (fast, lost on exit)
+#   2. On-disk SQLite DB at .emend/cache/parse.db (persists across runs)
+# Key: md5 of source text.  Value: compressed-pickled LibCST Module.
 _parse_cache: dict[bytes, cst.Module] = {}
 _parse_cache_lock = threading.Lock()
 _PARSE_CACHE_MAX = 256
 
+# Disk cache (SQLite) — lazily initialized on first use.
+_disk_cache_conn: sqlite3.Connection | None = None
+_disk_cache_lock = threading.Lock()
+_disk_cache_checked = False
+
+
+def _get_disk_cache() -> sqlite3.Connection | None:
+    """Return a thread-safe SQLite connection for the parse cache, or None."""
+    global _disk_cache_conn, _disk_cache_checked
+    if _disk_cache_checked:
+        return _disk_cache_conn
+    with _disk_cache_lock:
+        if _disk_cache_checked:
+            return _disk_cache_conn
+        _disk_cache_checked = True
+        try:
+            import sqlite3
+            root = _find_project_root(".")
+            cache_dir = Path(root) / ".emend" / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = cache_dir / "parse.db"
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS parse_cache "
+                "(hash BLOB PRIMARY KEY, data BLOB)"
+            )
+            conn.commit()
+            _disk_cache_conn = conn
+            logger.debug("disk parse cache opened at %s", db_path)
+        except Exception as exc:
+            logger.debug("disk parse cache unavailable: %s", exc)
+            _disk_cache_conn = None
+    return _disk_cache_conn
+
+
+def _disk_cache_get(key: bytes) -> cst.Module | None:
+    """Look up a parsed module in the disk cache."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return None
+    try:
+        import pickle
+        import zlib
+        row = conn.execute(
+            "SELECT data FROM parse_cache WHERE hash = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            return pickle.loads(zlib.decompress(row[0]))
+    except Exception:
+        pass
+    return None
+
+
+def _disk_cache_put(key: bytes, module: cst.Module) -> None:
+    """Store a parsed module in the disk cache (best-effort)."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    try:
+        import pickle
+        import zlib
+        data = zlib.compress(
+            pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
+        )
+        with _disk_cache_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", (key, data)
+            )
+            conn.commit()
+    except Exception:
+        pass
+
 
 def _cached_parse(source: str) -> cst.Module:
-    """Parse Python source into a LibCST Module, with caching.
+    """Parse Python source into a LibCST Module, with two-tier caching.
 
-    Repeated calls with identical source text return the same Module
-    object without re-parsing. Thread-safe for use with ThreadPoolExecutor.
+    Checks in-memory cache first, then disk cache, then parses.
+    Thread-safe for use with ThreadPoolExecutor.
     """
     key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
+    # Tier 1: in-memory
     with _parse_cache_lock:
         cached = _parse_cache.get(key)
     if cached is not None:
         return cached
-    module = cst.parse_module(source)
+    # Tier 2: disk
+    module = _disk_cache_get(key)
+    if module is None:
+        # Parse from scratch and write to disk cache
+        module = cst.parse_module(source)
+        _disk_cache_put(key, module)
+    # Store in memory cache
     with _parse_cache_lock:
         if len(_parse_cache) >= _PARSE_CACHE_MAX:
-            # Evict oldest ~25% of entries
             keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
             for k in keys_to_evict:
                 del _parse_cache[k]
