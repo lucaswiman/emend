@@ -241,18 +241,21 @@ class _QNCollector(cst.CSTVisitor):
             pass
 
 
-def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int]:
+def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int]:
     """Worker function for process-pool indexing.
 
     Runs in a subprocess.  Parses a batch of files, resolves qualified
     names, and writes directly to the SQLite disk cache — avoiding the
     cost of serialising LibCST modules back to the main process.
 
+    Files whose content hash is already present in both cache tables are
+    skipped without parsing (cache-hit fast path).
+
     Args:
         args: (db_path, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count) — number of entries written.
+        (parse_count, qn_count, skipped_count) — entries written / skipped.
     """
     import pickle
     import sqlite3
@@ -262,37 +265,84 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int]:
     parse_rows: list[tuple[bytes, bytes]] = []
     qn_rows: list[tuple[bytes, bytes]] = []
 
-    for _py_file, content in file_batch:
-        content_hash = hashlib.md5(
-            content.encode(), usedforsecurity=False
-        ).digest()
+    if not file_batch:
+        return (0, 0, 0)
 
-        # Parse
+    # Compute content hashes up-front so we can bulk-check the cache.
+    file_hashes: list[tuple[bytes, str, str]] = [
+        (hashlib.md5(content.encode(), usedforsecurity=False).digest(), py_file, content)
+        for py_file, content in file_batch
+    ]
+    all_hashes = [h for h, _, _ in file_hashes]
+
+    # Pre-check which hashes are already present in both cache tables.
+    cached_parse: set[bytes] = set()
+    cached_qn: set[bytes] = set()
+    try:
+        conn_check = sqlite3.connect(db_path, timeout=30)
+        conn_check.execute("PRAGMA journal_mode=WAL")
+        conn_check.execute("PRAGMA synchronous=NORMAL")
+        placeholders = ",".join("?" * len(all_hashes))
+        try:
+            cached_parse = {
+                row[0]
+                for row in conn_check.execute(
+                    f"SELECT hash FROM parse_cache WHERE hash IN ({placeholders})",
+                    all_hashes,
+                ).fetchall()
+            }
+        except Exception:
+            pass
+        try:
+            cached_qn = {
+                row[0]
+                for row in conn_check.execute(
+                    f"SELECT hash FROM qn_index WHERE hash IN ({placeholders})",
+                    all_hashes,
+                ).fetchall()
+            }
+        except Exception:
+            pass
+        conn_check.close()
+    except Exception:
+        pass  # If pre-check fails, process everything
+
+    skipped = 0
+    for content_hash, _py_file, content in file_hashes:
+        need_parse = content_hash not in cached_parse
+        need_qn = content_hash not in cached_qn
+        if not need_parse and not need_qn:
+            skipped += 1
+            continue
+
+        # Parse (required for both cache types).
         try:
             module = cst.parse_module(content)
         except Exception:
             continue
 
-        try:
-            parse_blob = zlib.compress(
-                pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
-            )
-            parse_rows.append((content_hash, parse_blob))
-        except Exception:
-            pass
+        if need_parse:
+            try:
+                parse_blob = zlib.compress(
+                    pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
+                )
+                parse_rows.append((content_hash, parse_blob))
+            except Exception:
+                pass
 
-        # QN index
-        try:
-            wrapper = cst.metadata.MetadataWrapper(module)
-            collector = _QNCollector()
-            wrapper.visit(collector)
-            qn_blob = zlib.compress(
-                pickle.dumps(collector.all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
-                level=1,
-            )
-            qn_rows.append((content_hash, qn_blob))
-        except Exception:
-            pass
+        if need_qn:
+            # QN index
+            try:
+                wrapper = cst.metadata.MetadataWrapper(module)
+                collector = _QNCollector()
+                wrapper.visit(collector)
+                qn_blob = zlib.compress(
+                    pickle.dumps(collector.all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
+                    level=1,
+                )
+                qn_rows.append((content_hash, qn_blob))
+            except Exception:
+                pass
 
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
@@ -322,7 +372,7 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int]:
         except Exception:
             pass
 
-    return (len(parse_rows), len(qn_rows))
+    return (len(parse_rows), len(qn_rows), skipped)
 
 
 def warm_caches(
@@ -369,16 +419,30 @@ def warm_caches(
     file_contents = _rust.read_and_filter_files(py_files, [])
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
-    stats = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0}
+    stats = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0, "skipped": 0}
 
     # Phase 2: parse + QN index in subprocesses.
-    # Ensure the DB exists before spawning workers.
-    _get_disk_cache()
-    _ensure_qn_table()
-
-    # Resolve the DB path so workers can open their own connections.
+    # Resolve the DB path and ensure the directory exists before spawning workers.
     cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_ignore_files(project_root)
     db_path = str(cache_dir / "parse.db")
+    # Pre-create both tables in the main process so workers don't race on schema setup.
+    try:
+        import sqlite3 as _sqlite3
+        _init_conn = _sqlite3.connect(db_path)
+        _init_conn.execute("PRAGMA journal_mode=WAL")
+        _init_conn.execute("PRAGMA synchronous=NORMAL")
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS parse_cache (hash BLOB PRIMARY KEY, data BLOB)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)"
+        )
+        _init_conn.commit()
+        _init_conn.close()
+    except Exception:
+        pass
 
     # Split files into batches — one batch per worker.
     batch_size = max(1, len(file_contents) // max_workers)
@@ -390,11 +454,12 @@ def warm_caches(
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
-        for batch_idx, (parse_n, qn_n) in enumerate(
+        for batch_idx, (parse_n, qn_n, skip_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
             stats["parse_cached"] += parse_n
             stats["qn_cached"] += qn_n
+            stats["skipped"] += skip_n
             # Report progress for all files in this batch
             if callback:
                 _db_path, chunk = batches[batch_idx]
