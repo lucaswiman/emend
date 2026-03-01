@@ -62,6 +62,70 @@ Then start the server:
    The MCP server requires Pydantic, which does not support Python 3.14t as of
    February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
 
+Adding emend to Claude Code
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The quickest way to connect emend to
+`Claude Code <https://code.claude.com/>`_ is the ``claude mcp add`` CLI:
+
+.. code-block:: bash
+
+   # Add for the current project (default scope: local)
+   claude mcp add --transport stdio emend -- emend mcp
+
+   # Or share with your team via .mcp.json (project scope)
+   claude mcp add --transport stdio --scope project emend -- emend mcp
+
+If you installed with ``uv tool install``, make sure the ``emend`` binary is on
+your PATH, or use ``uvx``:
+
+.. code-block:: bash
+
+   claude mcp add --transport stdio emend -- uvx emend mcp
+
+You can also configure it by editing JSON directly:
+
+.. code-block:: bash
+
+   claude mcp add-json emend '{"type":"stdio","command":"emend","args":["mcp"]}'
+
+For a **team-shared** setup, add a ``.mcp.json`` file to your project root
+(and commit it to version control):
+
+.. code-block:: json
+
+   {
+     "mcpServers": {
+       "emend": {
+         "type": "stdio",
+         "command": "emend",
+         "args": ["mcp"]
+       }
+     }
+   }
+
+Verify the server is connected:
+
+.. code-block:: bash
+
+   claude mcp list          # from the terminal
+
+Or inside Claude Code, type ``/mcp`` to see all connected servers and their
+status.
+
+**Scopes.** Claude Code has three MCP configuration scopes:
+
+- ``local`` (default) -- private to you, current project only (stored in
+  ``~/.claude.json``)
+- ``project`` -- shared with the team via ``.mcp.json`` in the project root
+  (committed to version control)
+- ``user`` -- available to you across all projects (stored in
+  ``~/.claude.json``)
+
+Use ``--scope`` with ``claude mcp add`` to choose. See the
+`Claude Code MCP documentation <https://code.claude.com/docs/en/mcp>`_ for
+full details on scopes, environment variables, and managed configurations.
+
 Verifying installation
 ----------------------
 

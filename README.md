@@ -58,6 +58,58 @@ emend mcp --transport sse --port 8080  # SSE transport
 **Note:** The MCP server requires Pydantic, which does not support Python 3.14t as
 of February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
 
+#### Adding emend to Claude Code
+
+The quickest way is the `claude mcp add` CLI:
+
+```bash
+# Add for the current project (default scope: local)
+claude mcp add --transport stdio emend -- emend mcp
+
+# Or share with your team via .mcp.json (project scope)
+claude mcp add --transport stdio --scope project emend -- emend mcp
+```
+
+If you installed with `uv tool install`, make sure the `emend` binary is on your
+PATH, or use the full path:
+
+```bash
+claude mcp add --transport stdio emend -- uvx emend mcp
+```
+
+You can also add it by editing configuration JSON directly. For a **personal**
+setup, run:
+
+```bash
+claude mcp add-json emend '{"type":"stdio","command":"emend","args":["mcp"]}'
+```
+
+For a **team-shared** setup, add a `.mcp.json` file to your project root
+(and commit it to version control):
+
+```json
+{
+  "mcpServers": {
+    "emend": {
+      "type": "stdio",
+      "command": "emend",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Verify it's connected:
+
+```bash
+claude mcp list          # from the terminal
+```
+
+Or inside Claude Code, type `/mcp` to see all connected servers and their status.
+
+See the [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp)
+for details on scopes, environment variables, and managed configurations.
+
 Run `emend --help` to verify. Full documentation at [lucaswiman.github.io/emend](https://lucaswiman.github.io/emend/).
 
 ## Usage

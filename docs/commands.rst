@@ -835,17 +835,41 @@ return a unified diff. Set ``apply=True`` to write changes to disk.
 
 **Claude Code configuration:**
 
-Add to your Claude Code MCP settings:
+The quickest way to add emend to `Claude Code <https://code.claude.com/>`_:
+
+.. code-block:: bash
+
+   # Add for the current project
+   claude mcp add --transport stdio emend -- emend mcp
+
+   # Share with your team (writes .mcp.json)
+   claude mcp add --transport stdio --scope project emend -- emend mcp
+
+   # If installed via uv tool install
+   claude mcp add --transport stdio emend -- uvx emend mcp
+
+Or add directly via JSON:
+
+.. code-block:: bash
+
+   claude mcp add-json emend '{"type":"stdio","command":"emend","args":["mcp"]}'
+
+For a team-shared ``.mcp.json`` file (committed to version control):
 
 .. code-block:: json
 
    {
      "mcpServers": {
        "emend": {
+         "type": "stdio",
          "command": "emend",
          "args": ["mcp"]
        }
      }
    }
+
+Verify the connection with ``claude mcp list`` or type ``/mcp`` inside
+Claude Code. See :doc:`installation` for details on scopes and configuration
+options.
 
 ---
