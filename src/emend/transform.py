@@ -5323,6 +5323,7 @@ def find_dead_code(
         metadata_providers=_BulkReferenceFinder.METADATA_DEPENDENCIES,
         target_file=None,
         candidate_files=ref_scan_files,
+        target_qnames=set(candidate_qns.keys()),
     ):
         referenced.update(visitor.referenced)
 
