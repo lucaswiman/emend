@@ -1732,9 +1732,17 @@ def index_cmd(
         print("", file=sys.stderr)  # newline after progress
 
     elapsed = _time.monotonic() - t0
+    skipped = stats.get("skipped", 0)
+    new_parse = stats["parse_cached"]
+    new_qn = stats["qn_cached"]
+    if skipped and not new_parse and not new_qn:
+        detail = f"all {skipped} already cached"
+    elif skipped:
+        detail = f"parse: {new_parse}, qn: {new_qn}, already cached: {skipped}"
+    else:
+        detail = f"parse: {new_parse}, qn: {new_qn}"
     print(
-        f"Indexed {stats['files']} files in {elapsed:.1f}s "
-        f"(parse: {stats['parse_cached']}, qn: {stats['qn_cached']})",
+        f"Indexed {stats['files']} files in {elapsed:.1f}s ({detail})",
         file=sys.stderr,
     )
 
