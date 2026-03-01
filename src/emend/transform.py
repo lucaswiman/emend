@@ -68,6 +68,10 @@ def _get_disk_cache() -> sqlite3.Connection | None:
                 "CREATE TABLE IF NOT EXISTS parse_cache "
                 "(hash BLOB PRIMARY KEY, data BLOB)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS type_cache "
+                "(hash TEXT PRIMARY KEY, data BLOB)"
+            )
             conn.commit()
             _disk_cache_conn = conn
             logger.debug("disk parse cache opened at %s", db_path)
@@ -427,7 +431,7 @@ def warm_caches(
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
     db_path = str(cache_dir / "parse.db")
-    # Pre-create both tables in the main process so workers don't race on schema setup.
+    # Pre-create all tables in the main process so workers don't race on schema setup.
     try:
         import sqlite3 as _sqlite3
         _init_conn = _sqlite3.connect(db_path)
@@ -438,6 +442,9 @@ def warm_caches(
         )
         _init_conn.execute(
             "CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)"
+        )
+        _init_conn.execute(
+            "CREATE TABLE IF NOT EXISTS type_cache (hash TEXT PRIMARY KEY, data BLOB)"
         )
         _init_conn.commit()
         _init_conn.close()

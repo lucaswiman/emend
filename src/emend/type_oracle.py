@@ -865,7 +865,12 @@ def _content_hash(path: Path) -> str:
 
 
 def _type_cache_db_path(project_root: Path | None = None) -> str | None:
-    """Return the path to the type-oracle disk cache, or None."""
+    """Return the path to the type-oracle disk cache (parse.db), or None.
+
+    Type inference results are stored in the same SQLite database as the parse
+    and QN-index caches (``.emend/cache/parse.db``) in a ``type_cache`` table,
+    so a single ``emend index`` run can populate all caches together.
+    """
     try:
         if project_root is None:
             from emend.transform import _find_project_root
@@ -874,7 +879,7 @@ def _type_cache_db_path(project_root: Path | None = None) -> str | None:
             root = project_root
         cache_dir = root / ".emend" / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        return str(cache_dir / "types.db")
+        return str(cache_dir / "parse.db")
     except Exception:
         return None
 
