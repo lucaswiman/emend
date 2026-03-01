@@ -486,50 +486,62 @@ def warm_caches(
         stats["parse_cached"], stats["qn_cached"],
     )
 
-    # Phase 3: type indexing — populate type_cache via the configured engine.
-    if type_engine and str(type_engine).lower() != "none":
-        try:
-            from emend.type_oracle import create_type_oracle, PyreflyAdapter
-            oracle = create_type_oracle(
-                engine=type_engine,
-                project_root=Path(project_root),
+    # Phase 3: type indexing — populate the type_cache table.
+    # Runs in the main process (adapters hold LSP connections / subprocess
+    # state that cannot be pickled into workers).  Pyrefly batches are
+    # parallelised via threads because each batch spawns a subprocess and
+    # releases the GIL.  LSP adapters (pyright, ty) serialise on their own
+    # internal lock, so a single thread suffices there.
+    if type_engine and type_engine.lower() != "none":
+        from emend.type_oracle import (
+            create_type_oracle,
+            PyreflyAdapter,
+            TypeEngineUnavailableError,
+        )
+
+        oracle = create_type_oracle(
+            engine=type_engine, project_root=Path(project_root)
+        )
+        engine_name = type(oracle).__name__.replace("Adapter", "").lower()
+
+        if not oracle.is_available():
+            raise TypeEngineUnavailableError(
+                f"Type inference engine '{engine_name}' is not installed or not on PATH. "
+                f"Install it (pyrefly, ty, or pyright) and re-run, or pass "
+                f"--type-engine=none to skip type indexing."
             )
-            engine_label = type(oracle).__name__.replace("Adapter", "").lower()
-            stats["type_engine"] = engine_label
 
-            all_paths = [Path(f) for f, _ in file_contents]
-            # Chunk files so we can report progress and bound per-call work.
-            TYPE_CHUNK = 100
-            type_chunks = [
-                all_paths[i : i + TYPE_CHUNK]
-                for i in range(0, len(all_paths), TYPE_CHUNK)
-            ]
+        stats["type_engine"] = engine_name
+        all_paths = [Path(f) for f, _ in file_contents]
+        project_root_path = Path(project_root)
 
-            # PyreflyAdapter.infer_batch() spawns a subprocess per chunk —
-            # parallelize with threads (GIL released during subprocess wait).
-            # LSP-based adapters share a single server connection and must
-            # run sequentially.
-            n_type_workers = max_workers if isinstance(oracle, PyreflyAdapter) else 1
-            project_root_path = Path(project_root)
+        # Split into chunks so we can report progress and bound memory.
+        TYPE_CHUNK = 100
+        type_chunks = [
+            all_paths[i : i + TYPE_CHUNK]
+            for i in range(0, len(all_paths), TYPE_CHUNK)
+        ]
 
-            def _type_chunk(chunk: list[Path]) -> int:
-                results = oracle.infer_batch(chunk, project_root=project_root_path)
-                return len(results)
+        # Pyrefly spawns one subprocess per batch → safe to parallelise.
+        # LSP adapters share a single server connection → keep sequential.
+        n_type_workers = max_workers if isinstance(oracle, PyreflyAdapter) else 1
 
-            t_type = time.monotonic()
-            with ThreadPoolExecutor(max_workers=n_type_workers) as pool:
-                for chunk_idx, n in enumerate(pool.map(_type_chunk, type_chunks)):
-                    stats["type_cached"] = int(stats["type_cached"]) + n
-                    if callback:
-                        for p in type_chunks[chunk_idx]:
-                            callback("types", str(p))
+        def _do_type_chunk(chunk: list[Path]) -> int:
+            results = oracle.infer_batch(chunk, project_root=project_root_path)
+            return len(results)
 
-            logger.info(
-                "warm_caches: type-indexed %d files via %s in %.3fs",
-                stats["type_cached"], engine_label, time.monotonic() - t_type,
-            )
-        except Exception as exc:
-            logger.warning("warm_caches: type indexing skipped: %s", exc)
+        t_type = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n_type_workers) as pool:
+            for chunk_idx, n in enumerate(pool.map(_do_type_chunk, type_chunks)):
+                stats["type_cached"] = int(stats["type_cached"]) + n
+                if callback:
+                    for p in type_chunks[chunk_idx]:
+                        callback("types", str(p))
+
+        logger.info(
+            "warm_caches: type-indexed %d files via %s in %.3fs",
+            stats["type_cached"], engine_name, time.monotonic() - t_type,
+        )
 
     # Ensure the cache directory has ignore files so it doesn't get checked
     # in or built into Docker images.

@@ -405,6 +405,11 @@ class FileTypes:
 # Abstract TypeOracle interface
 # ---------------------------------------------------------------------------
 
+
+class TypeEngineUnavailableError(RuntimeError):
+    """Raised when the requested type inference engine is not installed."""
+
+
 class TypeOracle(ABC):
     """Abstract interface for querying inferred types.
 

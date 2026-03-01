@@ -1741,7 +1741,13 @@ def index_cmd(
     total = len(_collect_python_files_scandir(scan_root))
     print(f"Indexing {total} Python files in {scan_root}...", file=sys.stderr)
 
-    stats = warm_caches(path, jobs=jobs, callback=_progress, type_engine=type_engine)
+    from emend.type_oracle import TypeEngineUnavailableError
+    try:
+        stats = warm_caches(path, jobs=jobs, callback=_progress, type_engine=type_engine)
+    except TypeEngineUnavailableError as exc:
+        print("", file=sys.stderr)
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
 
     if not verbose and sys.stderr.isatty():
         print("", file=sys.stderr)  # newline after progress
