@@ -58,6 +58,8 @@ def _get_disk_cache() -> sqlite3.Connection | None:
             root = _find_project_root(".")
             cache_dir = Path(root) / ".emend" / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
+            # Ensure ignore files exist so cache DB is never checked in
+            _ensure_cache_ignore_files(root)
             db_path = cache_dir / "parse.db"
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -239,6 +241,90 @@ class _QNCollector(cst.CSTVisitor):
             pass
 
 
+def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int]:
+    """Worker function for process-pool indexing.
+
+    Runs in a subprocess.  Parses a batch of files, resolves qualified
+    names, and writes directly to the SQLite disk cache — avoiding the
+    cost of serialising LibCST modules back to the main process.
+
+    Args:
+        args: (db_path, [(file_path, content), ...])
+
+    Returns:
+        (parse_count, qn_count) — number of entries written.
+    """
+    import pickle
+    import sqlite3
+    import zlib
+
+    db_path, file_batch = args
+    parse_rows: list[tuple[bytes, bytes]] = []
+    qn_rows: list[tuple[bytes, bytes]] = []
+
+    for _py_file, content in file_batch:
+        content_hash = hashlib.md5(
+            content.encode(), usedforsecurity=False
+        ).digest()
+
+        # Parse
+        try:
+            module = cst.parse_module(content)
+        except Exception:
+            continue
+
+        try:
+            parse_blob = zlib.compress(
+                pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
+            )
+            parse_rows.append((content_hash, parse_blob))
+        except Exception:
+            pass
+
+        # QN index
+        try:
+            wrapper = cst.metadata.MetadataWrapper(module)
+            collector = _QNCollector()
+            wrapper.visit(collector)
+            qn_blob = zlib.compress(
+                pickle.dumps(collector.all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
+                level=1,
+            )
+            qn_rows.append((content_hash, qn_blob))
+        except Exception:
+            pass
+
+    # Bulk-write to SQLite from this worker process.
+    # WAL mode allows concurrent readers/writers across processes.
+    if parse_rows or qn_rows:
+        try:
+            conn = sqlite3.connect(db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            if parse_rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS parse_cache "
+                    "(hash BLOB PRIMARY KEY, data BLOB)"
+                )
+                conn.executemany(
+                    "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", parse_rows
+                )
+            if qn_rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS qn_index "
+                    "(hash BLOB PRIMARY KEY, qnames BLOB)"
+                )
+                conn.executemany(
+                    "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
+                )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    return (len(parse_rows), len(qn_rows))
+
+
 def warm_caches(
     project_path: str = ".",
     *,
@@ -251,6 +337,13 @@ def warm_caches(
     server start-up.  Each file is parsed, then QualifiedNameProvider is
     resolved to build the QN index.
 
+    Uses a ``ProcessPoolExecutor`` so that LibCST parsing (CPU-bound)
+    runs across multiple cores without GIL contention.  Files are split
+    into batches; each worker process parses its batch and writes results
+    directly to the SQLite disk cache (WAL mode allows concurrent writers),
+    avoiding the overhead of serialising LibCST modules back to the main
+    process.
+
     Args:
         project_path: Root directory of the project.
         jobs: Max parallelism (defaults to CPU count).
@@ -260,6 +353,7 @@ def warm_caches(
         Dict with stats: ``{"files", "parse_cached", "qn_cached"}``.
     """
     import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
 
     project_root = _find_project_root(project_path)
     # Collect files from the user-specified path (not the project root)
@@ -277,44 +371,34 @@ def warm_caches(
 
     stats = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0}
 
-    # Phase 2: parse + QN index (parallel)
-    def _warm_one(args: tuple[str, str]) -> tuple[bool, bool]:
-        py_file, content = args
-        if callback:
-            callback("index", py_file)
-        content_hash = hashlib.md5(
-            content.encode(), usedforsecurity=False
-        ).digest()
-        # Parse
-        parse_hit = False
-        with _parse_cache_lock:
-            parse_hit = content_hash in {
-                hashlib.md5(k, usedforsecurity=False).digest()
-                for k in []  # not useful to check in-memory, just parse
-            }
-        _cached_parse(content)  # populates both in-memory + disk
-        parse_cached = True
+    # Phase 2: parse + QN index in subprocesses.
+    # Ensure the DB exists before spawning workers.
+    _get_disk_cache()
+    _ensure_qn_table()
 
-        # QN index
-        qn_hit = _get_cached_qnames(content_hash) is not None
-        if not qn_hit:
-            try:
-                module = _cached_parse(content)
-                wrapper = cst.metadata.MetadataWrapper(module)
-                collector = _QNCollector()
-                wrapper.visit(collector)
-                _store_qnames(content_hash, collector.all_qnames)
-            except Exception:
-                pass
-        return (parse_cached, qn_hit or True)
+    # Resolve the DB path so workers can open their own connections.
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = str(cache_dir / "parse.db")
+
+    # Split files into batches — one batch per worker.
+    batch_size = max(1, len(file_contents) // max_workers)
+    batches: list[tuple[str, list[tuple[str, str]]]] = []
+    for i in range(0, len(file_contents), batch_size):
+        chunk = file_contents[i : i + batch_size]
+        batches.append((db_path, chunk))
 
     t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for parse_ok, qn_ok in executor.map(_warm_one, file_contents):
-            if parse_ok:
-                stats["parse_cached"] += 1
-            if qn_ok:
-                stats["qn_cached"] += 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for batch_idx, (parse_n, qn_n) in enumerate(
+            executor.map(_index_batch, batches)
+        ):
+            stats["parse_cached"] += parse_n
+            stats["qn_cached"] += qn_n
+            # Report progress for all files in this batch
+            if callback:
+                _db_path, chunk = batches[batch_idx]
+                for py_file, _content in chunk:
+                    callback("index", py_file)
 
     logger.info(
         "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d)",
@@ -493,10 +577,11 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     return '.'.join(module_parts)
 
 
-_SKIP_DIRS = frozenset({'.git', '__pycache__', '.venv', 'venv', '.tox', 'node_modules',
-                        '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
-                        'dist', 'build', '.nox', '.uv-cache', '.pixi',
-                        '.cargo', '.cargo-cache'})
+# Non-dot directories to skip.  All directories starting with '.' are
+# skipped automatically by the Rust scanner (emend_core.collect_python_files).
+# The canonical list lives in Rust (scanner.rs); we import it here so
+# Python and Rust always agree.
+_SKIP_DIRS = frozenset(_rust.skip_dirs())
 
 # Module-level file-list cache: maps resolved project root to (mtime_ns, file_list)
 _file_list_cache: dict[str, tuple[int, list[str]]] = {}

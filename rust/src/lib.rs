@@ -39,6 +39,14 @@ fn collect_python_files(root: &str) -> PyResult<Vec<String>> {
     Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
+/// Return the list of non-dot directory names that are skipped during scanning.
+///
+/// All directories starting with '.' are also skipped automatically.
+#[pyfunction]
+fn skip_dirs() -> Vec<&'static str> {
+    scanner::SKIP_DIRS.to_vec()
+}
+
 /// Pre-filter files: return only those whose content contains `name_hint`.
 ///
 /// Reads files in parallel using rayon.
@@ -217,6 +225,7 @@ fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<V
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_function(wrap_pyfunction!(collect_python_files, m)?)?;
+    m.add_function(wrap_pyfunction!(skip_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(filter_files_by_content, m)?)?;
     m.add_function(wrap_pyfunction!(find_name_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(find_calls_in_files, m)?)?;

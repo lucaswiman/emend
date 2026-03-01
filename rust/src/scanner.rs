@@ -2,25 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Directories to skip when scanning for Python files.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
+/// Non-dot directories to skip when scanning for Python files.
+/// All directories starting with '.' are skipped automatically.
+pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
-    ".venv",
     "venv",
-    ".tox",
     "node_modules",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".eggs",
     "dist",
     "build",
-    ".nox",
-    ".uv-cache",
-    ".pixi",
-    ".cargo",
-    ".cargo-cache",
 ];
 
 /// Collect all `.py` files under `root`, skipping non-project directories.
@@ -66,7 +55,9 @@ pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
             }
 
             if is_dir {
-                if !SKIP_DIRS.contains(&name_str.as_ref()) {
+                // Skip all dot-directories (e.g. .venv, .poetry_cache, .git)
+                // as well as explicitly listed non-dot directories.
+                if !name_str.starts_with('.') && !SKIP_DIRS.contains(&name_str.as_ref()) {
                     stack.push(entry.path());
                 }
             } else if is_file && name_str.ends_with(".py") {

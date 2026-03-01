@@ -1653,6 +1653,10 @@ def index_cmd(
         Optional[int],
         typer.Option("--jobs", "-j", help="Max parallel workers (default: CPU count)")
     ] = None,
+    verbose: Annotated[
+        int,
+        typer.Option("--verbose", "-v", count=True, help="Increase verbosity (-v: show files, -vv: debug)")
+    ] = 0,
 ):
     """Pre-build caches for faster cross-project operations.
 
@@ -1666,9 +1670,16 @@ def index_cmd(
     Examples:
         emend index
         emend index src/ --jobs 8
+        emend index -v          # show each file being indexed
+        emend index -vv         # debug-level logging
     """
     import time as _time
     t0 = _time.monotonic()
+
+    if verbose >= 2:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
+    elif verbose >= 1:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     n_done = 0
     total = None
@@ -1676,7 +1687,9 @@ def index_cmd(
     def _progress(phase: str, file_path: str) -> None:
         nonlocal n_done
         n_done += 1
-        if total and sys.stderr.isatty():
+        if verbose >= 1:
+            print(f"  {file_path}", file=sys.stderr)
+        elif total and sys.stderr.isatty():
             pct = n_done * 100 // total
             print(f"\r  [{pct:3d}%] {n_done}/{total} files indexed", end="", file=sys.stderr)
 
@@ -1689,7 +1702,7 @@ def index_cmd(
 
     stats = warm_caches(path, jobs=jobs, callback=_progress)
 
-    if sys.stderr.isatty():
+    if not verbose and sys.stderr.isatty():
         print("", file=sys.stderr)  # newline after progress
 
     elapsed = _time.monotonic() - t0
