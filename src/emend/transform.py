@@ -17,6 +17,7 @@ import re
 import sys
 import io
 import json
+import time
 from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
 
@@ -264,6 +265,7 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
     if git_tracked_only:
         tracked = _collect_git_tracked_python_files(project_root)
         if tracked is not None:
+            logger.info("collect_python_files: %d git-tracked files in %s", len(tracked), project_root)
             return tracked
 
     import os
@@ -271,13 +273,19 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
     try:
         root_mtime = os.stat(resolved).st_mtime_ns
     except OSError:
-        return _collect_python_files_scandir(resolved)
+        t0 = time.monotonic()
+        files = _collect_python_files_scandir(resolved)
+        logger.info("collect_python_files: %d files in %.3fs (scandir, %s)", len(files), time.monotonic() - t0, resolved)
+        return files
 
     cached = _file_list_cache.get(resolved)
     if cached is not None and cached[0] == root_mtime:
+        logger.debug("collect_python_files: %d files (cached, %s)", len(cached[1]), resolved)
         return cached[1]
 
+    t0 = time.monotonic()
     files = _collect_python_files_scandir(resolved)
+    logger.info("collect_python_files: %d files in %.3fs (%s)", len(files), time.monotonic() - t0, resolved)
     _file_list_cache[resolved] = (root_mtime, files)
     return files
 
@@ -325,26 +333,35 @@ def visit_project(
         target_file: The resolved path of the file defining the symbol (for is_def_file).
         candidate_files: If provided, only visit these files (pre-filtered by import graph).
     """
+    t_start = time.monotonic()
     project_root = project_path or "."
     py_files = _collect_python_files(project_root)
+    logger.info("visit_project: %d python files collected from %s", len(py_files), project_root)
     if candidate_files is not None:
         # Pre-filter to only files in the candidate set
         # Always include the target_file itself (definition file)
+        before = len(py_files)
         py_files = [f for f in py_files
                     if f in candidate_files
                     or (target_file and str(Path(f).resolve()) == target_file)]
+        logger.info("visit_project: candidate_files filter %d -> %d", before, len(py_files))
 
     # Structural pre-filter for cross-project ops: use tree-sitter to find
     # files with actual identifier matches (eliminates strings/comments false positives)
     if metadata_providers and name_hint:
+        before = len(py_files)
+        t0 = time.monotonic()
         py_files = prefilter_files_structural(py_files, name_hint)
+        logger.info("visit_project: structural prefilter %d -> %d in %.3fs (hint=%r)", before, len(py_files), time.monotonic() - t0, name_hint)
         # Re-add target_file if it was filtered out (definition file must always be visited)
         if target_file and target_file not in py_files:
             py_files.append(target_file)
 
     # Batch read + filter in Rust (parallel I/O + substring pre-filter)
     hints = [name_hint] if name_hint and not metadata_providers else []
+    t0 = time.monotonic()
     file_contents = _rust.read_and_filter_files(py_files, hints)
+    logger.info("visit_project: read_and_filter %d -> %d files in %.3fs (hints=%r)", len(py_files), len(file_contents), time.monotonic() - t0, hints)
 
     # Ensure target_file is always included (definition file must be visited)
     if target_file and not metadata_providers:
@@ -371,16 +388,23 @@ def visit_project(
             except Exception:
                 return None
 
+        t0 = time.monotonic()
+        n_visited = 0
         with ThreadPoolExecutor() as executor:
             for result in executor.map(_visit_one, file_contents):
                 if result is not None:
+                    n_visited += 1
                     yield result
+        logger.info("visit_project: parallel visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
     else:
         # Sequential path: no metadata providers or single file
+        t0 = time.monotonic()
+        n_visited = 0
         for py_file, content in file_contents:
             is_def_file = (target_file is not None
                            and str(Path(py_file).resolve()) == target_file)
             try:
+                t_file = time.monotonic()
                 module = _cached_parse(content)
                 visitor = visitor_factory(py_file, is_def_file)
                 if metadata_providers:
@@ -388,9 +412,12 @@ def visit_project(
                     result_module = wrapper.visit(visitor)
                 else:
                     result_module = module.visit(visitor)
+                logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
+                n_visited += 1
                 yield (py_file, result_module, visitor)
             except Exception:
                 continue
+        logger.info("visit_project: sequential visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
 
 
 class SymbolFinder(cst.CSTVisitor):

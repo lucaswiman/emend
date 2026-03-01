@@ -6,6 +6,7 @@ build/
 dist/
 LibCST
 benchmarks/.django-checkout/
+benchmarks/.django-scaled/
 src/emend/_version.py
 rust/target/
 benchmark-results/
