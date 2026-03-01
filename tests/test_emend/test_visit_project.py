@@ -33,7 +33,7 @@ class TestVisitProjectRefactorFindReferences:
             accessor=None,
         )
 
-        refs = find_references(selector, project_path=str(project))
+        refs = list(find_references(selector, project_path=str(project)))
         assert len(refs) >= 2  # definition + usage
 
     def test_find_references_cross_file(self, tmp_path):

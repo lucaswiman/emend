@@ -4548,7 +4548,7 @@ def find_references(
     include_imports: bool = True,
     writes_only: bool = False,
     reads_only: bool = False,
-) -> list[Reference]:
+) -> Iterator[Reference]:
     """Find all references to a symbol across the project.
 
     Uses LibCST QualifiedNameProvider for scope-aware resolution:
@@ -4596,29 +4596,29 @@ def find_references(
     # Compute the set of qualified names we're looking for (for QN-index filtering)
     all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
 
-    references = []
-    for _py_file, _module, finder in visit_project(
-        name_hint=symbol_name,
-        visitor_factory=factory,
-        project_path=scan_root,
-        metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
-        target_file=resolved_target,
-        candidate_files=candidates,
-        target_qnames=all_target_qns,
-    ):
-        references.extend(finder.references)
+    # Use an inner generator so validation above runs eagerly on call, not on first iteration.
+    def _gen() -> Iterator[Reference]:
+        for _py_file, _module, finder in visit_project(
+            name_hint=symbol_name,
+            visitor_factory=factory,
+            project_path=scan_root,
+            metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
+            target_file=resolved_target,
+            candidate_files=candidates,
+            target_qnames=all_target_qns,
+        ):
+            for ref in finder.references:
+                if not include_definition and ref.is_definition:
+                    continue
+                if not include_imports and ref.is_import:
+                    continue
+                if writes_only and not ref.is_write:
+                    continue
+                if reads_only and ref.is_write:
+                    continue
+                yield ref
 
-    # Filter based on options
-    if not include_definition:
-        references = [r for r in references if not r.is_definition]
-    if not include_imports:
-        references = [r for r in references if not r.is_import]
-    if writes_only:
-        references = [r for r in references if r.is_write]
-    if reads_only:
-        references = [r for r in references if not r.is_write]
-
-    return references
+    return _gen()
 
 
 @dataclass
@@ -4705,7 +4705,7 @@ class _CallerFilter(cst.CSTVisitor):
 def find_callers(
     selector: ExtendedSelector,
     project_path: str | None = None,
-) -> list[Reference]:
+) -> Iterator[Reference]:
     """Find all places where a function is called across the project.
 
     Unlike find_references, this only returns actual call sites,
@@ -4740,19 +4740,19 @@ def find_callers(
 
     all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
 
-    callers = []
-    for _py_file, _module, visitor in visit_project(
-        name_hint=symbol_name,
-        visitor_factory=factory,
-        project_path=scan_root,
-        metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
-        target_file=resolved_target,
-        candidate_files=candidates,
-        target_qnames=all_target_qns,
-    ):
-        callers.extend(visitor.call_references)
+    def _gen() -> Iterator[Reference]:
+        for _py_file, _module, visitor in visit_project(
+            name_hint=symbol_name,
+            visitor_factory=factory,
+            project_path=scan_root,
+            metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
+            target_file=resolved_target,
+            candidate_files=candidates,
+            target_qnames=all_target_qns,
+        ):
+            yield from visitor.call_references
 
-    return callers
+    return _gen()
 
 
 class _CalleeCollector(cst.CSTVisitor):
@@ -6157,6 +6157,7 @@ def cmd_lookup(
     dedent: bool = False,
     matching: str | None = None,
     type_oracle: TypeOracle | None = None,
+    out: "IO[str] | None" = None,
 ) -> str:
     """Unified lookup command combining get, query, and show.
 
@@ -6178,6 +6179,33 @@ def cmd_lookup(
             files_to_query = [f for f in glob_mod.glob(file_or_pattern, recursive=True) if f.endswith('.py')]
         else:
             files_to_query = [file_or_pattern]
+
+        if out is not None and not count:
+            # Streaming path: write each file's output directly to out as it completes
+            for fpath in files_to_query:
+                old_stdout = sys.stdout
+                sys.stdout = out
+                try:
+                    cmd_query(
+                        filepath=fpath,
+                        kinds=kind,
+                        names=name,
+                        decorators=has_decorator,
+                        returns_patterns=returns,
+                        in_classes=in_class,
+                        depths=depth,
+                        params=has_param,
+                        case_insensitive=case_insensitive,
+                        smart_case=smart_case,
+                        output_json=json_output,
+                        paths_only=paths_only,
+                        count_only=False,
+                        type_oracle=type_oracle,
+                    )
+                finally:
+                    sys.stdout = old_stdout
+                out.flush()
+            return ''
 
         all_output = []
         total_count_val = 0
@@ -6228,6 +6256,36 @@ def cmd_lookup(
         # Multi-file dispatch for file globs
         if selector.has_file_glob():
             expanded_files = selector.expand_file_glob()
+
+            if out is not None and not matching:
+                # Streaming path: write each file's result to out as it completes
+                any_results = False
+                for fpath in expanded_files:
+                    concrete = selector.with_file_path(fpath)
+                    try:
+                        result = _cmd_lookup_single_selector(
+                            concrete,
+                            file_or_pattern=fpath,
+                            case_insensitive=case_insensitive,
+                            smart_case=smart_case,
+                            json_output=json_output,
+                            metadata=metadata,
+                            paths_only=paths_only,
+                            count=count,
+                            dedent=dedent,
+                        )
+                        if result:
+                            out.write(result)
+                            if not result.endswith('\n'):
+                                out.write('\n')
+                            out.flush()
+                            any_results = True
+                    except (ValueError, FileNotFoundError):
+                        continue
+                if not any_results:
+                    raise ValueError(f"No symbols found matching {selector_str}")
+                return ''
+
             all_results = []
             for fpath in expanded_files:
                 concrete = selector.with_file_path(fpath)

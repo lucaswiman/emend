@@ -1827,7 +1827,7 @@ class TestFindReferences:
             accessor=None
         )
 
-        refs = find_references(selector)
+        refs = list(find_references(selector))
 
         # Should find at least the definition and the call
         assert len(refs) >= 2

@@ -412,86 +412,91 @@ def search(
                 file_strs = [str(f) for f in files]
             _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, target_path)
 
-            all_matches = []
-            if is_multi_file and len(file_strs) > 1:
-                literals = extract_pattern_literals(query)
-                _logger.info("pattern literals for pre-filter: %r", literals)
-                _t0 = _time.monotonic()
-                file_contents = emend_core.read_and_filter_files(file_strs, literals)
-                _logger.info("read_and_filter_files: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
+            # Build a lazy iterator over all matches, yielding as each file completes.
+            # This allows streaming output rather than collecting everything first.
+            def _iter_matches():
+                if is_multi_file and len(file_strs) > 1:
+                    literals = extract_pattern_literals(query)
+                    _logger.info("pattern literals for pre-filter: %r", literals)
+                    _t1 = _time.monotonic()
+                    file_contents = emend_core.read_and_filter_files(file_strs, literals)
+                    _logger.info("read_and_filter_files: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t1)
 
-                # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
-                rust_path_used = False
-                if where_scope is None and imported_from is None and not scope_local and oracle is None:
-                    from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
-                    from emend.transform import PatternMatch
-                    pattern_ir = compile_pattern_to_rust_ir(query)
-                    if pattern_ir is not None:
-                        inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
-                        not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
-                        if (where_inside is None or inside_ir is not None) and \
-                           (where_not_inside is None or not_inside_ir is not None):
-                            _t0 = _time.monotonic()
-                            raw_matches = emend_core.find_pattern_in_files(
-                                list(file_contents), pattern_ir, inside_ir, not_inside_ir
-                            )
-                            _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t0)
-                            for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
-                                all_matches.append((file_path_str, PatternMatch(
-                                    node=None, captures={}, line=line, matched_text=text
-                                )))
-                            rust_path_used = True
-                    else:
-                        _logger.info("pattern could not be compiled to Rust IR, falling back to Python")
+                    # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
+                    rust_path_used = False
+                    if where_scope is None and imported_from is None and not scope_local and oracle is None:
+                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+                        from emend.transform import PatternMatch
+                        pattern_ir = compile_pattern_to_rust_ir(query)
+                        if pattern_ir is not None:
+                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
+                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
+                            if (where_inside is None or inside_ir is not None) and \
+                               (where_not_inside is None or not_inside_ir is not None):
+                                _t1 = _time.monotonic()
+                                raw_matches = emend_core.find_pattern_in_files(
+                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                                )
+                                _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t1)
+                                for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                                    yield (file_path_str, PatternMatch(
+                                        node=None, captures={}, line=line, matched_text=text
+                                    ))
+                                rust_path_used = True
+                        else:
+                            _logger.info("pattern could not be compiled to Rust IR, falling back to Python")
 
-                if not rust_path_used:
-                    _logger.info("python path: processing %d files", len(file_contents))
-                    _t0 = _time.monotonic()
+                    if not rust_path_used:
+                        _logger.info("python path: processing %d files", len(file_contents))
+                        _t1 = _time.monotonic()
 
-                    def _find_one(args):
-                        fp, content = args
+                        def _find_one(args):
+                            fp, content = args
+                            try:
+                                return [(fp, m) for m in find_pattern(
+                                    query, fp,
+                                    scope=where_scope,
+                                    inside=where_inside,
+                                    not_inside=where_not_inside,
+                                    imported_from=imported_from,
+                                    scope_local=scope_local,
+                                    source_override=content,
+                                    type_oracle=oracle,
+                                )]
+                            except Exception:
+                                return []
+
+                        from concurrent.futures import ThreadPoolExecutor as _TPE
+                        n_py = 0
+                        with _TPE() as _executor:
+                            for batch in _executor.map(_find_one, file_contents):
+                                n_py += len(batch)
+                                yield from batch
+                        _logger.info("python path: %d matches in %.3fs", n_py, _time.monotonic() - _t1)
+                else:
+                    for fstr in file_strs:
                         try:
-                            return [(fp, m) for m in find_pattern(
-                                query, fp,
+                            for match in find_pattern(
+                                query, fstr,
                                 scope=where_scope,
                                 inside=where_inside,
                                 not_inside=where_not_inside,
                                 imported_from=imported_from,
                                 scope_local=scope_local,
-                                source_override=content,
                                 type_oracle=oracle,
-                            )]
-                        except Exception:
-                            return []
-
-                    from concurrent.futures import ThreadPoolExecutor as _TPE
-                    with _TPE() as _executor:
-                        for batch in _executor.map(_find_one, file_contents):
-                            all_matches.extend(batch)
-                    _logger.info("python path: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t0)
-            else:
-                for fstr in file_strs:
-                    try:
-                        file_matches = find_pattern(
-                            query, fstr,
-                            scope=where_scope,
-                            inside=where_inside,
-                            not_inside=where_not_inside,
-                            imported_from=imported_from,
-                            scope_local=scope_local,
-                            type_oracle=oracle,
-                        )
-                        for match in file_matches:
-                            all_matches.append((fstr, match))
-                    except FileNotFoundError:
-                        if not is_multi_file:
-                            raise
-                        continue
+                            ):
+                                yield (fstr, match)
+                        except FileNotFoundError:
+                            if not is_multi_file:
+                                raise
 
             if count_output:
-                print(len(all_matches))
+                n_total = sum(1 for _ in _iter_matches())
+                print(n_total)
+                _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             elif json_output:
                 import json
+                all_matches = list(_iter_matches())
                 serialized_matches = []
                 for file_path_str, match in all_matches:
                     if match.matched_text is not None:
@@ -514,33 +519,36 @@ def search(
                         "captures": captures
                     })
                 print(json.dumps({"count": len(all_matches), "matches": serialized_matches}))
+                _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
             else:
-                if all_matches:
-                    if effective_output == "selector":
-                        from emend.ast_utils import find_nested_definitions, find_symbol_by_line
-                        _defs_cache: dict[str, list] = {}
-                        seen: set[str] = set()
-                        for file_path_str, match in all_matches:
-                            if file_path_str not in _defs_cache:
-                                _defs_cache[file_path_str] = find_nested_definitions(file_path_str)
-                            if match.line is not None:
-                                sym = find_symbol_by_line(_defs_cache[file_path_str], match.line)
-                                if sym:
-                                    sel_path = f"{file_path_str}::{'.'.join(sym.path)}"
-                                    if sel_path not in seen:
-                                        seen.add(sel_path)
-                                        print(sel_path)
-                                else:
-                                    print(f"{file_path_str}:{match.line}")
+                n_total = 0
+                if effective_output == "selector":
+                    from emend.ast_utils import find_nested_definitions, find_symbol_by_line
+                    _defs_cache: dict[str, list] = {}
+                    seen: set[str] = set()
+                    for file_path_str, match in _iter_matches():
+                        n_total += 1
+                        if file_path_str not in _defs_cache:
+                            _defs_cache[file_path_str] = find_nested_definitions(file_path_str)
+                        if match.line is not None:
+                            sym = find_symbol_by_line(_defs_cache[file_path_str], match.line)
+                            if sym:
+                                sel_path = f"{file_path_str}::{'.'.join(sym.path)}"
+                                if sel_path not in seen:
+                                    seen.add(sel_path)
+                                    print(sel_path, flush=True)
                             else:
-                                print(f"{file_path_str}:?")
-                    else:
-                        for file_path_str, match in all_matches:
-                            if match.line is not None:
-                                print(f"{file_path_str}:{match.line}")
-                            else:
-                                print(f"{file_path_str}:?")
-            _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
+                                print(f"{file_path_str}:{match.line}", flush=True)
+                        else:
+                            print(f"{file_path_str}:?", flush=True)
+                else:
+                    for file_path_str, match in _iter_matches():
+                        n_total += 1
+                        if match.line is not None:
+                            print(f"{file_path_str}:{match.line}", flush=True)
+                        else:
+                            print(f"{file_path_str}:?", flush=True)
+                _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             return
 
         # ---- LOOKUP MODE ----
@@ -579,8 +587,10 @@ def search(
             dedent=dedent_output,
             matching=lookup_matching,
             type_oracle=oracle,
+            out=sys.stdout,
         )
-        print(result, end='')
+        if result:
+            print(result, end='')
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1022,7 +1032,7 @@ def refs_cmd(
                 print(json.dumps(data, indent=2))
             else:
                 for ref in callers:
-                    print(f"{ref.file_path}:{ref.line}")
+                    print(f"{ref.file_path}:{ref.line}", flush=True)
             return
 
         references = find_references(
@@ -1056,7 +1066,7 @@ def refs_cmd(
                     marker = " (definition)"
                 elif ref.is_import:
                     marker = " (import)"
-                print(f"{ref.file_path}:{ref.line}{marker}")
+                print(f"{ref.file_path}:{ref.line}{marker}", flush=True)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)
