@@ -1,1 +1,1 @@
-.. include:: ../src/emend/grammar_and_cookbook.rst
+../src/emend/grammar_and_cookbook.rst
