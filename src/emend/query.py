@@ -3,6 +3,7 @@
 This module provides a filter-based search for Python symbols,
 designed for AI agent refactoring workflows.
 """
+from __future__ import annotations
 
 import fnmatch
 import json
@@ -11,9 +12,13 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import libcst as cst
 from libcst.metadata import PositionProvider, MetadataWrapper
+
+if TYPE_CHECKING:
+    from emend.type_oracle import FileTypes, TypeOracle
 
 _logger = logging.getLogger(__name__)
 
@@ -426,7 +431,7 @@ def _filter_by_returns_with_oracle(
     returns_patterns: list[str],
     case_insensitive: bool,
     smart_case: bool = False,
-    file_types: object | None = None,
+    file_types: FileTypes | None = None,
 ) -> bool:
     """Check if symbol return type matches any pattern, with TypeOracle fallback.
 
@@ -521,7 +526,7 @@ def _filter_by_param(
     return False
 
 
-def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: object | None = None) -> list[SymbolInfo]:
+def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: TypeOracle | None = None) -> list[SymbolInfo]:
     """Query symbols from a file with filters.
 
     Args:
@@ -587,7 +592,7 @@ def cmd_query(
     output_json: bool = False,
     paths_only: bool = False,
     count_only: bool = False,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> None:
     """Execute the query command.
 

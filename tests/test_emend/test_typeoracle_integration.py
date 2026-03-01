@@ -26,6 +26,7 @@ from emend.type_oracle import (
     FileTypes,
     TypeBinding,
     TypeDescriptor,
+    TypeOracle,
     create_type_oracle,
 )
 
@@ -140,11 +141,11 @@ class TestOracleConstraintCompilation:
 # Simple TypeOracle adapter wrapping manually built FileTypes
 # ---------------------------------------------------------------------------
 
-class _SimpleOracle:
+class _SimpleOracle(TypeOracle):
     """Lightweight TypeOracle that wraps pre-built FileTypes by path.
 
-    This is not a mock: it is a real adapter that implements the TypeOracle
-    interface by returning real FileTypes objects.
+    Subclasses the real TypeOracle ABC so that interface changes (e.g.
+    renamed or added abstract methods) cause test failures immediately.
     """
 
     def __init__(self, file_types_map: dict[str, FileTypes]):
@@ -160,11 +161,12 @@ class _SimpleOracle:
                 return ft
         return FileTypes(path=str(path))
 
-    def type_at(self, path, line, col, project_root=None):
+    def type_at(self, path: Path, line: int, col: int,
+                project_root: Path | None = None) -> TypeBinding | None:
         ft = self.infer_file(path, project_root)
         return ft.type_at(line, col)
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         pass
 
 
