@@ -36,7 +36,7 @@ class TestIndexBatchCacheHit:
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
         parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
-            (str(db_path), batch)
+            (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
         assert parse_n == 1
@@ -53,11 +53,11 @@ class TestIndexBatchCacheHit:
         batch = [(str(tmp_path / "a.py"), SOURCE)]
 
         # Cold run
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         # Warm run — must skip
         parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
-            (str(db_path), batch)
+            (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
         assert parse_n == 0
         assert qn_n == 0
@@ -71,10 +71,10 @@ class TestIndexBatchCacheHit:
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
 
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
         rows_after_cold = _db_row_count(db_path, "parse_cache")
 
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
         rows_after_warm = _db_row_count(db_path, "parse_cache")
 
         assert rows_after_cold == rows_after_warm == 1
@@ -102,7 +102,7 @@ class TestIndexBatchCacheHit:
 
         batch = [(str(tmp_path / "a.py"), SOURCE)]
         parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
-            (str(db_path), batch)
+            (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
         assert parse_n == 0  # already cached
@@ -319,7 +319,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def process_request(x: int) -> str:\n    return str(x)\n\nclass MyClass:\n    pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         count = _db_row_count(db_path, "symbol_index")
         assert count >= 2  # at least process_request + MyClass
@@ -342,7 +342,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def greet(name: str, loud: bool = False) -> str:\n    pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         row = conn.execute(
@@ -361,7 +361,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def foo(): pass\nclass Bar: pass\ndef baz(): pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         funcs = conn.execute(
@@ -386,7 +386,7 @@ class TestSymbolIndex:
             "def handle_error(): pass\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         results = conn.execute(
@@ -409,7 +409,7 @@ class TestImportGraph:
         db_path = tmp_path / "parse.db"
         source = "import os\nfrom pathlib import Path\nimport json\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         rows = conn.execute(
@@ -439,7 +439,7 @@ class TestReferenceIndex:
             "    return x\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         count = _db_row_count(db_path, "reference_index")
         # Should have references for helper, main, x, etc.
@@ -456,7 +456,7 @@ class TestReferenceIndex:
             "result = process()\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), batch))
+        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         calls = conn.execute(
@@ -583,7 +583,7 @@ class TestIndexStatus:
         assert info is not None
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
-        assert info["schema_version"] == "2"
+        assert info["schema_version"] == "3"
 
     def test_status_returns_none_without_index(self, tmp_path):
         """get_index_status returns None when no index exists."""

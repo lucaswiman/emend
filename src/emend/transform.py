@@ -96,6 +96,7 @@ def _get_disk_cache() -> sqlite3.Connection | None:
                 "  file_path TEXT NOT NULL,"
                 "  name TEXT NOT NULL,"
                 "  qualified_name TEXT NOT NULL,"
+                "  module_qn TEXT,"
                 "  kind TEXT NOT NULL,"
                 "  line INTEGER NOT NULL,"
                 "  end_line INTEGER NOT NULL,"
@@ -103,7 +104,10 @@ def _get_disk_cache() -> sqlite3.Connection | None:
                 "  parent TEXT,"
                 "  signature TEXT,"
                 "  returns TEXT,"
-                "  decorators TEXT"
+                "  decorators TEXT,"
+                "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
+                "  is_exported INTEGER NOT NULL DEFAULT 0,"
+                "  has_noqa INTEGER NOT NULL DEFAULT 0"
                 ")"
             )
             conn.execute(
@@ -415,7 +419,51 @@ class _RefIndexCollector(cst.CSTVisitor):
         self._record(node)
 
 
-def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
+def _extract_all_exports(module: cst.Module) -> set[str]:
+    """Extract names from ``__all__`` without re-parsing (index-time helper)."""
+    names: set[str] = set()
+    for stmt in module.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if (isinstance(item, cst.Assign)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0].target, cst.Name)
+                        and item.targets[0].target.value == '__all__'):
+                    value = item.value
+                    elements = None
+                    if isinstance(value, (cst.List, cst.Tuple)):
+                        elements = value.elements
+                    if elements:
+                        for el in elements:
+                            if isinstance(el, cst.Element) and isinstance(
+                                el.value, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString)
+                            ):
+                                raw = el.value.evaluated_value if hasattr(el.value, 'evaluated_value') else None
+                                if isinstance(raw, str):
+                                    names.add(raw)
+    return names
+
+
+_NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+
+
+def _extract_noqa_lines(source: str) -> set[int]:
+    """Return line numbers that have ``# noqa: emend:deadcode`` (index-time helper)."""
+    result: set[int] = set()
+    for lineno, line in enumerate(source.splitlines(), 1):
+        m = _NOQA_RE.search(line)
+        if m is None:
+            continue
+        codes = m.group(1)
+        if codes is None:
+            # Bare noqa — suppresses everything
+            result.add(lineno)
+        elif 'deadcode' in codes:
+            result.add(lineno)
+    return result
+
+
+def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
     Runs in a subprocess.  Parses a batch of files, resolves qualified
@@ -426,7 +474,7 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
     skipped without parsing (cache-hit fast path).
 
     Args:
-        args: (db_path, [(file_path, content), ...])
+        args: (db_path, source_root, project_root, [(file_path, content), ...])
 
     Returns:
         (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count).
@@ -437,7 +485,7 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
     from .query import _SymbolCollector
     from libcst.metadata import PositionProvider, MetadataWrapper
 
-    db_path, file_batch = args
+    db_path, source_root, project_root, file_batch = args
     parse_rows: list[tuple[bytes, bytes]] = []
     qn_rows: list[tuple[bytes, bytes]] = []
     sym_rows: list[tuple] = []
@@ -562,11 +610,29 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                     w = cst.metadata.MetadataWrapper(module)
                     sym_collector = _SymbolCollector(py_file)
                     w.visit(sym_collector)
+
+                # Compute module_qn prefix for this file.
+                _src = Path(source_root)
+                _proj = Path(project_root)
+                _abs = Path(py_file).resolve()
+                try:
+                    _rel = _abs.relative_to(_src)
+                except ValueError:
+                    _rel = _abs.relative_to(_proj)
+                _module_prefix = ".".join(
+                    list(_rel.parts[:-1]) + [_rel.stem]
+                )
+
+                # __all__ membership and noqa for dead-code pre-filtering.
+                exported_names = _extract_all_exports(module)
+                noqa_lines = _extract_noqa_lines(content)
+
                 for sym in sym_collector.symbols:
                     # Build qualified_name from file module path + symbol path
                     # For index batch, use the dotted symbol path from the selector
                     parts = sym.path.split("::", 1)
                     dotted = parts[1] if len(parts) > 1 else sym.name
+                    m_qn = f"{_module_prefix}.{dotted}"
                     sig = None
                     if sym.parameters:
                         ret_str = f" -> {sym.returns}" if sym.returns else ""
@@ -576,6 +642,7 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                         py_file,
                         sym.name,
                         dotted,
+                        m_qn,
                         sym.kind,
                         sym.line,
                         sym.end_line,
@@ -584,6 +651,11 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                         sig,
                         sym.returns,
                         ",".join(sym.decorators) if sym.decorators else None,
+                        int(_is_likely_entry_point(
+                            sym.name, sym.kind, sym.decorators, sym.depth,
+                        )),
+                        int(sym.name in exported_names),
+                        int(sym.line in noqa_lines),
                     ))
             except Exception:
                 pass
@@ -643,6 +715,7 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                     "  file_path TEXT NOT NULL,"
                     "  name TEXT NOT NULL,"
                     "  qualified_name TEXT NOT NULL,"
+                    "  module_qn TEXT,"
                     "  kind TEXT NOT NULL,"
                     "  line INTEGER NOT NULL,"
                     "  end_line INTEGER NOT NULL,"
@@ -650,7 +723,10 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                     "  parent TEXT,"
                     "  signature TEXT,"
                     "  returns TEXT,"
-                    "  decorators TEXT"
+                    "  decorators TEXT,"
+                    "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
+                    "  is_exported INTEGER NOT NULL DEFAULT 0,"
+                    "  has_noqa INTEGER NOT NULL DEFAULT 0"
                     ")"
                 )
                 # Delete old entries for these hashes before inserting
@@ -661,9 +737,10 @@ def _index_batch(args: tuple[str, list[tuple[str, str]]]) -> tuple[int, int, int
                     )
                 conn.executemany(
                     "INSERT INTO symbol_index "
-                    "(content_hash, file_path, name, qualified_name, kind, "
-                    "line, end_line, depth, parent, signature, returns, decorators) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(content_hash, file_path, name, qualified_name, module_qn, kind, "
+                    "line, end_line, depth, parent, signature, returns, decorators, "
+                    "is_entry_point, is_exported, has_noqa) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     sym_rows,
                 )
             if import_rows:
@@ -887,6 +964,18 @@ def _ensure_index_fresh(
         return False
 
     try:
+        # Check schema version — force re-index on mismatch.
+        try:
+            ver = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if ver is None or ver[0] != "3":
+                conn.close()
+                return False
+        except Exception:
+            conn.close()
+            return False
+
         # Check if index tables exist and have data
         try:
             count = conn.execute("SELECT COUNT(*) FROM symbol_index").fetchone()[0]
@@ -935,7 +1024,8 @@ def _ensure_index_fresh(
             conn.commit()
 
         if files_to_index:
-            _index_batch((str(db_path), files_to_index))
+            _src_root = _find_python_source_root(project_root)
+            _index_batch((str(db_path), _src_root, project_root, files_to_index))
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
@@ -1323,6 +1413,7 @@ def warm_caches(
             "  file_path TEXT NOT NULL,"
             "  name TEXT NOT NULL,"
             "  qualified_name TEXT NOT NULL,"
+            "  module_qn TEXT,"
             "  kind TEXT NOT NULL,"
             "  line INTEGER NOT NULL,"
             "  end_line INTEGER NOT NULL,"
@@ -1330,7 +1421,10 @@ def warm_caches(
             "  parent TEXT,"
             "  signature TEXT,"
             "  returns TEXT,"
-            "  decorators TEXT"
+            "  decorators TEXT,"
+            "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
+            "  is_exported INTEGER NOT NULL DEFAULT 0,"
+            "  has_noqa INTEGER NOT NULL DEFAULT 0"
             ")"
         )
         _init_conn.execute(
@@ -1391,12 +1485,15 @@ def warm_caches(
     except Exception:
         pass
 
+    # Resolve source root once so _index_batch workers can compute module_qn.
+    source_root = _find_python_source_root(project_root)
+
     # Split files into batches — one batch per worker.
     batch_size = max(1, len(file_contents) // max_workers)
-    batches: list[tuple[str, list[tuple[str, str]]]] = []
+    batches: list[tuple[str, str, str, list[tuple[str, str]]]] = []
     for i in range(0, len(file_contents), batch_size):
         chunk = file_contents[i : i + batch_size]
-        batches.append((db_path, chunk))
+        batches.append((db_path, source_root, project_root, chunk))
 
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -1412,7 +1509,7 @@ def warm_caches(
             stats["ref_cached"] += ref_n
             # Report progress for all files in this batch
             if callback:
-                _db_path, chunk = batches[batch_idx]
+                _db_path, _src, _proj, chunk = batches[batch_idx]
                 for py_file, _content in chunk:
                     callback("index", py_file)
 
@@ -1476,7 +1573,7 @@ def warm_caches(
         )
         _mf_conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "2"),
+            ("schema_version", "3"),
         )
         _mf_conn.commit()
         _mf_conn.close()
@@ -6303,16 +6400,16 @@ def _find_dead_code_cached(
     strings_count_as_references: bool,
     all_files: bool,
 ) -> list[DeadSymbol]:
-    """Index-accelerated dead code detection.
+    """Index-accelerated dead code detection — single SQL query.
 
-    Uses ``symbol_index`` and ``reference_index`` from ``parse.db`` to
-    avoid re-parsing every file.  Builds the index automatically when
-    it is missing or stale.
+    Uses ``symbol_index`` and ``reference_index`` from ``parse.db``.
+    The heavy lifting (candidate filtering + reference checking) is a
+    single ``NOT EXISTS`` query; only the lightweight string-literal
+    post-filter runs in Python on the small result set.
     """
     import sqlite3 as _sql3
 
     scan_root = str(Path(project_path).resolve())
-    module_root = _find_project_root(project_path)
 
     # Ensure the index is fresh; build it if necessary.
     if not _ensure_index_fresh(scan_root):
@@ -6327,203 +6424,172 @@ def _find_dead_code_cached(
     conn.execute("PRAGMA journal_mode=WAL")
 
     try:
-        # ---- Step 1: Candidate collection from symbol_index ----------
-        # Join with file_manifest to guarantee only current hashes are
-        # considered (stale rows from previous content are excluded).
-        kind_clause = ""
-        if kind == "function":
-            kind_clause = " AND si.kind IN ('function', 'async_function')"
-        elif kind == "class":
-            kind_clause = " AND si.kind = 'class'"
+        # ---- Build the single query ---------------------------------
+        conditions = [
+            "si.depth = 1",
+            "si.is_entry_point = 0",
+            "si.is_exported = 0",
+            "si.has_noqa = 0",
+        ]
+        params: list = []
 
-        rows = conn.execute(
-            "SELECT si.name, si.qualified_name, si.kind, si.file_path, "
-            "       si.line, si.decorators "
-            "FROM symbol_index si "
-            "INNER JOIN file_manifest fm "
-            "  ON si.content_hash = fm.content_hash "
-            "     AND si.file_path = fm.path "
-            f"WHERE si.depth = 1{kind_clause}"
-        ).fetchall()
+        if kind == "function":
+            conditions.append("si.kind IN ('function', 'async_function')")
+        elif kind == "class":
+            conditions.append("si.kind = 'class'")
+
+        if not include_private:
+            # Exclude _private names (but keep dunders — they're already
+            # filtered by is_entry_point).
+            conditions.append(
+                "(si.name NOT LIKE '\\_%' ESCAPE '\\' OR si.name LIKE '\\_\\_%\\_\\_%' ESCAPE '\\')"
+            )
+
+        # Reference exclusion: ignore references from certain dirs.
+        exclude_clause = ""
+        if exclude_references_from:
+            like_parts = []
+            for pattern in exclude_references_from:
+                resolved = str(Path(pattern).resolve())
+                like_parts.append("ri.file_path NOT LIKE ? ESCAPE '\\'")
+                # Escape any existing % or _ in the path for LIKE,
+                # then append % for prefix matching.
+                safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                params.append(f"{safe}%")
+            exclude_clause = " AND " + " AND ".join(like_parts)
+
+        where = " AND ".join(conditions)
+
+        query = f"""
+            SELECT si.name, si.qualified_name, si.kind, si.file_path,
+                   si.line
+            FROM symbol_index si
+            INNER JOIN file_manifest fm
+              ON si.content_hash = fm.content_hash
+                 AND si.file_path = fm.path
+            WHERE {where}
+              AND NOT EXISTS (
+                SELECT 1 FROM reference_index ri
+                WHERE (ri.target_qn = si.qualified_name
+                       OR ri.target_qn = si.module_qn)
+                  AND NOT (ri.file_path = si.file_path
+                           AND ri.line = si.line)
+                  {exclude_clause}
+              )
+            ORDER BY si.file_path, si.line
+        """
+
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
 
         if not rows:
             return []
 
-        # Build exclude set (resolved directory prefixes)
-        exclude_resolved: set[str] = set()
-        if exclude_references_from:
-            for pattern in exclude_references_from:
-                exclude_resolved.add(str(Path(pattern).resolve()))
+        # ---- String-literal post-filter (Python) ---------------------
+        # The reference_index only captures AST-level Name/Attribute
+        # references.  String literals need a quick text scan.  This
+        # runs on the small set of candidates returned by SQL (~tens).
+        if not strings_count_as_references:
+            return [
+                DeadSymbol(
+                    file_path=fp, name=name, kind=sym_kind,
+                    line=line, selector=f"{fp}::{qname}",
+                    reason="no references found",
+                )
+                for name, qname, sym_kind, fp, line in rows
+            ]
 
-        # Filter candidates using the same heuristics as the cold path.
-        # key: (resolved_file, name) → metadata dict
-        candidates: dict[tuple[str, str], dict] = {}
-        for name, qname, sym_kind, file_path, line, dec_str in rows:
-            if not include_private and name.startswith("_") and not _is_dunder(name):
-                continue
-            decorators = dec_str.split(",") if dec_str else []
-            if _is_likely_entry_point(name, sym_kind, decorators, 1):
-                continue
-            resolved_file = str(Path(file_path).resolve())
-            # QualifiedNameProvider stores bare names at the definition
-            # site (e.g. ``helper``) and module-prefixed names at import
-            # sites (e.g. ``lib.helper``).  We query both forms.
-            bare_qn = qname
-            full_qn = f"{_file_to_module(file_path, module_root)}.{qname}"
-            cand_key = (resolved_file, name)
-            candidates[cand_key] = {
-                "file_path": file_path,
-                "name": name,
-                "kind": sym_kind,
-                "line": line,
-                "bare_qn": bare_qn,
-                "full_qn": full_qn,
-                "selector": f"{file_path}::{qname}",
-            }
+        # Collect names that need string checking (length > 3).
+        str_names = {name for name, _, _, _, _ in rows if len(name) > 3}
 
-        if not candidates:
-            return []
+        if str_names:
+            # Use Rust batch-read with name hints for fast file scanning.
+            py_files = _collect_python_files(
+                scan_root, git_tracked_only=not all_files,
+            )
 
-        # ---- Step 2: Bulk reference_index lookup ---------------------
-        # Build QN → candidate-keys mappings for both bare and full QNs.
-        qn_to_cands: dict[str, set[tuple[str, str]]] = {}
-        for cand_key, info in candidates.items():
-            qn_to_cands.setdefault(info["bare_qn"], set()).add(cand_key)
-            qn_to_cands.setdefault(info["full_qn"], set()).add(cand_key)
+            # Build exclude set for string scanning.
+            exclude_resolved: set[str] = set()
+            if exclude_references_from:
+                for pattern in exclude_references_from:
+                    exclude_resolved.add(str(Path(pattern).resolve()))
 
-        all_qns = list(qn_to_cands.keys())
-        referenced: set[tuple[str, str]] = set()
-        BATCH = 900  # stay below SQLite variable limit
-
-        if not exclude_resolved:
-            # Fast path: any QN with >1 distinct (file, line) is alive.
-            for i in range(0, len(all_qns), BATCH):
-                batch = all_qns[i : i + BATCH]
-                ph = ",".join("?" * len(batch))
-                for (qn,) in conn.execute(
-                    f"SELECT target_qn FROM reference_index "
-                    f"WHERE target_qn IN ({ph}) "
-                    f"GROUP BY target_qn "
-                    f"HAVING COUNT(DISTINCT file_path || ':' || CAST(line AS TEXT)) > 1",
-                    batch,
-                ):
-                    referenced.update(qn_to_cands.get(qn, set()))
-        else:
-            # With excludes: fetch raw entries and filter in Python.
-            for i in range(0, len(all_qns), BATCH):
-                batch = all_qns[i : i + BATCH]
-                ph = ",".join("?" * len(batch))
-                ref_rows = conn.execute(
-                    f"SELECT target_qn, file_path, line FROM reference_index "
-                    f"WHERE target_qn IN ({ph})",
-                    batch,
-                ).fetchall()
-                for qn, ref_file, ref_line in ref_rows:
-                    for cand_key in qn_to_cands.get(qn, set()):
-                        if cand_key in referenced:
-                            continue
-                        def_file = cand_key[0]
-                        def_line = candidates[cand_key]["line"]
-                        if ref_file == def_file:
-                            if ref_line != def_line:
-                                referenced.add(cand_key)
-                        else:
-                            if not any(
-                                ref_file.startswith(ex) for ex in exclude_resolved
-                            ):
-                                referenced.add(cand_key)
-
-        # ---- Step 3: Lazy checks on remaining candidates -------------
-        unreferenced = {
-            k: v for k, v in candidates.items() if k not in referenced
-        }
-
-        if not unreferenced:
-            return []
-
-        # Group by file so we read each file at most once.
-        files_needed: dict[str, list[tuple[tuple[str, str], dict]]] = {}
-        for cand_key, info in unreferenced.items():
-            resolved = cand_key[0]
-            files_needed.setdefault(resolved, []).append((cand_key, info))
-
-        dead_symbols: list[DeadSymbol] = []
-        py_files = _collect_python_files(scan_root, git_tracked_only=not all_files)
-
-        for resolved_file, cands in files_needed.items():
+            # file → content cache (only files containing a candidate name)
+            file_cache: dict[str, str] = {}
             try:
-                content = Path(cands[0][1]["file_path"]).read_text()
-            except Exception:
-                continue
-            exports = _get_all_exported_names(content)
-
-            for cand_key, info in cands:
-                if info["name"] in exports:
-                    continue
-                if _has_noqa_deadcode(content, info["line"]):
-                    continue
-
-                # String-based fallback: the reference_index only
-                # captures AST-level Name/Attribute references.  String
-                # literals (dynamic dispatch, registries, serialization)
-                # need a text scan.  Only names > 3 chars are checked.
-                if strings_count_as_references and len(info["name"]) > 3:
-                    name = info["name"]
-                    def_line = info["line"]
-                    found_str_ref = False
-
-                    # Same-file: check non-definition lines for the name
-                    # inside string literals (identifier refs are already
-                    # covered by the reference_index).
-                    _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
-                    for i, line_text in enumerate(
-                        content.splitlines(), 1
+                matched = _rust.read_and_filter_files(
+                    py_files, list(str_names),
+                )
+                for fp, content in matched:
+                    r = str(Path(fp).resolve())
+                    if exclude_resolved and any(
+                        r.startswith(ex) for ex in exclude_resolved
                     ):
-                        if i == def_line or name not in line_text:
+                        continue
+                    file_cache[r] = content
+            except Exception:
+                pass
+
+            # Also read definition files for same-file string checks.
+            for _, _, _, fp, _ in rows:
+                r = str(Path(fp).resolve())
+                if r not in file_cache:
+                    try:
+                        file_cache[r] = Path(fp).read_text()
+                    except Exception:
+                        pass
+
+            # Build name → set of files containing it (excluding def file).
+            _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
+            names_with_str_ref: set[tuple[str, str]] = set()  # (file_path, name)
+            for name, qname, sym_kind, fp, line in rows:
+                if len(name) <= 3:
+                    continue
+                r = str(Path(fp).resolve())
+
+                # Same-file: check for name in strings on non-def lines.
+                content = file_cache.get(r)
+                if content and name in content:
+                    for i, lt in enumerate(content.splitlines(), 1):
+                        if i == line or name not in lt:
                             continue
-                        cleaned = _strip_re.sub("", line_text)
+                        cleaned = _strip_re.sub("", lt)
                         if name not in cleaned:
-                            # Name appears only inside strings
-                            found_str_ref = True
+                            names_with_str_ref.add((fp, name))
                             break
 
-                    # Cross-file: scan other project files.
-                    if not found_str_ref:
-                        for py_file in py_files:
-                            if exclude_resolved and any(
-                                str(Path(py_file).resolve()).startswith(ex)
-                                for ex in exclude_resolved
-                            ):
-                                continue
-                            res_pf = str(Path(py_file).resolve())
-                            if res_pf == resolved_file:
-                                continue
-                            try:
-                                pf_content = Path(py_file).read_text()
-                            except Exception:
-                                continue
-                            if name in pf_content:
-                                found_str_ref = True
-                                break
-                    if found_str_ref:
+                if (fp, name) in names_with_str_ref:
+                    continue
+
+                # Cross-file: any other file containing the name.
+                for other_r, other_content in file_cache.items():
+                    if other_r == r:
                         continue
+                    if name in other_content:
+                        names_with_str_ref.add((fp, name))
+                        break
+        else:
+            names_with_str_ref = set()
 
-                dead_symbols.append(
-                    DeadSymbol(
-                        file_path=info["file_path"],
-                        name=info["name"],
-                        kind=info["kind"],
-                        line=info["line"],
-                        selector=info["selector"],
-                        reason="no references found",
-                    )
+        dead_symbols = []
+        for name, qname, sym_kind, fp, line in rows:
+            if (fp, name) in names_with_str_ref:
+                continue
+            dead_symbols.append(
+                DeadSymbol(
+                    file_path=fp, name=name, kind=sym_kind,
+                    line=line, selector=f"{fp}::{qname}",
+                    reason="no references found",
                 )
-
-        dead_symbols.sort(key=lambda d: (d.file_path, d.line))
+            )
         return dead_symbols
 
-    finally:
-        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
 
 
 def find_dead_code(
