@@ -405,6 +405,11 @@ class FileTypes:
 # Abstract TypeOracle interface
 # ---------------------------------------------------------------------------
 
+
+class TypeEngineUnavailableError(RuntimeError):
+    """Raised when the requested type inference engine is not installed."""
+
+
 class TypeOracle(ABC):
     """Abstract interface for querying inferred types.
 
@@ -429,6 +434,25 @@ class TypeOracle(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the backing type checker is installed and usable."""
+
+    def infer_batch(
+        self, paths: list[Path], project_root: Path | None = None
+    ) -> dict[str, FileTypes]:
+        """Infer types for multiple files.
+
+        Default implementation calls :meth:`infer_file` for each path.
+        Subclasses may override for more efficient bulk processing (e.g.
+        :class:`PyreflyAdapter` runs a single ``pyrefly check`` invocation).
+
+        Returns a dict mapping resolved absolute path strings to
+        :class:`FileTypes`.
+        """
+        results: dict[str, FileTypes] = {}
+        for path in paths:
+            resolved = path.resolve()
+            if resolved.exists():
+                results[str(resolved)] = self.infer_file(resolved, project_root)
+        return results
 
 
 # ---------------------------------------------------------------------------

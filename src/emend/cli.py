@@ -1683,12 +1683,25 @@ def index_cmd(
         int,
         typer.Option("--verbose", "-v", count=True, help="Increase verbosity (-v: show files, -vv: debug)")
     ] = 0,
+    type_engine: Annotated[
+        str,
+        typer.Option(
+            "--type-engine",
+            help=(
+                "Type inference engine for the type-cache phase. "
+                "'auto' (default) detects from project config and PATH. "
+                "'none' skips type indexing. "
+                "Explicit choices: pyrefly, pyright, ty."
+            ),
+        ),
+    ] = "auto",
 ):
     """Pre-build caches for faster cross-project operations.
 
     Parses every Python file in the project and builds:
     - LibCST parse cache (speeds up all pattern operations)
     - Qualified-name index (speeds up refs, rename, callers)
+    - Type-inference cache (speeds up :type[] / :returns[] queries)
 
     Run this once after cloning a repo or when starting work on a new
     codebase. Subsequent emend commands will be significantly faster.
@@ -1696,8 +1709,10 @@ def index_cmd(
     Examples:
         emend index
         emend index src/ --jobs 8
-        emend index -v          # show each file being indexed
-        emend index -vv         # debug-level logging
+        emend index -v                    # show each file being indexed
+        emend index -vv                   # debug-level logging
+        emend index --type-engine none    # skip type indexing
+        emend index --type-engine pyright # force pyright
     """
     import time as _time
     t0 = _time.monotonic()
@@ -1726,7 +1741,13 @@ def index_cmd(
     total = len(_collect_python_files_scandir(scan_root))
     print(f"Indexing {total} Python files in {scan_root}...", file=sys.stderr)
 
-    stats = warm_caches(path, jobs=jobs, callback=_progress)
+    from emend.type_oracle import TypeEngineUnavailableError
+    try:
+        stats = warm_caches(path, jobs=jobs, callback=_progress, type_engine=type_engine)
+    except TypeEngineUnavailableError as exc:
+        print("", file=sys.stderr)
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
 
     if not verbose and sys.stderr.isatty():
         print("", file=sys.stderr)  # newline after progress
@@ -1735,12 +1756,21 @@ def index_cmd(
     skipped = stats.get("skipped", 0)
     new_parse = stats["parse_cached"]
     new_qn = stats["qn_cached"]
+    new_types = int(stats.get("type_cached", 0))
+    engine_name = str(stats.get("type_engine", ""))
+
+    parse_qn = f"parse: {new_parse}, qn: {new_qn}"
     if skipped and not new_parse and not new_qn:
         detail = f"all {skipped} already cached"
     elif skipped:
-        detail = f"parse: {new_parse}, qn: {new_qn}, already cached: {skipped}"
+        detail = f"{parse_qn}, already cached: {skipped}"
     else:
-        detail = f"parse: {new_parse}, qn: {new_qn}"
+        detail = parse_qn
+    if new_types:
+        type_detail = f"types: {new_types}"
+        if engine_name:
+            type_detail += f" ({engine_name})"
+        detail += f", {type_detail}"
     print(
         f"Indexed {stats['files']} files in {elapsed:.1f}s ({detail})",
         file=sys.stderr,
