@@ -414,7 +414,7 @@ def warm_caches(
         "type_cached", "type_engine"}``.
     """
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor
 
     project_root = _find_project_root(project_path)
     # Collect files from the user-specified path (not the project root)
@@ -487,15 +487,11 @@ def warm_caches(
     )
 
     # Phase 3: type indexing — populate the type_cache table.
-    # Runs in the main process (adapters hold LSP connections / subprocess
-    # state that cannot be pickled into workers).  Pyrefly batches are
-    # parallelised via threads because each batch spawns a subprocess and
-    # releases the GIL.  LSP adapters (pyright, ty) serialise on their own
-    # internal lock, so a single thread suffices there.
+    # Runs in the main process.  Pyrefly handles its own parallelism
+    # internally; LSP adapters (pyright, ty) are inherently sequential.
     if type_engine and type_engine.lower() != "none":
         from emend.type_oracle import (
             create_type_oracle,
-            PyreflyAdapter,
             TypeEngineUnavailableError,
         )
 
@@ -515,28 +511,12 @@ def warm_caches(
         all_paths = [Path(f) for f, _ in file_contents]
         project_root_path = Path(project_root)
 
-        # Split into chunks so we can report progress and bound memory.
-        TYPE_CHUNK = 100
-        type_chunks = [
-            all_paths[i : i + TYPE_CHUNK]
-            for i in range(0, len(all_paths), TYPE_CHUNK)
-        ]
-
-        # Pyrefly spawns one subprocess per batch → safe to parallelise.
-        # LSP adapters share a single server connection → keep sequential.
-        n_type_workers = max_workers if isinstance(oracle, PyreflyAdapter) else 1
-
-        def _do_type_chunk(chunk: list[Path]) -> int:
-            results = oracle.infer_batch(chunk, project_root=project_root_path)
-            return len(results)
-
         t_type = time.monotonic()
-        with ThreadPoolExecutor(max_workers=n_type_workers) as pool:
-            for chunk_idx, n in enumerate(pool.map(_do_type_chunk, type_chunks)):
-                stats["type_cached"] = int(stats["type_cached"]) + n
-                if callback:
-                    for p in type_chunks[chunk_idx]:
-                        callback("types", str(p))
+        results = oracle.infer_batch(all_paths, project_root=project_root_path)
+        stats["type_cached"] = len(results)
+        if callback:
+            for p in all_paths:
+                callback("types", str(p))
 
         logger.info(
             "warm_caches: type-indexed %d files via %s in %.3fs",

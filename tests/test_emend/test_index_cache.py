@@ -3,6 +3,7 @@
 Verifies that a second call to ``warm_caches`` on an unchanged project
 skips all files (cache hits) instead of re-parsing them.
 """
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -112,7 +113,7 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        stats = warm_caches(str(proj))
+        stats = warm_caches(str(proj), type_engine=None)
 
         assert stats["skipped"] == 0
         assert stats["parse_cached"] == 2
@@ -123,9 +124,9 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        warm_caches(str(proj))  # cold
+        warm_caches(str(proj), type_engine=None)  # cold
 
-        stats = warm_caches(str(proj))  # warm
+        stats = warm_caches(str(proj), type_engine=None)  # warm
         assert stats["skipped"] == 2
         assert stats["parse_cached"] == 0
         assert stats["qn_cached"] == 0
@@ -136,11 +137,156 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        warm_caches(str(proj))  # cold
+        warm_caches(str(proj), type_engine=None)  # cold
 
         t0 = time.monotonic()
-        warm_caches(str(proj))  # warm
+        warm_caches(str(proj), type_engine=None)  # warm
         warm_elapsed = time.monotonic() - t0
 
         # Even for 2 files, warm run should be well under 5 seconds.
         assert warm_elapsed < 5.0
+
+
+# ---------------------------------------------------------------------------
+# Type cache warming
+# ---------------------------------------------------------------------------
+
+_HAS_TYPE_ENGINE = bool(
+    shutil.which("pyright-langserver") or shutil.which("pyright")
+    or shutil.which("pyrefly") or shutil.which("ty")
+)
+
+
+class TestTypeCacheWarming:
+    """Verify that warm_caches populates the type_cache table."""
+
+    def _make_project(self, tmp_path: Path) -> Path:
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text("def hello(x: int) -> str:\n    return str(x)\n")
+        (proj / "b.py").write_text("y: float = 3.14\n")
+        return proj
+
+    @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
+    def test_type_cache_populated(self, tmp_path):
+        """warm_caches with auto engine writes rows to the type_cache table."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        stats = warm_caches(str(proj), type_engine="auto")
+
+        assert stats["type_cached"] >= 2
+        assert stats["type_engine"] != ""
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        assert db_path.exists()
+        assert _db_row_count(db_path, "type_cache") >= 2
+
+    @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
+    def test_type_cache_warm_run_uses_disk_cache(self, tmp_path):
+        """Second warm_caches call reads types from disk, not the engine."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        warm_caches(str(proj), type_engine="auto")
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        rows_after_cold = _db_row_count(db_path, "type_cache")
+        assert rows_after_cold >= 2
+
+        # Second run — type_cache rows should not grow.
+        warm_caches(str(proj), type_engine="auto")
+        rows_after_warm = _db_row_count(db_path, "type_cache")
+        assert rows_after_warm == rows_after_cold
+
+    def test_type_engine_none_skips_type_cache(self, tmp_path):
+        """type_engine=None skips type indexing entirely."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        stats = warm_caches(str(proj), type_engine=None)
+
+        assert stats["type_cached"] == 0
+        assert stats["type_engine"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Error caching — files that fail type inference should be cached so they
+# are not re-computed on every run.
+# ---------------------------------------------------------------------------
+
+
+class TestErrorFileCaching:
+    """Verify that files causing errors during infer_file are cached."""
+
+    def test_base_infer_batch_caches_on_error(self, tmp_path):
+        """Base class infer_batch returns empty FileTypes for files that raise."""
+        from unittest.mock import patch
+        from emend.type_oracle import FileTypes, _FileTypeCache, TypeOracle
+
+        # Create a concrete adapter with a real cache to test the base class
+        # infer_batch fallback.
+        class _StubAdapter(TypeOracle):
+            def __init__(self):
+                self._cache = _FileTypeCache(max_entries=16)
+
+            def infer_file(self, path, project_root=None):
+                raise RuntimeError("simulated parse failure")
+
+            def type_at(self, path, line, col, project_root=None):
+                return None
+
+            def clear_cache(self):
+                self._cache.clear()
+
+            def is_available(self):
+                return True
+
+        adapter = _StubAdapter()
+        py = tmp_path / "bad.py"
+        py.write_text("this is not valid: python [\n")
+
+        results = adapter.infer_batch([py])
+        key = str(py.resolve())
+        assert key in results
+        assert isinstance(results[key], FileTypes)
+        assert results[key].bindings == []
+
+    def test_pyright_infer_file_caches_on_error(self, tmp_path):
+        """PyrightAdapter.infer_file caches an empty result when a file errors."""
+        import hashlib
+        from emend.type_oracle import PyrightAdapter, _content_hash
+
+        db_path = str(tmp_path / "parse.db")
+        adapter = PyrightAdapter(db_path=db_path)
+
+        py = tmp_path / "bad.py"
+        # Write non-UTF-8 bytes to trigger UnicodeDecodeError in read_text()
+        py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
+
+        content_hash = _content_hash(py)
+        # First call — should catch the error and cache an empty result
+        ft = adapter.infer_file(py)
+        assert ft.bindings == []
+
+        # Verify the empty result was cached
+        cached = adapter._cache.get(content_hash)
+        assert cached is not None
+        assert cached.bindings == []
+
+    def test_ty_infer_file_caches_on_error(self, tmp_path):
+        """TyAdapter.infer_file caches an empty result when a file errors."""
+        from emend.type_oracle import TyAdapter, _content_hash
+
+        db_path = str(tmp_path / "parse.db")
+        adapter = TyAdapter(db_path=db_path)
+
+        py = tmp_path / "bad.py"
+        py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
+
+        content_hash = _content_hash(py)
+        ft = adapter.infer_file(py)
+        assert ft.bindings == []
+
+        cached = adapter._cache.get(content_hash)
+        assert cached is not None
