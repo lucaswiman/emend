@@ -707,7 +707,9 @@ def copy_to(
     dedent: Annotated[bool, Field(description="Dedent the copied symbol (useful for nested functions).")] = False,
     apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
 ) -> str:
-    """Copy a symbol to another file."""
+    """Copy a symbol to another file. Prefer this over manual read/write for
+    moving long functions or methods between modules — the body is copied
+    exactly from the source AST, so nothing can be hallucinated or lost."""
     buf = io.StringIO()
     with redirect_stdout(buf):
         ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
