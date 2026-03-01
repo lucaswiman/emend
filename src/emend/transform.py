@@ -915,12 +915,24 @@ def _ensure_index_fresh(
                 files_to_index.append((path, content))
             except Exception:
                 pass
-        for path, _old_hash, _new_hash in scan.changed:
+        for path, old_hash, _new_hash in scan.changed:
             try:
                 content = Path(path).read_text()
                 files_to_index.append((path, content))
             except Exception:
-                pass
+                continue
+            # Remove stale derived-table entries for the old content hash
+            # so they don't linger after re-indexing with the new hash.
+            for table in ("symbol_index", "import_graph", "reference_index"):
+                try:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE content_hash = ?",
+                        (old_hash,),
+                    )
+                except Exception:
+                    pass
+        if scan.changed:
+            conn.commit()
 
         if files_to_index:
             _index_batch((str(db_path), files_to_index))
@@ -6095,8 +6107,9 @@ def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: i
     if name in _ENTRY_POINT_NAMES:
         return True
 
-    # Names starting with test_ (pytest discovery)
-    if name.startswith('test_') or name.startswith('Test'):
+    # Names starting with test_ or Test (pytest discovery)
+    # Names starting with describe_ (pytest-describe convention)
+    if name.startswith('test_') or name.startswith('Test') or name.startswith('describe_'):
         return True
 
     # Private names (single underscore prefix) at depth > 1 are methods,
@@ -6282,6 +6295,237 @@ def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
     return None
 
 
+def _find_dead_code_cached(
+    project_path: str,
+    kind: str | None,
+    include_private: bool,
+    exclude_references_from: list[str] | None,
+    strings_count_as_references: bool,
+    all_files: bool,
+) -> list[DeadSymbol]:
+    """Index-accelerated dead code detection.
+
+    Uses ``symbol_index`` and ``reference_index`` from ``parse.db`` to
+    avoid re-parsing every file.  Builds the index automatically when
+    it is missing or stale.
+    """
+    import sqlite3 as _sql3
+
+    scan_root = str(Path(project_path).resolve())
+    module_root = _find_project_root(project_path)
+
+    # Ensure the index is fresh; build it if necessary.
+    if not _ensure_index_fresh(scan_root):
+        logger.info("dead_code: index stale/missing — warming caches")
+        warm_caches(scan_root, type_engine="none")
+
+    project_root = _find_project_root(scan_root)
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    db_path = cache_dir / "parse.db"
+
+    conn = _sql3.connect(str(db_path), timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    try:
+        # ---- Step 1: Candidate collection from symbol_index ----------
+        # Join with file_manifest to guarantee only current hashes are
+        # considered (stale rows from previous content are excluded).
+        kind_clause = ""
+        if kind == "function":
+            kind_clause = " AND si.kind IN ('function', 'async_function')"
+        elif kind == "class":
+            kind_clause = " AND si.kind = 'class'"
+
+        rows = conn.execute(
+            "SELECT si.name, si.qualified_name, si.kind, si.file_path, "
+            "       si.line, si.decorators "
+            "FROM symbol_index si "
+            "INNER JOIN file_manifest fm "
+            "  ON si.content_hash = fm.content_hash "
+            "     AND si.file_path = fm.path "
+            f"WHERE si.depth = 1{kind_clause}"
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # Build exclude set (resolved directory prefixes)
+        exclude_resolved: set[str] = set()
+        if exclude_references_from:
+            for pattern in exclude_references_from:
+                exclude_resolved.add(str(Path(pattern).resolve()))
+
+        # Filter candidates using the same heuristics as the cold path.
+        # key: (resolved_file, name) → metadata dict
+        candidates: dict[tuple[str, str], dict] = {}
+        for name, qname, sym_kind, file_path, line, dec_str in rows:
+            if not include_private and name.startswith("_") and not _is_dunder(name):
+                continue
+            decorators = dec_str.split(",") if dec_str else []
+            if _is_likely_entry_point(name, sym_kind, decorators, 1):
+                continue
+            resolved_file = str(Path(file_path).resolve())
+            # QualifiedNameProvider stores bare names at the definition
+            # site (e.g. ``helper``) and module-prefixed names at import
+            # sites (e.g. ``lib.helper``).  We query both forms.
+            bare_qn = qname
+            full_qn = f"{_file_to_module(file_path, module_root)}.{qname}"
+            cand_key = (resolved_file, name)
+            candidates[cand_key] = {
+                "file_path": file_path,
+                "name": name,
+                "kind": sym_kind,
+                "line": line,
+                "bare_qn": bare_qn,
+                "full_qn": full_qn,
+                "selector": f"{file_path}::{qname}",
+            }
+
+        if not candidates:
+            return []
+
+        # ---- Step 2: Bulk reference_index lookup ---------------------
+        # Build QN → candidate-keys mappings for both bare and full QNs.
+        qn_to_cands: dict[str, set[tuple[str, str]]] = {}
+        for cand_key, info in candidates.items():
+            qn_to_cands.setdefault(info["bare_qn"], set()).add(cand_key)
+            qn_to_cands.setdefault(info["full_qn"], set()).add(cand_key)
+
+        all_qns = list(qn_to_cands.keys())
+        referenced: set[tuple[str, str]] = set()
+        BATCH = 900  # stay below SQLite variable limit
+
+        if not exclude_resolved:
+            # Fast path: any QN with >1 distinct (file, line) is alive.
+            for i in range(0, len(all_qns), BATCH):
+                batch = all_qns[i : i + BATCH]
+                ph = ",".join("?" * len(batch))
+                for (qn,) in conn.execute(
+                    f"SELECT target_qn FROM reference_index "
+                    f"WHERE target_qn IN ({ph}) "
+                    f"GROUP BY target_qn "
+                    f"HAVING COUNT(DISTINCT file_path || ':' || CAST(line AS TEXT)) > 1",
+                    batch,
+                ):
+                    referenced.update(qn_to_cands.get(qn, set()))
+        else:
+            # With excludes: fetch raw entries and filter in Python.
+            for i in range(0, len(all_qns), BATCH):
+                batch = all_qns[i : i + BATCH]
+                ph = ",".join("?" * len(batch))
+                ref_rows = conn.execute(
+                    f"SELECT target_qn, file_path, line FROM reference_index "
+                    f"WHERE target_qn IN ({ph})",
+                    batch,
+                ).fetchall()
+                for qn, ref_file, ref_line in ref_rows:
+                    for cand_key in qn_to_cands.get(qn, set()):
+                        if cand_key in referenced:
+                            continue
+                        def_file = cand_key[0]
+                        def_line = candidates[cand_key]["line"]
+                        if ref_file == def_file:
+                            if ref_line != def_line:
+                                referenced.add(cand_key)
+                        else:
+                            if not any(
+                                ref_file.startswith(ex) for ex in exclude_resolved
+                            ):
+                                referenced.add(cand_key)
+
+        # ---- Step 3: Lazy checks on remaining candidates -------------
+        unreferenced = {
+            k: v for k, v in candidates.items() if k not in referenced
+        }
+
+        if not unreferenced:
+            return []
+
+        # Group by file so we read each file at most once.
+        files_needed: dict[str, list[tuple[tuple[str, str], dict]]] = {}
+        for cand_key, info in unreferenced.items():
+            resolved = cand_key[0]
+            files_needed.setdefault(resolved, []).append((cand_key, info))
+
+        dead_symbols: list[DeadSymbol] = []
+        py_files = _collect_python_files(scan_root, git_tracked_only=not all_files)
+
+        for resolved_file, cands in files_needed.items():
+            try:
+                content = Path(cands[0][1]["file_path"]).read_text()
+            except Exception:
+                continue
+            exports = _get_all_exported_names(content)
+
+            for cand_key, info in cands:
+                if info["name"] in exports:
+                    continue
+                if _has_noqa_deadcode(content, info["line"]):
+                    continue
+
+                # String-based fallback: the reference_index only
+                # captures AST-level Name/Attribute references.  String
+                # literals (dynamic dispatch, registries, serialization)
+                # need a text scan.  Only names > 3 chars are checked.
+                if strings_count_as_references and len(info["name"]) > 3:
+                    name = info["name"]
+                    def_line = info["line"]
+                    found_str_ref = False
+
+                    # Same-file: check non-definition lines for the name
+                    # inside string literals (identifier refs are already
+                    # covered by the reference_index).
+                    _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
+                    for i, line_text in enumerate(
+                        content.splitlines(), 1
+                    ):
+                        if i == def_line or name not in line_text:
+                            continue
+                        cleaned = _strip_re.sub("", line_text)
+                        if name not in cleaned:
+                            # Name appears only inside strings
+                            found_str_ref = True
+                            break
+
+                    # Cross-file: scan other project files.
+                    if not found_str_ref:
+                        for py_file in py_files:
+                            if exclude_resolved and any(
+                                str(Path(py_file).resolve()).startswith(ex)
+                                for ex in exclude_resolved
+                            ):
+                                continue
+                            res_pf = str(Path(py_file).resolve())
+                            if res_pf == resolved_file:
+                                continue
+                            try:
+                                pf_content = Path(py_file).read_text()
+                            except Exception:
+                                continue
+                            if name in pf_content:
+                                found_str_ref = True
+                                break
+                    if found_str_ref:
+                        continue
+
+                dead_symbols.append(
+                    DeadSymbol(
+                        file_path=info["file_path"],
+                        name=info["name"],
+                        kind=info["kind"],
+                        line=info["line"],
+                        selector=info["selector"],
+                        reason="no references found",
+                    )
+                )
+
+        dead_symbols.sort(key=lambda d: (d.file_path, d.line))
+        return dead_symbols
+
+    finally:
+        conn.close()
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
@@ -6293,12 +6537,9 @@ def find_dead_code(
 ) -> Iterator[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
-    Performs two passes over project files:
-      1. Collect all top-level symbol definitions and their qualified names.
-      2. Visit every file once to discover which candidate symbols are
-         actually referenced anywhere outside their definition site.
-
-    This is O(files) rather than O(symbols * files).
+    Uses ``symbol_index`` and ``reference_index`` from ``parse.db`` for
+    fast lookups.  When the index is stale or missing it is automatically
+    rebuilt so that the result is always based on current sources.
 
     Args:
         project_path: Project root directory.
@@ -6319,266 +6560,19 @@ def find_dead_code(
     Yields:
         DeadSymbol objects sorted by file path and line number.
     """
-    from .query import _collect_symbols, SymbolInfo
-
-    # scan_root: where to collect files (respects the user-supplied path)
-    # module_root: project root for computing dotted module names (always
-    #              the real project root so that QNs match across files)
-    scan_root = str(Path(project_path).resolve())
-    module_root = _find_project_root(project_path)
-    py_files = _collect_python_files(scan_root, git_tracked_only=not all_files)
-
-    # Build resolved exclude set for reference scanning
-    exclude_resolved: set[str] = set()
-    if exclude_references_from:
-        for pattern in exclude_references_from:
-            p = Path(pattern).resolve()
-            exclude_resolved.add(str(p))
-
-    def _is_excluded_ref_file(py_file: str) -> bool:
-        """Check if a file should be excluded from reference scanning."""
-        if not exclude_resolved:
-            return False
-        resolved = str(Path(py_file).resolve())
-        return any(resolved.startswith(ex) for ex in exclude_resolved)
-
-    # Phase 1: Collect candidate symbols
-    # candidate key = (resolved_file_path, symbol_name)
-    candidates: dict[tuple[str, str], tuple[str, SymbolInfo]] = {}
-    # Per-file definition lines for self-reference filtering
-    file_def_lines: dict[str, dict[str, int]] = {}  # file -> {name -> line}
-    # __all__ exports per file
-    all_exports: dict[str, set[str]] = {}
-    # file contents cache (needed for noqa checking and Phase 2 text matching)
-    file_contents_cache: dict[str, str] = {}
-
-    for py_file in py_files:
-        try:
-            content = Path(py_file).read_text()
-        except Exception:
-            continue
-
-        resolved_file = str(Path(py_file).resolve())
-        file_contents_cache[resolved_file] = content
-        symbols = _collect_symbols(Path(py_file), content)
-        exports = _get_all_exported_names(content)
-        if exports:
-            all_exports[resolved_file] = exports
-
-        local_defs: dict[str, int] = {}
-
-        for sym in symbols:
-            if sym.depth != 1:
-                continue
-            if kind:
-                if kind == 'function' and sym.kind not in ('function', 'async_function'):
-                    continue
-                if kind == 'class' and sym.kind != 'class':
-                    continue
-            if not include_private and sym.name.startswith('_') and not _is_dunder(sym.name):
-                continue
-            if _is_likely_entry_point(sym.name, sym.kind, sym.decorators, sym.depth):
-                continue
-            if sym.name in exports:
-                continue
-            # Check for # noqa: emend:deadcode on the definition line
-            if _has_noqa_deadcode(content, sym.line):
-                continue
-
-            cand_key = (resolved_file, sym.name)
-            candidates[cand_key] = (py_file, sym)
-            local_defs[sym.name] = sym.line
-
-        if local_defs:
-            file_def_lines[resolved_file] = local_defs
-
-    if not candidates:
-        return []
-
-    # Phase 2: Import-graph + text-based reference detection.
-    # Instead of expensive MetadataWrapper + QualifiedNameProvider scope
-    # analysis on every file, we use the import graph to determine which
-    # files could reference each candidate, then do fast text matching.
-    referenced: set[tuple[str, str]] = set()
-
-    # Step 2a: Build import graph using Rust (parallel tree-sitter parsing)
-    t_phase2 = time.monotonic()
-    import_data = _rust.extract_imports(py_files)
-
-    # Reverse index: module -> set of resolved importing file paths
-    module_importers: dict[str, set[str]] = {}
-    for file_path_str, modules in import_data:
-        resolved_fp = str(Path(file_path_str).resolve())
-        for mod in modules:
-            module_importers.setdefault(mod, set()).add(resolved_fp)
-
-    # Resolve relative imports and add to the reverse index
-    _REL_IMPORT_RE = re.compile(
-        r'^\s*from\s+(\.+\w*(?:\.\w+)*)\s+import', re.MULTILINE
+    t0 = time.monotonic()
+    dead_symbols = _find_dead_code_cached(
+        project_path,
+        kind=kind,
+        include_private=include_private,
+        exclude_references_from=exclude_references_from,
+        strings_count_as_references=strings_count_as_references,
+        all_files=all_files,
     )
-    for py_file in py_files:
-        resolved_fp = str(Path(py_file).resolve())
-        content = file_contents_cache.get(resolved_fp)
-        if content is None:
-            continue
-        file_module = _file_to_module(py_file, module_root)
-        for match in _REL_IMPORT_RE.finditer(content):
-            rel = match.group(1)
-            dots = len(rel) - len(rel.lstrip('.'))
-            suffix = rel[dots:]
-            parts = file_module.split('.')
-            if dots > len(parts):
-                continue
-            base_parts = parts[:-dots] if dots <= len(parts) else []
-            if suffix:
-                abs_module = '.'.join(base_parts + suffix.split('.'))
-            else:
-                abs_module = '.'.join(base_parts)
-            if abs_module:
-                module_importers.setdefault(abs_module, set()).add(resolved_fp)
-
     logger.info(
-        "dead_code phase2: import graph built in %.3fs (%d modules)",
-        time.monotonic() - t_phase2, len(module_importers),
+        "dead_code: %d dead symbols in %.3fs",
+        len(dead_symbols), time.monotonic() - t0,
     )
-
-    # Group candidates by their defining module
-    candidates_by_module: dict[str, list[tuple[str, str]]] = {}
-    for cand_key, (file_path, sym) in candidates.items():
-        mod = _file_to_module(file_path, module_root)
-        candidates_by_module.setdefault(mod, []).append(cand_key)
-
-    # Step 2b: Check cross-file references via import graph.
-    # For each candidate module, check files that import it for name matches.
-    t_xref = time.monotonic()
-    for module, cand_keys in candidates_by_module.items():
-        importing_files = module_importers.get(module, set())
-        for imp_file_resolved in importing_files:
-            if exclude_resolved and any(
-                imp_file_resolved.startswith(ex) for ex in exclude_resolved
-            ):
-                continue
-            content = file_contents_cache.get(imp_file_resolved)
-            if content is None:
-                continue
-            for cand_key in cand_keys:
-                if cand_key in referenced:
-                    continue
-                def_file, name = cand_key
-                # Skip checking the definition file here (handled in step 2c)
-                if imp_file_resolved == def_file:
-                    continue
-                if name in content:
-                    referenced.add(cand_key)
-
-    logger.info(
-        "dead_code phase2: cross-file refs found %d in %.3fs",
-        len(referenced), time.monotonic() - t_xref,
-    )
-
-    # Step 2c: Check same-file references (name on non-definition lines).
-    # Distinguishes identifier vs string occurrences: identifiers always
-    # count; string occurrences only count when strings_count_as_references
-    # is True AND the name is longer than 3 characters.
-    _strip_strings_re = re.compile(r"'[^']*'|\"[^\"]*\"")
-    t_self = time.monotonic()
-    for cand_key, (file_path, sym) in candidates.items():
-        if cand_key in referenced:
-            continue
-        resolved_file = cand_key[0]
-        content = file_contents_cache.get(resolved_file)
-        if content is None:
-            continue
-        name = sym.name
-        def_line = file_def_lines.get(resolved_file, {}).get(name)
-        if def_line is None:
-            continue
-        for i, line_text in enumerate(content.splitlines(), 1):
-            if i == def_line:
-                continue
-            if name not in line_text:
-                continue
-            # Check if name appears as an identifier (outside string literals)
-            cleaned = _strip_strings_re.sub("", line_text)
-            if name in cleaned:
-                # Identifier reference — always counts
-                referenced.add(cand_key)
-                break
-            # Name only appears inside strings on this line
-            if strings_count_as_references and len(name) > 3:
-                referenced.add(cand_key)
-                break
-
-    logger.info(
-        "dead_code phase2: same-file refs total %d in %.3fs",
-        len(referenced), time.monotonic() - t_self,
-    )
-
-    # Step 2d: String-based references across ALL non-excluded files.
-    # When strings_count_as_references is True, check for the candidate
-    # name appearing in ANY non-excluded file (catching dynamic dispatch,
-    # serialization, registry patterns, etc.).  Only names > 3 chars are
-    # checked (short names produce too many false matches).
-    # We skip the definition file for each candidate to avoid counting
-    # the definition itself as a reference.
-    if strings_count_as_references:
-        t_str = time.monotonic()
-        # Build string patterns: name -> set of candidate keys (skip short names)
-        string_patterns: dict[str, set[tuple[str, str]]] = {}
-        for cand_key, (fp, sym) in candidates.items():
-            if cand_key in referenced:
-                continue
-            if len(sym.name) > 3:
-                string_patterns.setdefault(sym.name, set()).add(cand_key)
-
-        if string_patterns:
-            for py_file in py_files:
-                if not string_patterns:
-                    break
-                if _is_excluded_ref_file(py_file):
-                    continue
-                resolved_fp = str(Path(py_file).resolve())
-                content = file_contents_cache.get(resolved_fp)
-                if content is None:
-                    continue
-                matched_patterns: list[str] = []
-                for pattern, keys in string_patterns.items():
-                    if pattern in content:
-                        # Only mark candidates where this is NOT
-                        # the definition file (avoid self-match).
-                        new_refs = {k for k in keys if k[0] != resolved_fp}
-                        if new_refs:
-                            referenced.update(new_refs)
-                        # Remove pattern if all candidates are now referenced
-                        if not (keys - referenced):
-                            matched_patterns.append(pattern)
-                for p in matched_patterns:
-                    del string_patterns[p]
-
-        logger.info(
-            "dead_code phase2: string refs total %d in %.3fs",
-            len(referenced), time.monotonic() - t_str,
-        )
-
-    logger.info(
-        "dead_code phase2: total %.3fs, %d/%d candidates referenced",
-        time.monotonic() - t_phase2, len(referenced), len(candidates),
-    )
-
-    # Phase 3: Yield results — candidates not in referenced set
-    dead_symbols: list[DeadSymbol] = []
-    for cand_key, (file_path, sym) in candidates.items():
-        if cand_key not in referenced:
-            dead_symbols.append(DeadSymbol(
-                file_path=file_path,
-                name=sym.name,
-                kind=sym.kind,
-                line=sym.line,
-                selector=sym.path,
-                reason="no references found",
-            ))
-
-    dead_symbols.sort(key=lambda d: (d.file_path, d.line))
 
     if show_last_reference and dead_symbols:
         from concurrent.futures import ThreadPoolExecutor
@@ -6592,6 +6586,7 @@ def find_dead_code(
                 yield d
     else:
         yield from dead_symbols
+
 
 
 def _rename_symbol_in_file(
