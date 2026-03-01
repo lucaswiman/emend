@@ -288,6 +288,20 @@ def search(
     is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
     has_selector = '::' in query and not is_pattern_mode
 
+    # If query looks like a file path/glob/directory (no $ or ::) but --where
+    # provides a pattern (has $), the user likely intended:
+    #   emend search 'Union[$X, $Y]' myproject/**/*.py
+    # rather than the (broken) lookup-mode interpretation.
+    # Swap them and activate pattern mode.
+    if not is_pattern_mode and not has_selector and not is_line_selector:
+        if where_matching and "$" in where_matching:
+            _fop = Path(query)
+            if _fop.is_dir() or '*' in query or '?' in query:
+                path = query
+                query = where_matching
+                where_matching = None
+                is_pattern_mode = True
+
     # Build lookup-mode filters from --where
     lookup_has_decorator: Optional[list[str]] = None
     lookup_in_class: Optional[list[str]] = None
@@ -381,6 +395,8 @@ def search(
                         else:
                             ast_commands._print_symbol_tree(symbols, indent=1)
             else:
+                if not file_path_obj.exists():
+                    raise FileNotFoundError(f"No such file or directory: {file_for_summary!r}")
                 symbols = ast_commands.collect_symbols(
                     file_for_summary, tree_depth=tree_depth, selector=selector_for_summary
                 )

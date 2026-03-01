@@ -71,3 +71,36 @@ class TestSearchEdgeCases:
 
         assert result.exit_code == 0
         assert result.stdout.strip() == ""
+
+    def test_search_where_pattern_with_dir_activates_pattern_mode(self, tmp_path):
+        """When query is a directory and --where has a $-pattern, treat as pattern search."""
+        file1 = tmp_path / "a.py"
+        file1.write_text("Union[int, str]\n")
+        file2 = tmp_path / "b.py"
+        file2.write_text("x = 1\n")
+
+        result = runner.invoke(app, ["search", str(tmp_path), "--where", "Union[$X, $Y]"])
+
+        assert result.exit_code == 0
+        assert "a.py" in result.stdout
+        assert "b.py" not in result.stdout
+
+    def test_search_where_pattern_with_file_glob_activates_pattern_mode(self, tmp_path):
+        """When query is a file glob and --where has a $-pattern, treat as pattern search."""
+        file1 = tmp_path / "a.py"
+        file1.write_text("Optional[int]\n")
+        file2 = tmp_path / "b.py"
+        file2.write_text("x = 1\n")
+
+        result = runner.invoke(app, ["search", f"{tmp_path}/*.py", "--where", "Optional[$X]"])
+
+        assert result.exit_code == 0
+        assert "a.py" in result.stdout
+        assert "b.py" not in result.stdout
+
+    def test_search_nonexistent_bare_name_errors(self, tmp_path):
+        """A bare non-file name in summary mode gives a clear error."""
+        result = runner.invoke(app, ["search", "SomeNonExistentName"])
+
+        assert result.exit_code != 0
+        assert "No such file" in result.stderr or "No such file" in result.stdout
