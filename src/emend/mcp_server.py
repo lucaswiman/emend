@@ -717,6 +717,49 @@ def copy_to(
 
 
 # ---------------------------------------------------------------------------
+# grammar_and_cookbook
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def grammar_and_cookbook() -> str:
+    """Return the full emend grammar reference and cookbook.
+
+    Call this tool when you need detailed syntax help for constructing
+    selectors, patterns, or command invocations.  The response covers
+    selector syntax, pattern metavariables, every command with examples,
+    and common refactoring recipes.
+    """
+    import importlib.resources
+    import re as _re
+
+    text = importlib.resources.read_text("emend", "grammar_and_cookbook.rst")
+
+    # Resolve ``.. literalinclude::`` directives by inlining the grammar files.
+    # Sphinx handles these at build time, but plain-text consumers (LLMs) need
+    # the content expanded inline.
+    _grammars = {
+        "selector.lark": importlib.resources.read_text("emend.grammars", "selector.lark"),
+        "pattern.lark": importlib.resources.read_text("emend.grammars", "pattern.lark"),
+    }
+
+    def _inline(m: "_re.Match[str]") -> str:
+        path = m.group(1).strip()
+        for name, content in _grammars.items():
+            if name in path:
+                indented = "\n".join("    " + line for line in content.splitlines())
+                return f"::\n\n{indented}\n"
+        return m.group(0)  # leave unknown directives as-is
+
+    text = _re.sub(
+        r"\.\. literalinclude:: [^\n]+\n(?:   :[^\n]+\n)*",
+        _inline,
+        text,
+    )
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

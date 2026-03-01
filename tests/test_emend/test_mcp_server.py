@@ -22,6 +22,7 @@ try:
         graph,
         deadcode,
         copy_to,
+        grammar_and_cookbook,
     )
 except Exception:
     pytest.skip("mcp SDK not usable in this environment", allow_module_level=True)
@@ -37,6 +38,7 @@ def test_all_tools_registered():
     expected = {
         "search", "replace", "edit", "add", "refs", "rename",
         "move", "graph", "deadcode", "lint", "copy_to",
+        "grammar_and_cookbook",
     }
     assert expected == tool_names
 
@@ -367,6 +369,21 @@ def test_copy_to_dry_run(tmp_path):
         apply=False,
     )
     assert "helper" in result
+
+
+# ---------------------------------------------------------------------------
+# grammar_and_cookbook
+# ---------------------------------------------------------------------------
+
+
+def test_grammar_and_cookbook():
+    """The grammar_and_cookbook tool returns the RST reference document."""
+    result = grammar_and_cookbook()
+    assert "Selector syntax" in result
+    assert "Pattern syntax" in result
+    assert "Cookbook recipes" in result
+    assert "emend search" in result
+    assert "emend replace" in result
 
 
 # ---------------------------------------------------------------------------
