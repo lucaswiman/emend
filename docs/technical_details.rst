@@ -84,13 +84,189 @@ handled in Python using `LibCST <https://github.com/Instagram/LibCST>`_:
 
 LibCST is also used for all *mutations* — the Rust layer is read-only.
 
-Parse caching
-~~~~~~~~~~~~~
+Caching and indexing
+--------------------
 
-``transform._cached_parse()`` maintains an LRU cache (256 entries) keyed on
-the MD5 of the source text.  Repeated lookups for the same unchanged file are
-free after the first parse.  The cache is thread-safe via a ``threading.Lock``
-and evicts the oldest 25 % of entries when it reaches capacity.
+emend maintains a per-project cache at ``.emend/cache/parse.db`` (SQLite, WAL
+mode).  The cache is content-addressed — almost every key is the MD5 of the
+file's source text — so switching branches or reverting edits naturally reuses
+earlier entries.  A ``.gitignore`` and ``.dockerignore`` are auto-generated
+inside ``.emend/cache/`` to prevent the database from being checked in.
+
+Overview of cache tables
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 15 65
+
+   * - Table
+     - Key
+     - Contents
+   * - ``parse_cache``
+     - content MD5 (BLOB)
+     - Compressed-pickled ``libcst.Module``.  Avoids reparsing unchanged files.
+   * - ``qn_index``
+     - content MD5 (BLOB)
+     - Compressed-pickled ``set[str]`` of every qualified name in the file.
+       Used by ``visit_project()`` to skip files that cannot reference a target
+       symbol.
+   * - ``type_cache``
+     - content MD5 (TEXT)
+     - Compressed-pickled ``FileTypes`` from the type oracle.  Avoids
+       re-running pyrefly / pyright / ty on unchanged files.
+   * - ``file_manifest``
+     - absolute path (TEXT)
+     - ``(mtime_ns, size, content_hash, indexed_at)``.  Bridges path-based
+       queries to the content-hash caches and enables incremental re-indexing
+       via stat-only scans.
+   * - ``symbol_index``
+     - (content_hash, file_path, name, ...)
+     - One row per symbol definition (function, class, method).  Stores name,
+       qualified name, kind, line range, depth, parent, signature, return type,
+       and decorators.  Indexed on ``name``, ``qualified_name``, ``file_path``,
+       and ``kind`` for fast lookups.
+   * - ``reference_index``
+     - (content_hash, target_qn, file_path, line, col)
+     - One row per reference to a qualified name.  Each row records the
+       reference kind (``read``, ``write``, ``import``, ``call``).  Indexed on
+       ``target_qn`` for fast find-references.
+   * - ``import_graph``
+     - (content_hash, imported_module)
+     - One row per import statement, mapping the importing file to the dotted
+       module name.  Indexed on ``imported_module`` for fast "files importing X"
+       queries.
+   * - ``index_meta``
+     - key name (TEXT)
+     - Key-value pairs: ``schema_version``, ``git_head``, ``indexed_at``.
+
+In-memory parse cache
+~~~~~~~~~~~~~~~~~~~~~
+
+``transform._cached_parse()`` maintains a two-tier cache:
+
+1. **In-memory dict** (256 entries, keyed on source MD5).  Thread-safe via
+   ``threading.Lock``.  When full, the oldest 25 % of entries are evicted.
+2. **Disk** (``parse_cache`` table).  On a cache miss the source is parsed,
+   the result is written to disk, then promoted to memory.
+
+This means repeated lookups for the same unchanged file are free after the
+first parse, even across process restarts.
+
+How caches are populated
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+There are two population paths:
+
+**Lazy (on first use).**  ``_cached_parse()`` populates ``parse_cache``
+transparently whenever a file is parsed.  ``visit_project()`` populates
+``qn_index`` as a side-effect of running ``QualifiedNameProvider``: after each
+file's ``MetadataWrapper.visit()`` completes, a lightweight ``_QNCollector``
+re-walks the resolved tree and stores the qualified-name set.
+
+**Eager (``emend index``).**  ``warm_caches()`` scans the project in parallel
+using a ``ProcessPoolExecutor``.  Each worker subprocess (``_index_batch()``)
+receives a batch of ``(file_path, source_text)`` tuples and performs:
+
+1. **Parse** — ``cst.parse_module()`` → compressed pickle → ``parse_cache``.
+2. **QN resolution** — ``MetadataWrapper`` + ``_QNCollector`` → compressed
+   pickle → ``qn_index``.
+3. **Symbol collection** — ``_SymbolCollector`` (from ``query.py``) →
+   ``symbol_index`` rows (name, kind, line, signature, etc.).
+4. **Import extraction** — regex scan of ``import`` / ``from … import``
+   statements → ``import_graph`` rows.
+5. **Reference collection** — ``_RefIndexCollector`` visitor with
+   ``QualifiedNameProvider + PositionProvider + ParentNodeProvider`` →
+   ``reference_index`` rows (target QN, line, column, ref_kind).
+
+After all workers finish, the main process performs three additional steps:
+
+- **File manifest** — ``stat()`` every indexed file and writes
+  ``(path, mtime_ns, size, content_hash, timestamp)`` to ``file_manifest``.
+- **Git HEAD** — runs ``git rev-parse HEAD`` and stores the SHA in
+  ``index_meta``.
+- **Type cache** — runs the configured type engine (pyrefly / pyright / ty)
+  and stores results in ``type_cache``.
+
+Workers write directly to the SQLite database (WAL mode permits concurrent
+writers across processes).  Files whose content hash already appears in all
+relevant tables are skipped without parsing.
+
+How caches are invalidated
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Because caches are keyed on file content (MD5 hash), not file path, they are
+**automatically correct** — if a file's content hasn't changed, its cached data
+is still valid regardless of when it was written.  There is no explicit
+"invalidation" of stale entries; old entries simply become unreachable when no
+file on disk has that content anymore.
+
+For the path-indexed tables (``file_manifest``, ``symbol_index``,
+``reference_index``, ``import_graph``), a three-tier freshness check determines
+which files need re-indexing:
+
+**Tier 1 — Git HEAD (~1 ms).**  ``git rev-parse HEAD`` is compared against the
+stored ``git_head`` in ``index_meta``.  If they match, no files have changed
+since the last index.
+
+**Tier 2 — File stat (~10–50 ms for 5 000 files).**  Each file is ``stat()``-ed
+and its ``(mtime_ns, size)`` compared against ``file_manifest``.  Files whose
+mtime and size match are unchanged — no I/O required.
+
+**Tier 3 — Content hash (only for stat-mismatched files).**  Files whose mtime
+or size differ are read and hashed.  If the hash matches the manifest (e.g.
+``git stash pop`` touched the mtime but didn't change content), the manifest's
+mtime is updated in-place.  If the hash differs, the file is re-indexed: old
+rows keyed on the previous content hash are deleted from ``symbol_index``,
+``reference_index``, and ``import_graph``, then fresh rows are inserted.
+
+This check is implemented in ``_scan_manifest()`` and exposed through
+``_ensure_index_fresh()``, which commands call before querying the index.  If
+fewer than 50 files are stale, they are re-indexed inline; otherwise the caller
+falls back to the cold path or advises running ``emend index``.
+
+How caches are cleaned
+~~~~~~~~~~~~~~~~~~~~~~
+
+emend does **not** aggressively prune old entries.  Content-hash keyed tables
+(``parse_cache``, ``qn_index``, ``type_cache``) accumulate entries across
+branch switches, which is intentional: switching back to an earlier branch
+reuses those entries.  The in-memory parse cache is bounded at 256 entries and
+self-evicting.
+
+Path-indexed rows are kept consistent by the re-index cycle described above:
+when a file's content changes, its old rows (keyed on the previous content
+hash) are deleted before new rows are inserted.  Deleted files are removed from
+``file_manifest`` and their derived rows are cleaned up during
+``_ensure_index_fresh()``.
+
+To reclaim disk space or force a full rebuild:
+
+.. code-block:: bash
+
+   # Delete the entire cache and rebuild from scratch:
+   rm -rf .emend/cache/
+   emend index
+
+   # Or just rebuild (existing entries are overwritten):
+   emend index
+
+The ``emend index --status`` command reports the number of indexed files,
+symbols, import edges, and references, plus how many files are stale.
+
+Warm-path query acceleration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the index is fresh, several commands bypass full-project scans:
+
+- ``search --complete <prefix>`` queries ``symbol_index`` with a ``LIKE``
+  prefix match — typically < 5 ms.
+- ``refs`` queries ``reference_index`` by qualified name — typically < 10 ms.
+- ``_files_importing_module()`` checks ``import_graph`` before falling back to
+  the Rust ``files_importing_module`` scan.
+
+All warm paths fall back transparently to their original (cold) implementations
+when the index is unavailable or stale.
 
 Selector grammar
 ----------------

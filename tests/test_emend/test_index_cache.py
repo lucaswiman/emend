@@ -2,6 +2,9 @@
 
 Verifies that a second call to ``warm_caches`` on an unchanged project
 skips all files (cache hits) instead of re-parsing them.
+
+Also tests the new index tables: symbol_index, import_graph,
+reference_index, file_manifest, and the staleness detection logic.
 """
 import shutil
 import sqlite3
@@ -27,16 +30,20 @@ class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
     def test_cold_cache_indexes_file(self, tmp_path):
-        """First run writes parse and qn entries."""
+        """First run writes parse, qn, symbol, import, and ref entries."""
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        parse_n, qn_n, skipped = _index_batch((str(db_path), batch))
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+            (str(db_path), batch)
+        )
 
         assert parse_n == 1
         assert qn_n == 1
         assert skipped == 0
+        # SOURCE has one function "hello" — should have at least 1 symbol
+        assert sym_n >= 1
 
     def test_warm_cache_skips_file(self, tmp_path):
         """Second run with same content skips the file entirely."""
@@ -49,9 +56,12 @@ class TestIndexBatchCacheHit:
         _index_batch((str(db_path), batch))
 
         # Warm run — must skip
-        parse_n, qn_n, skipped = _index_batch((str(db_path), batch))
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+            (str(db_path), batch)
+        )
         assert parse_n == 0
         assert qn_n == 0
+        assert sym_n == 0
         assert skipped == 1
 
     def test_warm_cache_no_extra_db_rows(self, tmp_path):
@@ -91,7 +101,9 @@ class TestIndexBatchCacheHit:
         conn.close()
 
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        parse_n, qn_n, skipped = _index_batch((str(db_path), batch))
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+            (str(db_path), batch)
+        )
 
         assert parse_n == 0  # already cached
         assert qn_n == 1    # was missing, now added
@@ -290,3 +302,292 @@ class TestErrorFileCaching:
 
         cached = adapter._cache.get(content_hash)
         assert cached is not None
+
+
+# ---------------------------------------------------------------------------
+# New index tables: symbol_index, import_graph, reference_index
+# ---------------------------------------------------------------------------
+
+
+class TestSymbolIndex:
+    """Tests for the symbol_index table population and querying."""
+
+    def test_symbol_index_populated(self, tmp_path):
+        """Indexing populates the symbol_index table."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = "def process_request(x: int) -> str:\n    return str(x)\n\nclass MyClass:\n    pass\n"
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        count = _db_row_count(db_path, "symbol_index")
+        assert count >= 2  # at least process_request + MyClass
+
+        # Check symbol details
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            "SELECT name, kind, line FROM symbol_index ORDER BY line"
+        ).fetchall()
+        conn.close()
+
+        names = [r[0] for r in rows]
+        assert "process_request" in names
+        assert "MyClass" in names
+
+    def test_symbol_index_has_signature(self, tmp_path):
+        """Symbol index stores function signatures."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = "def greet(name: str, loud: bool = False) -> str:\n    pass\n"
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT signature, returns FROM symbol_index WHERE name = 'greet'"
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert "name" in row[0]
+        assert row[1] == "str"
+
+    def test_symbol_index_kind_query(self, tmp_path):
+        """Can query symbol_index by kind."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = "def foo(): pass\nclass Bar: pass\ndef baz(): pass\n"
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        conn = sqlite3.connect(str(db_path))
+        funcs = conn.execute(
+            "SELECT name FROM symbol_index WHERE kind = 'function'"
+        ).fetchall()
+        classes = conn.execute(
+            "SELECT name FROM symbol_index WHERE kind = 'class'"
+        ).fetchall()
+        conn.close()
+
+        assert len(funcs) == 2
+        assert len(classes) == 1
+
+    def test_symbol_index_prefix_query(self, tmp_path):
+        """Can query symbols by name prefix (typeahead)."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = (
+            "def process_data(): pass\n"
+            "def process_request(): pass\n"
+            "def handle_error(): pass\n"
+        )
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        conn = sqlite3.connect(str(db_path))
+        results = conn.execute(
+            "SELECT name FROM symbol_index WHERE name LIKE 'process%'"
+        ).fetchall()
+        conn.close()
+
+        assert len(results) == 2
+        names = {r[0] for r in results}
+        assert names == {"process_data", "process_request"}
+
+
+class TestImportGraph:
+    """Tests for the import_graph table."""
+
+    def test_import_graph_populated(self, tmp_path):
+        """Indexing populates the import_graph table."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = "import os\nfrom pathlib import Path\nimport json\n"
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            "SELECT imported_module FROM import_graph"
+        ).fetchall()
+        conn.close()
+
+        modules = {r[0] for r in rows}
+        assert "os" in modules
+        assert "pathlib" in modules
+        assert "json" in modules
+
+
+class TestReferenceIndex:
+    """Tests for the reference_index table."""
+
+    def test_reference_index_populated(self, tmp_path):
+        """Indexing populates the reference_index with QN references."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = (
+            "def helper(): return 1\n"
+            "\n"
+            "def main():\n"
+            "    x = helper()\n"
+            "    return x\n"
+        )
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        count = _db_row_count(db_path, "reference_index")
+        # Should have references for helper, main, x, etc.
+        assert count > 0
+
+    def test_reference_index_has_call_kind(self, tmp_path):
+        """Reference index records call sites with ref_kind='call'."""
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        source = (
+            "def process(): return 1\n"
+            "\n"
+            "result = process()\n"
+        )
+        batch = [(str(tmp_path / "mod.py"), source)]
+        _index_batch((str(db_path), batch))
+
+        conn = sqlite3.connect(str(db_path))
+        calls = conn.execute(
+            "SELECT target_qn, line, ref_kind FROM reference_index "
+            "WHERE ref_kind = 'call'"
+        ).fetchall()
+        conn.close()
+
+        # The call to process() should be recorded
+        assert len(calls) >= 1
+
+
+class TestFileManifest:
+    """Tests for the file_manifest table via warm_caches."""
+
+    def test_manifest_populated_after_index(self, tmp_path):
+        """warm_caches populates the file_manifest table."""
+        from emend.transform import warm_caches
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        warm_caches(str(proj), type_engine=None)
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        count = _db_row_count(db_path, "file_manifest")
+        assert count == 1
+
+    def test_manifest_has_correct_hash(self, tmp_path):
+        """File manifest content_hash matches actual file hash."""
+        import hashlib
+        from emend.transform import warm_caches
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        warm_caches(str(proj), type_engine=None)
+
+        expected_hash = hashlib.md5(
+            SOURCE.encode(), usedforsecurity=False
+        ).digest()
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT content_hash FROM file_manifest"
+        ).fetchone()
+        conn.close()
+
+        assert row[0] == expected_hash
+
+
+class TestScanManifest:
+    """Tests for the _scan_manifest staleness detection."""
+
+    def test_unchanged_files_detected(self, tmp_path):
+        """Unchanged files are correctly identified."""
+        from emend.transform import warm_caches, _scan_manifest
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        warm_caches(str(proj), type_engine=None)
+
+        result = _scan_manifest(str(proj))
+        assert len(result.unchanged) == 1
+        assert len(result.changed) == 0
+        assert len(result.new_files) == 0
+        assert len(result.deleted) == 0
+
+    def test_new_file_detected(self, tmp_path):
+        """New files not in manifest are detected."""
+        from emend.transform import warm_caches, _scan_manifest
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        warm_caches(str(proj), type_engine=None)
+
+        # Add a new file
+        (proj / "b.py").write_text("x = 1\n")
+
+        result = _scan_manifest(str(proj))
+        assert len(result.new_files) == 1
+
+    def test_changed_file_detected(self, tmp_path):
+        """Modified files are detected via content hash."""
+        import time
+        from emend.transform import warm_caches, _scan_manifest
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        warm_caches(str(proj), type_engine=None)
+
+        # Modify file content
+        time.sleep(0.01)  # ensure different mtime
+        (proj / "a.py").write_text("def goodbye():\n    return 0\n")
+
+        result = _scan_manifest(str(proj))
+        assert len(result.changed) == 1
+
+
+class TestIndexStatus:
+    """Tests for get_index_status."""
+
+    def test_status_returns_info(self, tmp_path):
+        """get_index_status returns useful information after indexing."""
+        from emend.transform import warm_caches, get_index_status
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+        (proj / "b.py").write_text("class Foo:\n    pass\n")
+
+        warm_caches(str(proj), type_engine=None)
+
+        info = get_index_status(str(proj))
+        assert info is not None
+        assert info["file_manifest_count"] == 2
+        assert info["symbol_index_count"] >= 2  # hello + Foo
+        assert info["schema_version"] == "2"
+
+    def test_status_returns_none_without_index(self, tmp_path):
+        """get_index_status returns None when no index exists."""
+        from emend.transform import get_index_status
+
+        info = get_index_status(str(tmp_path))
+        assert info is None

@@ -226,6 +226,18 @@ def search(
         Optional[str],
         typer.Option("--type-engine", help="Type inference engine for :type[X] and :returns[X] constraints: auto, pyrefly, pyright, ty")
     ] = None,
+    limit: Annotated[
+        Optional[int],
+        typer.Option("--limit", help="Maximum number of results to return (useful for completion)")
+    ] = None,
+    complete: Annotated[
+        Optional[str],
+        typer.Option("--complete", help="Symbol name prefix for typeahead completion (returns JSON)")
+    ] = None,
+    project: Annotated[
+        Optional[str],
+        typer.Option("--project", help="Project root for index-based queries")
+    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -274,6 +286,25 @@ def search(
         emend search file.py --output summary::flat
     """
     import re as _re
+
+    # --complete mode: fast typeahead from symbol_index
+    if complete is not None:
+        from emend.transform import query_symbol_index
+        proj = project or "."
+        pattern = f"{complete}*" if not any(c in complete for c in "*?") else complete
+        results = query_symbol_index(
+            proj,
+            name_pattern=pattern,
+            kind=kind[0] if kind else None,
+            limit=limit or 20,
+        )
+        if results is None:
+            # Index not available — fall through to normal search
+            typer.echo("[]")
+            return
+        import json as _json
+        typer.echo(_json.dumps(results, indent=2))
+        return
 
     # Parse --where values
     where_params = parse_where_clause(where or [])
@@ -1723,12 +1754,19 @@ def index_cmd(
             ),
         ),
     ] = "auto",
+    status: Annotated[
+        bool,
+        typer.Option("--status", help="Show index freshness status and exit")
+    ] = False,
 ):
     """Pre-build caches for faster cross-project operations.
 
     Parses every Python file in the project and builds:
     - LibCST parse cache (speeds up all pattern operations)
     - Qualified-name index (speeds up refs, rename, callers)
+    - Symbol index (instant symbol lookup, typeahead, file outline)
+    - Import graph (fast import-based file filtering)
+    - Reference index (instant find-references, dead code detection)
     - Type-inference cache (speeds up :type[] / :returns[] queries)
 
     Run this once after cloning a repo or when starting work on a new
@@ -1737,11 +1775,34 @@ def index_cmd(
     Examples:
         emend index
         emend index src/ --jobs 8
+        emend index --status              # show index freshness
         emend index -v                    # show each file being indexed
         emend index -vv                   # debug-level logging
         emend index --type-engine none    # skip type indexing
         emend index --type-engine pyright # force pyright
     """
+    if status:
+        from emend.transform import get_index_status
+        info = get_index_status(path)
+        if info is None:
+            print("No index found. Run `emend index` to build.", file=sys.stderr)
+            raise typer.Exit(1)
+        print(f"Index status for {path}:", file=sys.stderr)
+        print(f"  Schema version:  {info.get('schema_version', 'unknown')}", file=sys.stderr)
+        print(f"  Git HEAD:        {info.get('git_head', 'unknown')[:12]}{'...' if len(info.get('git_head', '')) > 12 else ''}", file=sys.stderr)
+        print(f"  Indexed at:      {info.get('indexed_at', 'unknown')}", file=sys.stderr)
+        print(f"  Files:           {info.get('file_manifest_count', 0)}", file=sys.stderr)
+        print(f"  Symbols:         {info.get('symbol_index_count', 0)}", file=sys.stderr)
+        print(f"  Import edges:    {info.get('import_graph_count', 0)}", file=sys.stderr)
+        print(f"  References:      {info.get('reference_index_count', 0)}", file=sys.stderr)
+        head_str = " (HEAD changed)" if info.get("git_head_changed") else ""
+        stale = info.get("changed_files", 0) + info.get("new_files", 0)
+        if stale:
+            print(f"  Freshness:       {stale} files need re-indexing{head_str}", file=sys.stderr)
+        else:
+            print(f"  Freshness:       up to date{head_str}", file=sys.stderr)
+        return
+
     import time as _time
     t0 = _time.monotonic()
 
@@ -1784,6 +1845,8 @@ def index_cmd(
     skipped = stats.get("skipped", 0)
     new_parse = stats["parse_cached"]
     new_qn = stats["qn_cached"]
+    new_sym = stats.get("sym_cached", 0)
+    new_ref = stats.get("ref_cached", 0)
     new_types = int(stats.get("type_cached", 0))
     engine_name = str(stats.get("type_engine", ""))
 
@@ -1794,6 +1857,10 @@ def index_cmd(
         detail = f"{parse_qn}, already cached: {skipped}"
     else:
         detail = parse_qn
+    if new_sym:
+        detail += f", symbols: {new_sym}"
+    if new_ref:
+        detail += f", refs: {new_ref}"
     if new_types:
         type_detail = f"types: {new_types}"
         if engine_name:
