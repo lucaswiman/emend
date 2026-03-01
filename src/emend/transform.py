@@ -5843,6 +5843,31 @@ def _apply_matching_filter(
     return '\n'.join(filtered_parts)
 
 
+def _merge_type_filter(
+    selector: ExtendedSelector,
+    returns_filter: list[str] | None,
+) -> list[str] | None:
+    """Merge a selector's :returns[X] type_filter into the returns_filter list.
+
+    If the selector has a ``type_filter`` like ``returns[str]``, the type
+    string is appended to (or creates) the returns_filter list so the
+    existing returns-based filtering logic handles it.
+    """
+    if selector.type_filter is None:
+        return returns_filter
+    # Parse "returns[str]" or "type[Connection]"
+    tf = selector.type_filter
+    bracket = tf.index("[")
+    kind = tf[:bracket]
+    type_string = tf[bracket + 1:-1]
+    if kind == "returns":
+        merged = list(returns_filter) if returns_filter else []
+        merged.append(type_string)
+        return merged
+    # For :type[X], pass through as-is (future: filter by inferred type)
+    return returns_filter
+
+
 def _expand_selector_with_returns_filter(
     selector: ExtendedSelector,
     returns_filter: list[str],
@@ -5938,10 +5963,13 @@ def cmd_edit(
     - If rm=True or value="", remove the component or symbol
     - If accessor present + value, modify specific item (e.g., [params][x])
     - If no accessor + value, replace entire component (e.g., [returns])
-    - If returns_filter specified, only edit symbols whose return type matches
-      (checked via annotation first, then inferred type from type_oracle)
+    - If returns_filter or selector :returns[X] specified, only edit symbols
+      whose return type matches (annotation first, then inferred via oracle)
     """
     selector = parse_extended_selector(selector_str)
+
+    # Merge selector type_filter into returns_filter
+    returns_filter = _merge_type_filter(selector, returns_filter)
 
     # When returns_filter is specified, expand the selector to only include
     # symbols that match the return type constraint.
@@ -6024,10 +6052,13 @@ def cmd_add(
     - Position can be specified with --at, --before, or --after
     - Default is to append to end
     - Pseudo-class (e.g., :KEYWORD_ONLY) specifies parameter kind
-    - If returns_filter specified, only add to symbols whose return type matches
-      (checked via annotation first, then inferred type from type_oracle)
+    - If returns_filter or selector :returns[X] specified, only add to symbols
+      whose return type matches (annotation first, then inferred via oracle)
     """
     selector = parse_extended_selector(selector_str)
+
+    # Merge selector type_filter into returns_filter
+    returns_filter = _merge_type_filter(selector, returns_filter)
 
     # When returns_filter is specified, expand the selector to only include
     # symbols that match the return type constraint.

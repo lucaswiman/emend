@@ -727,3 +727,125 @@ class TestCmdAddReturnsFilter:
             value="age: int",
         )
         assert "age" in result
+
+
+# ---------------------------------------------------------------------------
+# Selector type_filter syntax (:returns[X], :type[X])
+# ---------------------------------------------------------------------------
+
+class TestSelectorTypeFilter:
+    """Test :returns[X] and :type[X] in selector syntax."""
+
+    def test_parse_returns_filter(self):
+        """Selector grammar parses :returns[str] correctly."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:returns[str][params]")
+        assert sel.symbol_path == ["*"]
+        assert sel.type_filter == "returns[str]"
+        assert sel.component == "params"
+
+    def test_parse_type_filter(self):
+        """Selector grammar parses :type[Connection] correctly."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:type[Connection]")
+        assert sel.type_filter == "type[Connection]"
+        assert sel.component is None
+
+    def test_parse_nested_type(self):
+        """Selector grammar handles nested brackets like Optional[str]."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:returns[Optional[str]][params]")
+        assert sel.type_filter == "returns[Optional[str]]"
+        assert sel.component == "params"
+
+    def test_parse_no_filter(self):
+        """Selectors without type filter have type_filter=None."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::func[params]")
+        assert sel.type_filter is None
+
+    def test_edit_with_selector_returns_filter(self, tmp_path):
+        """cmd_edit with :returns[str] in selector filters by annotation."""
+        source = textwrap.dedent("""\
+            def get_name() -> str:
+                return "alice"
+
+            def get_count() -> int:
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_edit
+
+        # Use :returns[str] in the selector instead of --returns flag
+        result = cmd_edit(
+            selector_str=f"{f}::*:returns[str][returns]",
+            value="str | None",
+        )
+        assert "-def get_name() -> str:" in result
+        assert "+def get_name() -> str | None:" in result
+        assert "-def get_count()" not in result
+        assert "+def get_count()" not in result
+
+    def test_add_with_selector_returns_filter(self, tmp_path):
+        """cmd_add with :returns[Connection] in selector filters by annotation."""
+        source = textwrap.dedent("""\
+            def connect() -> Connection:
+                pass
+
+            def get_name() -> str:
+                return "alice"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_add
+
+        result = cmd_add(
+            selector_str=f"{f}::*:returns[Connection][params]",
+            value="timeout: int = 30",
+        )
+        assert "+def connect(timeout: int = 30)" in result
+        assert "+def get_name(" not in result
+
+    def test_selector_filter_with_oracle(self, tmp_path):
+        """Selector :returns[X] works with oracle for unannotated functions."""
+        source = textwrap.dedent("""\
+            def get_name():
+                return "alice"
+
+            def get_count():
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="get_name", line=1, col_start=5, col_end=13,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("str")),
+                raw_type="() -> str", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="get_count", line=4, col_start=5, col_end=14,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("int")),
+                raw_type="() -> int", binding_kind="definition",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import cmd_edit
+
+        result = cmd_edit(
+            selector_str=f"{f}::*:returns[str][returns]",
+            value="str",
+            type_oracle=oracle,
+        )
+        assert "-def get_name():" in result
+        assert "+def get_name() -> str:" in result
+        assert "-def get_count()" not in result

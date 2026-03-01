@@ -45,6 +45,7 @@ class ExtendedSelector:
     pseudo_class: str | None = None
     line_start: int | None = None
     line_end: int | None = None
+    type_filter: str | None = None  # e.g. "returns[str]" or "type[Connection]"
 
     @property
     def line_range(self) -> tuple[int, int] | None:
@@ -92,16 +93,18 @@ class SelectorTransformer(Transformer):
         file_path = transformed[0]
         # symbol_path is optional (for module-level components like imports)
         symbol_path = []
+        type_filter = None
         components = []
 
-        if len(transformed) > 1:
-            # Check if next item is symbol_path (list) or component (dict)
-            if isinstance(transformed[1], list):
-                symbol_path = transformed[1]
-                components = transformed[2:]
-            else:
-                # It's a component, symbol_path is empty
-                components = transformed[1:]
+        rest = transformed[1:]
+        # Consume symbol_path (list), then optional type_filter (str), then components (dicts)
+        if rest and isinstance(rest[0], list):
+            symbol_path = rest[0]
+            rest = rest[1:]
+        if rest and isinstance(rest[0], str) and not isinstance(rest[0], dict):
+            type_filter = rest[0]
+            rest = rest[1:]
+        components = rest
 
         if components:
             comp = components[0]
@@ -110,12 +113,14 @@ class SelectorTransformer(Transformer):
                 symbol_path=symbol_path,
                 component=comp["name"],
                 accessor=comp.get("accessor"),
-                pseudo_class=comp.get("pseudo_class")
+                pseudo_class=comp.get("pseudo_class"),
+                type_filter=type_filter,
             )
         else:
             return ExtendedSelector(
                 file_path=file_path,
-                symbol_path=symbol_path
+                symbol_path=symbol_path,
+                type_filter=type_filter,
             )
 
     def file_path(self, items):
@@ -151,6 +156,10 @@ class SelectorTransformer(Transformer):
             else:
                 result["accessor"] = item
         return result
+
+    def type_filter(self, items):
+        # Strip leading ':' from the TYPE_FILTER token
+        return str(items[0])[1:]
 
     def pseudo_class(self, items):
         # Strip leading ':' from the PSEUDO_CLASS token and wrap with marker
