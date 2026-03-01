@@ -3,6 +3,7 @@
 Verifies that a second call to ``warm_caches`` on an unchanged project
 skips all files (cache hits) instead of re-parsing them.
 """
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -112,7 +113,7 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        stats = warm_caches(str(proj))
+        stats = warm_caches(str(proj), type_engine=None)
 
         assert stats["skipped"] == 0
         assert stats["parse_cached"] == 2
@@ -123,9 +124,9 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        warm_caches(str(proj))  # cold
+        warm_caches(str(proj), type_engine=None)  # cold
 
-        stats = warm_caches(str(proj))  # warm
+        stats = warm_caches(str(proj), type_engine=None)  # warm
         assert stats["skipped"] == 2
         assert stats["parse_cached"] == 0
         assert stats["qn_cached"] == 0
@@ -136,11 +137,74 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
-        warm_caches(str(proj))  # cold
+        warm_caches(str(proj), type_engine=None)  # cold
 
         t0 = time.monotonic()
-        warm_caches(str(proj))  # warm
+        warm_caches(str(proj), type_engine=None)  # warm
         warm_elapsed = time.monotonic() - t0
 
         # Even for 2 files, warm run should be well under 5 seconds.
         assert warm_elapsed < 5.0
+
+
+# ---------------------------------------------------------------------------
+# Type cache warming
+# ---------------------------------------------------------------------------
+
+_HAS_TYPE_ENGINE = bool(
+    shutil.which("pyright-langserver") or shutil.which("pyright")
+    or shutil.which("pyrefly") or shutil.which("ty")
+)
+
+
+class TestTypeCacheWarming:
+    """Verify that warm_caches populates the type_cache table."""
+
+    def _make_project(self, tmp_path: Path) -> Path:
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text("def hello(x: int) -> str:\n    return str(x)\n")
+        (proj / "b.py").write_text("y: float = 3.14\n")
+        return proj
+
+    @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
+    def test_type_cache_populated(self, tmp_path):
+        """warm_caches with auto engine writes rows to the type_cache table."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        stats = warm_caches(str(proj), type_engine="auto")
+
+        assert stats["type_cached"] >= 2
+        assert stats["type_engine"] != ""
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        assert db_path.exists()
+        assert _db_row_count(db_path, "type_cache") >= 2
+
+    @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
+    def test_type_cache_warm_run_uses_disk_cache(self, tmp_path):
+        """Second warm_caches call reads types from disk, not the engine."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        warm_caches(str(proj), type_engine="auto")
+
+        db_path = proj / ".emend" / "cache" / "parse.db"
+        rows_after_cold = _db_row_count(db_path, "type_cache")
+        assert rows_after_cold >= 2
+
+        # Second run — type_cache rows should not grow.
+        warm_caches(str(proj), type_engine="auto")
+        rows_after_warm = _db_row_count(db_path, "type_cache")
+        assert rows_after_warm == rows_after_cold
+
+    def test_type_engine_none_skips_type_cache(self, tmp_path):
+        """type_engine=None skips type indexing entirely."""
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        stats = warm_caches(str(proj), type_engine=None)
+
+        assert stats["type_cached"] == 0
+        assert stats["type_engine"] == ""

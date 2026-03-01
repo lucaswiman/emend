@@ -1088,11 +1088,14 @@ class PyreflyAdapter(TypeOracle):
             except OSError:
                 pass
 
-        # Fill in empty results for files that weren't in the output
+        # Fill in empty results for files that weren't in the output and
+        # cache them so subsequent runs don't re-invoke pyrefly for them.
         for rp in to_check:
             key = str(rp)
             if key not in results:
-                results[key] = FileTypes(path=key)
+                ft = FileTypes(path=key)
+                self._cache.put(hashes[key], ft)
+                results[key] = ft
 
         return results
 
