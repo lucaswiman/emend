@@ -1,6 +1,7 @@
 """emend - Python refactoring CLI with structured edits and pattern transforms."""
 
 import glob as glob_mod
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,19 @@ from emend.transform import (
     extract_pattern_literals,
 )
 from emend import ast_commands
+
+
+def _maybe_create_oracle(type_engine: str | None):
+    """Create a TypeOracle if *type_engine* is specified, returning ``None`` if unavailable."""
+    from emend.type_oracle import create_type_oracle
+    engine = type_engine or "auto"
+    oracle = create_type_oracle(engine=engine)
+    if not oracle.is_available():
+        logging.getLogger("emend.type_oracle").warning(
+            "Type engine '%s' not available; type constraints will have no effect", engine,
+        )
+        return None
+    return oracle
 
 
 def _reject_file_glob(selector_str: str, command_name: str) -> None:
@@ -191,6 +205,10 @@ def search(
         bool,
         typer.Option("--scope-local", help="Only match locally-defined names, exclude imports (pattern mode)")
     ] = False,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine", help="Type inference engine for :type[X] and :returns[X] constraints: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -301,6 +319,11 @@ def search(
         effective_output = "selector"
 
     try:
+        # ---- Create TypeOracle if needed ----
+        oracle = None
+        if type_engine is not None or (is_pattern_mode and (":type[" in query or ":returns[" in query)):
+            oracle = _maybe_create_oracle(type_engine)
+
         # ---- SUMMARY MODE ----
         if effective_output == "summary" and not is_pattern_mode:
             unsupported = []
@@ -367,9 +390,9 @@ def search(
                 literals = extract_pattern_literals(query)
                 file_contents = emend_core.read_and_filter_files(file_strs, literals)
 
-                # Try Rust batch fast-path (no scope/imported_from/scope_local constraints)
+                # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
                 rust_path_used = False
-                if where_scope is None and imported_from is None and not scope_local:
+                if where_scope is None and imported_from is None and not scope_local and oracle is None:
                     from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
                     from emend.transform import PatternMatch
                     pattern_ir = compile_pattern_to_rust_ir(query)
@@ -398,6 +421,7 @@ def search(
                                 imported_from=imported_from,
                                 scope_local=scope_local,
                                 source_override=content,
+                                type_oracle=oracle,
                             )
                             for match in file_matches:
                                 all_matches.append((file_path_str, match))
@@ -414,6 +438,7 @@ def search(
                             not_inside=where_not_inside,
                             imported_from=imported_from,
                             scope_local=scope_local,
+                            type_oracle=oracle,
                         )
                         for match in file_matches:
                             all_matches.append((file_path_str, match))
@@ -511,6 +536,7 @@ def search(
             count=count_output,
             dedent=dedent_output,
             matching=lookup_matching,
+            type_oracle=oracle,
         )
         print(result, end='')
 
@@ -548,6 +574,15 @@ def edit(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    returns: Annotated[
+        Optional[list[str]],
+        typer.Option("--returns", help="Only edit symbols whose return type matches (annotation or inferred)")
+    ] = None,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine",
+                     help="Type inference engine for --returns fallback: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Edit or replace existing symbol components.
 
@@ -566,13 +601,23 @@ def edit(
 
         # Remove entire function
         emend edit api.py::deprecated_function --rm --apply
+
+        # Edit return type of all functions returning str (annotation or inferred)
+        emend edit '*.py::*[returns]' 'str | None' --returns str --type-engine auto --apply
     """
     try:
+        # Create TypeOracle when --type-engine or --returns is specified
+        oracle = None
+        if type_engine is not None or returns:
+            oracle = _maybe_create_oracle(type_engine)
+
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
+            returns_filter=returns,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -606,6 +651,15 @@ def add(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    returns: Annotated[
+        Optional[list[str]],
+        typer.Option("--returns", help="Only add to symbols whose return type matches (annotation or inferred)")
+    ] = None,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine",
+                     help="Type inference engine for --returns fallback: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Add new items to symbol components.
 
@@ -632,8 +686,16 @@ def add(
 
         # Add keyword-only parameter
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
+
+        # Add parameter to all functions returning Connection (annotation or inferred)
+        emend add '*.py::*[params]' 'timeout: int = 30' --returns Connection --type-engine auto --apply
     """
     try:
+        # Create TypeOracle when --type-engine or --returns is specified
+        oracle = None
+        if type_engine is not None or returns:
+            oracle = _maybe_create_oracle(type_engine)
+
         result = cmd_add(
             selector_str=selector,
             value=value,
@@ -641,6 +703,8 @@ def add(
             after=after,
             at=at,
             apply=apply,
+            returns_filter=returns,
+            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -674,6 +738,11 @@ def replace_cmd(
             "'MyClass.method' (scope)"
         ))
     ] = None,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine",
+                     help="Type inference engine for :type[X] and :returns[X] constraints: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Replace pattern matches with replacement in Python file(s).
 
@@ -690,12 +759,19 @@ def replace_cmd(
         emend replace 'print($X)' 'logger.info($X)' file.py --where def --apply
         emend replace 'print($X)' 'logger.info($X)' file.py --where 'def test_*' --apply
         emend replace '$X = $Y' '$X: int = $Y' src/*.py --where 'not class' --apply
+        emend replace '$X:type[Connection].close()' '$X.shutdown()' src/ --type-engine auto
     """
     try:
         where_params = parse_where_clause(where or [])
         scope = where_params.get("scope")
         inside = where_params.get("inside")
         not_inside = where_params.get("not_inside")
+
+        # Create TypeOracle when --type-engine is specified or pattern contains
+        # oracle constraints (:type[X] / :returns[X]).
+        oracle = None
+        if type_engine is not None or ":type[" in pattern or ":returns[" in pattern:
+            oracle = _maybe_create_oracle(type_engine)
 
         search_path = path
         files, is_multi_file = resolve_files(search_path)
@@ -710,6 +786,7 @@ def replace_cmd(
                     pattern, replacement, file_path_str,
                     scope=scope, apply=apply,
                     inside=inside, not_inside=not_inside,
+                    type_oracle=oracle,
                 )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)
@@ -1381,6 +1458,109 @@ def dead_code_cmd(
 
 app.command("dead-code", hidden=True)(dead_code_cmd)
 app.command("dead_code", hidden=True)(dead_code_cmd)
+
+
+# ============================================================================
+# Type Inference Commands
+# ============================================================================
+
+@app.command("types")
+def types_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import, diagnostic")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: auto, pyrefly, pyright, ty")] = "auto",
+    definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
+):
+    """Show inferred types for symbols in a file.
+
+    Uses a type inference engine (Pyrefly, Pyright, or ty) to analyze
+    source files and display inferred types for all symbols and expressions.
+
+    The engine is auto-detected from project configuration files
+    (pyrightconfig.json, ty.toml, pyrefly.toml, or pyproject.toml sections)
+    and installed tools.  Use --engine to override.
+
+    Examples:
+        emend types src/models/user.py
+        emend types src/models/user.py --name User
+        emend types src/models/ --definitions-only --json
+        emend types app.py --engine pyright
+        emend types app.py --engine ty
+    """
+    from emend.type_oracle import create_type_oracle
+
+    import json as json_mod
+
+    try:
+        target = Path(path)
+        is_glob = "*" in path or "?" in path
+        # Use the target's parent as project root for autodetection;
+        # for globs use CWD since Path("src/*.py") is not a real path.
+        if is_glob:
+            project_root = Path.cwd()
+        elif target.is_file():
+            project_root = target.parent
+        else:
+            project_root = target
+        oracle = create_type_oracle(engine=engine, project_root=project_root)
+
+        resolved_engine = engine
+        if engine == "auto":
+            resolved_engine = type(oracle).__name__.replace("Adapter", "").lower()
+
+        if not oracle.is_available():
+            print(f"Error: {resolved_engine} is not installed or not available on PATH.", file=sys.stderr)
+            raise typer.Exit(2)
+
+        if is_glob:
+            files, _ = resolve_files(path)
+        elif target.is_dir():
+            files, _ = resolve_files(path)
+        else:
+            files = [target]
+
+        all_bindings = []
+        for f in files:
+            ft = oracle.infer_file(f)
+            for b in ft.bindings:
+                if name and b.name != name:
+                    continue
+                if kind and b.binding_kind != kind:
+                    continue
+                if definitions_only and b.binding_kind != "definition":
+                    continue
+                all_bindings.append((str(f), b))
+
+        if json_output:
+            data = []
+            for file_path, b in all_bindings:
+                entry = {
+                    "file": file_path,
+                    "name": b.name,
+                    "line": b.line,
+                    "col_start": b.col_start,
+                    "col_end": b.col_end,
+                    "type": b.raw_type,
+                    "kind": b.binding_kind,
+                }
+                data.append(entry)
+            print(json_mod.dumps(data, indent=2))
+        else:
+            if not all_bindings:
+                print("No type information found.")
+            else:
+                for file_path, b in all_bindings:
+                    col_range = f"{b.col_start}-{b.col_end}" if b.col_end else str(b.col_start)
+                    print(f"{file_path}:{b.line}:{col_range}  {b.name}: {b.raw_type}  ({b.binding_kind})")
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
 
 
 def main():

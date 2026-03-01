@@ -49,6 +49,27 @@ Prefix the type with ``!`` to match anything *except* that type:
    # Match addition where left side is NOT a function call
    emend search '$A:!call + $B' src/
 
+TypeOracle constraints
+~~~~~~~~~~~~~~~~~~~~~~
+
+For inferred (not just syntactic) type checking, use ``:type[X]`` and ``:returns[X]`` constraints. These require a type inference engine (see ``--type-engine``).
+
+- ``:type[X]`` — the inferred type of the captured expression must match ``X``
+- ``:returns[X]`` — the captured node must be a function whose inferred return type matches ``X``
+
+.. code-block:: bash
+
+   # Find calls where the argument has inferred type 'Connection'
+   emend search 'use($X:type[Connection])' src/ --type-engine pyrefly
+
+   # Find functions whose inferred return type is 'str | None'
+   emend search '$F:returns[str | None]' src/ --type-engine auto
+
+   # Find functions returning Optional[str] (parameterized form)
+   emend search '$F:returns[Optional[str]]' src/ --type-engine pyright
+
+TypeOracle constraints fall through to the LibCST path (no Rust fast-path). The engine is started once and results are cached per-file. Use ``--type-engine auto`` (default) to let emend detect the engine from project config files; or specify ``pyrefly``, ``pyright``, or ``ty`` explicitly.
+
 Basic patterns
 --------------
 
@@ -455,4 +476,5 @@ Limitations
 -----------
 
 - Patterns match at the expression or statement level; they cannot span multiple statements
-- ``$X:stmt`` type constraint is not yet fully implemented (see TODOS.md for details)
+- ``$X:stmt`` type constraint is not yet fully implemented
+- ``:type[X]`` / ``:returns[X]`` oracle constraints require a supported type checker to be installed and only support one level of bracket nesting in the type argument (e.g. ``:type[Optional[str]]`` works; ``:type[Optional[List[str]]]`` does not)

@@ -3,16 +3,24 @@
 This module provides a filter-based search for Python symbols,
 designed for AI agent refactoring workflows.
 """
+from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import libcst as cst
 from libcst.metadata import PositionProvider, MetadataWrapper
+
+if TYPE_CHECKING:
+    from emend.type_oracle import FileTypes, TypeOracle
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -418,6 +426,55 @@ def _filter_by_returns(
     return False
 
 
+def _filter_by_returns_with_oracle(
+    symbol: SymbolInfo,
+    returns_patterns: list[str],
+    case_insensitive: bool,
+    smart_case: bool = False,
+    file_types: FileTypes | None = None,
+) -> bool:
+    """Check if symbol return type matches any pattern, with TypeOracle fallback.
+
+    First checks the annotation string (like _filter_by_returns). If no
+    annotation is present but file_types (from TypeOracle) is available,
+    looks up the inferred return type for the symbol definition.
+    """
+    if not returns_patterns:
+        return True
+
+    # First try annotation-based matching
+    if symbol.returns is not None:
+        for pattern in returns_patterns:
+            if _match_pattern(symbol.returns, pattern, case_insensitive, smart_case):
+                return True
+        return False
+
+    # No annotation — try TypeOracle if available
+    if file_types is not None:
+        from emend.type_oracle import parse_type_string
+        bindings = file_types.types_for_name(symbol.name)
+        for binding in bindings:
+            if binding.line == symbol.line and binding.binding_kind in ("definition", "inferred"):
+                td = binding.type_descriptor
+                # For callable types, check the return type
+                if td.kind == "callable" and td.return_type is not None:
+                    ret_str = td.return_type.display()
+                    for pattern in returns_patterns:
+                        if _match_pattern(ret_str, pattern, case_insensitive, smart_case):
+                            return True
+                        # Also try structural matching via TypeDescriptor
+                        constraint_td = parse_type_string(pattern)
+                        if td.return_type.matches(constraint_td):
+                            return True
+                # For non-callable definitions, check the raw type string
+                elif binding.raw_type:
+                    for pattern in returns_patterns:
+                        if _match_pattern(binding.raw_type, pattern, case_insensitive, smart_case):
+                            return True
+
+    return False
+
+
 def _filter_by_in_class(symbol: SymbolInfo, in_classes: list[str]) -> bool:
     """Check if symbol is in one of the specified classes (OR logic)."""
     if not in_classes:
@@ -469,12 +526,15 @@ def _filter_by_param(
     return False
 
 
-def query_symbols(filepath: Path, filters: QueryFilter) -> list[SymbolInfo]:
+def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: TypeOracle | None = None) -> list[SymbolInfo]:
     """Query symbols from a file with filters.
 
     Args:
         filepath: Path to Python file
         filters: QueryFilter with search criteria
+        type_oracle: Optional TypeOracle instance for type-aware filtering.
+            When provided and --returns filter is used, symbols without
+            annotations are also checked against inferred return types.
 
     Returns:
         List of matching SymbolInfo objects
@@ -483,6 +543,12 @@ def query_symbols(filepath: Path, filters: QueryFilter) -> list[SymbolInfo]:
         source = f.read()
 
     all_symbols = _collect_symbols(filepath, source)
+
+    # Build TypeOracle index for this file if needed for returns filtering
+    file_types = None
+    if type_oracle is not None and filters.returns_patterns:
+        _logger.debug("Building type index for lookup returns filtering: %s", filepath)
+        file_types = type_oracle.infer_file(filepath)
 
     # Apply filters (different filter types use AND logic)
     results = []
@@ -494,7 +560,11 @@ def query_symbols(filepath: Path, filters: QueryFilter) -> list[SymbolInfo]:
             continue
         if not _filter_by_decorator(symbol, filters.decorators, filters.case_insensitive, filters.smart_case):
             continue
-        if not _filter_by_returns(symbol, filters.returns_patterns, filters.case_insensitive, filters.smart_case):
+        if not _filter_by_returns_with_oracle(
+            symbol, filters.returns_patterns,
+            filters.case_insensitive, filters.smart_case,
+            file_types,
+        ):
             continue
         if not _filter_by_in_class(symbol, filters.in_classes):
             continue
@@ -522,6 +592,7 @@ def cmd_query(
     output_json: bool = False,
     paths_only: bool = False,
     count_only: bool = False,
+    type_oracle: TypeOracle | None = None,
 ) -> None:
     """Execute the query command.
 
@@ -539,6 +610,7 @@ def cmd_query(
         output_json: Output as JSON
         paths_only: Output only selector paths
         count_only: Output only count of matches
+        type_oracle: Optional TypeOracle for type-aware returns filtering
     """
     path = Path(filepath)
     if not path.exists():
@@ -557,7 +629,7 @@ def cmd_query(
         smart_case=smart_case,
     )
 
-    results = query_symbols(path, filters)
+    results = query_symbols(path, filters, type_oracle=type_oracle)
 
     # Output
     if count_only:

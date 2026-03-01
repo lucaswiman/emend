@@ -62,6 +62,11 @@ Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MO
 +-----------------------+-------------------------------------------+
 | ``--scope-local``   | Only match locally-defined names       |
 +-----------------------+-------------------------------------------+
+| ``--type-engine``     | Type inference engine for ``:type[X]``    |
+|                       | and ``:returns[X]`` constraints:          |
+|                       | ``auto`` (default), ``pyrefly``,          |
+|                       | ``pyright``, ``ty``                       |
++-----------------------+-------------------------------------------+
 
 **Options (lookup/filter mode):**
 
@@ -706,3 +711,55 @@ Move a symbol to another file, updating all imports.
 
 ---
 
+types
+-----
+
+Show inferred types for symbols in a file. Uses a type inference engine (Pyrefly, Pyright, or ty) to analyze source files and display inferred types for all symbols and expressions.
+
+The engine is auto-detected from project configuration files (pyrightconfig.json, ty.toml, pyrefly.toml, or pyproject.toml sections) and installed tools. Use --engine to override.
+
+.. code-block:: text
+
+   emend types PATH [OPTIONS]
+
+**Arguments:**
+
+- PATH -- File, glob, or directory to analyze
+
+**Options:**
+
++---------------------------+-----------------------------------------------------+
+| Option                    | Description                                         |
++===========================+=====================================================+
+| ``--name``, ``-n`` TEXT   | Filter by symbol name                               |
++---------------------------+-----------------------------------------------------+
+| ``--kind``, ``-k`` TEXT   | Filter by binding kind: ``definition``,             |
+|                           | ``reference``, ``import``, ``diagnostic``           |
++---------------------------+-----------------------------------------------------+
+| ``--definitions-only``,   | Show only definitions                               |
+| ``-d``                    |                                                     |
++---------------------------+-----------------------------------------------------+
+| ``--json``                | Output as JSON                                      |
++---------------------------+-----------------------------------------------------+
+| ``--engine`` TEXT         | Type inference engine: ``auto`` (default),          |
+|                           | ``pyrefly``, ``pyright``, ``ty``                    |
++---------------------------+-----------------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Show all inferred types for a file
+   emend types src/models/user.py
+
+   # Filter by symbol name
+   emend types src/models/user.py --name User
+
+   # Only show definitions, output as JSON
+   emend types src/models/ --definitions-only --json
+
+   # Use a specific engine
+   emend types app.py --engine pyright
+   emend types app.py --engine ty
+
+---

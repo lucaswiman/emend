@@ -1,10 +1,11 @@
 start: selector
 
-selector: file_path DOUBLE_COLON symbol_path? component*
+selector: file_path DOUBLE_COLON symbol_path? type_filter? component*
 
 file_path: PATH
 symbol_path: symbol_segment ("." symbol_segment)*
 symbol_segment: WILDCARD | IDENTIFIER
+type_filter: TYPE_FILTER
 component: "[" COMPONENT_NAME "]" accessor? pseudo_class?
 accessor: "[" (IDENTIFIER | INT) "]"
 pseudo_class: PSEUDO_CLASS
@@ -16,6 +17,7 @@ WILDCARD: "*" | /[a-zA-Z_*][a-zA-Z0-9_*]*/
 IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/
 INT: /-?\d+/
 PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
+TYPE_FILTER: /:(?:returns|type)\[(?:[^\[\]]*(?:\[[^\[\]]*\])?)*\]/
 
 %declare _LITERALS_ALLOWED_TO_COLLIDE
 

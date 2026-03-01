@@ -14,6 +14,7 @@
 | `ast_utils.py` | AST traversal utilities using LibCST (`_NestedDefinitionVisitor` with `PositionProvider`) |
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
+| `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine` |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
 | `grammars/pattern.lark` | Lark grammar for pattern syntax |
 
@@ -58,13 +59,15 @@
 | `test_transform_ellipsis_collections.py` | Ellipsis captures in collections |
 | `test_transform_fstrings.py` | F-string pattern matching |
 | `test_transform_inside.py` | `--inside` / `--not-inside` constraints |
+| `test_type_oracle.py` | `TypeOracle` unit tests: `parse_type_string`, `TypeDescriptor`, `FileTypes`, cache, parsers, `detect_type_engine`, stress tests, optional pyrefly/pyright integration |
+| `test_typeoracle_integration.py` | End-to-end integration: `:type[X]`/`:returns[X]` pattern constraints, oracle-aware lookup, `cmd_edit`/`cmd_add` wiring |
 | `test_visit_project.py` | `visit_project()` helper |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`. Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
+| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`. Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |
@@ -76,6 +79,7 @@
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
+| `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
 
 ## Architecture
 
@@ -104,6 +108,19 @@ All cross-project functions use the shared `visit_project()` helper in `transfor
 - `rules` section: `find` + optional `not-inside` + `message` + optional `replace`
 - `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass
 - `--fix` flag auto-applies associated `replace` patterns
+
+### Type Oracle
+
+`type_oracle.py` provides an abstract `TypeOracle` interface for querying inferred types:
+- `PyreflyAdapter` -- runs `pyrefly check --debug-info` and parses the JSON binding dump
+- `PyrightAdapter` -- starts `pyright-langserver` via LSP and queries hover for each symbol
+- `TyAdapter` -- starts `ty lsp` via LSP and queries hover for each symbol
+- `create_type_oracle(engine="auto")` -- factory; autodetects engine from config files and PATH
+- `detect_type_engine(project_root)` -- heuristic: config files first (pyrightconfig.json, ty.toml, pyrefly.toml / pyproject.toml sections), then tool availability
+- `parse_type_string(raw)` -- parses type strings from any backend into `TypeDescriptor` trees
+- `FileTypes` / `TypeBinding` -- structured result types; `FileTypes.build_index()` enables O(1) positional lookup
+
+Pattern constraints `:type[X]` and `:returns[X]` are parsed by the `ORACLE_TYPE_CONSTRAINT` grammar terminal and post-filtered by `_filter_matches_by_type_oracle()` in `transform.py`.  Lookup (`search` / `query_symbols`) uses `_filter_by_returns_with_oracle()` in `query.py` as a fallback when no annotation is present.
 
 ### Dead Code Detection
 
