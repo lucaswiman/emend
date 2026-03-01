@@ -232,6 +232,8 @@ def search(
     If the query contains metavariables ($X, $...Y), uses pattern matching mode.
     If the query contains :: or is a plain file path, uses symbol lookup mode.
     A bare file/dir path with no filters shows a symbol summary.
+    A bare name that doesn't match any file is treated as a symbol search
+    across all Python files (equivalent to **::name).
 
     Output formats (--output):
         code          Full source of matched symbol(s) [default for selector]
@@ -261,6 +263,11 @@ def search(
         emend search file.py::func[params]
         emend search src/ --kind function --where '@app.command'
 
+        # Bare name (auto-detects as symbol search):
+        emend search process_encounter
+        emend search ::MyClass.method
+        emend search MyClass src/
+
         # Summary mode (list symbols):
         emend search file.py
         emend search file.py::MyClass --output summary
@@ -288,6 +295,10 @@ def search(
     is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
     has_selector = '::' in query and not is_pattern_mode
 
+    # Normalize ::name → **::name (unspecified path defaults to recursive search)
+    if has_selector and query.startswith('::'):
+        query = '**' + query
+
     # If query looks like a file path/glob/directory (no $ or ::) but --where
     # provides a pattern (has $), the user likely intended:
     #   emend search 'Union[$X, $Y]' myproject/**/*.py
@@ -301,6 +312,23 @@ def search(
                 query = where_matching
                 where_matching = None
                 is_pattern_mode = True
+
+        # Bare name fallback: if query doesn't match a file/dir/glob,
+        # treat it as a symbol name and search across Python files.
+        if not is_pattern_mode:
+            _query_path = Path(query)
+            if (not _query_path.exists()
+                    and '/' not in query
+                    and not query.endswith('.py')
+                    and not ('*' in query or '?' in query)):
+                if path:
+                    _p = Path(path)
+                    file_scope = str(_p / '**') if _p.is_dir() else path
+                    path = None
+                else:
+                    file_scope = '**'
+                query = f'{file_scope}::{query}'
+                has_selector = True
 
     # Build lookup-mode filters from --where
     lookup_has_decorator: Optional[list[str]] = None
