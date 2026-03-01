@@ -24,6 +24,7 @@ classifiers = [
 dependencies = ["typer", "libcst", "lark", "pyyaml"]
 
 [project.optional-dependencies]
+mcp = ["mcp[cli]>=1.0"]
 dev = ["pytest", "pytest-xdist", "sphinx", "furo", "pyright", "ty", "pyrefly"]
 
 [project.urls]

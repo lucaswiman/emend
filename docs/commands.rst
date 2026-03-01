@@ -763,3 +763,113 @@ The engine is auto-detected from project configuration files (pyrightconfig.json
    emend types app.py --engine ty
 
 ---
+
+mcp
+---
+
+Start an MCP (`Model Context Protocol <https://modelcontextprotocol.io/>`_) server
+that exposes emend commands as tools for LLM-based clients.
+
+Requires the ``mcp`` optional dependency: ``pip install emend[mcp]``.
+
+.. code-block:: text
+
+   emend mcp [OPTIONS]
+
+**Options:**
+
++---------------------------+-----------------------------------------------+
+| Option                    | Description                                   |
++===========================+===============================================+
+| ``--transport``, ``-t``   | Transport protocol: ``stdio`` (default) or    |
+|                           | ``sse``                                       |
++---------------------------+-----------------------------------------------+
+| ``--port``, ``-p``        | Port for SSE transport (default: 8000)        |
++---------------------------+-----------------------------------------------+
+
+**Exposed tools:**
+
++-----------+-------------------------------------------------------------------+
+| Tool      | Description                                                       |
++===========+===================================================================+
+| search    | Unified search: pattern matching, symbol lookup, summary          |
++-----------+-------------------------------------------------------------------+
+| replace   | Pattern replacement (dry-run by default)                          |
++-----------+-------------------------------------------------------------------+
+| edit      | Modify or remove symbol components                                |
++-----------+-------------------------------------------------------------------+
+| add       | Add items to symbol components                                    |
++-----------+-------------------------------------------------------------------+
+| refs      | Find references to a symbol (returns JSON)                        |
++-----------+-------------------------------------------------------------------+
+| rename    | Rename symbols or modules across the project                      |
++-----------+-------------------------------------------------------------------+
+| move      | Move symbols or modules with import updates                       |
++-----------+-------------------------------------------------------------------+
+| graph     | Generate call graphs                                              |
++-----------+-------------------------------------------------------------------+
+| deadcode  | Find unreferenced code                                            |
++-----------+-------------------------------------------------------------------+
+| lint      | Pattern-based linting                                             |
++-----------+-------------------------------------------------------------------+
+| copy_to   | Copy a symbol to another file                                     |
++-----------+-------------------------------------------------------------------+
+
+All write tools (edit, add, replace, rename, move) default to dry-run mode and
+return a unified diff. Set ``apply=True`` to write changes to disk.
+
+.. note::
+
+   The MCP server requires Pydantic, which does not support Python 3.14t as of
+   February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Start MCP server on stdio (default, for use with Claude Code, etc.)
+   emend mcp
+
+   # Start on SSE transport with custom port
+   emend mcp --transport sse --port 8080
+
+**Claude Code configuration:**
+
+The quickest way to add emend to `Claude Code <https://code.claude.com/>`_:
+
+.. code-block:: bash
+
+   # Add for the current project
+   claude mcp add --transport stdio emend -- emend mcp
+
+   # Share with your team (writes .mcp.json)
+   claude mcp add --transport stdio --scope project emend -- emend mcp
+
+   # If installed via uv tool install
+   claude mcp add --transport stdio emend -- uvx emend mcp
+
+Or add directly via JSON:
+
+.. code-block:: bash
+
+   claude mcp add-json emend '{"type":"stdio","command":"emend","args":["mcp"]}'
+
+For a team-shared ``.mcp.json`` file (committed to version control):
+
+.. code-block:: json
+
+   {
+     "mcpServers": {
+       "emend": {
+         "type": "stdio",
+         "command": "emend",
+         "args": ["mcp"]
+       }
+     }
+   }
+
+Verify the connection with ``claude mcp list`` or type ``/mcp`` inside
+Claude Code. See :doc:`installation` for details on scopes and configuration
+options.
+
+---

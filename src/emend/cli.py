@@ -1563,6 +1563,41 @@ def types_cmd(
         raise typer.Exit(2)
 
 
+@app.command("mcp")
+def mcp_cmd(
+    transport: Annotated[
+        str,
+        typer.Option("--transport", "-t", help="Transport protocol: stdio or sse")
+    ] = "stdio",
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="Port for SSE transport")
+    ] = 8000,
+):
+    """Start an MCP (Model Context Protocol) server.
+
+    Exposes emend commands as MCP tools for use by LLM-based clients.
+
+    Requires the 'mcp' optional dependency:
+        pip install emend[mcp]
+
+    Examples:
+        emend mcp
+        emend mcp --transport sse --port 8080
+    """
+    try:
+        from emend.mcp_server import run_server
+    except ImportError:
+        print(
+            "Error: MCP dependencies not installed. "
+            "Install with: pip install emend[mcp]",
+            file=sys.stderr,
+        )
+        raise typer.Exit(2)
+
+    run_server(transport=transport, port=port)
+
+
 def main():
     try:
         app()

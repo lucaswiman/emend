@@ -9,7 +9,7 @@ Two complementary systems: **structured edits** use selectors like `file.py::fun
 ### Using uv with free-threaded Python (recommended for best performance)
 
 ```bash
-uv tool install --python 3.14t emend
+uv tool install --python 3.13t emend
 ```
 
 Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
@@ -18,12 +18,13 @@ GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
 file scans with no lock contention — meaning `search`, `lint`, `refs`, and `rename`
 across large codebases are significantly faster.
 
-The `--python 3.14t` flag tells uv to use the free-threaded interpreter. Use
-`3.13t` if you prefer the stable free-threaded release:
+We recommend **3.13t** for the free-threaded interpreter. The 3.14t variant also
+works for core emend commands, but the optional MCP server (`emend mcp`) depends on
+Pydantic which does not yet support Python 3.14t (as of February 28, 2026):
 
 ```bash
-uv tool install --python 3.13t emend   # free-threaded 3.13 (stable)
-uv tool install --python 3.14t emend   # free-threaded 3.14 (latest)
+uv tool install --python 3.13t emend   # free-threaded 3.13 (recommended)
+uv tool install --python 3.14t emend   # free-threaded 3.14 (no MCP server support)
 ```
 
 ### Using uv (standard Python)
@@ -37,6 +38,77 @@ uv tool install emend
 ```bash
 pip install emend
 ```
+
+### MCP server
+
+To use emend as an [MCP](https://modelcontextprotocol.io/) server for LLM-based
+clients, install the optional `mcp` extra:
+
+```bash
+pip install emend[mcp]
+```
+
+Then start the server:
+
+```bash
+emend mcp                              # stdio transport (default)
+emend mcp --transport sse --port 8080  # SSE transport
+```
+
+**Note:** The MCP server requires Pydantic, which does not support Python 3.14t as
+of February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
+
+#### Adding emend to Claude Code
+
+The quickest way is the `claude mcp add` CLI:
+
+```bash
+# Add for the current project (default scope: local)
+claude mcp add --transport stdio emend -- emend mcp
+
+# Or share with your team via .mcp.json (project scope)
+claude mcp add --transport stdio --scope project emend -- emend mcp
+```
+
+If you installed with `uv tool install`, make sure the `emend` binary is on your
+PATH, or use the full path:
+
+```bash
+claude mcp add --transport stdio emend -- uvx emend mcp
+```
+
+You can also add it by editing configuration JSON directly. For a **personal**
+setup, run:
+
+```bash
+claude mcp add-json emend '{"type":"stdio","command":"emend","args":["mcp"]}'
+```
+
+For a **team-shared** setup, add a `.mcp.json` file to your project root
+(and commit it to version control):
+
+```json
+{
+  "mcpServers": {
+    "emend": {
+      "type": "stdio",
+      "command": "emend",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Verify it's connected:
+
+```bash
+claude mcp list          # from the terminal
+```
+
+Or inside Claude Code, type `/mcp` to see all connected servers and their status.
+
+See the [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp)
+for details on scopes, environment variables, and managed configurations.
 
 Run `emend --help` to verify. Full documentation at [lucaswiman.github.io/emend](https://lucaswiman.github.io/emend/).
 
@@ -186,6 +258,10 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 **`graph`** - Generate a call graph for functions in a file
 - `emend graph src/module.py --format plain`
 - Formats: `plain`, `json`, `dot`
+
+**`mcp`** - Start an MCP (Model Context Protocol) server
+- `emend mcp` (stdio) or `emend mcp --transport sse --port 8080`
+- Requires `pip install emend[mcp]`
 
 ## Examples
 
@@ -444,11 +520,11 @@ Clone the repository and install for development:
 git clone https://github.com/lucaswiman/emend
 cd emend
 
-# Using make (creates a 3.14t venv, compiles the Rust extension, installs dev deps)
+# Using make (creates a free-threaded venv, compiles the Rust extension, installs dev deps)
 make venv
 
 # Or manually (requires maturin and a Rust toolchain):
-uv venv .venv --python 3.14t
+uv venv .venv --python 3.13t
 uv pip install maturin
 .venv/bin/maturin develop -E dev
 ```
@@ -479,6 +555,7 @@ emend/
 │   ├── ast_utils.py          # AST traversal utilities
 │   ├── component_selector.py # Extended selector parsing
 │   ├── lint.py               # Pattern-based linter engine
+│   ├── mcp_server.py         # MCP server (optional, requires emend[mcp])
 │   └── grammars/
 │       ├── selector.lark     # Extended selector grammar
 │       └── pattern.lark      # Pattern grammar
