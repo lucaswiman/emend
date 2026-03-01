@@ -156,7 +156,7 @@ class TestFindCallers:
             accessor=None,
         )
 
-        callers = find_callers(selector, project_path=str(project))
+        callers = list(find_callers(selector, project_path=str(project)))
         assert len(callers) > 0, "Should find caller in same file"
 
 
