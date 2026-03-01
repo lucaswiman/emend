@@ -389,6 +389,7 @@ def warm_caches(
 
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
         for batch_idx, (parse_n, qn_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
