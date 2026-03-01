@@ -177,6 +177,46 @@ class TestSearchEdgeCases:
 
         assert result.exit_code != 0
 
+    def test_search_pattern_without_dollar_via_double_colon(self, tmp_path, monkeypatch):
+        """**::assert False is detected as a pattern (no $ needed with ::)."""
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "a.py"
+        f.write_text("def test():\n    assert False\n    assert True\n")
+
+        result = runner.invoke(
+            app, ["search", "**::assert False"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 0
+        assert "a.py:2" in result.stdout
+        # assert True should not match
+        assert ":3" not in result.stdout
+
+    def test_search_print_call_pattern_via_double_colon(self, tmp_path, monkeypatch):
+        """**::print() is detected as a pattern (parens aren't valid selector)."""
+        monkeypatch.chdir(tmp_path)
+        f = tmp_path / "a.py"
+        f.write_text("print()\nx = 1\n")
+
+        result = runner.invoke(
+            app, ["search", "**::print()"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 0
+        assert "a.py:1" in result.stdout
+
+    def test_search_selector_still_works_with_double_colon(self, tmp_path):
+        """file.py::MyClass remains a selector (valid selector syntax)."""
+        f = tmp_path / "mod.py"
+        f.write_text("class MyClass:\n    def method(self): pass\n")
+
+        result = runner.invoke(
+            app, ["search", f"{f}::MyClass"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 0
+        assert "MyClass" in result.stdout
+
 
 class TestSearchFileScopePattern:
     """Tests for file_scope::pattern syntax (e.g. **::print($X))."""

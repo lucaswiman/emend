@@ -322,22 +322,35 @@ def search(
         output_modifier = parts[1]
 
     # Detect query shape
-    is_pattern_mode = "$" in query
     is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
-    has_selector = '::' in query and not is_pattern_mode
+    is_pattern_mode = False
+    has_selector = False
 
-    # Handle file_scope::pattern syntax (e.g. "**::print($X)", "src/::func($A)")
-    # When :: and $ coexist, split the file scope from the pattern.
-    if is_pattern_mode and '::' in query:
-        _file_part, _pattern_part = query.split('::', 1)
-        if '$' in _pattern_part:
-            query = _pattern_part
+    if '::' in query and not is_line_selector:
+        _file_part, _right_part = query.split('::', 1)
+        if '$' in _right_part:
+            # Metavar in the right side → definitely a pattern
+            is_pattern_mode = True
+        else:
+            # Try parsing as a selector; if it fails, the right side is a pattern.
+            # e.g. "**::assert False" or "**::print()" are patterns,
+            # while "**::MyClass.method" or "**::func[params]" are selectors.
+            _sel_query = query if not query.startswith('::') else '**' + query
+            try:
+                parse_extended_selector(_sel_query)
+                has_selector = True
+            except Exception:
+                is_pattern_mode = True
+
+        if is_pattern_mode:
+            # Extract file scope from before :: and use right side as the pattern
+            query = _right_part
             _file_scope = _file_part.strip()
-            # Use file scope from the selector when no explicit path argument
             if not path:
                 if _file_scope and _file_scope != '**':
                     path = _file_scope
-                # else: ** or empty means "all files", which is the default (path=None → ".")
+    elif '$' in query:
+        is_pattern_mode = True
 
     # Normalize ::name → **::name (unspecified path defaults to recursive search)
     if has_selector and query.startswith('::'):
