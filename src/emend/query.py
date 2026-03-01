@@ -449,7 +449,7 @@ def _filter_by_returns_with_oracle(
         from emend.type_oracle import parse_type_string
         bindings = file_types.types_for_name(symbol.name)
         for binding in bindings:
-            if binding.line == symbol.line and binding.binding_kind == "definition":
+            if binding.line == symbol.line and binding.binding_kind in ("definition", "inferred"):
                 td = binding.type_descriptor
                 # For callable types, check the return type
                 if td.kind == "callable" and td.return_type is not None:

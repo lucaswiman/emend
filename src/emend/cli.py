@@ -568,9 +568,14 @@ def edit(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    returns: Annotated[
+        Optional[list[str]],
+        typer.Option("--returns", help="Only edit symbols whose return type matches (annotation or inferred)")
+    ] = None,
     type_engine: Annotated[
         Optional[str],
-        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
+        typer.Option("--type-engine",
+                     help="Type inference engine for --returns fallback: auto, pyrefly, pyright, ty")
     ] = None,
 ):
     """Edit or replace existing symbol components.
@@ -590,18 +595,29 @@ def edit(
 
         # Remove entire function
         emend edit api.py::deprecated_function --rm --apply
+
+        # Edit return type of all functions returning str (annotation or inferred)
+        emend edit '*.py::*[returns]' 'str | None' --returns str --type-engine auto --apply
     """
     try:
+        # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
-        if type_engine is not None:
+        if type_engine is not None or returns:
             from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
+            engine = type_engine or "auto"
+            oracle = create_type_oracle(engine=engine)
+            if not oracle.is_available():
+                logging.getLogger("emend.type_oracle").warning(
+                    "Type engine '%s' not available; using annotations only", engine,
+                )
+                oracle = None
 
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
+            returns_filter=returns,
             type_oracle=oracle,
         )
         print(result, end='')
@@ -636,9 +652,14 @@ def add(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
+    returns: Annotated[
+        Optional[list[str]],
+        typer.Option("--returns", help="Only add to symbols whose return type matches (annotation or inferred)")
+    ] = None,
     type_engine: Annotated[
         Optional[str],
-        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
+        typer.Option("--type-engine",
+                     help="Type inference engine for --returns fallback: auto, pyrefly, pyright, ty")
     ] = None,
 ):
     """Add new items to symbol components.
@@ -666,12 +687,22 @@ def add(
 
         # Add keyword-only parameter
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
+
+        # Add parameter to all functions returning Connection (annotation or inferred)
+        emend add '*.py::*[params]' 'timeout: int = 30' --returns Connection --type-engine auto --apply
     """
     try:
+        # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
-        if type_engine is not None:
+        if type_engine is not None or returns:
             from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
+            engine = type_engine or "auto"
+            oracle = create_type_oracle(engine=engine)
+            if not oracle.is_available():
+                logging.getLogger("emend.type_oracle").warning(
+                    "Type engine '%s' not available; using annotations only", engine,
+                )
+                oracle = None
 
         result = cmd_add(
             selector_str=selector,
@@ -680,6 +711,7 @@ def add(
             after=after,
             at=at,
             apply=apply,
+            returns_filter=returns,
             type_oracle=oracle,
         )
         print(result, end='')
@@ -714,6 +746,11 @@ def replace_cmd(
             "'MyClass.method' (scope)"
         ))
     ] = None,
+    type_engine: Annotated[
+        Optional[str],
+        typer.Option("--type-engine",
+                     help="Type inference engine for :type[X] and :returns[X] constraints: auto, pyrefly, pyright, ty")
+    ] = None,
 ):
     """Replace pattern matches with replacement in Python file(s).
 
@@ -730,12 +767,26 @@ def replace_cmd(
         emend replace 'print($X)' 'logger.info($X)' file.py --where def --apply
         emend replace 'print($X)' 'logger.info($X)' file.py --where 'def test_*' --apply
         emend replace '$X = $Y' '$X: int = $Y' src/*.py --where 'not class' --apply
+        emend replace '$X:type[Connection].close()' '$X.shutdown()' src/ --type-engine auto
     """
     try:
         where_params = parse_where_clause(where or [])
         scope = where_params.get("scope")
         inside = where_params.get("inside")
         not_inside = where_params.get("not_inside")
+
+        # Create TypeOracle when --type-engine is specified or pattern contains
+        # oracle constraints (:type[X] / :returns[X]).
+        oracle = None
+        if type_engine is not None or ":type[" in pattern or ":returns[" in pattern:
+            from emend.type_oracle import create_type_oracle
+            engine = type_engine or "auto"
+            oracle = create_type_oracle(engine=engine)
+            if not oracle.is_available():
+                logging.getLogger("emend.type_oracle").warning(
+                    "Type engine '%s' not available; oracle constraints will be ignored", engine,
+                )
+                oracle = None
 
         search_path = path
         files, is_multi_file = resolve_files(search_path)
@@ -750,6 +801,7 @@ def replace_cmd(
                     pattern, replacement, file_path_str,
                     scope=scope, apply=apply,
                     inside=inside, not_inside=not_inside,
+                    type_oracle=oracle,
                 )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)

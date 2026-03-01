@@ -395,13 +395,13 @@ class TestCmdLookupTypeOracle:
 
 
 # ---------------------------------------------------------------------------
-# cmd_edit/cmd_add accept type_oracle parameter
+# cmd_edit/cmd_add smoke tests
 # ---------------------------------------------------------------------------
 
-class TestCmdEditAddTypeOracle:
-    """Test that cmd_edit and cmd_add accept type_oracle parameter."""
+class TestCmdEditAddSmoke:
+    """Smoke tests for cmd_edit and cmd_add (no type_oracle wiring needed)."""
 
-    def test_cmd_edit_accepts_type_oracle(self, tmp_path):
+    def test_cmd_edit_works(self, tmp_path):
         source = textwrap.dedent("""\
             def greet(name: str) -> str:
                 return f"hello {name}"
@@ -411,15 +411,13 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_edit
 
-        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_edit(
             selector_str=f"{f}::greet[returns]",
             value="int",
-            type_oracle=None,
         )
         assert "int" in result
 
-    def test_cmd_add_accepts_type_oracle(self, tmp_path):
+    def test_cmd_add_works(self, tmp_path):
         source = textwrap.dedent("""\
             def greet(name: str) -> str:
                 return f"hello {name}"
@@ -429,10 +427,425 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_add
 
-        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_add(
             selector_str=f"{f}::greet[params]",
             value="age: int",
-            type_oracle=None,
         )
         assert "age" in result
+
+
+# ---------------------------------------------------------------------------
+# replace_pattern with TypeOracle
+# ---------------------------------------------------------------------------
+
+class TestReplacePatternTypeOracle:
+    """Test that replace_pattern uses TypeOracle for :type[X] constraints."""
+
+    def test_type_constraint_filters_replacements(self, tmp_path):
+        """Only replace matches where the captured variable has the right inferred type."""
+        source = textwrap.dedent("""\
+            x = get_connection()
+            y = get_name()
+            x.close()
+            y.close()
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="x", line=1, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("Connection"),
+                raw_type="Connection", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="y", line=2, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("str"),
+                raw_type="str", binding_kind="definition",
+            ),
+            # Bindings for usage sites (x.close(), y.close())
+            TypeBinding(
+                name="x", line=3, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("Connection"),
+                raw_type="Connection", binding_kind="inferred",
+            ),
+            TypeBinding(
+                name="y", line=4, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("str"),
+                raw_type="str", binding_kind="inferred",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import replace_pattern
+
+        # Without oracle: both .close() calls match
+        diff_no_oracle, count_no_oracle = replace_pattern(
+            "$X.close()", "$X.shutdown()", str(f),
+        )
+        assert count_no_oracle == 2
+
+        # With oracle + type constraint: only x (Connection) matches
+        diff_oracle, count_oracle = replace_pattern(
+            "$X:type[Connection].close()", "$X.shutdown()", str(f),
+            type_oracle=oracle,
+        )
+        assert count_oracle == 1
+        assert "x.shutdown()" in diff_oracle
+        assert "y.shutdown()" not in diff_oracle
+
+    def test_replace_no_oracle_constraints_unchanged(self, tmp_path):
+        """Patterns without oracle constraints work as before (no regression)."""
+        source = textwrap.dedent("""\
+            print("hello")
+            print("world")
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import replace_pattern
+
+        diff, count = replace_pattern(
+            'print($X)', 'log($X)', str(f),
+        )
+        assert count == 2
+
+    def test_replace_oracle_no_matches(self, tmp_path):
+        """When oracle filters out all matches, no replacement occurs."""
+        source = textwrap.dedent("""\
+            x = get_name()
+            x.close()
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="x", line=1, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("str"),
+                raw_type="str", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="x", line=2, col_start=1, col_end=2,
+                type_descriptor=TypeDescriptor.named("str"),
+                raw_type="str", binding_kind="inferred",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import replace_pattern
+
+        diff, count = replace_pattern(
+            "$X:type[Connection].close()", "$X.shutdown()", str(f),
+            type_oracle=oracle,
+        )
+        assert count == 0
+        assert diff == ""
+
+
+# ---------------------------------------------------------------------------
+# cmd_edit with returns_filter + TypeOracle
+# ---------------------------------------------------------------------------
+
+class TestCmdEditReturnsFilter:
+    """Test cmd_edit with --returns filter for type-aware editing."""
+
+    def test_edit_filters_by_annotation(self, tmp_path):
+        """Functions with matching return annotation are edited; others are skipped."""
+        source = textwrap.dedent("""\
+            def get_name() -> str:
+                return "alice"
+
+            def get_count() -> int:
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_edit
+
+        result = cmd_edit(
+            selector_str=f"{f}::*[returns]",
+            value="str | None",
+            returns_filter=["str"],
+        )
+        # Only get_name (returning str) should be edited
+        assert "str | None" in result
+        # get_name's return type was changed (appears in diff as modified line)
+        assert "-def get_name() -> str:" in result
+        assert "+def get_name() -> str | None:" in result
+        # get_count's return type was NOT changed (no diff line for it)
+        assert "-def get_count()" not in result
+        assert "+def get_count()" not in result
+
+    def test_edit_filters_by_oracle(self, tmp_path):
+        """Functions without annotations are filtered by inferred return type."""
+        source = textwrap.dedent("""\
+            def get_name():
+                return "alice"
+
+            def get_count():
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="get_name", line=1, col_start=5, col_end=13,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("str")),
+                raw_type="() -> str", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="get_count", line=4, col_start=5, col_end=14,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("int")),
+                raw_type="() -> int", binding_kind="definition",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import cmd_edit
+
+        # Add return annotation to functions returning str (inferred)
+        result = cmd_edit(
+            selector_str=f"{f}::*[returns]",
+            value="str",
+            returns_filter=["str"],
+            type_oracle=oracle,
+        )
+        # get_name's return type was changed
+        assert "-def get_name():" in result
+        assert "+def get_name() -> str:" in result
+        # get_count was NOT changed
+        assert "-def get_count()" not in result
+        assert "+def get_count()" not in result
+
+    def test_edit_no_returns_filter_unchanged(self, tmp_path):
+        """Without --returns filter, cmd_edit works as before."""
+        source = textwrap.dedent("""\
+            def greet(name: str) -> str:
+                return f"hello {name}"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_edit
+
+        result = cmd_edit(
+            selector_str=f"{f}::greet[returns]",
+            value="int",
+        )
+        assert "int" in result
+
+
+# ---------------------------------------------------------------------------
+# cmd_add with returns_filter + TypeOracle
+# ---------------------------------------------------------------------------
+
+class TestCmdAddReturnsFilter:
+    """Test cmd_add with --returns filter for type-aware parameter insertion."""
+
+    def test_add_filters_by_annotation(self, tmp_path):
+        """Only add parameter to functions whose return type matches."""
+        source = textwrap.dedent("""\
+            def connect() -> Connection:
+                pass
+
+            def get_name() -> str:
+                return "alice"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_add
+
+        result = cmd_add(
+            selector_str=f"{f}::*[params]",
+            value="timeout: int = 30",
+            returns_filter=["Connection"],
+        )
+        # Only connect (returning Connection) should get the new param
+        assert "timeout" in result
+        # connect was changed (timeout added)
+        assert "+def connect(timeout: int = 30)" in result
+        # get_name was NOT changed
+        assert "+def get_name(" not in result
+
+    def test_add_filters_by_oracle(self, tmp_path):
+        """Functions without annotations are filtered by inferred return type."""
+        source = textwrap.dedent("""\
+            def connect():
+                pass
+
+            def get_name():
+                return "alice"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="connect", line=1, col_start=5, col_end=12,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("Connection")),
+                raw_type="() -> Connection", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="get_name", line=4, col_start=5, col_end=13,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("str")),
+                raw_type="() -> str", binding_kind="definition",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import cmd_add
+
+        result = cmd_add(
+            selector_str=f"{f}::*[params]",
+            value="timeout: int = 30",
+            returns_filter=["Connection"],
+            type_oracle=oracle,
+        )
+        assert "timeout" in result
+        # connect was changed (timeout added)
+        assert "+def connect(timeout: int = 30)" in result
+        # get_name was NOT changed
+        assert "+def get_name(" not in result
+
+    def test_add_no_returns_filter_unchanged(self, tmp_path):
+        """Without --returns filter, cmd_add works as before."""
+        source = textwrap.dedent("""\
+            def greet(name: str) -> str:
+                return f"hello {name}"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_add
+
+        result = cmd_add(
+            selector_str=f"{f}::greet[params]",
+            value="age: int",
+        )
+        assert "age" in result
+
+
+# ---------------------------------------------------------------------------
+# Selector type_filter syntax (:returns[X], :type[X])
+# ---------------------------------------------------------------------------
+
+class TestSelectorTypeFilter:
+    """Test :returns[X] and :type[X] in selector syntax."""
+
+    def test_parse_returns_filter(self):
+        """Selector grammar parses :returns[str] correctly."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:returns[str][params]")
+        assert sel.symbol_path == ["*"]
+        assert sel.type_filter == "returns[str]"
+        assert sel.component == "params"
+
+    def test_parse_type_filter(self):
+        """Selector grammar parses :type[Connection] correctly."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:type[Connection]")
+        assert sel.type_filter == "type[Connection]"
+        assert sel.component is None
+
+    def test_parse_nested_type(self):
+        """Selector grammar handles nested brackets like Optional[str]."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::*:returns[Optional[str]][params]")
+        assert sel.type_filter == "returns[Optional[str]]"
+        assert sel.component == "params"
+
+    def test_parse_no_filter(self):
+        """Selectors without type filter have type_filter=None."""
+        from emend.component_selector import parse_extended_selector
+
+        sel = parse_extended_selector("file.py::func[params]")
+        assert sel.type_filter is None
+
+    def test_edit_with_selector_returns_filter(self, tmp_path):
+        """cmd_edit with :returns[str] in selector filters by annotation."""
+        source = textwrap.dedent("""\
+            def get_name() -> str:
+                return "alice"
+
+            def get_count() -> int:
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_edit
+
+        # Use :returns[str] in the selector instead of --returns flag
+        result = cmd_edit(
+            selector_str=f"{f}::*:returns[str][returns]",
+            value="str | None",
+        )
+        assert "-def get_name() -> str:" in result
+        assert "+def get_name() -> str | None:" in result
+        assert "-def get_count()" not in result
+        assert "+def get_count()" not in result
+
+    def test_add_with_selector_returns_filter(self, tmp_path):
+        """cmd_add with :returns[Connection] in selector filters by annotation."""
+        source = textwrap.dedent("""\
+            def connect() -> Connection:
+                pass
+
+            def get_name() -> str:
+                return "alice"
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        from emend.transform import cmd_add
+
+        result = cmd_add(
+            selector_str=f"{f}::*:returns[Connection][params]",
+            value="timeout: int = 30",
+        )
+        assert "+def connect(timeout: int = 30)" in result
+        assert "+def get_name(" not in result
+
+    def test_selector_filter_with_oracle(self, tmp_path):
+        """Selector :returns[X] works with oracle for unannotated functions."""
+        source = textwrap.dedent("""\
+            def get_name():
+                return "alice"
+
+            def get_count():
+                return 42
+        """)
+        f = tmp_path / "test.py"
+        f.write_text(source)
+
+        ft = _build_file_types(str(f), [
+            TypeBinding(
+                name="get_name", line=1, col_start=5, col_end=13,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("str")),
+                raw_type="() -> str", binding_kind="definition",
+            ),
+            TypeBinding(
+                name="get_count", line=4, col_start=5, col_end=14,
+                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("int")),
+                raw_type="() -> int", binding_kind="definition",
+            ),
+        ])
+        oracle = _SimpleOracle({str(f): ft})
+
+        from emend.transform import cmd_edit
+
+        result = cmd_edit(
+            selector_str=f"{f}::*:returns[str][returns]",
+            value="str",
+            type_oracle=oracle,
+        )
+        assert "-def get_name():" in result
+        assert "+def get_name() -> str:" in result
+        assert "-def get_count()" not in result

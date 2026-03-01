@@ -1076,6 +1076,12 @@ class PyrightAdapter(TypeOracle):
                 self._lsp.stop()
                 self._lsp = None
 
+    def __del__(self):
+        with self._lsp_lock:
+            if self._lsp:
+                self._lsp.stop()
+                self._lsp = None
+
 
 # ---------------------------------------------------------------------------
 # ty adapter
@@ -1188,6 +1194,12 @@ class TyAdapter(TypeOracle):
 
     def clear_cache(self) -> None:
         self._cache.clear()
+        with self._lsp_lock:
+            if self._lsp:
+                self._lsp.stop()
+                self._lsp = None
+
+    def __del__(self):
         with self._lsp_lock:
             if self._lsp:
                 self._lsp.stop()

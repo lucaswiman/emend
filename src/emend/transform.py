@@ -2614,7 +2614,7 @@ def _filter_matches_by_type_oracle(
     oracle_constraints: dict[str, tuple[str, str]],
     type_oracle: object,
     file_path: str,
-    position_provider: dict,
+    position_provider: Mapping,
 ) -> list[PatternMatch]:
     """Post-filter pattern matches using TypeOracle type constraints.
 
@@ -2628,7 +2628,8 @@ def _filter_matches_by_type_oracle(
             where kind is 'type' or 'returns'.
         type_oracle: A TypeOracle instance.
         file_path: Path to the source file being searched.
-        position_provider: LibCST PositionProvider for resolving node positions.
+        position_provider: Resolved LibCST PositionProvider metadata
+            (mapping from CSTNode to CodeRange).
     """
     from .type_oracle import FileTypes, TypeDescriptor, parse_type_string
 
@@ -2994,6 +2995,57 @@ class PatternReplacer(cst.CSTTransformer):
             elif isinstance(replacement, cst.BaseExpression):
                 return updated_node.with_changes(value=replacement)
         return updated_node
+
+
+class _PositionFilteredReplacer(PatternReplacer):
+    """Replacer that only modifies nodes at pre-approved line positions.
+
+    Used when ``find_pattern`` has already determined which positions satisfy
+    oracle type constraints (or other post-filters).  The replacer uses
+    ``PositionProvider`` metadata to check ``original_node`` positions in each
+    ``leave_*`` method before delegating to the parent replacer.
+
+    Note: overriding ``on_visit``/``on_leave`` would disable LibCST's specific
+    ``leave_*`` dispatch, so we override each ``leave_*`` method individually
+    via ``_make_position_filtered_leave``.
+    """
+
+    METADATA_DEPENDENCIES = (cst.metadata.PositionProvider,)
+
+    def __init__(
+        self,
+        matcher: m.BaseMatcherNode,
+        pattern: Pattern,
+        replacement_str: str,
+        ellipsis_info: dict | None = None,
+        allowed_lines: set[int] | None = None,
+    ):
+        super().__init__(matcher, pattern, replacement_str, ellipsis_info)
+        self.allowed_lines: set[int] = allowed_lines or set()
+
+    def _position_allowed(self, original_node: cst.CSTNode) -> bool:
+        try:
+            pos = self.get_metadata(cst.metadata.PositionProvider, original_node)
+            return pos.start.line in self.allowed_lines
+        except KeyError:
+            return False
+
+
+def _make_position_filtered_leave(base_method):
+    """Create a leave_* override that checks position before delegating."""
+    def leave_method(self, original_node, updated_node):
+        if not self._position_allowed(original_node):
+            return updated_node
+        return base_method(self, original_node, updated_node)
+    return leave_method
+
+
+# Dynamically override every leave_* method from PatternReplacer so that each
+# checks position before delegating to the parent implementation.
+for _name in list(vars(PatternReplacer)):
+    if _name.startswith("leave_"):
+        _base = getattr(PatternReplacer, _name)
+        setattr(_PositionFilteredReplacer, _name, _make_position_filtered_leave(_base))
 
 
 class ConstrainedPatternReplacer(PatternReplacer):
@@ -3557,6 +3609,7 @@ def replace_pattern(
     inside: str | None = None,
     not_inside: str | None = None,
     where: str | None = None,
+    type_oracle: object | None = None,
 ) -> tuple[str, int]:
     """Replace pattern matches with replacement template.
 
@@ -3572,6 +3625,10 @@ def replace_pattern(
         not_inside: Optional constraint - only replace outside this structure.
                     Supports same syntax as inside.
         where: Optional constraint - alias for inside with pattern support.
+        type_oracle: Optional TypeOracle instance for :type[X] and :returns[X]
+                     constraints.  When present, matching is delegated to
+                     ``find_pattern`` so that the oracle post-filter is applied
+                     and only type-verified positions are replaced.
 
     Returns:
         Tuple of (diff, count) where diff is a unified diff and count is number of replacements
@@ -3590,6 +3647,12 @@ def replace_pattern(
 
         # Replace only inside functions:
         >>> diff, count = replace_pattern("print($X)", "logger.info($X)", "file.py", inside="def")
+
+        # Type-aware replacement:
+        >>> diff, count = replace_pattern(
+        ...     "$X:type[Connection].close()", "$X.shutdown()",
+        ...     "file.py", type_oracle=oracle,
+        ... )
     """
     # Handle --where as alias for --inside
     if where is not None:
@@ -3604,6 +3667,12 @@ def replace_pattern(
     pattern = parse_pattern(pattern_str)
     matcher, ellipsis_info = compile_pattern_to_matcher(pattern)
 
+    # Detect oracle type constraints
+    oracle_constraints: dict[str, tuple[str, str]] = {}
+    for mv in pattern.metavars:
+        if is_oracle_type_constraint(mv.type_constraint):
+            oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
+
     # Read and parse file
     file = Path(file_path)
     if not file.exists():
@@ -3612,8 +3681,26 @@ def replace_pattern(
     source_code = file.read_text()
     module = cst.parse_module(source_code)
 
-    # Apply replacements - choose replacer based on parameters
-    if inside or not_inside:
+    # When oracle constraints are present, delegate matching to find_pattern
+    # which handles the type post-filtering, then use a position-filtered
+    # replacer to only replace at verified positions.
+    if oracle_constraints and type_oracle is not None:
+        matches = find_pattern(
+            pattern_str, file_path, scope=scope,
+            inside=inside, not_inside=not_inside,
+            type_oracle=type_oracle,
+            source_override=source_code,
+        )
+        if not matches:
+            return "", 0
+        allowed_lines = {match.line for match in matches if match.line is not None}
+        replacer = _PositionFilteredReplacer(
+            matcher, pattern, replacement_str, ellipsis_info,
+            allowed_lines=allowed_lines,
+        )
+        wrapper = cst.MetadataWrapper(module)
+        new_module = wrapper.visit(replacer)
+    elif inside or not_inside:
         # Use constrained replacer for inside/not_inside constraints
         replacer = ConstrainedPatternReplacer(matcher, pattern, replacement_str, ellipsis_info, inside, not_inside)
         new_module = module.visit(replacer)
@@ -5756,6 +5843,91 @@ def _apply_matching_filter(
     return '\n'.join(filtered_parts)
 
 
+def _merge_type_filter(
+    selector: ExtendedSelector,
+    returns_filter: list[str] | None,
+) -> list[str] | None:
+    """Merge a selector's :returns[X] type_filter into the returns_filter list.
+
+    If the selector has a ``type_filter`` like ``returns[str]``, the type
+    string is appended to (or creates) the returns_filter list so the
+    existing returns-based filtering logic handles it.
+    """
+    if selector.type_filter is None:
+        return returns_filter
+    # Parse "returns[str]" or "type[Connection]"
+    tf = selector.type_filter
+    bracket = tf.index("[")
+    kind = tf[:bracket]
+    type_string = tf[bracket + 1:-1]
+    if kind == "returns":
+        merged = list(returns_filter) if returns_filter else []
+        merged.append(type_string)
+        return merged
+    # For :type[X], pass through as-is (future: filter by inferred type)
+    return returns_filter
+
+
+def _expand_selector_with_returns_filter(
+    selector: ExtendedSelector,
+    returns_filter: list[str],
+    type_oracle: object | None = None,
+) -> list[ExtendedSelector]:
+    """Expand a selector to only include symbols matching a returns filter.
+
+    Uses annotation-based matching, falling back to type oracle when available.
+    Returns concrete selectors for each matching symbol.
+    """
+    import fnmatch as _fnmatch
+    from .query import _collect_symbols, _filter_by_returns_with_oracle
+
+    file_path = Path(selector.file_path)
+    if not file_path.exists():
+        return []
+    source = file_path.read_text()
+    symbols = _collect_symbols(file_path, source)
+
+    # Build type index if oracle available
+    file_types = None
+    if type_oracle is not None:
+        file_types = type_oracle.infer_file(file_path)
+
+    result = []
+    for symbol in symbols:
+        # Extract symbol's path segments from its full path (file.py::Class.method → [Class, method])
+        parts = symbol.path.split("::")
+        sym_path = parts[1].split(".") if len(parts) > 1 else [symbol.name]
+
+        # Check if symbol matches the selector's symbol_path pattern
+        if len(sym_path) != len(selector.symbol_path):
+            continue
+        match = True
+        for seg, pat in zip(sym_path, selector.symbol_path):
+            if pat != "*" and not _fnmatch.fnmatch(seg, pat):
+                match = False
+                break
+        if not match:
+            continue
+
+        # Check returns filter
+        if not _filter_by_returns_with_oracle(
+            symbol, returns_filter, case_insensitive=False, file_types=file_types,
+        ):
+            continue
+
+        # Create concrete selector for this symbol
+        concrete = ExtendedSelector(
+            file_path=selector.file_path,
+            symbol_path=sym_path,
+            component=selector.component,
+            accessor=selector.accessor,
+            pseudo_class=selector.pseudo_class,
+        )
+        result.append(concrete)
+
+    return result
+
+
 def _cmd_edit_single(
     selector: ExtendedSelector,
     value: str | None = None,
@@ -5783,6 +5955,7 @@ def cmd_edit(
     value: str | None = None,
     rm: bool = False,
     apply: bool = False,
+    returns_filter: list[str] | None = None,
     type_oracle: object | None = None,
 ) -> str:
     """Edit or replace existing symbol components.
@@ -5790,11 +5963,38 @@ def cmd_edit(
     - If rm=True or value="", remove the component or symbol
     - If accessor present + value, modify specific item (e.g., [params][x])
     - If no accessor + value, replace entire component (e.g., [returns])
-
-    Args:
-        type_oracle: Optional TypeOracle instance for type-aware operations.
+    - If returns_filter or selector :returns[X] specified, only edit symbols
+      whose return type matches (annotation first, then inferred via oracle)
     """
     selector = parse_extended_selector(selector_str)
+
+    # Merge selector type_filter into returns_filter
+    returns_filter = _merge_type_filter(selector, returns_filter)
+
+    # When returns_filter is specified, expand the selector to only include
+    # symbols that match the return type constraint.
+    if returns_filter:
+        files = (
+            selector.expand_file_glob()
+            if selector.has_file_glob()
+            else [selector.file_path]
+        )
+        all_results = []
+        for fpath in files:
+            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
+            matching = _expand_selector_with_returns_filter(
+                concrete_base, returns_filter, type_oracle,
+            )
+            for concrete in matching:
+                try:
+                    result = _cmd_edit_single(concrete, value=value, rm=rm, apply=apply)
+                    if result:
+                        all_results.append(result)
+                except (ValueError, FileNotFoundError):
+                    continue
+        if not all_results:
+            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
+        return '\n'.join(all_results)
 
     # Multi-file dispatch for file globs
     if selector.has_file_glob():
@@ -5844,6 +6044,7 @@ def cmd_add(
     after: str | None = None,
     at: int | None = None,
     apply: bool = False,
+    returns_filter: list[str] | None = None,
     type_oracle: object | None = None,
 ) -> str:
     """Add new items to symbol components.
@@ -5851,11 +6052,38 @@ def cmd_add(
     - Position can be specified with --at, --before, or --after
     - Default is to append to end
     - Pseudo-class (e.g., :KEYWORD_ONLY) specifies parameter kind
-
-    Args:
-        type_oracle: Optional TypeOracle instance for type-aware operations.
+    - If returns_filter or selector :returns[X] specified, only add to symbols
+      whose return type matches (annotation first, then inferred via oracle)
     """
     selector = parse_extended_selector(selector_str)
+
+    # Merge selector type_filter into returns_filter
+    returns_filter = _merge_type_filter(selector, returns_filter)
+
+    # When returns_filter is specified, expand the selector to only include
+    # symbols that match the return type constraint.
+    if returns_filter:
+        files = (
+            selector.expand_file_glob()
+            if selector.has_file_glob()
+            else [selector.file_path]
+        )
+        all_results = []
+        for fpath in files:
+            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
+            matching = _expand_selector_with_returns_filter(
+                concrete_base, returns_filter, type_oracle,
+            )
+            for concrete in matching:
+                try:
+                    result = _cmd_add_single(concrete, value=value, before=before, after=after, at=at, apply=apply)
+                    if result:
+                        all_results.append(result)
+                except (ValueError, FileNotFoundError):
+                    continue
+        if not all_results:
+            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
+        return '\n'.join(all_results)
 
     # Multi-file dispatch for file globs
     if selector.has_file_glob():
