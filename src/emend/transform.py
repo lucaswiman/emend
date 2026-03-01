@@ -384,12 +384,14 @@ def warm_caches(
     *,
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
-) -> dict[str, int]:
-    """Pre-populate the parse and QN-index caches for all project files.
+    type_engine: str | None = "auto",
+) -> dict[str, int | str]:
+    """Pre-populate the parse, QN-index, and type caches for all project files.
 
     Designed to be called from the ``emend index`` CLI command or at MCP
     server start-up.  Each file is parsed, then QualifiedNameProvider is
-    resolved to build the QN index.
+    resolved to build the QN index, and finally type inference results are
+    stored in the ``type_cache`` table.
 
     Uses a ``ProcessPoolExecutor`` so that LibCST parsing (CPU-bound)
     runs across multiple cores without GIL contention.  Files are split
@@ -402,12 +404,17 @@ def warm_caches(
         project_path: Root directory of the project.
         jobs: Max parallelism (defaults to CPU count).
         callback: Called with ``(phase, file_path)`` for progress reporting.
+        type_engine: Type inference engine for the type-cache phase.
+            ``"auto"`` (default) auto-detects from project config and PATH.
+            ``"none"`` or ``None`` skips type indexing entirely.
+            Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
 
     Returns:
-        Dict with stats: ``{"files", "parse_cached", "qn_cached"}``.
+        Dict with stats: ``{"files", "parse_cached", "qn_cached",
+        "type_cached", "type_engine"}``.
     """
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
     project_root = _find_project_root(project_path)
     # Collect files from the user-specified path (not the project root)
@@ -423,7 +430,7 @@ def warm_caches(
     file_contents = _rust.read_and_filter_files(py_files, [])
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
-    stats = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0, "skipped": 0}
+    stats: dict[str, int | str] = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0, "skipped": 0, "type_cached": 0, "type_engine": ""}
 
     # Phase 2: parse + QN index in subprocesses.
     # Resolve the DB path and ensure the directory exists before spawning workers.
@@ -478,6 +485,51 @@ def warm_caches(
         stats["files"], time.monotonic() - t0,
         stats["parse_cached"], stats["qn_cached"],
     )
+
+    # Phase 3: type indexing — populate type_cache via the configured engine.
+    if type_engine and str(type_engine).lower() != "none":
+        try:
+            from emend.type_oracle import create_type_oracle, PyreflyAdapter
+            oracle = create_type_oracle(
+                engine=type_engine,
+                project_root=Path(project_root),
+            )
+            engine_label = type(oracle).__name__.replace("Adapter", "").lower()
+            stats["type_engine"] = engine_label
+
+            all_paths = [Path(f) for f, _ in file_contents]
+            # Chunk files so we can report progress and bound per-call work.
+            TYPE_CHUNK = 100
+            type_chunks = [
+                all_paths[i : i + TYPE_CHUNK]
+                for i in range(0, len(all_paths), TYPE_CHUNK)
+            ]
+
+            # PyreflyAdapter.infer_batch() spawns a subprocess per chunk —
+            # parallelize with threads (GIL released during subprocess wait).
+            # LSP-based adapters share a single server connection and must
+            # run sequentially.
+            n_type_workers = max_workers if isinstance(oracle, PyreflyAdapter) else 1
+            project_root_path = Path(project_root)
+
+            def _type_chunk(chunk: list[Path]) -> int:
+                results = oracle.infer_batch(chunk, project_root=project_root_path)
+                return len(results)
+
+            t_type = time.monotonic()
+            with ThreadPoolExecutor(max_workers=n_type_workers) as pool:
+                for chunk_idx, n in enumerate(pool.map(_type_chunk, type_chunks)):
+                    stats["type_cached"] = int(stats["type_cached"]) + n
+                    if callback:
+                        for p in type_chunks[chunk_idx]:
+                            callback("types", str(p))
+
+            logger.info(
+                "warm_caches: type-indexed %d files via %s in %.3fs",
+                stats["type_cached"], engine_label, time.monotonic() - t_type,
+            )
+        except Exception as exc:
+            logger.warning("warm_caches: type indexing skipped: %s", exc)
 
     # Ensure the cache directory has ignore files so it doesn't get checked
     # in or built into Docker images.
