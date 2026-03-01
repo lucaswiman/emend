@@ -87,6 +87,11 @@ Line selectors
     file.py:42                     # single line
     file.py:42-100                 # line range
 
+Formal selector grammar (Lark)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. literalinclude:: ../src/emend/grammars/selector.lark
+
 
 Pattern syntax
 --------------
@@ -156,6 +161,11 @@ Decorator patterns::
 
     @$DEC\ndef $FUNC($...ARGS):   # decorated function
     @property\ndef $F($...A):     # specific decorator
+
+Formal pattern grammar (Lark)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. literalinclude:: ../src/emend/grammars/pattern.lark
 
 Replacement syntax
 ~~~~~~~~~~~~~~~~~~
