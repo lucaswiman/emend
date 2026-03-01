@@ -72,10 +72,43 @@ pub enum PatternNode {
     EmptyList,
     /// List with elements `[a, b, ...]`.
     List(Vec<PatternNode>),
+    /// Subscript access: `value[slice]` (e.g., `Optional[X]`, `dict[str, int]`).
+    Subscript {
+        value: Box<PatternNode>,
+        slices: Vec<PatternNode>,
+    },
+    /// Tuple literal: `(a, b, ...)`.
+    Tuple(Vec<PatternNode>),
     /// `None` literal.
     NoneLiteral,
     /// `True` or `False`.
     BoolLiteral(bool),
+    /// Binary operation: `a + b`, `a | b`, etc.
+    BinaryOp {
+        left: Box<PatternNode>,
+        op: String,
+        right: Box<PatternNode>,
+    },
+    /// Keyword argument: `key=value`.
+    KeywordArg {
+        key: String,
+        value: Box<PatternNode>,
+    },
+    /// Assignment: `target = value`.
+    Assign {
+        target: Box<PatternNode>,
+        value: Box<PatternNode>,
+    },
+    /// Comparison: `a == b`, `a is b`, etc.
+    Compare {
+        left: Box<PatternNode>,
+        ops: Vec<(String, PatternNode)>,
+    },
+    /// Unary operation: `not x`, `-x`.
+    UnaryOp {
+        op: String,
+        operand: Box<PatternNode>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +296,122 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 elems.push(deserialize_pattern(&item)?);
             }
             Ok(PatternNode::List(elems))
+        }
+
+        "subscript" => {
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Subscript pattern missing 'value'")
+            })?;
+            let value = deserialize_pattern(&value_obj)?;
+
+            let slices_obj = d.get_item("slices")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Subscript pattern missing 'slices'")
+            })?;
+            let slices_list = slices_obj.downcast::<PyList>()?;
+            let mut slices = Vec::new();
+            for item in slices_list.iter() {
+                slices.push(deserialize_pattern(&item)?);
+            }
+            Ok(PatternNode::Subscript {
+                value: Box::new(value),
+                slices,
+            })
+        }
+
+        "tuple" => {
+            let elems_obj = d.get_item("elements")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Tuple pattern missing 'elements'")
+            })?;
+            let elems_list = elems_obj.downcast::<PyList>()?;
+            let mut elems = Vec::new();
+            for item in elems_list.iter() {
+                elems.push(deserialize_pattern(&item)?);
+            }
+            Ok(PatternNode::Tuple(elems))
+        }
+
+        "binary_op" => {
+            let left_obj = d.get_item("left")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("BinaryOp pattern missing 'left'")
+            })?;
+            let left = deserialize_pattern(&left_obj)?;
+            let op: String = d.get_item("op")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("BinaryOp pattern missing 'op'")
+            })?.extract()?;
+            let right_obj = d.get_item("right")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("BinaryOp pattern missing 'right'")
+            })?;
+            let right = deserialize_pattern(&right_obj)?;
+            Ok(PatternNode::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+        }
+
+        "keyword_arg" => {
+            let key: String = d.get_item("key")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("KeywordArg pattern missing 'key'")
+            })?.extract()?;
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("KeywordArg pattern missing 'value'")
+            })?;
+            let value = deserialize_pattern(&value_obj)?;
+            Ok(PatternNode::KeywordArg {
+                key,
+                value: Box::new(value),
+            })
+        }
+
+        "assign" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Assign pattern missing 'target'")
+            })?;
+            let target = deserialize_pattern(&target_obj)?;
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Assign pattern missing 'value'")
+            })?;
+            let value = deserialize_pattern(&value_obj)?;
+            Ok(PatternNode::Assign {
+                target: Box::new(target),
+                value: Box::new(value),
+            })
+        }
+
+        "compare" => {
+            let left_obj = d.get_item("left")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Compare pattern missing 'left'")
+            })?;
+            let left = deserialize_pattern(&left_obj)?;
+            let ops_obj = d.get_item("ops")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Compare pattern missing 'ops'")
+            })?;
+            let ops_list = ops_obj.downcast::<PyList>()?;
+            let mut ops = Vec::new();
+            for item in ops_list.iter() {
+                let pair = item.downcast::<PyList>()?;
+                let op: String = pair.get_item(0)?.extract()?;
+                let comparator = deserialize_pattern(&pair.get_item(1)?)?;
+                ops.push((op, comparator));
+            }
+            Ok(PatternNode::Compare {
+                left: Box::new(left),
+                ops,
+            })
+        }
+
+        "unary_op" => {
+            let op: String = d.get_item("op")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("UnaryOp pattern missing 'op'")
+            })?.extract()?;
+            let operand_obj = d.get_item("operand")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("UnaryOp pattern missing 'operand'")
+            })?;
+            let operand = deserialize_pattern(&operand_obj)?;
+            Ok(PatternNode::UnaryOp {
+                op,
+                operand: Box::new(operand),
+            })
         }
 
         "none" => Ok(PatternNode::NoneLiteral),
@@ -631,6 +780,304 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 }
             }
             true
+        }
+
+        PatternNode::Subscript { value, slices } => {
+            // In tree-sitter Python, subscripts can appear as:
+            // 1. "subscript" node (in expression context): `Optional[int]`
+            //    fields: value (the object), subscript (the index/slice)
+            // 2. "generic_type" node (in type annotation context): `Optional[int]`
+            //    children: identifier + type_parameter (containing type children)
+            if node.kind() == "generic_type" {
+                // Generic type in annotation context
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.named_children(&mut cursor).collect();
+                if children.is_empty() {
+                    return false;
+                }
+                // First child is the name (identifier)
+                if !matches_node(children[0], source, value) {
+                    return false;
+                }
+                // Second child is type_parameter containing the type args
+                if children.len() < 2 || children[1].kind() != "type_parameter" {
+                    return slices.is_empty();
+                }
+                let type_param = children[1];
+                // Collect the type children inside type_parameter
+                // type_parameter contains `type` nodes, each wrapping an expression
+                let mut tp_cursor = type_param.walk();
+                let actual_slices: Vec<Node> = type_param.named_children(&mut tp_cursor)
+                    .filter(|n| n.kind() == "type")
+                    .collect();
+                // Check for ellipsis in slices (variadic match)
+                let has_ellipsis = slices.iter().any(|s| matches!(s, PatternNode::Ellipsis));
+                if has_ellipsis && slices.len() == 1 {
+                    return true;
+                }
+                if !has_ellipsis {
+                    if actual_slices.len() != slices.len() {
+                        return false;
+                    }
+                    for (i, slice_pattern) in slices.iter().enumerate() {
+                        // Type nodes wrap the actual expression, so match on
+                        // the child of the type node
+                        let inner = if actual_slices[i].named_child_count() == 1 {
+                            actual_slices[i].named_child(0).unwrap()
+                        } else {
+                            actual_slices[i]
+                        };
+                        if !matches_node(inner, source, slice_pattern) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                // subsequence matching with ellipsis
+                let non_ellipsis: Vec<&PatternNode> = slices.iter()
+                    .filter(|s| !matches!(s, PatternNode::Ellipsis))
+                    .collect();
+                if non_ellipsis.is_empty() {
+                    return true;
+                }
+                if actual_slices.len() < non_ellipsis.len() {
+                    return false;
+                }
+                'gen_sub: for start in 0..=(actual_slices.len() - non_ellipsis.len()) {
+                    for (j, pnode) in non_ellipsis.iter().enumerate() {
+                        let inner = if actual_slices[start + j].named_child_count() == 1 {
+                            actual_slices[start + j].named_child(0).unwrap()
+                        } else {
+                            actual_slices[start + j]
+                        };
+                        if !matches_node(inner, source, pnode) {
+                            continue 'gen_sub;
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            }
+
+            if node.kind() != "subscript" {
+                return false;
+            }
+            let value_node = match node.child_by_field_name("value") {
+                Some(n) => n,
+                None => return false,
+            };
+            if !matches_node(value_node, source, value) {
+                return false;
+            }
+            // Get all subscript fields (multiple: true in grammar)
+            let mut cursor = node.walk();
+            let actual_slices: Vec<Node> = node.children_by_field_name("subscript", &mut cursor)
+                .collect();
+            // Check for ellipsis in slices (variadic match)
+            let has_ellipsis = slices.iter().any(|s| matches!(s, PatternNode::Ellipsis));
+            if has_ellipsis && slices.len() == 1 {
+                return true; // Single ellipsis matches any slices
+            }
+            if !has_ellipsis {
+                if actual_slices.len() != slices.len() {
+                    return false;
+                }
+                for (i, slice_pattern) in slices.iter().enumerate() {
+                    if !matches_node(actual_slices[i], source, slice_pattern) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            // Has ellipsis mixed with other patterns: subsequence matching
+            let non_ellipsis: Vec<&PatternNode> = slices.iter()
+                .filter(|s| !matches!(s, PatternNode::Ellipsis))
+                .collect();
+            if non_ellipsis.is_empty() {
+                return true;
+            }
+            if actual_slices.len() < non_ellipsis.len() {
+                return false;
+            }
+            'outer_sub: for start in 0..=(actual_slices.len() - non_ellipsis.len()) {
+                for (j, pnode) in non_ellipsis.iter().enumerate() {
+                    if !matches_node(actual_slices[start + j], source, pnode) {
+                        continue 'outer_sub;
+                    }
+                }
+                return true;
+            }
+            false
+        }
+
+        PatternNode::Tuple(elems) => {
+            if node.kind() != "tuple" && node.kind() != "expression_list" {
+                return false;
+            }
+            let tuple_elems: Vec<Node> = {
+                let mut cursor = node.walk();
+                node.children(&mut cursor)
+                    .filter(|n| n.is_named())
+                    .collect()
+            };
+            let has_ellipsis = elems.iter().any(|e| matches!(e, PatternNode::Ellipsis));
+            if has_ellipsis && elems.len() == 1 {
+                return true;
+            }
+            if !has_ellipsis {
+                if tuple_elems.len() != elems.len() {
+                    return false;
+                }
+                for (i, ep) in elems.iter().enumerate() {
+                    if !matches_node(tuple_elems[i], source, ep) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            // subsequence matching
+            let non_ellipsis: Vec<&PatternNode> = elems.iter()
+                .filter(|e| !matches!(e, PatternNode::Ellipsis))
+                .collect();
+            if non_ellipsis.is_empty() {
+                return true;
+            }
+            if tuple_elems.len() < non_ellipsis.len() {
+                return false;
+            }
+            'outer_tup: for start in 0..=(tuple_elems.len() - non_ellipsis.len()) {
+                for (j, pnode) in non_ellipsis.iter().enumerate() {
+                    if !matches_node(tuple_elems[start + j], source, pnode) {
+                        continue 'outer_tup;
+                    }
+                }
+                return true;
+            }
+            false
+        }
+
+        PatternNode::BinaryOp { left, op, right } => {
+            if node.kind() != "binary_operator" && node.kind() != "boolean_operator" {
+                return false;
+            }
+            let left_node = match node.child_by_field_name("left") {
+                Some(n) => n,
+                None => return false,
+            };
+            let right_node = match node.child_by_field_name("right") {
+                Some(n) => n,
+                None => return false,
+            };
+            let op_node = match node.child_by_field_name("operator") {
+                Some(n) => n,
+                None => return false,
+            };
+            node_text(op_node, source) == op.as_str()
+                && matches_node(left_node, source, left)
+                && matches_node(right_node, source, right)
+        }
+
+        PatternNode::KeywordArg { key, value } => {
+            if node.kind() != "keyword_argument" {
+                return false;
+            }
+            let name_node = match node.child_by_field_name("name") {
+                Some(n) => n,
+                None => return false,
+            };
+            let value_node = match node.child_by_field_name("value") {
+                Some(n) => n,
+                None => return false,
+            };
+            node_text(name_node, source) == key.as_str()
+                && matches_node(value_node, source, value)
+        }
+
+        PatternNode::Assign { target, value } => {
+            if node.kind() != "assignment" && node.kind() != "augmented_assignment" {
+                return false;
+            }
+            let left_node = match node.child_by_field_name("left") {
+                Some(n) => n,
+                None => return false,
+            };
+            let right_node = match node.child_by_field_name("right") {
+                Some(n) => n,
+                None => return false,
+            };
+            matches_node(left_node, source, target) && matches_node(right_node, source, value)
+        }
+
+        PatternNode::Compare { left, ops } => {
+            if node.kind() != "comparison_operator" {
+                return false;
+            }
+            // tree-sitter comparison: children are [left, op1, comp1, op2, comp2, ...]
+            let mut cursor = node.walk();
+            let children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named() || !n.is_extra())
+                .collect();
+            // First named child is the left operand
+            if children.is_empty() {
+                return false;
+            }
+            if !matches_node(children[0], source, left) {
+                return false;
+            }
+            // Remaining children come in pairs: (operator, comparator)
+            // unnamed children are operators, named children are comparators
+            let named_children: Vec<Node> = node.children(&mut node.walk())
+                .collect();
+            // Just check we have at least the right structure
+            // For simple cases (single comparison), this is straightforward
+            if ops.len() == 1 {
+                // Find the operator text and comparator
+                let mut found_op = false;
+                for i in 0..named_children.len() {
+                    let child = named_children[i];
+                    let text = node_text(child, source);
+                    if text == ops[0].0 {
+                        found_op = true;
+                        // Next named child should be comparator
+                        for j in (i+1)..named_children.len() {
+                            if named_children[j].is_named() {
+                                return matches_node(named_children[j], source, &ops[0].1);
+                            }
+                        }
+                    }
+                }
+                return found_op;
+            }
+            // Multi-comparison not yet supported in fast path
+            false
+        }
+
+        PatternNode::UnaryOp { op, operand } => {
+            if node.kind() != "unary_operator" && node.kind() != "not_operator" {
+                return false;
+            }
+            // For "not" operator: tree-sitter uses "not_operator" kind
+            if node.kind() == "not_operator" {
+                if op != "not" {
+                    return false;
+                }
+                let arg_node = match node.child_by_field_name("argument") {
+                    Some(n) => n,
+                    None => return false,
+                };
+                return matches_node(arg_node, source, operand);
+            }
+            // For other unary operators (-x, ~x, +x)
+            let op_node = match node.child_by_field_name("operator") {
+                Some(n) => n,
+                None => return false,
+            };
+            let arg_node = match node.child_by_field_name("argument") {
+                Some(n) => n,
+                None => return false,
+            };
+            node_text(op_node, source) == op.as_str()
+                && matches_node(arg_node, source, operand)
         }
 
         PatternNode::NoneLiteral => node.kind() == "none",

@@ -15,7 +15,7 @@ from emend.transform import (
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph, find_dead_code,
-    extract_pattern_literals,
+    extract_pattern_literals, warm_caches,
 )
 from emend import ast_commands
 
@@ -141,8 +141,25 @@ def _app_callback(
         Optional[bool],
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version and exit."),
     ] = None,
+    verbose: Annotated[
+        int,
+        typer.Option("-v", "--verbose", count=True, help="Verbose output (-v info, -vv debug with timestamps)."),
+    ] = 0,
 ) -> None:
-    pass
+    if verbose >= 2:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    elif verbose >= 1:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s.%(msecs)03d %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
 
 
 # ============================================================================
@@ -377,18 +394,31 @@ def search(
 
         # ---- PATTERN MODE ----
         if is_pattern_mode:
+            import time as _time
+            _t_search_start = _time.monotonic()
+            _logger = logging.getLogger("emend.search")
             target_path = path or "."
             import libcst as cst
             from emend import emend_core
 
-            files, is_multi_file = resolve_files(target_path)
+            _t0 = _time.monotonic()
+            target_obj = Path(target_path)
+            if target_obj.is_dir():
+                # Fast path: get string list directly from Rust, skip Path creation
+                file_strs = emend_core.collect_python_files(str(target_obj.resolve()))
+                is_multi_file = True
+            else:
+                files, is_multi_file = resolve_files(target_path)
+                file_strs = [str(f) for f in files]
+            _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, target_path)
 
             all_matches = []
-            if is_multi_file and len(files) > 1:
-                # Single Rust pass: parallel read + filter (no double read)
-                file_strs = [str(f) for f in files]
+            if is_multi_file and len(file_strs) > 1:
                 literals = extract_pattern_literals(query)
+                _logger.info("pattern literals for pre-filter: %r", literals)
+                _t0 = _time.monotonic()
                 file_contents = emend_core.read_and_filter_files(file_strs, literals)
+                _logger.info("read_and_filter_files: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
 
                 # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
                 rust_path_used = False
@@ -401,20 +431,28 @@ def search(
                         not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
                         if (where_inside is None or inside_ir is not None) and \
                            (where_not_inside is None or not_inside_ir is not None):
+                            _t0 = _time.monotonic()
                             raw_matches = emend_core.find_pattern_in_files(
                                 list(file_contents), pattern_ir, inside_ir, not_inside_ir
                             )
+                            _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t0)
                             for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
                                 all_matches.append((file_path_str, PatternMatch(
                                     node=None, captures={}, line=line, matched_text=text
                                 )))
                             rust_path_used = True
+                    else:
+                        _logger.info("pattern could not be compiled to Rust IR, falling back to Python")
 
                 if not rust_path_used:
-                    for file_path_str, content in file_contents:
+                    _logger.info("python path: processing %d files", len(file_contents))
+                    _t0 = _time.monotonic()
+
+                    def _find_one(args):
+                        fp, content = args
                         try:
-                            file_matches = find_pattern(
-                                query, file_path_str,
+                            return [(fp, m) for m in find_pattern(
+                                query, fp,
                                 scope=where_scope,
                                 inside=where_inside,
                                 not_inside=where_not_inside,
@@ -422,17 +460,20 @@ def search(
                                 scope_local=scope_local,
                                 source_override=content,
                                 type_oracle=oracle,
-                            )
-                            for match in file_matches:
-                                all_matches.append((file_path_str, match))
+                            )]
                         except Exception:
-                            continue
+                            return []
+
+                    from concurrent.futures import ThreadPoolExecutor as _TPE
+                    with _TPE() as _executor:
+                        for batch in _executor.map(_find_one, file_contents):
+                            all_matches.extend(batch)
+                    _logger.info("python path: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t0)
             else:
-                for file_path in files:
-                    file_path_str = str(file_path)
+                for fstr in file_strs:
                     try:
                         file_matches = find_pattern(
-                            query, file_path_str,
+                            query, fstr,
                             scope=where_scope,
                             inside=where_inside,
                             not_inside=where_not_inside,
@@ -441,7 +482,7 @@ def search(
                             type_oracle=oracle,
                         )
                         for match in file_matches:
-                            all_matches.append((file_path_str, match))
+                            all_matches.append((fstr, match))
                     except FileNotFoundError:
                         if not is_multi_file:
                             raise
@@ -499,6 +540,7 @@ def search(
                                 print(f"{file_path_str}:{match.line}")
                             else:
                                 print(f"{file_path_str}:?")
+            _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
             return
 
         # ---- LOOKUP MODE ----
@@ -776,11 +818,49 @@ def replace_cmd(
         search_path = path
         files, is_multi_file = resolve_files(search_path)
 
+        # Pre-filter: use Rust matcher to find which files actually have
+        # matches, so we only LibCST-parse those files.
+        file_strs = [str(f) for f in files]
+        if is_multi_file and len(file_strs) > 1:
+            import time as _time
+            _logger = logging.getLogger("emend.replace")
+            from emend import emend_core
+            from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+
+            # First: substring pre-filter via Rust parallel I/O
+            literals = extract_pattern_literals(pattern)
+            _t0 = _time.monotonic()
+            file_contents = emend_core.read_and_filter_files(file_strs, literals)
+            _logger.info("read_and_filter: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
+
+            # Second: try structural pre-filter via Rust tree-sitter matcher
+            pattern_ir = compile_pattern_to_rust_ir(pattern)
+            if pattern_ir is not None:
+                inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
+                not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+                if (inside is None or inside_ir is not None) and \
+                   (not_inside is None or not_inside_ir is not None):
+                    _t0 = _time.monotonic()
+                    raw_matches = emend_core.find_pattern_in_files(
+                        list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                    )
+                    candidate_files = {m[0] for m in raw_matches}
+                    _logger.info("rust pre-filter: %d -> %d files with matches in %.3fs",
+                                 len(file_contents), len(candidate_files), _time.monotonic() - _t0)
+                    file_strs = sorted(candidate_files)
+                else:
+                    _logger.info("constraint could not compile to Rust IR, skipping structural pre-filter")
+                    file_strs = [fp for fp, _ in file_contents]
+            else:
+                _logger.info("pattern could not compile to Rust IR, skipping structural pre-filter")
+                file_strs = [fp for fp, _ in file_contents]
+        else:
+            file_strs = [str(f) for f in files]
+
         # Collect diffs and count across all files
         all_diffs = []
         total_count = 0
-        for file_path in files:
-            file_path_str = str(file_path)
+        for file_path_str in file_strs:
             try:
                 diff, cnt = replace_pattern(
                     pattern, replacement, file_path_str,
@@ -1561,6 +1641,63 @@ def types_cmd(
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(2)
+
+
+@app.command("index")
+def index_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root directory")
+    ] = ".",
+    jobs: Annotated[
+        Optional[int],
+        typer.Option("--jobs", "-j", help="Max parallel workers (default: CPU count)")
+    ] = None,
+):
+    """Pre-build caches for faster cross-project operations.
+
+    Parses every Python file in the project and builds:
+    - LibCST parse cache (speeds up all pattern operations)
+    - Qualified-name index (speeds up refs, rename, callers)
+
+    Run this once after cloning a repo or when starting work on a new
+    codebase. Subsequent emend commands will be significantly faster.
+
+    Examples:
+        emend index
+        emend index src/ --jobs 8
+    """
+    import time as _time
+    t0 = _time.monotonic()
+
+    n_done = 0
+    total = None
+
+    def _progress(phase: str, file_path: str) -> None:
+        nonlocal n_done
+        n_done += 1
+        if total and sys.stderr.isatty():
+            pct = n_done * 100 // total
+            print(f"\r  [{pct:3d}%] {n_done}/{total} files indexed", end="", file=sys.stderr)
+
+    # Quick count for progress bar
+    from emend.transform import _collect_python_files_scandir
+    from pathlib import Path as _Path
+    scan_root = str(_Path(path).resolve())
+    total = len(_collect_python_files_scandir(scan_root))
+    print(f"Indexing {total} Python files in {scan_root}...", file=sys.stderr)
+
+    stats = warm_caches(path, jobs=jobs, callback=_progress)
+
+    if sys.stderr.isatty():
+        print("", file=sys.stderr)  # newline after progress
+
+    elapsed = _time.monotonic() - t0
+    print(
+        f"Indexed {stats['files']} files in {elapsed:.1f}s "
+        f"(parse: {stats['parse_cached']}, qn: {stats['qn_cached']})",
+        file=sys.stderr,
+    )
 
 
 @app.command("mcp")

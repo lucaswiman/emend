@@ -1008,7 +1008,7 @@ _COMPOUND_HEADER_RE = _re.compile(
 )
 
 _DEF_HEADER_RE = _re.compile(
-    r"(?:^|\n)\s*(?:async\s+)?def\s+\w.*:\s*$", _re.DOTALL
+    r"(?:^|\n)\s*(?:async\s+)?(?:def|class)\s+\w.*:\s*$", _re.DOTALL
 )
 
 _EXCEPT_HEADER_RE = _re.compile(
@@ -1233,6 +1233,13 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             else:
                 return {"type": "any_expr"}
         else:
+            # Map Python builtins to tree-sitter node types
+            if node.value == "None":
+                return {"type": "none"}
+            if node.value == "True":
+                return {"type": "bool", "value": True}
+            if node.value == "False":
+                return {"type": "bool", "value": False}
             return {"type": "name", "value": node.value}
 
     elif isinstance(node, cst.Call):
@@ -1370,6 +1377,110 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             bases_ir.append(base_ir)
 
         return {"type": "classdef", "name": name_ir, "bases": bases_ir}
+
+    elif isinstance(node, cst.Subscript):
+        value_ir = _cst_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        slices_ir = []
+        for sl in node.slice:
+            if isinstance(sl, cst.SubscriptElement):
+                s_ir = _cst_to_rust_ir(sl.slice, metavar_map)
+                if s_ir is None:
+                    return None
+                slices_ir.append(s_ir)
+            else:
+                return None
+        return {"type": "subscript", "value": value_ir, "slices": slices_ir}
+
+    elif isinstance(node, cst.Index):
+        return _cst_to_rust_ir(node.value, metavar_map)
+
+    elif isinstance(node, cst.Tuple):
+        elems_ir = []
+        for elem in node.elements:
+            if isinstance(elem, cst.Element):
+                e_ir = _cst_to_rust_ir(elem.value, metavar_map)
+                if e_ir is None:
+                    return None
+                elems_ir.append(e_ir)
+            else:
+                return None
+        return {"type": "tuple", "elements": elems_ir}
+
+    elif isinstance(node, (cst.BinaryOperation, cst.BooleanOperation)):
+        left_ir = _cst_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        right_ir = _cst_to_rust_ir(node.right, metavar_map)
+        if right_ir is None:
+            return None
+        # Map the operator to a string
+        op_map = {
+            cst.Add: "+", cst.Subtract: "-", cst.Multiply: "*",
+            cst.Divide: "/", cst.FloorDivide: "//", cst.Modulo: "%",
+            cst.Power: "**", cst.BitAnd: "&", cst.BitOr: "|",
+            cst.BitXor: "^", cst.LeftShift: "<<", cst.RightShift: ">>",
+            cst.And: "and", cst.Or: "or", cst.MatrixMultiply: "@",
+        }
+        op_str = op_map.get(type(node.operator))
+        if op_str is None:
+            return None
+        return {"type": "binary_op", "left": left_ir, "op": op_str, "right": right_ir}
+
+    elif isinstance(node, cst.Assign):
+        if len(node.targets) != 1:
+            return None
+        target_ir = _cst_to_rust_ir(node.targets[0].target, metavar_map)
+        if target_ir is None:
+            return None
+        value_ir = _cst_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "assign", "target": target_ir, "value": value_ir}
+
+    elif isinstance(node, cst.Comparison):
+        left_ir = _cst_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        ops_ir = []
+        comp_op_map = {
+            cst.Equal: "==", cst.NotEqual: "!=",
+            cst.LessThan: "<", cst.GreaterThan: ">",
+            cst.LessThanEqual: "<=", cst.GreaterThanEqual: ">=",
+            cst.Is: "is", cst.IsNot: "is not",
+            cst.In: "in", cst.NotIn: "not in",
+        }
+        for comp_target in node.comparisons:
+            op_str = comp_op_map.get(type(comp_target.operator))
+            if op_str is None:
+                return None
+            comp_ir = _cst_to_rust_ir(comp_target.comparator, metavar_map)
+            if comp_ir is None:
+                return None
+            ops_ir.append([op_str, comp_ir])
+        return {"type": "compare", "left": left_ir, "ops": ops_ir}
+
+    elif isinstance(node, cst.UnaryOperation):
+        op_map = {
+            cst.Minus: "-", cst.Plus: "+", cst.BitInvert: "~", cst.Not: "not",
+        }
+        op_str = op_map.get(type(node.operator))
+        if op_str is None:
+            return None
+        operand_ir = _cst_to_rust_ir(node.expression, metavar_map)
+        if operand_ir is None:
+            return None
+        return {"type": "unary_op", "op": op_str, "operand": operand_ir}
+
+    elif isinstance(node, cst.Float):
+        return {"type": "string", "value": node.value}
+
+    elif isinstance(node, cst.ConcatenatedString):
+        return {"type": "string", "value": None}
+
+    elif isinstance(node, cst.FormattedString):
+        return {"type": "string", "value": None}
 
     else:
         # Unsupported node type — fall back to LibCST path

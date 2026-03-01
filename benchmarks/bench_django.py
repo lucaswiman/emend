@@ -31,6 +31,8 @@ DJANGO_REPO = "https://github.com/django/django.git"
 DJANGO_COMMIT = "9e7cc2b628fe8fd3895986af9b7fc9525034c1b0"
 DJANGO_TAG = "5.2"  # Tag that resolves to DJANGO_COMMIT (annotated tag)
 CACHE_DIR = Path(__file__).resolve().parent / ".django-checkout"
+SCALED_DIR = Path(__file__).resolve().parent / ".django-scaled"
+SCALED_COPIES = 50  # Number of copies of django/ to create
 
 LINT_RULES_YAML = textwrap.dedent("""\
     macros:
@@ -132,6 +134,47 @@ BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
     ),
 ]
 
+# Scaled benchmarks run against the 50x-duplicated codebase.
+# args_list uses "." as the search target (entire scaled directory).
+SCALED_BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
+    (
+        "scaled_find_optional",
+        'search "Optional[$X]" on 50x django (~38K py files)',
+        ["search", "Optional[$X]", "."],
+        {0},
+    ),
+    (
+        "scaled_find_filter",
+        'search "$X.objects.filter($...ARGS)" on 50x django',
+        ["search", "$X.objects.filter($...ARGS)", "."],
+        {0},
+    ),
+    (
+        "scaled_find_isinstance",
+        'search "isinstance($X, str)" on 50x django',
+        ["search", "isinstance($X, str)", "."],
+        {0},
+    ),
+    (
+        "scaled_find_print",
+        'search "print($...ARGS)" on 50x django',
+        ["search", "print($...ARGS)", "."],
+        {0},
+    ),
+    (
+        "scaled_find_assign",
+        'search "$X = None" on 50x django',
+        ["search", "$X = None", "."],
+        {0},
+    ),
+    (
+        "scaled_summary",
+        'search --output summary django1/django/db/models/ on 50x django',
+        ["search", "django1/django/db/models/", "--output", "summary"],
+        {0},
+    ),
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -216,6 +259,61 @@ def ensure_django_checkout() -> Path:
 
     _log(f"  Django checkout ready at {CACHE_DIR}")
     return CACHE_DIR
+
+
+def ensure_scaled_checkout(django_dir: Path) -> Path:
+    """Create a scaled directory with N copies of django/.
+
+    The result is a directory like:
+        .django-scaled/
+            django1/django/...
+            django2/django/...
+            ...
+            django50/django/...
+
+    Uses hard links for .py files to avoid duplicating data while keeping
+    the directory structure real (no symlinks, so scanners work natively).
+
+    Returns the path to the scaled directory.
+    """
+    marker = SCALED_DIR / f".{SCALED_COPIES}-copies"
+    if SCALED_DIR.exists() and marker.exists():
+        _log(f"  Scaled checkout already present at {SCALED_DIR} ({SCALED_COPIES} copies)")
+        return SCALED_DIR
+
+    if SCALED_DIR.exists():
+        _log("  Scaled checkout exists but stale, recreating...")
+        shutil.rmtree(SCALED_DIR)
+
+    _log(f"  Creating scaled checkout with {SCALED_COPIES} copies...")
+    SCALED_DIR.mkdir(parents=True)
+    src_django = django_dir / "django"
+
+    # Collect the list of .py files relative to django/
+    py_files = []
+    for py_file in src_django.rglob("*.py"):
+        py_files.append(py_file.relative_to(src_django))
+
+    _log(f"  Source: {len(py_files)} .py files in {src_django}")
+
+    for i in range(1, SCALED_COPIES + 1):
+        dest_root = SCALED_DIR / f"django{i}" / "django"
+        for rel in py_files:
+            dest = dest_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src = src_django / rel
+            try:
+                dest.hardlink_to(src)
+            except OSError:
+                # Fall back to copy if hard links fail (cross-device etc.)
+                shutil.copy2(str(src), str(dest))
+
+    total_py = len(py_files) * SCALED_COPIES
+    _log(f"  Scaled checkout ready: {total_py} .py files in {SCALED_DIR}")
+
+    # Write marker
+    marker.write_text(f"{SCALED_COPIES}\n")
+    return SCALED_DIR
 
 
 def setup_lint_rules(django_dir: Path) -> None:
@@ -471,6 +569,16 @@ def main() -> None:
         default=None,
         help="Save JSON results to this file path.",
     )
+    parser.add_argument(
+        "--scaled",
+        action="store_true",
+        help=f"Run scaled benchmarks against {SCALED_COPIES}x-duplicated Django codebase.",
+    )
+    parser.add_argument(
+        "--scaled-only",
+        action="store_true",
+        help="Run ONLY the scaled benchmarks (skip standard benchmarks).",
+    )
     args = parser.parse_args()
 
     if args.save and not args.label:
@@ -494,36 +602,61 @@ def main() -> None:
     _log("")
 
     # Step 2: Ensure Django checkout.
-    _log("[2/3] Ensuring Django checkout...")
+    _log("[2/4] Ensuring Django checkout...")
     django_dir = ensure_django_checkout()
     setup_lint_rules(django_dir)
     _log("")
 
-    # Step 3: Run benchmarks.
-    _log(f"[3/3] Running benchmarks ({iterations} iteration(s) each)...")
-    _log("")
+    # Step 2b: Ensure scaled checkout if needed.
+    scaled_dir: Path | None = None
+    if args.scaled or args.scaled_only:
+        _log("[2b/4] Ensuring scaled Django checkout...")
+        scaled_dir = ensure_scaled_checkout(django_dir)
+        _log("")
 
-    selected_benchmarks = BENCHMARKS
-    if args.only:
-        selected_benchmarks = [
-            b for b in BENCHMARKS if args.only in b[0]
-        ]
-        if not selected_benchmarks:
-            print(
-                f"ERROR: No benchmarks match --only={args.only!r}. "
-                f"Available: {', '.join(b[0] for b in BENCHMARKS)}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    # Step 3: Run standard benchmarks (unless --scaled-only).
+    all_benchmarks: list[tuple[str, str, list[str], set[int]]] = []
+    all_dirs: list[tuple[str, Path]] = []  # (bench_name, cwd) pairs
+
+    if not args.scaled_only:
+        selected_benchmarks = BENCHMARKS
+        if args.only:
+            selected_benchmarks = [
+                b for b in BENCHMARKS if args.only in b[0]
+            ]
+        all_benchmarks.extend(selected_benchmarks)
+        all_dirs.extend((b[0], django_dir) for b in selected_benchmarks)
+
+    if (args.scaled or args.scaled_only) and scaled_dir is not None:
+        selected_scaled = SCALED_BENCHMARKS
+        if args.only:
+            selected_scaled = [
+                b for b in SCALED_BENCHMARKS if args.only in b[0]
+            ]
+        all_benchmarks.extend(selected_scaled)
+        all_dirs.extend((b[0], scaled_dir) for b in selected_scaled)
+
+    if not all_benchmarks:
+        print(
+            f"ERROR: No benchmarks match --only={args.only!r}. "
+            f"Available: {', '.join(b[0] for b in BENCHMARKS + SCALED_BENCHMARKS)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _log(f"[3/4] Running benchmarks ({iterations} iteration(s) each)...")
+    _log("")
 
     results: dict[str, dict] = {}
     total_start = time.perf_counter()
+    dir_map = {name: cwd for name, cwd in all_dirs}
 
-    for bench_name, bench_desc, bench_args, bench_ok_codes in selected_benchmarks:
+    for bench_name, bench_desc, bench_args, bench_ok_codes in all_benchmarks:
+        cwd = dir_map[bench_name]
         _log(f"  Running: {bench_desc}...")
 
         data = run_benchmark(
-            emend_cmd, django_dir, bench_args, iterations,
+            emend_cmd, cwd, bench_args, iterations,
             ok_codes=bench_ok_codes,
         )
         results[bench_name] = data
@@ -540,7 +673,7 @@ def main() -> None:
     total_elapsed = time.perf_counter() - total_start
 
     # Step 4: Output results.
-    benchmarks_meta = [(b[0], b[1]) for b in selected_benchmarks]
+    benchmarks_meta = [(b[0], b[1]) for b in all_benchmarks]
     if args.save:
         # Save JSON to file; print human-readable table to stderr
         print_json(results, benchmarks_meta, label=args.label, save_path=args.save)

@@ -17,6 +17,7 @@ import re
 import sys
 import io
 import json
+import time
 from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
 
@@ -29,33 +30,316 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module parse cache: avoids re-parsing the same source text
 # ---------------------------------------------------------------------------
-# Uses a hash of the source as key to keep memory bounded.
-# LRU cache of 256 entries covers typical project operations.
+# Two-tier cache:
+#   1. In-memory dict (fast, lost on exit)
+#   2. On-disk SQLite DB at .emend/cache/parse.db (persists across runs)
+# Key: md5 of source text.  Value: compressed-pickled LibCST Module.
 _parse_cache: dict[bytes, cst.Module] = {}
 _parse_cache_lock = threading.Lock()
 _PARSE_CACHE_MAX = 256
 
+# Disk cache (SQLite) — lazily initialized on first use.
+_disk_cache_conn: sqlite3.Connection | None = None
+_disk_cache_lock = threading.Lock()
+_disk_cache_checked = False
+
+
+def _get_disk_cache() -> sqlite3.Connection | None:
+    """Return a thread-safe SQLite connection for the parse cache, or None."""
+    global _disk_cache_conn, _disk_cache_checked
+    if _disk_cache_checked:
+        return _disk_cache_conn
+    with _disk_cache_lock:
+        if _disk_cache_checked:
+            return _disk_cache_conn
+        _disk_cache_checked = True
+        try:
+            import sqlite3
+            root = _find_project_root(".")
+            cache_dir = Path(root) / ".emend" / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = cache_dir / "parse.db"
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS parse_cache "
+                "(hash BLOB PRIMARY KEY, data BLOB)"
+            )
+            conn.commit()
+            _disk_cache_conn = conn
+            logger.debug("disk parse cache opened at %s", db_path)
+        except Exception as exc:
+            logger.debug("disk parse cache unavailable: %s", exc)
+            _disk_cache_conn = None
+    return _disk_cache_conn
+
+
+def _disk_cache_get(key: bytes) -> cst.Module | None:
+    """Look up a parsed module in the disk cache."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return None
+    try:
+        import pickle
+        import zlib
+        row = conn.execute(
+            "SELECT data FROM parse_cache WHERE hash = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            return pickle.loads(zlib.decompress(row[0]))
+    except Exception:
+        pass
+    return None
+
+
+def _disk_cache_put(key: bytes, module: cst.Module) -> None:
+    """Store a parsed module in the disk cache (best-effort)."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    try:
+        import pickle
+        import zlib
+        data = zlib.compress(
+            pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
+        )
+        with _disk_cache_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", (key, data)
+            )
+            conn.commit()
+    except Exception:
+        pass
+
 
 def _cached_parse(source: str) -> cst.Module:
-    """Parse Python source into a LibCST Module, with caching.
+    """Parse Python source into a LibCST Module, with two-tier caching.
 
-    Repeated calls with identical source text return the same Module
-    object without re-parsing. Thread-safe for use with ThreadPoolExecutor.
+    Checks in-memory cache first, then disk cache, then parses.
+    Thread-safe for use with ThreadPoolExecutor.
     """
     key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
+    # Tier 1: in-memory
     with _parse_cache_lock:
         cached = _parse_cache.get(key)
     if cached is not None:
         return cached
-    module = cst.parse_module(source)
+    # Tier 2: disk
+    module = _disk_cache_get(key)
+    if module is None:
+        # Parse from scratch and write to disk cache
+        module = cst.parse_module(source)
+        _disk_cache_put(key, module)
+    # Store in memory cache
     with _parse_cache_lock:
         if len(_parse_cache) >= _PARSE_CACHE_MAX:
-            # Evict oldest ~25% of entries
             keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
             for k in keys_to_evict:
                 del _parse_cache[k]
         _parse_cache[key] = module
     return module
+
+
+# ---------------------------------------------------------------------------
+# Qualified-name index cache: per-file set of QN strings for pre-filtering
+# ---------------------------------------------------------------------------
+# After the first cross-project operation populates this cache, subsequent
+# operations can skip MetadataWrapper for files whose QN set doesn't overlap
+# with the target.  Content-hash keyed, persisted in the same SQLite DB.
+
+def _ensure_qn_table() -> None:
+    """Create the qn_index table if it doesn't exist (idempotent)."""
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    try:
+        with _disk_cache_lock:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS qn_index "
+                "(hash BLOB PRIMARY KEY, qnames BLOB)"
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+_qn_table_ready = False
+
+
+def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
+    """Look up cached qualified-name set for a file by content hash."""
+    global _qn_table_ready
+    conn = _get_disk_cache()
+    if conn is None:
+        return None
+    if not _qn_table_ready:
+        _ensure_qn_table()
+        _qn_table_ready = True
+    try:
+        import pickle
+        import zlib
+        row = conn.execute(
+            "SELECT qnames FROM qn_index WHERE hash = ?", (content_hash,)
+        ).fetchone()
+        if row is not None:
+            return pickle.loads(zlib.decompress(row[0]))
+    except Exception:
+        pass
+    return None
+
+
+def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
+    """Cache a file's qualified-name set (best-effort)."""
+    global _qn_table_ready
+    conn = _get_disk_cache()
+    if conn is None:
+        return
+    if not _qn_table_ready:
+        _ensure_qn_table()
+        _qn_table_ready = True
+    try:
+        import pickle
+        import zlib
+        data = zlib.compress(
+            pickle.dumps(qnames, protocol=pickle.HIGHEST_PROTOCOL), level=1
+        )
+        with _disk_cache_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)",
+                (content_hash, data),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+class _QNCollector(cst.CSTVisitor):
+    """Lightweight visitor that collects all qualified-name strings in a file.
+
+    Designed to run as a second pass on an already-resolved MetadataWrapper
+    (so QualifiedNameProvider metadata is already computed — this just reads it).
+    """
+    METADATA_DEPENDENCIES = (cst.metadata.QualifiedNameProvider,)
+
+    def __init__(self) -> None:
+        self.all_qnames: set[str] = set()
+
+    def visit_Name(self, node: cst.Name) -> None:
+        try:
+            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
+                self.all_qnames.add(qn.name)
+        except KeyError:
+            pass
+
+    def visit_Attribute(self, node: cst.Attribute) -> None:
+        try:
+            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
+                self.all_qnames.add(qn.name)
+        except KeyError:
+            pass
+
+
+def warm_caches(
+    project_path: str = ".",
+    *,
+    jobs: int | None = None,
+    callback: Callable[[str, str], None] | None = None,
+) -> dict[str, int]:
+    """Pre-populate the parse and QN-index caches for all project files.
+
+    Designed to be called from the ``emend index`` CLI command or at MCP
+    server start-up.  Each file is parsed, then QualifiedNameProvider is
+    resolved to build the QN index.
+
+    Args:
+        project_path: Root directory of the project.
+        jobs: Max parallelism (defaults to CPU count).
+        callback: Called with ``(phase, file_path)`` for progress reporting.
+
+    Returns:
+        Dict with stats: ``{"files", "parse_cached", "qn_cached"}``.
+    """
+    import multiprocessing
+
+    project_root = _find_project_root(project_path)
+    # Collect files from the user-specified path (not the project root)
+    # so that `emend index src/` only indexes src/, not the entire repo.
+    scan_root = str(Path(project_path).resolve())
+    py_files = _collect_python_files_scandir(scan_root)
+    logger.info("warm_caches: %d python files in %s", len(py_files), scan_root)
+
+    max_workers = jobs or multiprocessing.cpu_count() or 4
+
+    # Phase 1: read all files (Rust parallel I/O)
+    t0 = time.monotonic()
+    file_contents = _rust.read_and_filter_files(py_files, [])
+    logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
+
+    stats = {"files": len(file_contents), "parse_cached": 0, "qn_cached": 0}
+
+    # Phase 2: parse + QN index (parallel)
+    def _warm_one(args: tuple[str, str]) -> tuple[bool, bool]:
+        py_file, content = args
+        if callback:
+            callback("index", py_file)
+        content_hash = hashlib.md5(
+            content.encode(), usedforsecurity=False
+        ).digest()
+        # Parse
+        parse_hit = False
+        with _parse_cache_lock:
+            parse_hit = content_hash in {
+                hashlib.md5(k, usedforsecurity=False).digest()
+                for k in []  # not useful to check in-memory, just parse
+            }
+        _cached_parse(content)  # populates both in-memory + disk
+        parse_cached = True
+
+        # QN index
+        qn_hit = _get_cached_qnames(content_hash) is not None
+        if not qn_hit:
+            try:
+                module = _cached_parse(content)
+                wrapper = cst.metadata.MetadataWrapper(module)
+                collector = _QNCollector()
+                wrapper.visit(collector)
+                _store_qnames(content_hash, collector.all_qnames)
+            except Exception:
+                pass
+        return (parse_cached, qn_hit or True)
+
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for parse_ok, qn_ok in executor.map(_warm_one, file_contents):
+            if parse_ok:
+                stats["parse_cached"] += 1
+            if qn_ok:
+                stats["qn_cached"] += 1
+
+    logger.info(
+        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d)",
+        stats["files"], time.monotonic() - t0,
+        stats["parse_cached"], stats["qn_cached"],
+    )
+
+    # Ensure the cache directory has ignore files so it doesn't get checked
+    # in or built into Docker images.
+    _ensure_cache_ignore_files(project_root)
+
+    return stats
+
+
+def _ensure_cache_ignore_files(project_root: str) -> None:
+    """Create .gitignore and .dockerignore in the cache directory."""
+    cache_dir = Path(project_root) / ".emend" / "cache"
+    if not cache_dir.is_dir():
+        return
+    gitignore = cache_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("# Auto-generated by emend index\n*\n")
+    dockerignore = cache_dir / ".dockerignore"
+    if not dockerignore.exists():
+        dockerignore.write_text("# Auto-generated by emend index\n*\n")
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +548,7 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
     if git_tracked_only:
         tracked = _collect_git_tracked_python_files(project_root)
         if tracked is not None:
+            logger.info("collect_python_files: %d git-tracked files in %s", len(tracked), project_root)
             return tracked
 
     import os
@@ -271,13 +556,19 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
     try:
         root_mtime = os.stat(resolved).st_mtime_ns
     except OSError:
-        return _collect_python_files_scandir(resolved)
+        t0 = time.monotonic()
+        files = _collect_python_files_scandir(resolved)
+        logger.info("collect_python_files: %d files in %.3fs (scandir, %s)", len(files), time.monotonic() - t0, resolved)
+        return files
 
     cached = _file_list_cache.get(resolved)
     if cached is not None and cached[0] == root_mtime:
+        logger.debug("collect_python_files: %d files (cached, %s)", len(cached[1]), resolved)
         return cached[1]
 
+    t0 = time.monotonic()
     files = _collect_python_files_scandir(resolved)
+    logger.info("collect_python_files: %d files in %.3fs (%s)", len(files), time.monotonic() - t0, resolved)
     _file_list_cache[resolved] = (root_mtime, files)
     return files
 
@@ -314,6 +605,7 @@ def visit_project(
     metadata_providers: Sequence = (),
     target_file: str | None = None,
     candidate_files: set[str] | None = None,
+    target_qnames: set[str] | None = None,
 ) -> Iterator[tuple[str, cst.Module, object]]:
     """Iterate over Python files in the project, yielding (file_path, module, visitor).
 
@@ -324,27 +616,38 @@ def visit_project(
         metadata_providers: LibCST metadata providers to use with MetadataWrapper.
         target_file: The resolved path of the file defining the symbol (for is_def_file).
         candidate_files: If provided, only visit these files (pre-filtered by import graph).
+        target_qnames: If provided, use QN index cache to skip files whose cached
+                       qualified-name set has no overlap with these names.
     """
+    t_start = time.monotonic()
     project_root = project_path or "."
     py_files = _collect_python_files(project_root)
+    logger.info("visit_project: %d python files collected from %s", len(py_files), project_root)
     if candidate_files is not None:
         # Pre-filter to only files in the candidate set
         # Always include the target_file itself (definition file)
+        before = len(py_files)
         py_files = [f for f in py_files
                     if f in candidate_files
                     or (target_file and str(Path(f).resolve()) == target_file)]
+        logger.info("visit_project: candidate_files filter %d -> %d", before, len(py_files))
 
     # Structural pre-filter for cross-project ops: use tree-sitter to find
     # files with actual identifier matches (eliminates strings/comments false positives)
     if metadata_providers and name_hint:
+        before = len(py_files)
+        t0 = time.monotonic()
         py_files = prefilter_files_structural(py_files, name_hint)
+        logger.info("visit_project: structural prefilter %d -> %d in %.3fs (hint=%r)", before, len(py_files), time.monotonic() - t0, name_hint)
         # Re-add target_file if it was filtered out (definition file must always be visited)
         if target_file and target_file not in py_files:
             py_files.append(target_file)
 
     # Batch read + filter in Rust (parallel I/O + substring pre-filter)
     hints = [name_hint] if name_hint and not metadata_providers else []
+    t0 = time.monotonic()
     file_contents = _rust.read_and_filter_files(py_files, hints)
+    logger.info("visit_project: read_and_filter %d -> %d files in %.3fs (hints=%r)", len(py_files), len(file_contents), time.monotonic() - t0, hints)
 
     # Ensure target_file is always included (definition file must be visited)
     if target_file and not metadata_providers:
@@ -355,6 +658,37 @@ def visit_project(
                 file_contents.append((target_file, content))
             except Exception:
                 pass
+
+    # QN-index pre-filter: skip files whose cached qualified-name set
+    # has no overlap with the target QNs.  Files without cached data are
+    # kept (they'll be cached after MetadataWrapper runs).
+    _uses_qnp = cst.metadata.QualifiedNameProvider in metadata_providers
+    if target_qnames and _uses_qnp:
+        before = len(file_contents)
+        t0 = time.monotonic()
+        filtered_contents: list[tuple[str, str]] = []
+        n_cache_hits = 0
+        for py_file, content in file_contents:
+            # Always visit the definition file
+            if target_file and str(Path(py_file).resolve()) == target_file:
+                filtered_contents.append((py_file, content))
+                continue
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            cached_qns = _get_cached_qnames(content_hash)
+            if cached_qns is not None:
+                n_cache_hits += 1
+                if not target_qnames.intersection(cached_qns):
+                    continue  # no overlap → skip
+            filtered_contents.append((py_file, content))
+        logger.info(
+            "visit_project: qn_index filter %d -> %d in %.3fs "
+            "(%d cache hits)",
+            before, len(filtered_contents),
+            time.monotonic() - t0, n_cache_hits,
+        )
+        file_contents = filtered_contents
 
     if metadata_providers and len(file_contents) > 1:
         # Parallel path: each MetadataWrapper is independent per file — no shared state
@@ -367,30 +701,63 @@ def visit_project(
                 visitor = visitor_factory(py_file, is_def_file)
                 wrapper = cst.metadata.MetadataWrapper(module)
                 result_module = wrapper.visit(visitor)
+                # Cache QN data as a side-effect (second pass is cheap
+                # because QualifiedNameProvider is already resolved).
+                if _uses_qnp:
+                    try:
+                        collector = _QNCollector()
+                        wrapper.visit(collector)
+                        content_hash = hashlib.md5(
+                            content.encode(), usedforsecurity=False
+                        ).digest()
+                        _store_qnames(content_hash, collector.all_qnames)
+                    except Exception:
+                        pass
                 return (py_file, result_module, visitor)
             except Exception:
                 return None
 
+        t0 = time.monotonic()
+        n_visited = 0
         with ThreadPoolExecutor() as executor:
             for result in executor.map(_visit_one, file_contents):
                 if result is not None:
+                    n_visited += 1
                     yield result
+        logger.info("visit_project: parallel visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
     else:
         # Sequential path: no metadata providers or single file
+        t0 = time.monotonic()
+        n_visited = 0
         for py_file, content in file_contents:
             is_def_file = (target_file is not None
                            and str(Path(py_file).resolve()) == target_file)
             try:
+                t_file = time.monotonic()
                 module = _cached_parse(content)
                 visitor = visitor_factory(py_file, is_def_file)
                 if metadata_providers:
                     wrapper = cst.metadata.MetadataWrapper(module)
                     result_module = wrapper.visit(visitor)
+                    # Cache QN data
+                    if _uses_qnp:
+                        try:
+                            collector = _QNCollector()
+                            wrapper.visit(collector)
+                            content_hash = hashlib.md5(
+                                content.encode(), usedforsecurity=False
+                            ).digest()
+                            _store_qnames(content_hash, collector.all_qnames)
+                        except Exception:
+                            pass
                 else:
                     result_module = module.visit(visitor)
+                logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
+                n_visited += 1
                 yield (py_file, result_module, visitor)
             except Exception:
                 continue
+        logger.info("visit_project: sequential visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
 
 
 class SymbolFinder(cst.CSTVisitor):
@@ -4140,6 +4507,9 @@ def find_references(
     # from the module defining the target symbol.
     candidates = _files_importing_module(scan_root, target_module)
 
+    # Compute the set of qualified names we're looking for (for QN-index filtering)
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     references = []
     for _py_file, _module, finder in visit_project(
         name_hint=symbol_name,
@@ -4148,6 +4518,7 @@ def find_references(
         metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         references.extend(finder.references)
 
@@ -4281,6 +4652,8 @@ def find_callers(
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
 
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     callers = []
     for _py_file, _module, visitor in visit_project(
         name_hint=symbol_name,
@@ -4289,6 +4662,7 @@ def find_callers(
         metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         callers.extend(visitor.call_references)
 
@@ -4972,6 +5346,8 @@ def rename_symbol(
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
 
+    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+
     diffs = {}
     for py_file, result_module, renamer in visit_project(
         name_hint=symbol_name,
@@ -4980,6 +5356,7 @@ def rename_symbol(
         metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
+        target_qnames=all_target_qns,
     ):
         if not renamer.changed:
             continue

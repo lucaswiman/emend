@@ -24,6 +24,8 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 /// Collect all `.py` files under `root`, skipping non-project directories.
+///
+/// Follows symlinks to both directories and files.
 pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -40,19 +42,34 @@ pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
                 Err(_) => continue,
             };
 
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if file_type.is_dir() {
+            // Check file type; follow symlinks only when needed.
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            let is_dir;
+            let is_file;
+            if ft.is_symlink() {
+                // Follow symlink to determine actual type
+                if let Ok(meta) = std::fs::metadata(entry.path()) {
+                    is_dir = meta.is_dir();
+                    is_file = meta.is_file();
+                } else {
+                    continue;
+                }
+            } else {
+                is_dir = ft.is_dir();
+                is_file = ft.is_file();
+            }
+
+            if is_dir {
                 if !SKIP_DIRS.contains(&name_str.as_ref()) {
                     stack.push(entry.path());
                 }
-            } else if file_type.is_file() && name_str.ends_with(".py") {
+            } else if is_file && name_str.ends_with(".py") {
                 files.push(entry.path());
             }
         }

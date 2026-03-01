@@ -736,21 +736,37 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
 # ---------------------------------------------------------------------------
 
 class _FileTypeCache:
-    """Thread-safe cache of FileTypes keyed by file content hash.
+    """Thread-safe two-tier cache of FileTypes keyed by file content hash.
 
-    This avoids re-running pyrefly when a file hasn't changed.
-    The cache is bounded by max_entries to prevent unbounded memory growth.
-    Eviction is FIFO (first-inserted entries are evicted first).
+    Tier 1: In-memory dict (fast, lost on exit).
+    Tier 2: On-disk SQLite table (persists across invocations).
+
+    This avoids re-running type checkers when a file hasn't changed.
+    The in-memory cache is bounded by *max_entries*; eviction is FIFO.
     """
 
-    def __init__(self, max_entries: int = 256):
+    def __init__(self, max_entries: int = 256, db_path: str | None = None):
         self._cache: dict[str, FileTypes] = {}  # content_hash -> FileTypes
         self._lock = threading.Lock()
         self._max_entries = max_entries
+        self._db: _TypeOracleDiskCache | None = None
+        if db_path is not None:
+            self._db = _TypeOracleDiskCache(db_path)
 
     def get(self, content_hash: str) -> FileTypes | None:
+        # Tier 1: memory
         with self._lock:
-            return self._cache.get(content_hash)
+            cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+        # Tier 2: disk
+        if self._db is not None:
+            ft = self._db.get(content_hash)
+            if ft is not None:
+                with self._lock:
+                    self._cache[content_hash] = ft
+                return ft
+        return None
 
     def put(self, content_hash: str, ft: FileTypes) -> None:
         with self._lock:
@@ -760,20 +776,107 @@ class _FileTypeCache:
                 for k in keys:
                     del self._cache[k]
             self._cache[content_hash] = ft
+        # Persist to disk
+        if self._db is not None:
+            self._db.put(content_hash, ft)
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
+        if self._db is not None:
+            self._db.clear()
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._cache)
 
 
+class _TypeOracleDiskCache:
+    """SQLite-backed persistent cache for TypeOracle results."""
+
+    def __init__(self, db_path: str):
+        import sqlite3
+        self._lock = threading.Lock()
+        try:
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS type_cache "
+                "(hash TEXT PRIMARY KEY, data BLOB)"
+            )
+            self._conn.commit()
+            logger.debug("type oracle disk cache opened at %s", db_path)
+        except Exception as exc:
+            logger.debug("type oracle disk cache unavailable: %s", exc)
+            self._conn = None
+
+    def get(self, content_hash: str) -> FileTypes | None:
+        if self._conn is None:
+            return None
+        try:
+            import pickle
+            import zlib
+            row = self._conn.execute(
+                "SELECT data FROM type_cache WHERE hash = ?",
+                (content_hash,),
+            ).fetchone()
+            if row is not None:
+                ft = pickle.loads(zlib.decompress(row[0]))
+                ft.build_index()
+                return ft
+        except Exception:
+            pass
+        return None
+
+    def put(self, content_hash: str, ft: FileTypes) -> None:
+        if self._conn is None:
+            return
+        try:
+            import pickle
+            import zlib
+            data = zlib.compress(
+                pickle.dumps(ft, protocol=pickle.HIGHEST_PROTOCOL), level=1
+            )
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO type_cache VALUES (?, ?)",
+                    (content_hash, data),
+                )
+                self._conn.commit()
+        except Exception:
+            pass
+
+    def clear(self) -> None:
+        if self._conn is None:
+            return
+        try:
+            with self._lock:
+                self._conn.execute("DELETE FROM type_cache")
+                self._conn.commit()
+        except Exception:
+            pass
+
+
 def _content_hash(path: Path) -> str:
     """Compute a fast content hash for a file."""
     content = path.read_bytes()
     return hashlib.md5(content, usedforsecurity=False).hexdigest()
+
+
+def _type_cache_db_path(project_root: Path | None = None) -> str | None:
+    """Return the path to the type-oracle disk cache, or None."""
+    try:
+        if project_root is None:
+            from emend.transform import _find_project_root
+            root = Path(_find_project_root("."))
+        else:
+            root = project_root
+        cache_dir = root / ".emend" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return str(cache_dir / "types.db")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -796,9 +899,10 @@ class PyreflyAdapter(TypeOracle):
         pyrefly_path: str | None = None,
         cache_size: int = 256,
         extra_args: list[str] | None = None,
+        db_path: str | None = None,
     ):
         self._pyrefly = pyrefly_path or shutil.which("pyrefly") or "pyrefly"
-        self._cache = _FileTypeCache(max_entries=cache_size)
+        self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
 
     def is_available(self) -> bool:
@@ -980,9 +1084,10 @@ class PyrightAdapter(TypeOracle):
         pyright_path: str | None = None,
         cache_size: int = 256,
         extra_args: list[str] | None = None,
+        db_path: str | None = None,
     ):
         self._pyright = pyright_path or shutil.which("pyright-langserver") or "pyright-langserver"
-        self._cache = _FileTypeCache(max_entries=cache_size)
+        self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
@@ -1099,9 +1204,10 @@ class TyAdapter(TypeOracle):
         ty_path: str | None = None,
         cache_size: int = 256,
         extra_args: list[str] | None = None,
+        db_path: str | None = None,
     ):
         self._ty = ty_path or shutil.which("ty") or "ty"
-        self._cache = _FileTypeCache(max_entries=cache_size)
+        self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
@@ -1294,6 +1400,10 @@ def create_type_oracle(
     """
     if engine == "auto":
         engine = detect_type_engine(project_root)
+
+    # Inject disk cache path when not explicitly provided
+    if "db_path" not in kwargs:
+        kwargs["db_path"] = _type_cache_db_path(project_root)
 
     if engine == "pyrefly":
         return PyreflyAdapter(**kwargs)

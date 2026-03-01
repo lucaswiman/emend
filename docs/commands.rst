@@ -764,6 +764,56 @@ The engine is auto-detected from project configuration files (pyrightconfig.json
 
 ---
 
+index
+-----
+
+Pre-build caches for faster cross-project operations.  Parses every Python
+file in the project and builds a qualified-name index.  Run this once after
+cloning a repo or starting work on a new codebase — subsequent ``refs``,
+``rename``, ``callers``, and ``deadcode`` commands will be significantly
+faster.
+
+.. code-block:: text
+
+   emend index [PATH] [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- Project root directory (default: ``.``)
+
+**Options:**
+
++------------------------+--------------------------------------------------+
+| Option                 | Description                                      |
++========================+==================================================+
+| ``--jobs``, ``-j``     | Max parallel workers (default: CPU count)        |
++------------------------+--------------------------------------------------+
+
+**What gets cached:**
+
++-------------------------+---------------------------------------------------+
+| Cache                   | Effect                                            |
++=========================+===================================================+
+| LibCST parse cache      | Avoids re-parsing unchanged files (~5x faster)    |
++-------------------------+---------------------------------------------------+
+| Qualified-name index    | Skips MetadataWrapper for non-matching files       |
++-------------------------+---------------------------------------------------+
+
+The cache is stored in ``.emend/cache/`` and keyed by file content hash, so
+it self-invalidates when files change.  The directory is auto-gitignored and
+dockerignored.
+
+.. code-block:: bash
+
+   # Index the current project
+   emend index
+
+   # Index a specific directory with limited parallelism
+   emend index src/ --jobs 4
+
+When using the MCP server (``emend mcp``), indexing happens automatically in
+the background at startup.
+
 mcp
 ---
 

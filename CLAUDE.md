@@ -80,6 +80,7 @@
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
+| `index` | Pre-build parse and QN-index caches for faster cross-project operations (`--jobs`) |
 
 ## Architecture
 

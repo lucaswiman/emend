@@ -1,6 +1,27 @@
 Quick Start
 ===========
 
+Indexing (recommended)
+-----------------------
+
+After installing emend, run ``emend index`` once in your project root to
+pre-build caches:
+
+.. code-block:: bash
+
+   emend index                  # index current directory
+   emend index src/ --jobs 8    # index with 8 parallel workers
+
+This parses every Python file and builds a qualified-name index so that
+cross-project operations (``refs``, ``rename``, ``callers``, ``deadcode``)
+are significantly faster on subsequent runs.  The cache lives in
+``.emend/cache/`` (automatically gitignored and dockerignored) and is keyed
+by file content, so it self-invalidates when files change.  Re-run after
+large merges or branch switches.
+
+When using the MCP server (``emend mcp``), indexing happens automatically in
+the background at startup.
+
 Workflow
 --------
 
