@@ -395,13 +395,13 @@ class TestCmdLookupTypeOracle:
 
 
 # ---------------------------------------------------------------------------
-# cmd_edit/cmd_add accept type_oracle parameter
+# cmd_edit/cmd_add smoke tests
 # ---------------------------------------------------------------------------
 
-class TestCmdEditAddTypeOracle:
-    """Test that cmd_edit and cmd_add accept type_oracle parameter."""
+class TestCmdEditAddSmoke:
+    """Smoke tests for cmd_edit and cmd_add (no type_oracle wiring needed)."""
 
-    def test_cmd_edit_accepts_type_oracle(self, tmp_path):
+    def test_cmd_edit_works(self, tmp_path):
         source = textwrap.dedent("""\
             def greet(name: str) -> str:
                 return f"hello {name}"
@@ -411,15 +411,13 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_edit
 
-        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_edit(
             selector_str=f"{f}::greet[returns]",
             value="int",
-            type_oracle=None,
         )
         assert "int" in result
 
-    def test_cmd_add_accepts_type_oracle(self, tmp_path):
+    def test_cmd_add_works(self, tmp_path):
         source = textwrap.dedent("""\
             def greet(name: str) -> str:
                 return f"hello {name}"
@@ -429,10 +427,8 @@ class TestCmdEditAddTypeOracle:
 
         from emend.transform import cmd_add
 
-        # Pass a mock oracle (None is valid — it means no type-aware filtering)
         result = cmd_add(
             selector_str=f"{f}::greet[params]",
             value="age: int",
-            type_oracle=None,
         )
         assert "age" in result

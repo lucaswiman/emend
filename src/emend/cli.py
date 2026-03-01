@@ -568,10 +568,6 @@ def edit(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
-    type_engine: Annotated[
-        Optional[str],
-        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
-    ] = None,
 ):
     """Edit or replace existing symbol components.
 
@@ -592,17 +588,11 @@ def edit(
         emend edit api.py::deprecated_function --rm --apply
     """
     try:
-        oracle = None
-        if type_engine is not None:
-            from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
-
         result = cmd_edit(
             selector_str=selector,
             value=value,
             rm=rm,
             apply=apply,
-            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:
@@ -636,10 +626,6 @@ def add(
         bool,
         typer.Option("--apply", help="Apply changes to file")
     ] = False,
-    type_engine: Annotated[
-        Optional[str],
-        typer.Option("--type-engine", help="Type inference engine for type-aware operations: auto, pyrefly, pyright, ty")
-    ] = None,
 ):
     """Add new items to symbol components.
 
@@ -668,11 +654,6 @@ def add(
         emend add api.py::get_user[params]:KEYWORD_ONLY "force: bool = False" --apply
     """
     try:
-        oracle = None
-        if type_engine is not None:
-            from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine=type_engine)
-
         result = cmd_add(
             selector_str=selector,
             value=value,
@@ -680,7 +661,6 @@ def add(
             after=after,
             at=at,
             apply=apply,
-            type_oracle=oracle,
         )
         print(result, end='')
     except FileNotFoundError as e:

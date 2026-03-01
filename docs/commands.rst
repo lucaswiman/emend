@@ -138,17 +138,13 @@ Modify or remove existing symbol components. Shows a diff by default; use ``--ap
 
 **Options:**
 
-+-----------------+-----------------------------------------------+
-| Option          | Description                                   |
-+=================+===============================================+
-| ``--rm``        | Remove the component or symbol                |
-+-----------------+-----------------------------------------------+
-| ``--apply``     | Write changes to disk (default is dry-run)    |
-+-----------------+-----------------------------------------------+
-| ``--type-engine`` | Type inference engine for type-aware        |
-|                 | operations: ``auto``, ``pyrefly``,            |
-|                 | ``pyright``, ``ty``                           |
-+-----------------+-----------------------------------------------+
++-----------+-----------------------------------------------+
+| Option    | Description                                   |
++===========+===============================================+
+| ``--rm``  | Remove the component or symbol                |
++-----------+-----------------------------------------------+
+| ``--apply`` | Write changes to disk (default is dry-run) |
++-----------+-----------------------------------------------+
 
 **Examples:**
 
@@ -218,21 +214,17 @@ Insert new items into list components (params, decorators, bases). Shows a diff 
 
 **Position options:**
 
-+---------------------+------------------------------------------+
-| Option              | Description                              |
-+=====================+==========================================+
-| ``--at N``          | Insert at position N (0-indexed)         |
-+---------------------+------------------------------------------+
-| ``--before NAME``   | Insert before the named item             |
-+---------------------+------------------------------------------+
-| ``--after NAME``    | Insert after the named item              |
-+---------------------+------------------------------------------+
-| ``--apply``         | Write changes to disk                    |
-+---------------------+------------------------------------------+
-| ``--type-engine``   | Type inference engine for type-aware     |
-|                     | operations: ``auto``, ``pyrefly``,       |
-|                     | ``pyright``, ``ty``                      |
-+---------------------+------------------------------------------+
++-----------+----------------------------------------+
+| Option    | Description                            |
++===========+========================================+
+| ``--at N``  | Insert at position N (0-indexed)       |
++-----------+----------------------------------------+
+| ``--before NAME`` | Insert before the named item    |
++-----------+----------------------------------------+
+| ``--after NAME`` | Insert after the named item      |
++-----------+----------------------------------------+
+| ``--apply`` | Write changes to disk                  |
++-----------+----------------------------------------+
 
 **Examples:**
 

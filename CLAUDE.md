@@ -69,8 +69,8 @@
 |---------|-------------|
 | `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`. Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
-| `edit` | Modify or remove existing symbol components. File globs in selectors. `--type-engine` for type-aware operations |
-| `add` | Insert new items into list components. File globs in selectors. `--type-engine` for type-aware operations |
+| `edit` | Modify or remove existing symbol components. File globs in selectors |
+| `add` | Insert new items into list components. File globs in selectors |
 | `copy-to` | Copy a symbol to another file |
 | `move` | Move a symbol to another file or a module to another package, updating imports |
 | `rename` | Rename a symbol or module across the project (`--docs`, `--no-hierarchy`, `--unsure` for symbols; auto-detects mode by `::` in selector) |

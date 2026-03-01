@@ -2614,7 +2614,7 @@ def _filter_matches_by_type_oracle(
     oracle_constraints: dict[str, tuple[str, str]],
     type_oracle: object,
     file_path: str,
-    position_provider: dict,
+    position_provider: Mapping,
 ) -> list[PatternMatch]:
     """Post-filter pattern matches using TypeOracle type constraints.
 
@@ -2628,7 +2628,8 @@ def _filter_matches_by_type_oracle(
             where kind is 'type' or 'returns'.
         type_oracle: A TypeOracle instance.
         file_path: Path to the source file being searched.
-        position_provider: LibCST PositionProvider for resolving node positions.
+        position_provider: Resolved LibCST PositionProvider metadata
+            (mapping from CSTNode to CodeRange).
     """
     from .type_oracle import FileTypes, TypeDescriptor, parse_type_string
 
@@ -5783,16 +5784,12 @@ def cmd_edit(
     value: str | None = None,
     rm: bool = False,
     apply: bool = False,
-    type_oracle: object | None = None,
 ) -> str:
     """Edit or replace existing symbol components.
 
     - If rm=True or value="", remove the component or symbol
     - If accessor present + value, modify specific item (e.g., [params][x])
     - If no accessor + value, replace entire component (e.g., [returns])
-
-    Args:
-        type_oracle: Optional TypeOracle instance for type-aware operations.
     """
     selector = parse_extended_selector(selector_str)
 
@@ -5844,16 +5841,12 @@ def cmd_add(
     after: str | None = None,
     at: int | None = None,
     apply: bool = False,
-    type_oracle: object | None = None,
 ) -> str:
     """Add new items to symbol components.
 
     - Position can be specified with --at, --before, or --after
     - Default is to append to end
     - Pseudo-class (e.g., :KEYWORD_ONLY) specifies parameter kind
-
-    Args:
-        type_oracle: Optional TypeOracle instance for type-aware operations.
     """
     selector = parse_extended_selector(selector_str)
 
