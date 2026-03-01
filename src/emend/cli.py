@@ -20,6 +20,19 @@ from emend.transform import (
 from emend import ast_commands
 
 
+def _maybe_create_oracle(type_engine: str | None):
+    """Create a TypeOracle if *type_engine* is specified, returning ``None`` if unavailable."""
+    from emend.type_oracle import create_type_oracle
+    engine = type_engine or "auto"
+    oracle = create_type_oracle(engine=engine)
+    if not oracle.is_available():
+        logging.getLogger("emend.type_oracle").warning(
+            "Type engine '%s' not available; type constraints will have no effect", engine,
+        )
+        return None
+    return oracle
+
+
 def _reject_file_glob(selector_str: str, command_name: str) -> None:
     """Raise ValueError if selector contains file globs (for commands that don't support them)."""
     if '*' in selector_str.split('::')[0] or '?' in selector_str.split('::')[0]:
@@ -309,14 +322,7 @@ def search(
         # ---- Create TypeOracle if needed ----
         oracle = None
         if type_engine is not None or (is_pattern_mode and (":type[" in query or ":returns[" in query)):
-            from emend.type_oracle import create_type_oracle
-            engine = type_engine or "auto"
-            oracle = create_type_oracle(engine=engine)
-            if not oracle.is_available():
-                logging.getLogger("emend.type_oracle").warning(
-                    "Type engine not available; type constraints will have no effect"
-                )
-                oracle = None
+            oracle = _maybe_create_oracle(type_engine)
 
         # ---- SUMMARY MODE ----
         if effective_output == "summary" and not is_pattern_mode:
@@ -603,14 +609,7 @@ def edit(
         # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
         if type_engine is not None or returns:
-            from emend.type_oracle import create_type_oracle
-            engine = type_engine or "auto"
-            oracle = create_type_oracle(engine=engine)
-            if not oracle.is_available():
-                logging.getLogger("emend.type_oracle").warning(
-                    "Type engine '%s' not available; using annotations only", engine,
-                )
-                oracle = None
+            oracle = _maybe_create_oracle(type_engine)
 
         result = cmd_edit(
             selector_str=selector,
@@ -695,14 +694,7 @@ def add(
         # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
         if type_engine is not None or returns:
-            from emend.type_oracle import create_type_oracle
-            engine = type_engine or "auto"
-            oracle = create_type_oracle(engine=engine)
-            if not oracle.is_available():
-                logging.getLogger("emend.type_oracle").warning(
-                    "Type engine '%s' not available; using annotations only", engine,
-                )
-                oracle = None
+            oracle = _maybe_create_oracle(type_engine)
 
         result = cmd_add(
             selector_str=selector,
@@ -779,14 +771,7 @@ def replace_cmd(
         # oracle constraints (:type[X] / :returns[X]).
         oracle = None
         if type_engine is not None or ":type[" in pattern or ":returns[" in pattern:
-            from emend.type_oracle import create_type_oracle
-            engine = type_engine or "auto"
-            oracle = create_type_oracle(engine=engine)
-            if not oracle.is_available():
-                logging.getLogger("emend.type_oracle").warning(
-                    "Type engine '%s' not available; oracle constraints will be ignored", engine,
-                )
-                oracle = None
+            oracle = _maybe_create_oracle(type_engine)
 
         search_path = path
         files, is_multi_file = resolve_files(search_path)

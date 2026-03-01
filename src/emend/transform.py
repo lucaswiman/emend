@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 import ast
 import difflib
 import hashlib
@@ -18,6 +19,9 @@ import io
 import json
 from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
+
+if TYPE_CHECKING:
+    from .type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
 
@@ -2433,7 +2437,7 @@ def find_pattern(
     where: str | None = None,
     scope_local: bool = False,
     source_override: str | None = None,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -2612,7 +2616,7 @@ def _filter_matches_by_scope_local(
 def _filter_matches_by_type_oracle(
     matches: list[PatternMatch],
     oracle_constraints: dict[str, tuple[str, str]],
-    type_oracle: object,
+    type_oracle: TypeOracle,
     file_path: str,
     position_provider: Mapping,
 ) -> list[PatternMatch]:
@@ -2670,24 +2674,33 @@ def _filter_matches_by_type_oracle(
                 try:
                     pos = position_provider[captured]
                     line = pos.start.line
+                    col = pos.start.column + 1
                 except (KeyError, AttributeError):
                     keep = False
                     break
 
-                # Find function definitions at or near this line
                 matched_return = False
-                for binding in file_types.bindings:
-                    if binding.line == line and binding.binding_kind == "definition":
-                        # Check if the binding's type is callable with a return type
-                        td = binding.type_descriptor
-                        if td.kind == "callable" and td.return_type is not None:
-                            if td.return_type.matches(constraint_td):
+
+                # Try exact positional lookup first (O(1))
+                binding = file_types.type_at(line, col)
+                if binding is not None and binding.binding_kind == "definition":
+                    td = binding.type_descriptor
+                    if td.kind == "callable" and td.return_type is not None:
+                        matched_return = td.return_type.matches(constraint_td)
+                    elif td.matches(constraint_td):
+                        matched_return = True
+
+                # Fall back to name-based lookup if positional miss
+                if not matched_return and isinstance(captured, cst.Name):
+                    for b in file_types.types_for_name(captured.value):
+                        if b.line == line and b.binding_kind == "definition":
+                            td = b.type_descriptor
+                            if td.kind == "callable" and td.return_type is not None:
+                                matched_return = td.return_type.matches(constraint_td)
+                            elif td.matches(constraint_td):
                                 matched_return = True
+                            if matched_return:
                                 break
-                        # Also check raw type string for return annotation
-                        elif td.matches(constraint_td):
-                            matched_return = True
-                            break
 
                 if not matched_return:
                     keep = False
@@ -3609,7 +3622,7 @@ def replace_pattern(
     inside: str | None = None,
     not_inside: str | None = None,
     where: str | None = None,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> tuple[str, int]:
     """Replace pattern matches with replacement template.
 
@@ -5680,7 +5693,7 @@ def cmd_lookup(
     count: bool = False,
     dedent: bool = False,
     matching: str | None = None,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> str:
     """Unified lookup command combining get, query, and show.
 
@@ -5871,7 +5884,7 @@ def _merge_type_filter(
 def _expand_selector_with_returns_filter(
     selector: ExtendedSelector,
     returns_filter: list[str],
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> list[ExtendedSelector]:
     """Expand a selector to only include symbols matching a returns filter.
 
@@ -5956,7 +5969,7 @@ def cmd_edit(
     rm: bool = False,
     apply: bool = False,
     returns_filter: list[str] | None = None,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> str:
     """Edit or replace existing symbol components.
 
@@ -6045,7 +6058,7 @@ def cmd_add(
     at: int | None = None,
     apply: bool = False,
     returns_filter: list[str] | None = None,
-    type_oracle: object | None = None,
+    type_oracle: TypeOracle | None = None,
 ) -> str:
     """Add new items to symbol components.
 
