@@ -44,105 +44,19 @@ from emend import ast_commands
 mcp_app = FastMCP(
     "emend",
     instructions="""\
-emend is a Python refactoring tool with structured edits and pattern transforms.
-Use these tools to search, edit, and refactor Python code.
-All write operations (edit, add, replace, rename, move) default to dry-run mode
-showing diffs. Set apply=True to write changes to disk.
+emend is a Python refactoring tool. All write operations default to dry-run
+(showing diffs). Set apply=True to write changes.
 
-## Selector syntax
+Call the grammar_and_cookbook tool for full syntax reference.
 
-Selectors identify symbols and their components in Python files.
+## Quick reference
 
-### Symbol selectors
-  file.py::func                  # module-level function
-  file.py::Class                 # class
-  file.py::Class.method          # method
-  file.py::Class.method.nested   # nested function inside a method
-
-### Extended selectors (with components)
-  file.py::func[params]          # all parameters
-  file.py::func[params][ctx]     # parameter by name
-  file.py::func[params][0]       # parameter by index
-  file.py::func[returns]         # return annotation
-  file.py::func[decorators]      # decorator list
-  file.py::Class[bases]          # base classes
-  file.py::func[body]            # function body
-
-### Pseudo-class selectors
-  file.py::func[params]:KEYWORD_ONLY       # keyword-only parameter slot
-  file.py::func[params]:POSITIONAL_ONLY    # positional-only parameter slot
-
-### Wildcard selectors
-  file.py::*[params]             # all function parameters in file
-  file.py::Test*[decorators]     # symbols starting with "Test"
-  file.py::*.*[returns]          # all method return types
-  file.py::Class.*[body]         # all method bodies in Class
-
-### Line selectors
-  file.py:42                     # single line
-  file.py:42-100                 # line range
-
-### File globs
-  'src/**/*.py::func'            # match across files
-
-### File scope with patterns
-  '**::print($X)'               # search all files for pattern
-  'src/::assert False'           # search src/ for literal pattern
-  'file.py::print()'             # search one file for pattern
-
-When :: is present, the right side is auto-detected as a pattern or selector:
-- Contains $ → pattern mode (metavar search)
-- Parses as valid selector → selector mode (symbol lookup)
-- Doesn't parse as selector → pattern mode (literal code search)
-
-## Pattern syntax
-
-Patterns match code structures using metavariables (prefixed with $).
-Patterns can also be literal code without metavariables (e.g. 'assert False').
-
-### Metavariables
-  $X                # capture any single expression
-  $NAME             # named capture (uppercase)
-  $_                # anonymous (match but don't capture)
-  $...ARGS          # capture variable number of arguments (ellipsis)
-  $X:int            # type-constrained (int, str, float, expr, stmt, identifier, call, attr)
-
-### Examples
-  print($X)                     # function call with one arg
-  func($A, $B)                  # call with two args
-  func($...ARGS)                # call with any number of args
-  $A + $B                       # binary operation
-  $X[$Y]                        # subscript
-  return $X                     # return statement
-  assert $A == $B               # assert with comparison
-  [$X, $Y]                      # list with two elements
-
-### String content interpolation
-  ${X.content}                  # in replacement: strips quotes from a captured string literal
-
-## Where constraints (search and replace)
-
-The where parameter filters by scope/context:
-  'def'                         # inside any function
-  'async def'                   # inside any async function
-  'class'                       # inside any class
-  'def test_*'                  # inside functions matching glob
-  'MyClass.method'              # inside a specific method
-  'not class'                   # NOT inside a class
-  'not def test_*'              # NOT inside test functions
-  '@decorator'                  # inside decorated symbols
-
-## Output formats (search)
-
-  code       # matched source code (default for lookup)
-  location   # file:line (default for pattern mode)
-  selector   # emend selectors
-  summary    # symbol tree (default for bare file/dir)
-  metadata   # detailed symbol metadata
-  json       # JSON output
-  count      # match count only
-  code::dedent    # dedented source
-  summary::flat   # flat symbol list
+Selectors: file.py::func, file.py::Class.method, file.py::func[params][x],
+  file.py::func[returns], file.py::Class[bases], file.py::func[decorators],
+  file.py::func[body], file.py::*[params] (wildcards), 'src/**/*.py::func' (globs)
+Patterns: print($X), func($...ARGS), $A + $B, return $X ($ prefix = metavar)
+Where: 'def', 'class', 'def test_*', 'not class', '@decorator'
+Output: code, location, selector, summary, metadata, json, count
 """,
 )
 
@@ -454,44 +368,44 @@ def replace(
 
 
 # ---------------------------------------------------------------------------
-# edit
+# modify (unified edit + add + remove)
 # ---------------------------------------------------------------------------
 
 
 @mcp_app.tool()
-def edit(
-    selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::func[returns]', 'file.py::Class.method[params][x]').")],
-    value: Annotated[str | None, Field(description="New value for the component (omit when using rm=True).")] = None,
-    rm: Annotated[bool, Field(description="Remove the component or entire symbol.")] = False,
+def modify(
+    selector: Annotated[str, Field(description="Symbol selector with component (e.g. 'file.py::func[returns]', 'file.py::func[params]', 'file.py::Class[bases]').")],
+    value: Annotated[str | None, Field(description="New value. Required for 'set' and 'add' modes. Omit for 'remove'.")] = None,
+    mode: Annotated[str, Field(description="Operation: 'set' replaces a component value, 'add' inserts into a list component (params/bases/decorators), 'remove' deletes the component or symbol.")] = "set",
+    before: Annotated[str | None, Field(description="Insert before this named item (add mode only).")] = None,
+    after: Annotated[str | None, Field(description="Insert after this named item (add mode only).")] = None,
+    at: Annotated[int | None, Field(description="Insert at position, 0-indexed (add mode only).")] = None,
     apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
 ) -> str:
-    """Edit or remove existing symbol components."""
-    return cmd_edit(selector_str=selector, value=value, rm=rm, apply=apply)
+    """Modify a symbol component: set its value, add to a list, or remove it.
 
-
-# ---------------------------------------------------------------------------
-# add
-# ---------------------------------------------------------------------------
-
-
-@mcp_app.tool()
-def add(
-    selector: Annotated[str, Field(description="Symbol selector targeting a list component (e.g. 'file.py::func[params]', 'file.py::Class[bases]').")],
-    value: Annotated[str, Field(description="Value to add (e.g. 'ctx: Context', 'BaseClass').")],
-    before: Annotated[str | None, Field(description="Insert before this named item.")] = None,
-    after: Annotated[str | None, Field(description="Insert after this named item.")] = None,
-    at: Annotated[int | None, Field(description="Insert at this position (0-indexed).")] = None,
-    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
-) -> str:
-    """Add new items to symbol components (params, bases, decorators)."""
-    return cmd_add(
-        selector_str=selector,
-        value=value,
-        before=before,
-        after=after,
-        at=at,
-        apply=apply,
-    )
+    Modes:
+    - set: Replace a component's value (e.g. change return type, replace params)
+    - add: Insert into a list component (params, bases, decorators). Use before/after/at for positioning.
+    - remove: Delete a component or entire symbol
+    """
+    if mode == "set":
+        return cmd_edit(selector_str=selector, value=value, rm=False, apply=apply)
+    elif mode == "add":
+        if value is None:
+            return "Error: value is required for 'add' mode."
+        return cmd_add(
+            selector_str=selector,
+            value=value,
+            before=before,
+            after=after,
+            at=at,
+            apply=apply,
+        )
+    elif mode == "remove":
+        return cmd_edit(selector_str=selector, rm=True, apply=apply)
+    else:
+        return f"Error: unknown mode '{mode}'. Use 'set', 'add', or 'remove'."
 
 
 # ---------------------------------------------------------------------------
@@ -592,12 +506,21 @@ def rename(
 def move(
     selector: Annotated[str, Field(description="Symbol selector (file.py::name) or module path (file.py). Uses :: for symbols, bare path for modules.")],
     destination: Annotated[str, Field(description="Destination file or package.")],
+    copy_only: Annotated[bool, Field(description="Copy without removing from source (symbol mode only). The body is copied exactly from the AST.")] = False,
     dedent: Annotated[bool, Field(description="Dedent nested symbols (symbol mode only).")] = False,
     no_update_imports: Annotated[bool, Field(description="Don't update imports across the project (symbol mode only).")] = False,
     apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
     project: Annotated[str | None, Field(description="Project root directory (module mode only).")] = None,
 ) -> str:
-    """Move a symbol or module to another file, updating all imports."""
+    """Move (or copy) a symbol or module to another file, updating all imports.
+
+    Set copy_only=True to copy a symbol without removing it from the source file.
+    """
+    if copy_only:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ast_commands.cmd_copy_to(selector, destination, append=True, dedent=dedent, apply=apply)
+        return buf.getvalue()
     if "::" in selector:
         parsed = parse_extended_selector(selector)
         diffs = move_symbol(
@@ -733,26 +656,6 @@ def lint(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# copy_to
-# ---------------------------------------------------------------------------
-
-
-@mcp_app.tool()
-def copy_to(
-    selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::my_function').")],
-    destination: Annotated[str, Field(description="Destination file path.")],
-    append: Annotated[bool, Field(description="Append to destination file instead of creating new.")] = False,
-    dedent: Annotated[bool, Field(description="Dedent the copied symbol (useful for nested functions).")] = False,
-    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
-) -> str:
-    """Copy a symbol to another file. Prefer this over manual read/write for
-    moving long functions or methods between modules — the body is copied
-    exactly from the source AST, so nothing can be hallucinated or lost."""
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
-    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

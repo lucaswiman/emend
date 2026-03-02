@@ -203,8 +203,8 @@ Commands
 All write operations default to **dry-run** (show diff).  Pass ``--apply`` to
 write changes.
 
-search
-~~~~~~
+grep
+~~~~
 
 Auto-detects mode from the query:
 
@@ -214,17 +214,19 @@ Auto-detects mode from the query:
 - **Summary mode**: bare file/dir path without filters
 - **Bare name**: name that doesn't match a file searches as ``**::name``
 
+Primary command name is ``grep``. Hidden aliases: ``search``, ``query``, ``show``, ``get``, ``lookup``, ``find``, ``ls``.
+
 ::
 
-    emend search 'print($X)' src/                         # pattern (has $)
-    emend search '**::print($X)'                          # pattern with file scope
-    emend search '**::assert False'                        # literal pattern via ::
-    emend search 'src/::import os'                         # pattern scoped to src/
-    emend search file.py::func[params]                     # lookup (valid selector)
-    emend search file.py                                   # summary
-    emend search process_encounter                         # bare name
-    emend search ::MyClass                                 # ::name shorthand
-    emend search hello src/                                # bare name scoped to src/
+    emend grep 'print($X)' src/                          # pattern (has $)
+    emend grep '**::print($X)'                           # pattern with file scope
+    emend grep '**::assert False'                         # literal pattern via ::
+    emend grep 'src/::import os'                          # pattern scoped to src/
+    emend grep file.py::func[params]                      # lookup (valid selector)
+    emend grep file.py                                    # summary
+    emend grep process_encounter                          # bare name
+    emend grep ::MyClass                                  # ::name shorthand
+    emend grep hello src/                                 # bare name scoped to src/
 
 Output formats (``--output``/``-o``):
   ``code``, ``location``, ``selector``, ``summary``, ``metadata``,
@@ -259,7 +261,9 @@ replace
 edit
 ~~~~
 
-Modify or remove existing symbol components::
+Modify or remove existing symbol components. Hidden alias: ``set``.
+
+::
 
     emend edit SELECTOR [VALUE] [--rm] [--apply]
 
@@ -272,7 +276,9 @@ Modify or remove existing symbol components::
 add
 ~~~
 
-Insert new items into list components::
+Insert new items into list components. Hidden alias: ``insert``.
+
+::
 
     emend add SELECTOR VALUE [--at N] [--before NAME] [--after NAME] [--apply]
 
@@ -284,10 +290,27 @@ Insert new items into list components::
     emend add api.py::func[decorators] "@cache" --at 0 --apply
     emend add models.py::User[bases] "TimestampMixin" --apply
 
+rm
+~~
+
+Remove a symbol or component. Primary command name. Hidden aliases: ``remove``, ``delete``.
+Shorthand for ``edit --rm``.
+
+::
+
+    emend rm SELECTOR [--apply]
+
+::
+
+    emend rm api.py::get_user[params][debug] --apply
+    emend rm api.py::deprecated_func --apply
+
 refs
 ~~~~
 
-Find all references (scope-aware)::
+Find all references (scope-aware). Hidden aliases: ``references``, ``find-references``.
+
+::
 
     emend refs SELECTOR [--exclude-definition] [--exclude-imports]
               [--writes-only] [--reads-only] [--calls-only] [--project DIR]
@@ -309,28 +332,33 @@ Rename a symbol or module across the project::
     emend rename api.py::OldClass --to NewClass --apply
     emend rename old_utils.py --to new_utils --apply   # module rename
 
-move
-~~~~
+mv
+~~
 
-Move a symbol or module, updating imports::
-
-    emend move SELECTOR DESTINATION [--dedent] [--apply]
+Move a symbol or module, updating imports. Primary command name. Hidden alias: ``move``.
 
 ::
 
-    emend move utils.py::helper other.py --apply
-    emend move utils.py pkg/ --project . --apply   # module move
-
-copy-to
-~~~~~~~
-
-Copy a symbol to another file (exact AST copy, no hallucination risk)::
-
-    emend copy-to SELECTOR DESTINATION [--append] [--dedent] [--apply]
+    emend mv SELECTOR DESTINATION [--dedent] [--apply]
 
 ::
 
-    emend copy-to module.py::OuterClass.inner_func helpers.py --dedent --apply
+    emend mv utils.py::helper other.py --apply
+    emend mv utils.py pkg/ --project . --apply   # module move
+
+cp
+~~
+
+Copy a symbol to another file (exact AST copy, no hallucination risk). Primary command name.
+Hidden aliases: ``copy-to``, ``copy``.
+
+::
+
+    emend cp SELECTOR DESTINATION [--append] [--dedent] [--apply]
+
+::
+
+    emend cp module.py::OuterClass.inner_func helpers.py --dedent --apply
 
 graph
 ~~~~~
@@ -404,7 +432,7 @@ Add a parameter to every method in a class
 
 ::
 
-    emend search api.py::MyClass --kind method --output selector | while read sel; do
+    emend grep api.py::MyClass --kind method --output selector | while read sel; do
         emend add "$sel[params]" "ctx: Context" --after self --apply
     done
 
@@ -420,7 +448,7 @@ Find and fix open() calls without encoding
 
 ::
 
-    emend search 'open($PATH)' src/
+    emend grep 'open($PATH)' src/
     emend replace 'open($PATH)' 'open($PATH, encoding="utf-8")' src/ --apply
 
 Extract a nested function to a new module
@@ -428,8 +456,8 @@ Extract a nested function to a new module
 
 ::
 
-    emend copy-to module.py::Outer.inner_func helpers.py --dedent --apply
-    emend edit module.py::Outer.inner_func --rm --apply
+    emend cp module.py::Outer.inner_func helpers.py --dedent --apply
+    emend rm module.py::Outer.inner_func --apply
 
 Find all callers of a function
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -451,7 +479,7 @@ Batch-add a decorator to all async functions
 
 ::
 
-    emend search src/ --kind async_function --output selector | while read sel; do
+    emend grep src/ --kind async_function --output selector | while read sel; do
         emend add "$sel[decorators]" "@trace" --at 0 --apply
     done
 
@@ -467,7 +495,7 @@ Move a function and update all imports
 
 ::
 
-    emend move utils.py::helper_func helpers/core.py --apply
+    emend mv utils.py::helper_func helpers/core.py --apply
 
 Set up a lint rule to catch prints
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -511,15 +539,15 @@ Find functions that raise a specific exception
 
 ::
 
-    emend search 'raise ValueError($MSG)' src/ --output json
+    emend grep 'raise ValueError($MSG)' src/ --output json
 
 Scope-aware searching
 ~~~~~~~~~~~~~~~~~~~~~
 
 ::
 
-    emend search 'print($X)' tests/ --where 'def test_*'    # inside test funcs
-    emend search 'await $X' src/ --where 'async def fetch_*' # inside async funcs
-    emend search 'print($X)' src/ --where 'not class'        # outside classes
-    emend search 'config' src/ --scope-local                  # only local definitions
-    emend search 'json.loads($X)' src/ --imported-from json   # import-aware
+    emend grep 'print($X)' tests/ --where 'def test_*'    # inside test funcs
+    emend grep 'await $X' src/ --where 'async def fetch_*' # inside async funcs
+    emend grep 'print($X)' src/ --where 'not class'        # outside classes
+    emend grep 'config' src/ --scope-local                  # only local definitions
+    emend grep 'json.loads($X)' src/ --imported-from json   # import-aware
