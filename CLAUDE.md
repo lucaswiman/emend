@@ -78,7 +78,7 @@
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
-| `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`) |
+| `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
 | `index` | Pre-build parse, QN-index, and type-cache schema in `parse.db` for faster cross-project operations (`--jobs`) |
 
@@ -107,7 +107,7 @@ All cross-project functions use the shared `visit_project()` helper in `transfor
 `lint.py` loads rules from `.emend/patterns.yaml`:
 - `macros` section: named reusable pattern fragments
 - `rules` section: `find` + optional `not-inside` + `message` + optional `replace`
-- `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass
+- `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass (supports `entry-point-decorators`, `entry-point-names`, `exclude-paths` with glob patterns)
 - `--fix` flag auto-applies associated `replace` patterns
 
 ### Type Oracle
@@ -131,6 +131,7 @@ Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the sha
 - Single-pass O(files) analysis using `QualifiedNameProvider`
 - `_find_python_source_root()` detects `src/` layout via `pyproject.toml`
 - Entry point heuristics skip decorated symbols, dunders, tests, `__all__` members
+- Configurable `entry-point-decorators`, `entry-point-names`, and `exclude-paths` (with glob support) via `.emend/patterns.yaml` or CLI flags
 - String literal scanning for dynamic references (getattr, serialization)
 - `git log -S` integration for last-reference tracking
 - `# noqa: emend:deadcode` inline suppression
