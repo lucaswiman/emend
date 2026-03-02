@@ -261,7 +261,7 @@ replace
 edit
 ~~~~
 
-Modify or remove existing symbol components. Also available as ``set``.
+Modify or remove existing symbol components. Hidden alias: ``set``.
 
 ::
 
@@ -276,7 +276,7 @@ Modify or remove existing symbol components. Also available as ``set``.
 add
 ~~~
 
-Insert new items into list components. Also available as ``insert``.
+Insert new items into list components. Hidden alias: ``insert``.
 
 ::
 
@@ -293,7 +293,7 @@ Insert new items into list components. Also available as ``insert``.
 rm
 ~~
 
-Remove a symbol or component. Primary command name (``remove`` and ``delete`` are hidden aliases).
+Remove a symbol or component. Primary command name. Hidden aliases: ``remove``, ``delete``.
 Shorthand for ``edit --rm``.
 
 ::
@@ -308,7 +308,7 @@ Shorthand for ``edit --rm``.
 refs
 ~~~~
 
-Find all references (scope-aware). Also available as ``references``, ``find-references``.
+Find all references (scope-aware). Hidden aliases: ``references``, ``find-references``.
 
 ::
 
@@ -335,7 +335,7 @@ Rename a symbol or module across the project::
 mv
 ~~
 
-Move a symbol or module, updating imports. Primary command name (``move`` is hidden alias).
+Move a symbol or module, updating imports. Primary command name. Hidden alias: ``move``.
 
 ::
 
@@ -350,7 +350,7 @@ cp
 ~~
 
 Copy a symbol to another file (exact AST copy, no hallucination risk). Primary command name.
-Also available as ``copy-to``, ``copy``.
+Hidden aliases: ``copy-to``, ``copy``.
 
 ::
 
@@ -539,7 +539,7 @@ Find functions that raise a specific exception
 
 ::
 
-    emend search 'raise ValueError($MSG)' src/ --output json
+    emend grep 'raise ValueError($MSG)' src/ --output json
 
 Scope-aware searching
 ~~~~~~~~~~~~~~~~~~~~~
