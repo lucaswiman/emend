@@ -2113,6 +2113,107 @@ def index_cmd(
     )
 
 
+@app.command("vin-search")
+def vin_search_cmd(
+    query: Annotated[str, typer.Argument(help="Search query (symbol name, pattern with $, or selector with ::)")],
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root or file scope")
+    ] = ".",
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Max results")
+    ] = 50,
+    kind: Annotated[
+        Optional[str],
+        typer.Option("--kind", help="Symbol kind filter (function, class, method)")
+    ] = None,
+    mode: Annotated[
+        Optional[str],
+        typer.Option("--mode", help="Force search mode: symbol, pattern, selector, references")
+    ] = None,
+    file_scope: Annotated[
+        Optional[str],
+        typer.Option("--file", "-f", help="Restrict to file path (substring match)")
+    ] = None,
+):
+    """Fast one-shot search (JSON output) for editor integration.
+
+    Auto-detects search mode from the query:
+    - Contains ``$`` → pattern search (``print($X)``)
+    - Contains ``::`` → selector resolution (``file.py::Class.method``)
+    - Otherwise → symbol name search
+
+    Supports partial/incomplete patterns: ``foo(bar, $`` is auto-closed
+    to ``foo(bar, $_)`` for matching.
+
+    Examples:
+        emend vin-search parse
+        emend vin-search 'parse_pattern' --kind function
+        emend vin-search 'src/emend/pattern.py::parse'
+        emend vin-search 'print($X)' src/
+        emend vin-search 'foo(bar, $' src/
+    """
+    from emend.vin_search import VinSearchEngine
+
+    engine = VinSearchEngine(path)
+    try:
+        if mode == "references":
+            result = engine.search_references(query, limit=limit)
+        elif mode == "pattern":
+            result = engine.search_pattern(query, limit=limit, file_scope=file_scope)
+        elif mode == "symbols":
+            result = engine.search_symbols(query, limit=limit, file_scope=file_scope, kind=kind)
+        elif mode == "selector":
+            result = engine.resolve_selector(query, limit=limit)
+        else:
+            result = engine.search(query, limit=limit, file_scope=file_scope, kind=kind)
+
+        import json as _json
+        from dataclasses import asdict as _asdict
+        print(_json.dumps(_asdict(result), default=str))
+    finally:
+        engine.close()
+
+
+@app.command("vin-server")
+def vin_server_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root directory")
+    ] = ".",
+):
+    """Start a long-running search server for editor plugins (stdio JSON-RPC).
+
+    Keeps the SQLite index and FTS5 trigram table warm in memory,
+    giving sub-100ms response times for symbol search, pattern
+    matching, and reference lookup.
+
+    Each request is a JSON line on stdin, each response a JSON line on stdout.
+
+    Methods:
+        search         — auto-detect mode (symbol/pattern/selector)
+        symbols        — symbol name search
+        pattern        — code pattern search (supports partial input)
+        references     — find references by qualified name
+        selector       — resolve a selector (file.py::Class.method)
+        file_symbols   — file outline
+        status         — index status
+        reindex        — refresh stale files + rebuild FTS
+        shutdown       — clean exit
+
+    Examples:
+        emend vin-server
+        emend vin-server src/
+
+        # From the editor, send requests on stdin:
+        {"id": 1, "method": "search", "params": {"query": "parse"}}
+    """
+    from emend.vin_search import run_vin_server
+
+    run_vin_server(path)
+
+
 @app.command("mcp")
 def mcp_cmd(
     transport: Annotated[

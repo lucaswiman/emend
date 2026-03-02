@@ -1617,6 +1617,26 @@ def warm_caches(
             stats["type_cached"], engine_name, time.monotonic() - t_type,
         )
 
+    # Phase 4: rebuild FTS5 trigram index for fast symbol search.
+    try:
+        import sqlite3 as _sqlite3
+        from emend.vin_search import rebuild_fts as _rebuild_fts
+
+        _fts_conn = _sqlite3.connect(db_path, timeout=30)
+        _fts_conn.execute("PRAGMA journal_mode=WAL")
+        _fts_conn.execute("PRAGMA synchronous=NORMAL")
+        t_fts = time.monotonic()
+        fts_count = _rebuild_fts(_fts_conn)
+        _fts_conn.close()
+        stats["fts_indexed"] = fts_count
+        logger.info(
+            "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
+            fts_count, time.monotonic() - t_fts,
+        )
+    except Exception as exc:
+        logger.debug("warm_caches: FTS rebuild skipped: %s", exc)
+        stats["fts_indexed"] = 0
+
     # Ensure the cache directory has ignore files so it doesn't get checked
     # in or built into Docker images.
     _ensure_cache_ignore_files(project_root)
