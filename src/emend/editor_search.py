@@ -1,6 +1,6 @@
-"""Fast search interface for VIN (editor) plugins.
+"""Fast search interface for editor plugins.
 
-Provides a ``VinSearchEngine`` backed by the emend SQLite index
+Provides an ``EditorSearchEngine`` backed by the emend SQLite index
 (``parse.db``) with FTS5 trigram indexing for sub-100ms interactive
 search.  A lightweight newline-delimited JSON-RPC protocol runs
 over stdio so the editor process stays warm across keystrokes.
@@ -14,7 +14,7 @@ Architecture overview
 3. **Partial pattern normalization** auto-closes incomplete patterns
    (``foo(bar, $`` → ``foo(bar, $_)``) so partial keystrokes yield
    useful results.
-4. **Long-running server** (``emend vin-server``) keeps the DB
+4. **Long-running server** (``emend editor-server``) keeps the DB
    connection and FTS index warm, amortizing Python startup cost.
 
 Why *not* a Rust SQLite extension
@@ -265,11 +265,11 @@ def rebuild_fts(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# VinSearchEngine
+# EditorSearchEngine
 # ---------------------------------------------------------------------------
 
 
-class VinSearchEngine:
+class EditorSearchEngine:
     """Fast, index-backed search engine for editor plugins.
 
     Keeps a SQLite connection open for the lifetime of the engine
@@ -886,7 +886,7 @@ _METHODS = {
 }
 
 
-def _dispatch(engine: VinSearchEngine, method: str, params: dict) -> dict:
+def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     """Route a JSON-RPC method to the engine."""
     if method == "search":
         return asdict(engine.search(**params))
@@ -919,7 +919,7 @@ def _write_json(obj: dict, stream=None) -> None:
     out.flush()
 
 
-def run_vin_server(project_path: str = ".") -> None:
+def run_editor_server(project_path: str = ".") -> None:
     """Run a newline-delimited JSON-RPC server over stdio.
 
     Protocol
@@ -948,7 +948,7 @@ def run_vin_server(project_path: str = ".") -> None:
     - ``reindex``        — refresh stale files + rebuild FTS
     - ``shutdown``       — clean exit
     """
-    engine = VinSearchEngine(project_path)
+    engine = EditorSearchEngine(project_path)
 
     # Signal readiness
     _write_json({"jsonrpc": "2.0", "method": "ready", "params": {

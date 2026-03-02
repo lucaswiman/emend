@@ -1,4 +1,4 @@
-"""Tests for the VIN search interface (``vin_search.py``).
+"""Tests for the editor search interface (``editor_search.py``).
 
 Covers:
 - FTS5 trigram index creation and rebuild
@@ -106,7 +106,7 @@ def indexed_project(tmp_path):
 
 class TestFTS5:
     def test_rebuild_fts_creates_table(self, indexed_project):
-        from emend.vin_search import rebuild_fts
+        from emend.editor_search import rebuild_fts
 
         db_path = indexed_project / ".emend" / "cache" / "parse.db"
         conn = sqlite3.connect(str(db_path))
@@ -123,7 +123,7 @@ class TestFTS5:
         conn.close()
 
     def test_rebuild_fts_idempotent(self, indexed_project):
-        from emend.vin_search import rebuild_fts
+        from emend.editor_search import rebuild_fts
 
         db_path = indexed_project / ".emend" / "cache" / "parse.db"
         conn = sqlite3.connect(str(db_path))
@@ -136,7 +136,7 @@ class TestFTS5:
 
     def test_fts_trigram_substring_match(self, indexed_project):
         """FTS5 trigram should find 'greet' inside 'greet_loudly'."""
-        from emend.vin_search import rebuild_fts
+        from emend.editor_search import rebuild_fts
 
         db_path = indexed_project / ".emend" / "cache" / "parse.db"
         conn = sqlite3.connect(str(db_path))
@@ -154,15 +154,15 @@ class TestFTS5:
 
 
 # ---------------------------------------------------------------------------
-# VinSearchEngine: symbol search
+# EditorSearchEngine: symbol search
 # ---------------------------------------------------------------------------
 
 
 class TestSymbolSearch:
     def test_exact_match(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("greet")
             names = [item["name"] for item in result.items]
@@ -174,9 +174,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_prefix_match(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("parse")
             names = [item["name"] for item in result.items]
@@ -186,9 +186,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_substring_match(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("loudly")
             names = [item["name"] for item in result.items]
@@ -197,9 +197,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_case_insensitive(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("GREET")
             names = [item["name"] for item in result.items]
@@ -208,9 +208,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_kind_filter(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("greet", kind="class")
             names = [item["name"] for item in result.items]
@@ -220,9 +220,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_limit(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("", limit=2)
             # Can't match empty string well, but should not crash
@@ -231,9 +231,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_dotted_query(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("Greeter.greet")
             # Should match via qualified_name search
@@ -242,9 +242,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_returns_score_field(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("parse_pattern")
             assert len(result.items) >= 1
@@ -254,9 +254,9 @@ class TestSymbolSearch:
             engine.close()
 
     def test_elapsed_ms(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_symbols("greet")
             assert result.elapsed_ms >= 0
@@ -271,34 +271,34 @@ class TestSymbolSearch:
 
 class TestScoring:
     def test_exact_beats_prefix(self):
-        from emend.vin_search import _score_symbol
+        from emend.editor_search import _score_symbol
 
         exact = _score_symbol("parse", "mod.parse", "parse")
         prefix = _score_symbol("parse_pattern", "mod.parse_pattern", "parse")
         assert exact > prefix
 
     def test_prefix_beats_substring(self):
-        from emend.vin_search import _score_symbol
+        from emend.editor_search import _score_symbol
 
         prefix = _score_symbol("parse_pattern", "mod.parse_pattern", "parse")
         substr = _score_symbol("re_parse", "mod.re_parse", "parse")
         assert prefix > substr
 
     def test_substring_beats_fuzzy(self):
-        from emend.vin_search import _score_symbol
+        from emend.editor_search import _score_symbol
 
         substr = _score_symbol("re_parse", "mod.re_parse", "parse")
         fuzzy = _score_symbol("pxaxrxsxe", "mod.pxaxrxsxe", "parse")
         assert substr > fuzzy
 
     def test_no_match_returns_zero(self):
-        from emend.vin_search import _score_symbol
+        from emend.editor_search import _score_symbol
 
         score = _score_symbol("xyz", "mod.xyz", "abc")
         assert score == 0.0
 
     def test_segment_boundary_bonus(self):
-        from emend.vin_search import _score_symbol
+        from emend.editor_search import _score_symbol
 
         # "parse" at word boundary (_parse) scores higher than in the middle
         at_boundary = _score_symbol("_parse", "mod._parse", "parse")
@@ -315,7 +315,7 @@ class TestScoring:
 
 class TestPartialPattern:
     def test_trailing_dollar(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         norm, literals = normalize_partial_pattern("foo(bar, $")
         assert norm is not None
@@ -326,35 +326,35 @@ class TestPartialPattern:
         assert "$_" in norm
 
     def test_trailing_ellipsis_dollar(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         norm, literals = normalize_partial_pattern("func($...")
         assert norm is not None
         assert "$...TAIL" in norm
 
     def test_unclosed_paren(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         norm, literals = normalize_partial_pattern("print(x")
         assert norm is not None
         assert norm == "print(x)"
 
     def test_unclosed_bracket(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         norm, literals = normalize_partial_pattern("data[key")
         assert norm is not None
         assert "]" in norm
 
     def test_complete_pattern_unchanged(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         norm, literals = normalize_partial_pattern("print($X)")
         assert norm == "print($X)"
         assert "print" in literals
 
     def test_literals_extracted_on_failure(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         # Something so broken it can't normalize
         _, literals = normalize_partial_pattern("!@#$%^&*(")
@@ -362,7 +362,7 @@ class TestPartialPattern:
         assert isinstance(literals, list)
 
     def test_keywords_excluded_from_literals(self):
-        from emend.vin_search import normalize_partial_pattern
+        from emend.editor_search import normalize_partial_pattern
 
         _, literals = normalize_partial_pattern("if True and foo")
         assert "foo" in literals
@@ -378,9 +378,9 @@ class TestPartialPattern:
 
 class TestSelectorResolution:
     def test_file_and_symbol(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.resolve_selector("sample.py::Greeter")
             names = [item["name"] for item in result.items]
@@ -390,9 +390,9 @@ class TestSelectorResolution:
             engine.close()
 
     def test_partial_symbol_prefix(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.resolve_selector("sample.py::pars")
             names = [item["name"] for item in result.items]
@@ -402,9 +402,9 @@ class TestSelectorResolution:
             engine.close()
 
     def test_glob_file_pattern(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.resolve_selector("*.py::Greeter")
             names = [item["name"] for item in result.items]
@@ -413,9 +413,9 @@ class TestSelectorResolution:
             engine.close()
 
     def test_dotted_path(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.resolve_selector("sample.py::Greeter.greet")
             assert len(result.items) >= 1
@@ -423,9 +423,9 @@ class TestSelectorResolution:
             engine.close()
 
     def test_bare_name_falls_back_to_symbol_search(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.resolve_selector("Greeter")
             assert result.mode == "symbol"
@@ -442,9 +442,9 @@ class TestSelectorResolution:
 
 class TestUnifiedSearch:
     def test_symbol_mode(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search("greet")
             assert result.mode == "symbol"
@@ -453,9 +453,9 @@ class TestUnifiedSearch:
             engine.close()
 
     def test_selector_mode(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search("sample.py::Greeter")
             assert result.mode == "selector"
@@ -463,9 +463,9 @@ class TestUnifiedSearch:
             engine.close()
 
     def test_query_field_populated(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search("greet")
             assert result.query == "greet"
@@ -480,9 +480,9 @@ class TestUnifiedSearch:
 
 class TestReferenceSearch:
     def test_find_references(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             # "greet" is called in greet_loudly
             result = engine.search_references("sample.greet")
@@ -494,9 +494,9 @@ class TestReferenceSearch:
             engine.close()
 
     def test_ref_kind_filter(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.search_references(
                 "sample.greet", ref_kind="call"
@@ -514,9 +514,9 @@ class TestReferenceSearch:
 
 class TestFileSymbols:
     def test_file_outline(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         py_file = str((indexed_project / "sample.py").resolve())
         try:
             result = engine.file_symbols(py_file)
@@ -529,9 +529,9 @@ class TestFileSymbols:
             engine.close()
 
     def test_file_outline_ordered_by_line(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         py_file = str((indexed_project / "sample.py").resolve())
         try:
             result = engine.file_symbols(py_file)
@@ -548,9 +548,9 @@ class TestFileSymbols:
 
 class TestStatus:
     def test_status(self, indexed_project):
-        from emend.vin_search import VinSearchEngine
+        from emend.editor_search import EditorSearchEngine
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = engine.status()
             assert result.mode == "status"
@@ -568,9 +568,9 @@ class TestStatus:
 
 class TestServerProtocol:
     def test_dispatch_search(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = _dispatch(engine, "search", {"query": "greet"})
             assert "items" in result
@@ -580,9 +580,9 @@ class TestServerProtocol:
             engine.close()
 
     def test_dispatch_symbols(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = _dispatch(engine, "symbols", {"query": "parse", "limit": 5})
             assert len(result["items"]) <= 5
@@ -590,9 +590,9 @@ class TestServerProtocol:
             engine.close()
 
     def test_dispatch_file_symbols(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         py_file = str((indexed_project / "sample.py").resolve())
         try:
             result = _dispatch(engine, "file_symbols", {"file": py_file})
@@ -601,9 +601,9 @@ class TestServerProtocol:
             engine.close()
 
     def test_dispatch_status(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = _dispatch(engine, "status", {})
             assert result["items"][0]["available"] is True
@@ -611,9 +611,9 @@ class TestServerProtocol:
             engine.close()
 
     def test_dispatch_shutdown(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = _dispatch(engine, "shutdown", {})
             assert result == {"ok": True}
@@ -621,9 +621,9 @@ class TestServerProtocol:
             engine.close()
 
     def test_dispatch_unknown_method(self, indexed_project):
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             with pytest.raises(ValueError, match="Unknown method"):
                 _dispatch(engine, "nonexistent", {})
@@ -632,9 +632,9 @@ class TestServerProtocol:
 
     def test_result_serializable(self, indexed_project):
         """Verify that dispatch results can be JSON-serialized."""
-        from emend.vin_search import VinSearchEngine, _dispatch
+        from emend.editor_search import EditorSearchEngine, _dispatch
 
-        engine = VinSearchEngine(str(indexed_project))
+        engine = EditorSearchEngine(str(indexed_project))
         try:
             result = _dispatch(engine, "search", {"query": "greet"})
             serialized = json.dumps(result, default=str)
@@ -651,24 +651,24 @@ class TestServerProtocol:
 
 class TestIdentifierSplit:
     def test_snake_case(self):
-        from emend.vin_search import _split_identifier
+        from emend.editor_search import _split_identifier
 
         assert _split_identifier("parse_pattern") == ["parse", "pattern"]
 
     def test_camel_case(self):
-        from emend.vin_search import _split_identifier
+        from emend.editor_search import _split_identifier
 
         result = _split_identifier("parsePattern")
         assert "parse" in result
         assert "Pattern" in result
 
     def test_mixed(self):
-        from emend.vin_search import _split_identifier
+        from emend.editor_search import _split_identifier
 
         result = _split_identifier("XMLParser_v2")
         assert len(result) >= 2
 
     def test_single_word(self):
-        from emend.vin_search import _split_identifier
+        from emend.editor_search import _split_identifier
 
         assert _split_identifier("greet") == ["greet"]

@@ -2113,8 +2113,8 @@ def index_cmd(
     )
 
 
-@app.command("vin-search")
-def vin_search_cmd(
+@app.command("editor-search")
+def editor_search_cmd(
     query: Annotated[str, typer.Argument(help="Search query (symbol name, pattern with $, or selector with ::)")],
     path: Annotated[
         str,
@@ -2148,15 +2148,15 @@ def vin_search_cmd(
     to ``foo(bar, $_)`` for matching.
 
     Examples:
-        emend vin-search parse
-        emend vin-search 'parse_pattern' --kind function
-        emend vin-search 'src/emend/pattern.py::parse'
-        emend vin-search 'print($X)' src/
-        emend vin-search 'foo(bar, $' src/
+        emend editor-search parse
+        emend editor-search 'parse_pattern' --kind function
+        emend editor-search 'src/emend/pattern.py::parse'
+        emend editor-search 'print($X)' src/
+        emend editor-search 'foo(bar, $' src/
     """
-    from emend.vin_search import VinSearchEngine
+    from emend.editor_search import EditorSearchEngine
 
-    engine = VinSearchEngine(path)
+    engine = EditorSearchEngine(path)
     try:
         if mode == "references":
             result = engine.search_references(query, limit=limit)
@@ -2176,8 +2176,8 @@ def vin_search_cmd(
         engine.close()
 
 
-@app.command("vin-server")
-def vin_server_cmd(
+@app.command("editor-server")
+def editor_server_cmd(
     path: Annotated[
         str,
         typer.Argument(help="Project root directory")
@@ -2203,15 +2203,15 @@ def vin_server_cmd(
         shutdown       — clean exit
 
     Examples:
-        emend vin-server
-        emend vin-server src/
+        emend editor-server
+        emend editor-server src/
 
         # From the editor, send requests on stdin:
         {"id": 1, "method": "search", "params": {"query": "parse"}}
     """
-    from emend.vin_search import run_vin_server
+    from emend.editor_search import run_editor_server
 
-    run_vin_server(path)
+    run_editor_server(path)
 
 
 @app.command("mcp")
