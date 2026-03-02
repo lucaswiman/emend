@@ -87,11 +87,14 @@ LibCST is also used for all *mutations* — the Rust layer is read-only.
 Caching and indexing
 --------------------
 
-emend maintains a per-project cache at ``.emend/cache/parse.db`` (SQLite, WAL
-mode).  The cache is content-addressed — almost every key is the MD5 of the
-file's source text — so switching branches or reverting edits naturally reuses
+emend maintains a cache at ``.emend/cache/parse.db`` (SQLite, WAL mode).
+The cache is content-addressed — almost every key is the MD5 of the file's
+source text — so switching branches or reverting edits naturally reuses
 earlier entries.  A ``.gitignore`` and ``.dockerignore`` are auto-generated
 inside ``.emend/cache/`` to prevent the database from being checked in.
+When running inside a git worktree the cache is stored in the **main repo's**
+``.emend/cache/`` so all worktrees share a single database (see
+`Git worktree support`_ below).
 
 Overview of cache tables
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -116,10 +119,11 @@ Overview of cache tables
      - Compressed-pickled ``FileTypes`` from the type oracle.  Avoids
        re-running pyrefly / pyright / ty on unchanged files.
    * - ``file_manifest``
-     - absolute path (TEXT)
+     - (worktree_id, absolute path)
      - ``(mtime_ns, size, content_hash, indexed_at)``.  Bridges path-based
        queries to the content-hash caches and enables incremental re-indexing
-       via stat-only scans.
+       via stat-only scans.  Scoped by ``worktree_id`` so each worktree
+       maintains its own stat cache while sharing content-hashed data.
    * - ``symbol_index``
      - (content_hash, file_path, name, ...)
      - One row per symbol definition (function, class, method).  Stores name,
@@ -138,7 +142,9 @@ Overview of cache tables
        queries.
    * - ``index_meta``
      - key name (TEXT)
-     - Key-value pairs: ``schema_version``, ``git_head``, ``indexed_at``.
+     - Key-value pairs: ``schema_version``, ``git_head:<worktree_id>``,
+       ``indexed_at:<worktree_id>``.  Per-worktree keys are scoped by the
+       worktree's resolved root path.
 
 In-memory parse cache
 ~~~~~~~~~~~~~~~~~~~~~
@@ -182,9 +188,10 @@ receives a batch of ``(file_path, source_text)`` tuples and performs:
 After all workers finish, the main process performs three additional steps:
 
 - **File manifest** — ``stat()`` every indexed file and writes
-  ``(path, mtime_ns, size, content_hash, timestamp)`` to ``file_manifest``.
+  ``(worktree_id, path, mtime_ns, size, content_hash, timestamp)`` to
+  ``file_manifest``.  Each worktree maintains its own set of manifest rows.
 - **Git HEAD** — runs ``git rev-parse HEAD`` and stores the SHA in
-  ``index_meta``.
+  ``index_meta`` under the key ``git_head:<worktree_id>``.
 - **Type cache** — runs the configured type engine (pyrefly / pyright / ty)
   and stores results in ``type_cache``.
 
@@ -206,8 +213,8 @@ For the path-indexed tables (``file_manifest``, ``symbol_index``,
 which files need re-indexing:
 
 **Tier 1 — Git HEAD (~1 ms).**  ``git rev-parse HEAD`` is compared against the
-stored ``git_head`` in ``index_meta``.  If they match, no files have changed
-since the last index.
+stored ``git_head:<worktree_id>`` in ``index_meta``.  If they match, no files
+have changed since the last index in this worktree.
 
 **Tier 2 — File stat (~10–50 ms for 5 000 files).**  Each file is ``stat()``-ed
 and its ``(mtime_ns, size)`` compared against ``file_manifest``.  Files whose
@@ -267,6 +274,34 @@ When the index is fresh, several commands bypass full-project scans:
 
 All warm paths fall back transparently to their original (cold) implementations
 when the index is unavailable or stale.
+
+Git worktree support
+~~~~~~~~~~~~~~~~~~~~
+
+When emend runs inside a `git worktree
+<https://git-scm.com/docs/git-worktree>`_, the cache is automatically shared
+with the main repository.  This means:
+
+- Running ``emend index`` in **any** worktree populates the shared
+  ``parse.db``.  Other worktrees immediately benefit from the cached parse
+  trees, qualified-name indexes, type information, symbol definitions, and
+  reference data — all of which are keyed by content hash.
+- Each worktree maintains its own ``file_manifest`` rows (scoped by a
+  ``worktree_id`` derived from the worktree's absolute path), so stat-based
+  freshness checks are accurate per worktree.
+- Git HEAD tracking is per-worktree (``git_head:<worktree_id>`` keys in
+  ``index_meta``), so branch switches in one worktree don't invalidate
+  another.
+
+The mechanism works by reading the ``.git`` file in the worktree root (which
+contains a ``gitdir:`` pointer) and following the ``commondir`` reference to
+locate the main repository.  ``_resolve_cache_root()`` in ``transform.py``
+performs this resolution and caches the result.  For non-worktree repos (and
+non-git projects), the project root is used directly — no behavior change.
+
+SQLite WAL mode ensures that concurrent access from multiple worktrees (or
+multiple emend processes) is safe: readers never block, and writes are
+serialized with a configurable timeout.
 
 Selector grammar
 ----------------

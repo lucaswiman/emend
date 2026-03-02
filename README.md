@@ -123,8 +123,10 @@ emend index src/ --jobs 8    # index specific directory with 8 workers
 
 This parses every Python file and builds a qualified-name index, so subsequent
 cross-project operations (`refs`, `rename`, `callers`, `deadcode`) are
-significantly faster. The cache is stored in `.emend/cache/` (automatically
-gitignored and dockerignored). Re-run after large merges or branch switches.
+significantly faster. The cache is stored in `.emend/cache/parse.db` (automatically
+gitignored and dockerignored) and is keyed by file content hash, so it
+self-invalidates when files change. Git worktrees automatically share a single
+cache with the main repo. Re-run after large merges or branch switches.
 
 When using the MCP server (`emend mcp`), indexing happens automatically in the
 background on startup.
