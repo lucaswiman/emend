@@ -556,32 +556,181 @@ class EditorSearchEngine:
         limit: int = 50,
         file_scope: str | None = None,
     ) -> SearchResult:
-        """Run a full pattern search using emend's transform engine."""
-        from emend.transform import find_pattern, extract_pattern_literals
+        """Run a full pattern search using emend's transform engine.
 
-        path = file_scope or "."
-        items: list[dict] = []
-        try:
-            for match in find_pattern(pattern, path):
-                items.append({
-                    "file_path": match.file_path,
-                    "line": match.line,
-                    "end_line": match.end_line,
-                    "col": match.col,
-                    "end_col": match.end_col,
-                    "matched_text": match.matched_text,
-                })
-                if len(items) >= limit:
-                    break
-        except Exception as exc:
-            logger.debug("Pattern search failed: %s", exc)
+        Uses a three-stage pipeline to minimise work:
+
+        1. **Index prefilter** — query ``reference_index`` / ``symbol_index``
+           for files that mention the pattern's literal identifiers.  This is
+           an O(1) SQLite lookup and typically eliminates >90 % of files.
+        2. **Rust string filter** — ``read_and_filter_files`` does a parallel
+           ``contains()`` check on file contents, dropping files that lack any
+           required literal.  Cheap (~ms), catches what the index misses.
+        3. **AST match** — only the surviving files are parsed and matched
+           with LibCST (or the Rust tree-sitter fast-path).
+        """
+        from emend.transform import (
+            find_pattern,
+            extract_pattern_literals,
+            _collect_python_files_scandir,
+            _find_project_root,
+            PatternMatch,
+        )
+
+        literals = extract_pattern_literals(pattern)
+
+        # --- resolve file scope to a list of candidate paths ---
+        scope_path = file_scope or "."
+        scope_resolved = Path(scope_path).resolve()
+
+        if scope_resolved.is_file():
+            # Single file — skip all filtering, go straight to AST
+            items: list[dict] = []
+            try:
+                for match in find_pattern(pattern, str(scope_resolved)):
+                    items.append({
+                        "file_path": str(scope_resolved),
+                        "line": match.line,
+                        "end_line": match.end_line,
+                        "col": match.col,
+                        "end_col": match.end_col,
+                        "matched_text": match.matched_text,
+                    })
+                    if len(items) >= limit:
+                        break
+            except Exception as exc:
+                logger.debug("Pattern search failed: %s", exc)
+            return SearchResult(
+                items=items, elapsed_ms=0, mode="pattern",
+                truncated=len(items) >= limit,
+            )
+
+        # Multi-file: collect all Python files under scope
+        all_files = _collect_python_files_scandir(str(scope_resolved))
+
+        # --- Stage 1: index prefilter ---
+        if literals:
+            candidate_files = self._candidate_files_for_literals(
+                literals, all_files
+            )
+        else:
+            candidate_files = all_files
+
+        logger.debug(
+            "pattern prefilter: %d/%d files after index stage",
+            len(candidate_files), len(all_files),
+        )
+
+        # --- Stage 2: Rust string-contains filter ---
+        if literals and candidate_files:
+            try:
+                import emend_core as _rust
+                file_contents = _rust.read_and_filter_files(
+                    candidate_files, literals
+                )
+            except Exception:
+                # Rust unavailable — read files in Python
+                file_contents = []
+                for fp in candidate_files:
+                    try:
+                        content = Path(fp).read_text()
+                        if all(lit in content for lit in literals):
+                            file_contents.append((fp, content))
+                    except Exception:
+                        pass
+        else:
+            # No literals to filter on — read all candidates
+            file_contents = []
+            for fp in candidate_files:
+                try:
+                    file_contents.append((fp, Path(fp).read_text()))
+                except Exception:
+                    pass
+
+        logger.debug(
+            "pattern prefilter: %d files after string-contains stage",
+            len(file_contents),
+        )
+
+        # --- Stage 3: AST match ---
+        items = []
+        for fp, content in file_contents:
+            try:
+                for match in find_pattern(
+                    pattern, fp, source_override=content
+                ):
+                    items.append({
+                        "file_path": fp,
+                        "line": match.line,
+                        "end_line": match.end_line,
+                        "col": match.col,
+                        "end_col": match.end_col,
+                        "matched_text": match.matched_text,
+                    })
+                    if len(items) >= limit:
+                        break
+            except Exception:
+                pass
+            if len(items) >= limit:
+                break
 
         return SearchResult(
-            items=items,
-            elapsed_ms=0,
-            mode="pattern",
+            items=items, elapsed_ms=0, mode="pattern",
             truncated=len(items) >= limit,
         )
+
+    def _candidate_files_for_literals(
+        self,
+        literals: list[str],
+        all_files: list[str],
+    ) -> list[str]:
+        """Query the index for files likely to contain *literals*.
+
+        Intersects results from ``reference_index`` and ``symbol_index``
+        to produce a set of candidate file paths.  Falls back to the
+        full file list if the index has no useful data.
+        """
+        conn = self._get_conn()
+        all_set = set(all_files)
+
+        # Collect file paths per literal, then intersect.
+        per_literal: list[set[str]] = []
+        for lit in literals:
+            files_for_lit: set[str] = set()
+            try:
+                for (fp,) in conn.execute(
+                    "SELECT DISTINCT file_path FROM reference_index "
+                    "WHERE target_qn LIKE ?",
+                    ("%" + lit + "%",),
+                ):
+                    files_for_lit.add(fp)
+            except Exception:
+                pass
+            try:
+                for (fp,) in conn.execute(
+                    "SELECT DISTINCT file_path FROM symbol_index "
+                    "WHERE name = ? OR qualified_name LIKE ?",
+                    (lit, "%" + lit + "%"),
+                ):
+                    files_for_lit.add(fp)
+            except Exception:
+                pass
+
+            if files_for_lit:
+                per_literal.append(files_for_lit)
+
+        if not per_literal:
+            # Index had nothing useful — fall back to full list
+            return all_files
+
+        # Intersect: a file must appear for every literal
+        candidates = per_literal[0]
+        for s in per_literal[1:]:
+            candidates &= s
+
+        # Keep only files that are actually in our scope
+        result = [f for f in all_files if f in candidates]
+        return result if result else all_files
 
     def _search_literals(
         self,

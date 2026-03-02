@@ -672,3 +672,205 @@ class TestIdentifierSplit:
         from emend.editor_search import _split_identifier
 
         assert _split_identifier("greet") == ["greet"]
+
+
+# ---------------------------------------------------------------------------
+# Pattern search with index prefilter
+# ---------------------------------------------------------------------------
+
+
+MULTI_FILE_A = '''\
+def hello():
+    print("hello world")
+
+def goodbye():
+    print("goodbye world")
+'''
+
+MULTI_FILE_B = '''\
+import math
+
+def compute(x):
+    return math.sqrt(x)
+
+class Calculator:
+    def add(self, a, b):
+        return a + b
+'''
+
+MULTI_FILE_C = '''\
+def unrelated():
+    return 42
+
+class Empty:
+    pass
+'''
+
+
+def _build_multi_file_index(tmp_path: Path) -> Path:
+    """Create a project with 3 files and build the index."""
+    from emend.transform import _index_batch
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cache = proj / ".emend" / "cache"
+    cache.mkdir(parents=True)
+    db_path = cache / "parse.db"
+
+    files = {
+        "a.py": MULTI_FILE_A,
+        "b.py": MULTI_FILE_B,
+        "c.py": MULTI_FILE_C,
+    }
+    for name, content in files.items():
+        (proj / name).write_text(content)
+
+    batch = [(str(proj / name), content) for name, content in files.items()]
+    _index_batch((str(db_path), str(proj), str(proj), batch))
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS index_meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_manifest ("
+        "  path TEXT PRIMARY KEY,"
+        "  mtime_ns INTEGER NOT NULL,"
+        "  size INTEGER NOT NULL,"
+        "  content_hash BLOB NOT NULL,"
+        "  indexed_at REAL NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+        ("schema_version", "3"),
+    )
+    conn.commit()
+    conn.close()
+
+    return proj
+
+
+@pytest.fixture
+def multi_file_project(tmp_path):
+    return _build_multi_file_index(tmp_path)
+
+
+class TestPatternPrefilter:
+    def test_candidate_files_narrows_scope(self, multi_file_project):
+        """Index prefilter should return only files containing the literal."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            all_files = [
+                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
+            ]
+            # "sqrt" only appears in b.py
+            candidates = engine._candidate_files_for_literals(
+                ["sqrt"], all_files
+            )
+            assert len(candidates) < len(all_files)
+            assert any("b.py" in f for f in candidates)
+        finally:
+            engine.close()
+
+    def test_candidate_files_intersection(self, multi_file_project):
+        """Multiple literals should intersect — only files with ALL literals."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            all_files = [
+                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
+            ]
+            # "math" and "sqrt" both in b.py only
+            candidates = engine._candidate_files_for_literals(
+                ["math", "sqrt"], all_files
+            )
+            assert len(candidates) <= 1
+            if candidates:
+                assert any("b.py" in f for f in candidates)
+        finally:
+            engine.close()
+
+    def test_candidate_files_unknown_literal_falls_back(self, multi_file_project):
+        """Unknown literal not in the index should fall back to all files."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            all_files = [
+                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
+            ]
+            candidates = engine._candidate_files_for_literals(
+                ["xyzzy_nonexistent"], all_files
+            )
+            # Should fall back to the full list
+            assert candidates == all_files
+        finally:
+            engine.close()
+
+    def test_pattern_search_single_file(self, multi_file_project):
+        """Pattern search on a single file should work without prefilter."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search_pattern(
+                "print($X)",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "pattern"
+            assert len(result.items) >= 2  # two print() calls in a.py
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+    def test_pattern_search_multi_file(self, multi_file_project):
+        """Pattern search across directory should use prefilter and find matches."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search_pattern(
+                "print($X)",
+                file_scope=str(multi_file_project),
+            )
+            assert result.mode == "pattern"
+            assert len(result.items) >= 2
+        finally:
+            engine.close()
+
+    def test_pattern_search_respects_limit(self, multi_file_project):
+        """Pattern search should stop after limit matches."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search_pattern(
+                "print($X)",
+                file_scope=str(multi_file_project),
+                limit=1,
+            )
+            assert len(result.items) == 1
+            assert result.truncated is True
+        finally:
+            engine.close()
+
+    def test_pattern_search_no_matches(self, multi_file_project):
+        """Pattern for something not in any file should return empty."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search_pattern(
+                "nonexistent_func($X)",
+                file_scope=str(multi_file_project),
+            )
+            assert result.items == []
+        finally:
+            engine.close()
