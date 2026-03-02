@@ -15,7 +15,7 @@ uv tool install --python 3.13t emend
 Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
 GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
 `#[pymodule(gil_used = false)]`), so on free-threaded Python it can run parallel
-file scans with no lock contention — meaning `search`, `lint`, `refs`, and `rename`
+file scans with no lock contention — meaning `grep`, `lint`, `refs`, and `rename`
 across large codebases are significantly faster.
 
 We recommend **3.13t** for the free-threaded interpreter. The 3.14t variant also
@@ -129,6 +129,23 @@ gitignored and dockerignored). Re-run after large merges or branch switches.
 When using the MCP server (`emend mcp`), indexing happens automatically in the
 background on startup.
 
+## MCP Server
+
+The MCP server exposes emend functionality to Claude Code and other LLM clients via 10 tools:
+
+1. **`grep`** — Search code (pattern/symbol lookup/summary mode)
+2. **`modify`** — Edit symbols and components (set/add/remove)
+3. **`move`** — Move symbols/modules or copy with copy_only flag
+4. **`replace`** — Pattern-based code substitution
+5. **`rename`** — Rename symbols/modules across the project
+6. **`refs`** — Find all references (with filters)
+7. **`graph`** — Generate call graphs
+8. **`batch`** — Apply bulk refactoring operations
+9. **`lint`** — Run linting rules
+10. **`deadcode`** — Find unreferenced code
+
+See the [grammar_and_cookbook.rst](src/emend/grammar_and_cookbook.rst) reference for full command documentation.
+
 ## Usage
 
 ```bash
@@ -213,24 +230,23 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ### Search & Read
 
-**`search`** - Unified search with auto-detection
-- Pattern mode: `emend search 'print($X)' file.py` or `emend search '**::print($X)'`
-- Literal pattern: `emend search '**::assert False'` or `emend search 'src/::import os'`
-- Lookup mode: `emend search file.py::func`
-- Summary mode: `emend search file.py` (list symbols)
+**`grep`** - Unified search with auto-detection (primary name; hidden aliases: `search`, `query`, `show`, `get`, `lookup`, `find`, `ls`)
+- Pattern mode: `emend grep 'print($X)' file.py` or `emend grep '**::print($X)'`
+- Literal pattern: `emend grep '**::assert False'` or `emend grep 'src/::import os'`
+- Lookup mode: `emend grep file.py::func`
+- Summary mode: `emend grep file.py` (list symbols)
 - Filters: `--kind`, `--name`, `--returns`, `--depth`, `--has-param`, `--output`, `--where`, `--imported-from`, `--scope-local`
 - Output formats: `code`, `location`, `selector`, `summary`, `metadata`, `json`, `count`, `summary::flat`, `code::dedent`
-- Also available as: `query`, `show`, `get`, `lookup`, `find` for intuitive workflows
 
 ### Edit & Transform
 
-**`edit`** - Modify or remove existing symbol components
+**`edit`** - Modify or remove existing symbol components (hidden alias: `set`)
 - Replace: `emend edit file.py::func[returns] "int" --apply`
 - Insert: `emend edit file.py::func[params] "new_param" --before ctx --apply`
 - Remove: `emend edit file.py::func[params][old_param] --rm --apply`
 - Wildcards: `emend edit 'file.py::*[decorators]' "@dataclass" --apply`
 
-**`add`** - Insert new items into list components (alternative to `edit`)
+**`add`** - Insert new items into list components (hidden alias: `insert`)
 - `emend add file.py::func[params] "timeout: int = 30" --apply`
 - `emend add "file.py::func[params]:KEYWORD_ONLY" "debug: bool" --apply`
 
@@ -240,7 +256,7 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ### Symbol Management
 
-**`refs`** - Find all references to a symbol across the project
+**`refs`** - Find all references to a symbol across the project (hidden aliases: `references`, `find-references`)
 - `emend refs models.py::User`
 - Filters: `--writes-only`, `--reads-only`, `--calls-only`
 - Output: `--json` for JSON output (default shows file:line)
@@ -250,12 +266,16 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 - Module: `emend rename models.py --to accounts.py --apply`
 - Filters: `--docs`, `--no-hierarchy`, `--unsure`
 
-**`move`** - Move a symbol or module with automatic import updates
-- Symbol: `emend move utils.py::parse_date helpers/dates.py --apply`
-- Module: `emend move utils.py helpers/utils.py --apply`
+**`mv`** - Move a symbol or module with automatic import updates (primary name; hidden alias: `move`)
+- Symbol: `emend mv utils.py::parse_date helpers/dates.py --apply`
+- Module: `emend mv utils.py helpers/utils.py --apply`
 
-**`copy-to`** - Copy a symbol to another file
-- `emend copy-to workflow.py::Builder._build.helper tasks.py --dedent --apply`
+**`cp`** - Copy a symbol to another file (primary name; hidden aliases: `copy-to`, `copy`)
+- `emend cp workflow.py::Builder._build.helper tasks.py --dedent --apply`
+
+**`rm`** - Remove a symbol or component (primary name; hidden aliases: `remove`, `delete`; shorthand for `edit --rm`)
+- `emend rm file.py::func[params][old_param] --apply`
+- `emend rm file.py::deprecated_func --apply`
 
 ### Utilities
 
@@ -287,25 +307,25 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ```bash
 # Search by pattern (pattern mode)
-emend search 'print($X)' src/
-emend search 'assertEqual($A, $B)' tests/ --output count
+emend grep 'print($X)' src/
+emend grep 'assertEqual($A, $B)' tests/ --output count
 
 # Search by symbol (lookup mode)
-emend search file.py::func
-emend search src/ --kind function --name test_*
-emend search file.py --output json
+emend grep file.py::func
+emend grep src/ --kind function --name test_*
+emend grep file.py --output json
 
 # Extract function parameters
-emend search api.py::handler[params]
-emend search 'api.py::*[params]'  # Wildcard: all function params in file
+emend grep api.py::handler[params]
+emend grep 'api.py::*[params]'  # Wildcard: all function params in file
 
 # Get return types
-emend search 'src/**/*.py::*[returns]' --output metadata
+emend grep 'src/**/*.py::*[returns]' --output metadata
 
 # List symbols in a module
-emend search file.py                          # Tree view
-emend search file.py --output summary::flat   # Flat list
-emend search file.py --depth 2                # Limit nesting depth
+emend grep file.py                          # Tree view
+emend grep file.py --output summary::flat   # Flat list
+emend grep file.py --depth 2                # Limit nesting depth
 ```
 
 ### Edit Examples
@@ -346,7 +366,7 @@ emend replace 'get_field($N)' 'field$N' api.py --where process --apply
 emend replace 'Union["$X", $Y]' '$X | $Y' src/ --apply
 
 # Find all pattern matches
-emend search 'print($X)' src/ --output location
+emend grep 'print($X)' src/ --output location
 
 # Multi-rule batch operations
 emend batch rules.json --apply
@@ -364,13 +384,16 @@ emend refs models.py::User --calls-only     # Only function calls
 emend rename models.py::User --to Account --apply
 
 # Move a symbol to another file (updates imports)
-emend move utils.py::parse_date helpers/dates.py --apply
+emend mv utils.py::parse_date helpers/dates.py --apply
 
 # Copy a symbol to another file
-emend copy-to workflow.py::Builder._build.helper tasks.py --dedent --apply
+emend cp workflow.py::Builder._build.helper tasks.py --dedent --apply
 
-# List symbols using search
-emend search workflow.py --depth 3
+# Remove a symbol or component
+emend rm file.py::deprecated_func --apply
+
+# List symbols using grep
+emend grep workflow.py --depth 3
 ```
 
 ### Pattern Syntax
@@ -379,23 +402,23 @@ Patterns support metavariables for capturing:
 
 ```bash
 # Single expression
-emend find 'print($MSG)' src/
+emend grep 'print($MSG)' src/
 
 # Multiple arguments with capture
-emend find 'func($A, $B)' src/
+emend grep 'func($A, $B)' src/
 
 # Variable arguments
-emend find 'func($...ARGS)' src/
+emend grep 'func($...ARGS)' src/
 
 # Type constraints
-emend find 'range($N:int)' src/
+emend grep 'range($N:int)' src/
 
 # Anonymous metavariables
-emend find 'func($_, $ARG)' src/
+emend grep 'func($_, $ARG)' src/
 
 # Structural constraints (via --where)
-emend find 'print($X)' src/ --where 'async def'
-emend find 'await $X' src/ --where 'not if __debug__'
+emend grep 'print($X)' src/ --where 'async def'
+emend grep 'await $X' src/ --where 'not if __debug__'
 
 # Supported pattern types:
 #   Literals: $X, $MSG:str, $N:int, 3.14
