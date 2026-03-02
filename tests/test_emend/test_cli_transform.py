@@ -56,12 +56,12 @@ class TestFindCommand:
         result = runner.invoke(app, ["search", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
-        # Should show 3 matches (3 lines of output)
+        # Should show 3 matches (header + code line per match = 6 lines)
         lines = result.stdout.strip().split('\n')
-        assert len(lines) == 3
-        # Each line should reference the file in file:line format
-        for i, line in enumerate(lines):
-            assert f"{str(test_file)}:" in line
+        assert len(lines) == 6
+        # Odd lines (0, 2, 4) are headers with file:line format
+        for i in range(0, 6, 2):
+            assert f"{str(test_file)}:" in lines[i]
 
     def test_find_count(self, tmp_path):
         """Find with --count shows only count."""
@@ -127,9 +127,9 @@ class TestFindCommand:
         result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "my_func"])
 
         assert result.exit_code == 0
-        # Should find only the print inside my_func (line 3)
+        # Should find only the print inside my_func (line 3): header + code = 2 lines
         lines = result.stdout.strip().split('\n')
-        assert len(lines) == 1
+        assert len(lines) == 2
         assert ":3" in lines[0]
 
     def test_find_with_dotted_scope(self, tmp_path):
@@ -148,9 +148,9 @@ class TestFindCommand:
         result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "MyClass.method"])
 
         assert result.exit_code == 0
-        # Should find only the print inside MyClass.method (line 3)
+        # Should find only the print inside MyClass.method (line 3): header + code = 2 lines
         lines = result.stdout.strip().split('\n')
-        assert len(lines) == 1
+        assert len(lines) == 2
         assert ":3" in lines[0]
 
 
@@ -303,11 +303,12 @@ class TestFindReplaceConstraints:
         result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "def"])
 
         assert result.exit_code == 0
-        # Should find prints inside functions only (2 matches)
+        # Should find prints inside functions only (2 matches): header + code per match = 4 lines
         lines = result.stdout.strip().split("\n")
-        assert len(lines) == 2
-        # Each match should be in file:line format
-        assert all(f"{str(test_file)}:" in line for line in lines)
+        assert len(lines) == 4
+        # Header lines (0, 2) should reference the file in file:line format
+        assert f"{str(test_file)}:" in lines[0]
+        assert f"{str(test_file)}:" in lines[2]
 
     def test_find_not_inside_cli(self, tmp_path):
         """Test find with --not-inside constraint."""
@@ -322,9 +323,9 @@ class TestFindReplaceConstraints:
         result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "not if"])
 
         assert result.exit_code == 0
-        # Should find prints outside if blocks only (2 matches)
+        # Should find prints outside if blocks only (2 matches): header + code per match = 4 lines
         lines = result.stdout.strip().split("\n")
-        assert len(lines) == 2
+        assert len(lines) == 4
 
     def test_replace_inside_cli(self, tmp_path):
         """Test replace with --inside constraint."""
