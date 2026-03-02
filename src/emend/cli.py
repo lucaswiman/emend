@@ -313,7 +313,7 @@ def _print_pattern_match_code(
 # Unified Commands
 # ============================================================================
 
-@app.command("search")
+@app.command("grep")
 def search(
     query: Annotated[str, typer.Argument(help="Pattern with $X metavars, selector (file.py::sym), or file/dir path")],
     path: Annotated[Optional[str], typer.Argument(help="File, glob, or directory to search (pattern mode)")] = None,
@@ -848,7 +848,7 @@ app.command("show", hidden=True)(search)
 app.command("get", hidden=True)(search)
 app.command("lookup", hidden=True)(search)
 app.command("find", hidden=True)(search)
-app.command("grep", hidden=True)(search)
+app.command("search", hidden=True)(search)
 app.command("ls", hidden=True)(search)
 
 
@@ -925,7 +925,7 @@ def edit(
         raise typer.Exit(1)
 
 
-@app.command("remove")
+@app.command("rm")
 def remove_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol or file.py::Symbol[component])")],
     apply: Annotated[
@@ -939,16 +939,16 @@ def remove_cmd(
 
     Examples:
         # Remove a function
-        emend remove api.py::deprecated_function --apply
+        emend rm api.py::deprecated_function --apply
 
         # Remove a parameter
-        emend remove api.py::get_user[params][force] --apply
+        emend rm api.py::get_user[params][force] --apply
 
         # Remove a decorator
-        emend remove api.py::handler[decorators][@deprecated] --apply
+        emend rm api.py::handler[decorators][@deprecated] --apply
 
         # Remove a base class
-        emend remove models.py::User[bases][OldMixin] --apply
+        emend rm models.py::User[bases][OldMixin] --apply
     """
     try:
         result = cmd_edit(selector_str=selector, rm=True, apply=apply)
@@ -964,7 +964,7 @@ def remove_cmd(
         raise typer.Exit(1)
 
 
-app.command("rm", hidden=True)(remove_cmd)
+app.command("remove", hidden=True)(remove_cmd)
 app.command("delete", hidden=True)(remove_cmd)
 app.command("set", hidden=True)(edit)
 
@@ -1252,7 +1252,7 @@ def lint_cmd(
         raise typer.Exit(1)
 
 
-@app.command("copy-to")
+@app.command("cp")
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
     destination: Annotated[str, typer.Argument(help="Destination file path")],
@@ -1263,15 +1263,15 @@ def copy_to_cmd(
     """Copy a symbol to another file.
 
     Examples:
-        emend copy-to file.py::my_function other.py --apply
-        emend copy-to file.py::MyClass other.py --append --apply
-        emend copy-to file.py::outer.inner other.py --dedent --apply
+        emend cp file.py::my_function other.py --apply
+        emend cp file.py::MyClass other.py --append --apply
+        emend cp file.py::outer.inner other.py --dedent --apply
     """
     ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
 
 
 app.command("copy", hidden=True)(copy_to_cmd)
-app.command("cp", hidden=True)(copy_to_cmd)
+app.command("copy-to", hidden=True)(copy_to_cmd)
 
 
 @app.command("refs")
@@ -1444,7 +1444,7 @@ def rename_cmd(
         raise typer.Exit(1)
 
 
-@app.command("move")
+@app.command("mv")
 def move_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol move, or file.py for module move)")],
     destination: Annotated[str, typer.Argument(help="Destination file or package")],
@@ -1466,9 +1466,9 @@ def move_cmd(
         Moves the module file to the destination package and updates imports.
 
     Examples:
-        emend move file.py::helper_func dest.py
-        emend move file.py::MyClass dest.py --apply
-        emend move utils.py pkg --project . --apply
+        emend mv file.py::helper_func dest.py
+        emend mv file.py::MyClass dest.py --apply
+        emend mv utils.py pkg --project . --apply
     """
     try:
         if '::' in selector:
@@ -1520,7 +1520,7 @@ def move_cmd(
         raise typer.Exit(1)
 
 
-app.command("mv", hidden=True)(move_cmd)
+app.command("move", hidden=True)(move_cmd)
 
 
 @app.command("batch")
