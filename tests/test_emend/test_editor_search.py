@@ -76,16 +76,18 @@ def _build_index(tmp_path: Path, source: str = SAMPLE_SOURCE) -> Path:
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_manifest ("
-        "  path TEXT PRIMARY KEY,"
+        "  worktree_id TEXT NOT NULL DEFAULT '',"
+        "  path TEXT NOT NULL,"
         "  mtime_ns INTEGER NOT NULL,"
         "  size INTEGER NOT NULL,"
         "  content_hash BLOB NOT NULL,"
-        "  indexed_at REAL NOT NULL"
+        "  indexed_at REAL NOT NULL,"
+        "  PRIMARY KEY (worktree_id, path)"
         ")"
     )
     conn.execute(
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-        ("schema_version", "3"),
+        ("schema_version", "4"),
     )
     conn.commit()
     conn.close()
@@ -736,16 +738,18 @@ def _build_multi_file_index(tmp_path: Path) -> Path:
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_manifest ("
-        "  path TEXT PRIMARY KEY,"
+        "  worktree_id TEXT NOT NULL DEFAULT '',"
+        "  path TEXT NOT NULL,"
         "  mtime_ns INTEGER NOT NULL,"
         "  size INTEGER NOT NULL,"
         "  content_hash BLOB NOT NULL,"
-        "  indexed_at REAL NOT NULL"
+        "  indexed_at REAL NOT NULL,"
+        "  PRIMARY KEY (worktree_id, path)"
         ")"
     )
     conn.execute(
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-        ("schema_version", "3"),
+        ("schema_version", "4"),
     )
     conn.commit()
     conn.close()

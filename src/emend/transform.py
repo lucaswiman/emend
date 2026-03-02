@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=4)
-def _resolve_cache_root(project_root: str | Path) -> Path:
+def _resolve_cache_root(project_root: str) -> Path:
     """Return the main repo root for cache storage.
 
     In a git worktree, the cache lives in the main repo so all
@@ -71,12 +71,12 @@ def _resolve_cache_root(project_root: str | Path) -> Path:
 
 def _cache_db_dir(project_root: str | Path) -> Path:
     """Return the directory for the shared cache DB."""
-    main_root = _resolve_cache_root(project_root)
+    main_root = _resolve_cache_root(str(project_root))
     return main_root / ".emend" / "cache"
 
 
 @lru_cache(maxsize=4)
-def _get_worktree_id(project_root: str | Path) -> str:
+def _get_worktree_id(project_root: str) -> str:
     """Return a stable identifier for the current working tree.
 
     This is the resolved absolute path of *project_root*.  Each worktree
@@ -84,6 +84,120 @@ def _get_worktree_id(project_root: str | Path) -> str:
     content-hashed cache data.
     """
     return str(Path(project_root).resolve())
+
+
+def _init_cache_schema(conn: sqlite3.Connection) -> None:
+    """Create all cache tables and indexes if they don't exist (idempotent).
+
+    Called from ``_get_disk_cache()`` (lazy init) and ``warm_caches()``
+    (pre-create before spawning workers).  Keeping the DDL in one place
+    prevents the two call-sites from drifting out of sync.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS parse_cache "
+        "(hash BLOB PRIMARY KEY, data BLOB)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS qn_index "
+        "(hash BLOB PRIMARY KEY, qnames BLOB)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS type_cache "
+        "(hash TEXT PRIMARY KEY, data BLOB)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS index_meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_manifest ("
+        "  worktree_id TEXT NOT NULL DEFAULT '',"
+        "  path TEXT NOT NULL,"
+        "  mtime_ns INTEGER NOT NULL,"
+        "  size INTEGER NOT NULL,"
+        "  content_hash BLOB NOT NULL,"
+        "  indexed_at REAL NOT NULL,"
+        "  PRIMARY KEY (worktree_id, path)"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
+        "ON file_manifest(content_hash)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbol_index ("
+        "  content_hash BLOB NOT NULL,"
+        "  file_path TEXT NOT NULL,"
+        "  name TEXT NOT NULL,"
+        "  qualified_name TEXT NOT NULL,"
+        "  module_qn TEXT,"
+        "  kind TEXT NOT NULL,"
+        "  line INTEGER NOT NULL,"
+        "  end_line INTEGER NOT NULL,"
+        "  depth INTEGER NOT NULL DEFAULT 1,"
+        "  parent TEXT,"
+        "  signature TEXT,"
+        "  returns TEXT,"
+        "  decorators TEXT,"
+        "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
+        "  is_exported INTEGER NOT NULL DEFAULT 0,"
+        "  has_noqa INTEGER NOT NULL DEFAULT 0"
+        ")"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_name ON symbol_index(name)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sym_qn ON symbol_index(qualified_name)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sym_file ON symbol_index(file_path)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sym_hash ON symbol_index(content_hash)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sym_kind ON symbol_index(kind)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS import_graph ("
+        "  content_hash BLOB NOT NULL,"
+        "  file_path TEXT NOT NULL,"
+        "  imported_module TEXT NOT NULL,"
+        "  PRIMARY KEY (content_hash, imported_module)"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_module "
+        "ON import_graph(imported_module)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_hash "
+        "ON import_graph(content_hash)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reference_index ("
+        "  content_hash BLOB NOT NULL,"
+        "  target_qn TEXT NOT NULL,"
+        "  file_path TEXT NOT NULL,"
+        "  line INTEGER NOT NULL,"
+        "  col INTEGER NOT NULL,"
+        "  ref_kind TEXT NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ref_qn "
+        "ON reference_index(target_qn)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ref_file "
+        "ON reference_index(file_path)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ref_hash "
+        "ON reference_index(content_hash)"
+    )
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -121,119 +235,7 @@ def _get_disk_cache() -> sqlite3.Connection | None:
             _ensure_cache_ignore_files(root)
             db_path = cache_dir / "parse.db"
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS parse_cache "
-                "(hash BLOB PRIMARY KEY, data BLOB)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS type_cache "
-                "(hash TEXT PRIMARY KEY, data BLOB)"
-            )
-            # --- New index tables (schema v2) ---
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS index_meta "
-                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS file_manifest ("
-                "  worktree_id TEXT NOT NULL DEFAULT '',"
-                "  path TEXT NOT NULL,"
-                "  mtime_ns INTEGER NOT NULL,"
-                "  size INTEGER NOT NULL,"
-                "  content_hash BLOB NOT NULL,"
-                "  indexed_at REAL NOT NULL,"
-                "  PRIMARY KEY (worktree_id, path)"
-                ")"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
-                "ON file_manifest(content_hash)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_manifest_worktree "
-                "ON file_manifest(worktree_id)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS symbol_index ("
-                "  content_hash BLOB NOT NULL,"
-                "  file_path TEXT NOT NULL,"
-                "  name TEXT NOT NULL,"
-                "  qualified_name TEXT NOT NULL,"
-                "  module_qn TEXT,"
-                "  kind TEXT NOT NULL,"
-                "  line INTEGER NOT NULL,"
-                "  end_line INTEGER NOT NULL,"
-                "  depth INTEGER NOT NULL DEFAULT 1,"
-                "  parent TEXT,"
-                "  signature TEXT,"
-                "  returns TEXT,"
-                "  decorators TEXT,"
-                "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
-                "  is_exported INTEGER NOT NULL DEFAULT 0,"
-                "  has_noqa INTEGER NOT NULL DEFAULT 0"
-                ")"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_name "
-                "ON symbol_index(name)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_qn "
-                "ON symbol_index(qualified_name)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_file "
-                "ON symbol_index(file_path)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_hash "
-                "ON symbol_index(content_hash)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_kind "
-                "ON symbol_index(kind)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS import_graph ("
-                "  content_hash BLOB NOT NULL,"
-                "  file_path TEXT NOT NULL,"
-                "  imported_module TEXT NOT NULL,"
-                "  PRIMARY KEY (content_hash, imported_module)"
-                ")"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_import_module "
-                "ON import_graph(imported_module)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_import_hash "
-                "ON import_graph(content_hash)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS reference_index ("
-                "  content_hash BLOB NOT NULL,"
-                "  target_qn TEXT NOT NULL,"
-                "  file_path TEXT NOT NULL,"
-                "  line INTEGER NOT NULL,"
-                "  col INTEGER NOT NULL,"
-                "  ref_kind TEXT NOT NULL"
-                ")"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ref_qn "
-                "ON reference_index(target_qn)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ref_file "
-                "ON reference_index(file_path)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ref_hash "
-                "ON reference_index(content_hash)"
-            )
-            conn.commit()
+            _init_cache_schema(conn)
             _disk_cache_conn = conn
             logger.debug("disk parse cache opened at %s", db_path)
         except Exception as exc:
@@ -1451,115 +1453,7 @@ def warm_caches(
     try:
         import sqlite3 as _sqlite3
         _init_conn = _sqlite3.connect(db_path)
-        _init_conn.execute("PRAGMA journal_mode=WAL")
-        _init_conn.execute("PRAGMA synchronous=NORMAL")
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS parse_cache (hash BLOB PRIMARY KEY, data BLOB)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS type_cache (hash TEXT PRIMARY KEY, data BLOB)"
-        )
-        # --- New index tables ---
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS index_meta "
-            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS file_manifest ("
-            "  worktree_id TEXT NOT NULL DEFAULT '',"
-            "  path TEXT NOT NULL,"
-            "  mtime_ns INTEGER NOT NULL,"
-            "  size INTEGER NOT NULL,"
-            "  content_hash BLOB NOT NULL,"
-            "  indexed_at REAL NOT NULL,"
-            "  PRIMARY KEY (worktree_id, path)"
-            ")"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
-            "ON file_manifest(content_hash)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_manifest_worktree "
-            "ON file_manifest(worktree_id)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS symbol_index ("
-            "  content_hash BLOB NOT NULL,"
-            "  file_path TEXT NOT NULL,"
-            "  name TEXT NOT NULL,"
-            "  qualified_name TEXT NOT NULL,"
-            "  module_qn TEXT,"
-            "  kind TEXT NOT NULL,"
-            "  line INTEGER NOT NULL,"
-            "  end_line INTEGER NOT NULL,"
-            "  depth INTEGER NOT NULL DEFAULT 1,"
-            "  parent TEXT,"
-            "  signature TEXT,"
-            "  returns TEXT,"
-            "  decorators TEXT,"
-            "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
-            "  is_exported INTEGER NOT NULL DEFAULT 0,"
-            "  has_noqa INTEGER NOT NULL DEFAULT 0"
-            ")"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sym_name ON symbol_index(name)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sym_qn ON symbol_index(qualified_name)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sym_file ON symbol_index(file_path)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sym_hash ON symbol_index(content_hash)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sym_kind ON symbol_index(kind)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS import_graph ("
-            "  content_hash BLOB NOT NULL,"
-            "  file_path TEXT NOT NULL,"
-            "  imported_module TEXT NOT NULL,"
-            "  PRIMARY KEY (content_hash, imported_module)"
-            ")"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_import_module "
-            "ON import_graph(imported_module)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_import_hash "
-            "ON import_graph(content_hash)"
-        )
-        _init_conn.execute(
-            "CREATE TABLE IF NOT EXISTS reference_index ("
-            "  content_hash BLOB NOT NULL,"
-            "  target_qn TEXT NOT NULL,"
-            "  file_path TEXT NOT NULL,"
-            "  line INTEGER NOT NULL,"
-            "  col INTEGER NOT NULL,"
-            "  ref_kind TEXT NOT NULL"
-            ")"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ref_qn "
-            "ON reference_index(target_qn)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ref_file "
-            "ON reference_index(file_path)"
-        )
-        _init_conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ref_hash "
-            "ON reference_index(content_hash)"
-        )
-        _init_conn.commit()
+        _init_cache_schema(_init_conn)
         _init_conn.close()
     except Exception:
         pass

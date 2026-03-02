@@ -283,10 +283,10 @@ class EditorSearchEngine:
     """
 
     def __init__(self, project_path: str) -> None:
-        from emend.transform import _find_project_root
+        from emend.transform import _find_project_root, _cache_db_dir
 
         self.project_root = _find_project_root(project_path)
-        self.db_path = Path(self.project_root) / ".emend" / "cache" / "parse.db"
+        self.db_path = _cache_db_dir(self.project_root) / "parse.db"
         self._conn: sqlite3.Connection | None = None
         self._fts_ready = False
         self._fts_available: bool | None = None
