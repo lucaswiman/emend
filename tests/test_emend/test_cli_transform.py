@@ -453,3 +453,112 @@ class TestFindReplaceMultiFile:
         # Both files should be modified
         assert "x: int = 1" in file1.read_text()
         assert "x: int = 2" in file2.read_text()
+
+
+class TestCLIAliases:
+    """Test that CLI aliases work correctly."""
+
+    def test_grep_alias(self, tmp_path):
+        """grep is an alias for search (pattern mode)."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("print('hello')\n")
+
+        result = runner.invoke(app, ["grep", "print($X)", str(test_file)])
+        assert result.exit_code == 0
+        assert str(test_file) in result.stdout
+
+    def test_ls_alias(self, tmp_path):
+        """ls is an alias for search (summary mode)."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def greet():\n    pass\n")
+
+        result = runner.invoke(app, ["ls", str(test_file)])
+        assert result.exit_code == 0
+        assert "greet" in result.stdout
+
+    def test_remove_command(self, tmp_path):
+        """remove command removes a symbol."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+
+        result = runner.invoke(app, ["remove", f"{test_file}::old", "--apply"])
+        assert result.exit_code == 0
+        content = test_file.read_text()
+        assert "keep" in content
+        assert "def old" not in content
+
+    def test_rm_alias(self, tmp_path):
+        """rm is an alias for remove."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+
+        result = runner.invoke(app, ["rm", f"{test_file}::old", "--apply"])
+        assert result.exit_code == 0
+        assert "def old" not in test_file.read_text()
+
+    def test_delete_alias(self, tmp_path):
+        """delete is an alias for remove."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+
+        result = runner.invoke(app, ["delete", f"{test_file}::old", "--apply"])
+        assert result.exit_code == 0
+        assert "def old" not in test_file.read_text()
+
+    def test_set_alias(self, tmp_path):
+        """set is an alias for edit."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def greet() -> str:\n    return 'hi'\n")
+
+        result = runner.invoke(app, ["set", f"{test_file}::greet[returns]", "int", "--apply"])
+        assert result.exit_code == 0
+        assert "int" in test_file.read_text()
+
+    def test_insert_alias(self, tmp_path):
+        """insert is an alias for add."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
+
+        result = runner.invoke(app, ["insert", f"{test_file}::greet[params]", "ctx: Context", "--apply"])
+        assert result.exit_code == 0
+        assert "ctx" in test_file.read_text()
+
+    def test_copy_alias(self, tmp_path):
+        """copy is an alias for copy-to."""
+        src = tmp_path / "source.py"
+        src.write_text("def helper():\n    return 42\n")
+        dest = tmp_path / "dest.py"
+
+        result = runner.invoke(app, ["copy", f"{src}::helper", str(dest), "--apply"])
+        assert result.exit_code == 0
+        assert "helper" in dest.read_text()
+
+    def test_cp_alias(self, tmp_path):
+        """cp is an alias for copy-to."""
+        src = tmp_path / "source.py"
+        src.write_text("def helper():\n    return 42\n")
+        dest = tmp_path / "dest.py"
+
+        result = runner.invoke(app, ["cp", f"{src}::helper", str(dest), "--apply"])
+        assert result.exit_code == 0
+        assert "helper" in dest.read_text()
+
+    def test_mv_alias(self, tmp_path):
+        """mv is an alias for move."""
+        src = tmp_path / "source.py"
+        src.write_text("def helper():\n    return 42\n")
+        dest = tmp_path / "dest.py"
+        dest.write_text("")
+
+        result = runner.invoke(app, ["mv", f"{src}::helper", str(dest), "--apply"])
+        assert result.exit_code == 0
+        assert "helper" in dest.read_text()
+
+    def test_references_alias(self, tmp_path):
+        """references is an alias for refs."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def greet():\n    pass\n\ngreet()\n")
+
+        result = runner.invoke(app, ["references", f"{test_file}::greet"])
+        assert result.exit_code == 0
+        assert str(test_file) in result.stdout

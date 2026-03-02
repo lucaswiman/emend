@@ -14,14 +14,12 @@ try:
         mcp_app,
         search,
         replace,
-        edit,
-        add,
+        modify,
         refs,
         rename,
         move,
         graph,
         deadcode,
-        copy_to,
         grammar_and_cookbook,
     )
 except Exception:
@@ -36,8 +34,8 @@ except Exception:
 def test_all_tools_registered():
     tool_names = {t.name for t in mcp_app._tool_manager.list_tools()}
     expected = {
-        "search", "replace", "edit", "add", "refs", "rename",
-        "move", "graph", "deadcode", "lint", "copy_to",
+        "search", "replace", "modify", "refs", "rename",
+        "move", "graph", "deadcode", "lint",
         "grammar_and_cookbook",
     }
     assert expected == tool_names
@@ -147,88 +145,113 @@ def test_replace_no_matches(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# edit tool
+# modify tool (unified edit + add + remove)
 # ---------------------------------------------------------------------------
 
 
-def test_edit_returns(tmp_path):
+def test_modify_set_returns(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
 
-    result = edit(
+    result = modify(
         selector=f"{p}::greet[returns]",
         value="str | None",
+        mode="set",
         apply=False,
     )
     assert "str | None" in result
 
 
-def test_edit_apply(tmp_path):
+def test_modify_set_apply(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
 
-    edit(
+    modify(
         selector=f"{p}::greet[returns]",
         value="str | None",
+        mode="set",
         apply=True,
     )
     assert "str | None" in p.read_text()
 
 
-def test_edit_remove(tmp_path):
+def test_modify_remove(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str, unused: int) -> str:\n    return f'Hello, {name}'\n")
 
-    result = edit(
+    result = modify(
         selector=f"{p}::greet[params][unused]",
-        rm=True,
+        mode="remove",
         apply=False,
     )
     assert "unused" in result  # shows in the diff
 
 
-# ---------------------------------------------------------------------------
-# add tool
-# ---------------------------------------------------------------------------
-
-
-def test_add_parameter(tmp_path):
+def test_modify_add_parameter(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
 
-    result = add(
+    result = modify(
         selector=f"{p}::greet[params]",
         value="greeting: str = 'Hello'",
+        mode="add",
         apply=False,
     )
     assert "greeting" in result
 
 
-def test_add_parameter_apply(tmp_path):
+def test_modify_add_parameter_apply(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
 
-    add(
+    modify(
         selector=f"{p}::greet[params]",
         value="greeting: str = 'Hello'",
+        mode="add",
         apply=True,
     )
     assert "greeting" in p.read_text()
 
 
-def test_add_at_position(tmp_path):
+def test_modify_add_at_position(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(a: int, b: int) -> int:\n    return a + b\n")
 
-    add(
+    modify(
         selector=f"{p}::greet[params]",
         value="c: int",
+        mode="add",
         at=1,
         apply=True,
     )
     content = p.read_text()
     # c should appear between a and b
     assert "a: int, c: int, b: int" in content
+
+
+def test_modify_add_missing_value(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
+
+    result = modify(
+        selector=f"{p}::greet[params]",
+        mode="add",
+        apply=False,
+    )
+    assert "Error" in result
+
+
+def test_modify_unknown_mode(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
+
+    result = modify(
+        selector=f"{p}::greet[returns]",
+        value="int",
+        mode="bogus",
+        apply=False,
+    )
+    assert "Error" in result
 
 
 # ---------------------------------------------------------------------------
@@ -354,18 +377,19 @@ def test_deadcode_basic(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# copy_to tool
+# move copy_only (was copy_to)
 # ---------------------------------------------------------------------------
 
 
-def test_copy_to_dry_run(tmp_path):
+def test_move_copy_only_dry_run(tmp_path):
     src = tmp_path / "source.py"
     src.write_text("def helper():\n    return 42\n")
     dest = tmp_path / "dest.py"
 
-    result = copy_to(
+    result = move(
         selector=f"{src}::helper",
         destination=str(dest),
+        copy_only=True,
         apply=False,
     )
     assert "helper" in result

@@ -848,6 +848,8 @@ app.command("show", hidden=True)(search)
 app.command("get", hidden=True)(search)
 app.command("lookup", hidden=True)(search)
 app.command("find", hidden=True)(search)
+app.command("grep", hidden=True)(search)
+app.command("ls", hidden=True)(search)
 
 
 
@@ -921,6 +923,50 @@ def edit(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+@app.command("remove")
+def remove_cmd(
+    selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol or file.py::Symbol[component])")],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Apply changes to file")
+    ] = False,
+):
+    """Remove a symbol or component.
+
+    Shorthand for ``edit --rm``.
+
+    Examples:
+        # Remove a function
+        emend remove api.py::deprecated_function --apply
+
+        # Remove a parameter
+        emend remove api.py::get_user[params][force] --apply
+
+        # Remove a decorator
+        emend remove api.py::handler[decorators][@deprecated] --apply
+
+        # Remove a base class
+        emend remove models.py::User[bases][OldMixin] --apply
+    """
+    try:
+        result = cmd_edit(selector_str=selector, rm=True, apply=apply)
+        print(result, end='')
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+app.command("rm", hidden=True)(remove_cmd)
+app.command("delete", hidden=True)(remove_cmd)
+app.command("set", hidden=True)(edit)
 
 
 @app.command("add")
@@ -1009,6 +1055,8 @@ def add(
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
 
+
+app.command("insert", hidden=True)(add)
 
 
 
@@ -1222,6 +1270,9 @@ def copy_to_cmd(
     ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
 
 
+app.command("copy", hidden=True)(copy_to_cmd)
+app.command("cp", hidden=True)(copy_to_cmd)
+
 
 @app.command("refs")
 def refs_cmd(
@@ -1316,6 +1367,10 @@ def refs_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+app.command("references", hidden=True)(refs_cmd)
+app.command("find-references", hidden=True)(refs_cmd)
 
 
 @app.command("rename")
@@ -1465,6 +1520,7 @@ def move_cmd(
         raise typer.Exit(1)
 
 
+app.command("mv", hidden=True)(move_cmd)
 
 
 @app.command("batch")
