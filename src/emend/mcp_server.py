@@ -653,11 +653,17 @@ def deadcode(
     no_strings: Annotated[bool, Field(description="Don't count string literals as references.")] = False,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
     all_files: Annotated[bool, Field(description="Scan all Python files, not just git-tracked ones.")] = False,
+    entry_point_decorators: Annotated[list[str] | None, Field(description="Additional decorator names to treat as entry points.")] = None,
+    entry_point_names: Annotated[list[str] | None, Field(description="Additional function/class names to treat as entry points.")] = None,
+    exclude_paths: Annotated[list[str] | None, Field(description="Directories to exclude entirely from dead code analysis.")] = None,
 ) -> str:
     """Find potentially dead (unreferenced) code. Returns JSON.
 
     Skips dunder methods, test functions, decorated entry points,
     __all__ members, and conventional entry points.
+
+    Use entry_point_decorators and entry_point_names to add custom
+    exclusions beyond the built-in heuristics.
     """
     results = find_dead_code(
         project_path=path,
@@ -667,6 +673,9 @@ def deadcode(
         strings_count_as_references=not no_strings,
         show_last_reference=not no_last_reference,
         all_files=all_files,
+        entry_point_decorators=entry_point_decorators,
+        entry_point_names=entry_point_names,
+        exclude_paths=exclude_paths,
     )
     data = []
     for d in results:

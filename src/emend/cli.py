@@ -1701,6 +1701,18 @@ def dead_code_cmd(
     no_strings: Annotated[bool, typer.Option("--no-strings", help="Don't count string literals as references")] = False,
     no_last_reference: Annotated[bool, typer.Option("--no-last-reference", help="Don't show git last-reference info")] = False,
     all_files: Annotated[bool, typer.Option("--all-files", help="Scan all Python files, not just git-tracked ones")] = False,
+    entry_point_decorator: Annotated[
+        Optional[list[str]],
+        typer.Option("--entry-point-decorator", help="Additional decorator names to treat as entry points (repeatable)")
+    ] = None,
+    entry_point_name: Annotated[
+        Optional[list[str]],
+        typer.Option("--entry-point-name", help="Additional function/class names to treat as entry points (repeatable)")
+    ] = None,
+    exclude_path: Annotated[
+        Optional[list[str]],
+        typer.Option("--exclude-path", help="Directories to exclude entirely from analysis (repeatable)")
+    ] = None,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
@@ -1720,6 +1732,9 @@ def dead_code_cmd(
     - Private symbols (_name) unless --include-private is set
     - Symbols with # noqa: emend:deadcode on the definition line
 
+    Use --entry-point-decorator and --entry-point-name to add custom
+    exclusions beyond the built-in heuristics.
+
     By default, string literals containing the symbol name are treated
     as references (e.g. getattr(obj, "method_name")).  Disable with
     --no-strings.
@@ -1731,6 +1746,8 @@ def dead_code_cmd(
         emend deadcode src/ --exclude-references-from tests/
         emend deadcode . --no-strings --no-last-reference
         emend deadcode . --all-files
+        emend deadcode . --entry-point-decorator my_framework.handler
+        emend deadcode . --entry-point-name plugin_init
     """
     try:
         results = find_dead_code(
@@ -1741,6 +1758,9 @@ def dead_code_cmd(
             strings_count_as_references=not no_strings,
             show_last_reference=not no_last_reference,
             all_files=all_files,
+            entry_point_decorators=entry_point_decorator,
+            entry_point_names=entry_point_name,
+            exclude_paths=exclude_path,
         )
 
         if json_output:

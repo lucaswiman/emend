@@ -6206,6 +6206,8 @@ _ENTRY_POINT_DECORATORS = frozenset({
 # Decorator base names that indicate entry points
 _ENTRY_POINT_DECORATOR_BASENAMES = frozenset({
     'route', 'get', 'post', 'put', 'delete', 'patch', 'head', 'options',
+    'sync_get', 'sync_post', 'sync_put', 'sync_delete', 'sync_patch',
+    'websocket', 'websocket_route',
     'command', 'task', 'hook', 'listener',
     'receiver', 'signal', 'handler', 'middleware',
     'register', 'export',
@@ -6433,6 +6435,9 @@ def _find_dead_code_cached(
     exclude_references_from: list[str] | None,
     strings_count_as_references: bool,
     all_files: bool,
+    entry_point_decorators: list[str] | None = None,
+    entry_point_names: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> list[DeadSymbol]:
     """Index-accelerated dead code detection — single SQL query.
 
@@ -6479,6 +6484,20 @@ def _find_dead_code_cached(
                 "(si.name NOT LIKE '\\_%' ESCAPE '\\' OR si.name LIKE '\\_\\_%\\_\\_%' ESCAPE '\\')"
             )
 
+        # Exclude entire directories from analysis.
+        if exclude_paths:
+            for pattern in exclude_paths:
+                resolved = str(Path(pattern).resolve())
+                conditions.append("si.file_path NOT LIKE ? ESCAPE '\\'")
+                safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                params.append(f"{safe}%")
+
+        # Custom entry point names: filter at SQL level.
+        if entry_point_names:
+            placeholders = ", ".join("?" for _ in entry_point_names)
+            conditions.append(f"si.name NOT IN ({placeholders})")
+            params.extend(entry_point_names)
+
         # Reference exclusion: ignore references from certain dirs.
         exclude_clause = ""
         if exclude_references_from:
@@ -6496,7 +6515,7 @@ def _find_dead_code_cached(
 
         query = f"""
             SELECT si.name, si.qualified_name, si.kind, si.file_path,
-                   si.line
+                   si.line, si.decorators
             FROM symbol_index si
             INNER JOIN file_manifest fm
               ON si.content_hash = fm.content_hash
@@ -6516,6 +6535,36 @@ def _find_dead_code_cached(
         rows = conn.execute(query, params).fetchall()
         conn.close()
 
+        # Post-filter: custom entry point decorators.
+        if entry_point_decorators and rows:
+            ep_decs = set(entry_point_decorators)
+            # Also build a basename set for flexible matching.
+            ep_basenames = {d.rsplit(".", 1)[-1] for d in ep_decs}
+            filtered = []
+            for row in rows:
+                dec_str = row[5]  # si.decorators column
+                if dec_str:
+                    skip = False
+                    for dec in dec_str.split(","):
+                        # Strip @ prefix and arguments:
+                        # @app.command("name") -> app.command
+                        dec_clean = dec.strip()
+                        if dec_clean.startswith("@"):
+                            dec_clean = dec_clean[1:]
+                        if "(" in dec_clean:
+                            dec_clean = dec_clean[:dec_clean.index("(")]
+                        if dec_clean in ep_decs:
+                            skip = True
+                            break
+                        basename = dec_clean.rsplit(".", 1)[-1] if "." in dec_clean else dec_clean
+                        if basename in ep_basenames:
+                            skip = True
+                            break
+                    if skip:
+                        continue
+                filtered.append(row)
+            rows = filtered
+
         if not rows:
             return []
 
@@ -6530,11 +6579,11 @@ def _find_dead_code_cached(
                     line=line, selector=f"{fp}::{qname}",
                     reason="no references found",
                 )
-                for name, qname, sym_kind, fp, line in rows
+                for name, qname, sym_kind, fp, line, _decs in rows
             ]
 
         # Collect names that need string checking (length > 3).
-        str_names = {name for name, _, _, _, _ in rows if len(name) > 3}
+        str_names = {name for name, _, _, _, _, _ in rows if len(name) > 3}
 
         if str_names:
             # Use Rust batch-read with name hints for fast file scanning.
@@ -6565,7 +6614,7 @@ def _find_dead_code_cached(
                 pass
 
             # Also read definition files for same-file string checks.
-            for _, _, _, fp, _ in rows:
+            for _, _, _, fp, _, _ in rows:
                 r = str(Path(fp).resolve())
                 if r not in file_cache:
                     try:
@@ -6576,7 +6625,7 @@ def _find_dead_code_cached(
             # Build name → set of files containing it (excluding def file).
             _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
             names_with_str_ref: set[tuple[str, str]] = set()  # (file_path, name)
-            for name, qname, sym_kind, fp, line in rows:
+            for name, qname, sym_kind, fp, line, _decs in rows:
                 if len(name) <= 3:
                     continue
                 r = str(Path(fp).resolve())
@@ -6606,7 +6655,7 @@ def _find_dead_code_cached(
             names_with_str_ref = set()
 
         dead_symbols = []
-        for name, qname, sym_kind, fp, line in rows:
+        for name, qname, sym_kind, fp, line, _decs in rows:
             if (fp, name) in names_with_str_ref:
                 continue
             dead_symbols.append(
@@ -6634,6 +6683,9 @@ def find_dead_code(
     strings_count_as_references: bool = True,
     show_last_reference: bool = True,
     all_files: bool = False,
+    entry_point_decorators: list[str] | None = None,
+    entry_point_names: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> Iterator[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
@@ -6656,6 +6708,14 @@ def find_dead_code(
         all_files: If True, scan all Python files (including untracked).
             By default only git-tracked files are scanned when inside a
             git repository.
+        entry_point_decorators: Additional decorator names to treat as entry
+            points (e.g. ``["my_framework.handler"]``).  Symbols with these
+            decorators are never flagged as dead code.
+        entry_point_names: Additional function/class names to treat as entry
+            points (e.g. ``["plugin_init"]``).  Symbols with these names are
+            never flagged as dead code.
+        exclude_paths: Directories to exclude entirely from dead code analysis.
+            Symbols defined in these paths are never reported.
 
     Yields:
         DeadSymbol objects sorted by file path and line number.
@@ -6668,6 +6728,9 @@ def find_dead_code(
         exclude_references_from=exclude_references_from,
         strings_count_as_references=strings_count_as_references,
         all_files=all_files,
+        entry_point_decorators=entry_point_decorators,
+        entry_point_names=entry_point_names,
+        exclude_paths=exclude_paths,
     )
     logger.info(
         "dead_code: %d dead symbols in %.3fs",

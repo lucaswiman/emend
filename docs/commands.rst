@@ -486,23 +486,34 @@ Also available as: ``dead-code``, ``dead_code``.
 
 **Options:**
 
-+------------------------------+-----------------------------------------------+
-| Option                       | Description                                   |
-+==============================+===============================================+
-| ``--kind``, ``-k``          | Filter by symbol kind: ``function``, ``class``|
-+------------------------------+-----------------------------------------------+
-| ``--include-private``        | Include ``_private`` symbols (excluded by      |
-|                              | default)                                      |
-+------------------------------+-----------------------------------------------+
-| ``--json``                   | Output as JSON                                |
-+------------------------------+-----------------------------------------------+
-| ``--exclude-references-from``| Directories to ignore when scanning for       |
-|                              | references (e.g. ``tests/``). Can be repeated.|
-+------------------------------+-----------------------------------------------+
-| ``--no-strings``             | Don't count string literals as references     |
-+------------------------------+-----------------------------------------------+
-| ``--no-last-reference``      | Don't show git last-reference info            |
-+------------------------------+-----------------------------------------------+
++-------------------------------+-----------------------------------------------+
+| Option                        | Description                                   |
++===============================+===============================================+
+| ``--kind``, ``-k``           | Filter by symbol kind: ``function``, ``class``|
++-------------------------------+-----------------------------------------------+
+| ``--include-private``         | Include ``_private`` symbols (excluded by      |
+|                               | default)                                      |
++-------------------------------+-----------------------------------------------+
+| ``--json``                    | Output as JSON                                |
++-------------------------------+-----------------------------------------------+
+| ``--exclude-references-from`` | Directories to ignore when scanning for       |
+|                               | references (e.g. ``tests/``). Can be repeated.|
++-------------------------------+-----------------------------------------------+
+| ``--no-strings``              | Don't count string literals as references     |
++-------------------------------+-----------------------------------------------+
+| ``--no-last-reference``       | Don't show git last-reference info            |
++-------------------------------+-----------------------------------------------+
+| ``--entry-point-decorator``   | Additional decorator names to treat as entry  |
+|                               | points. Symbols with these decorators are     |
+|                               | never flagged. Can be repeated.               |
++-------------------------------+-----------------------------------------------+
+| ``--entry-point-name``        | Additional function/class names to treat as   |
+|                               | entry points. Can be repeated.                |
++-------------------------------+-----------------------------------------------+
+| ``--exclude-path``            | Directories to exclude entirely from          |
+|                               | analysis. Symbols defined in these paths are  |
+|                               | never reported. Can be repeated.              |
++-------------------------------+-----------------------------------------------+
 
 **Automatic exclusions:**
 
@@ -515,6 +526,8 @@ The following are automatically skipped (not reported as dead):
 - Conventional entry points (``main``, ``setup``, ``teardown``)
 - Private symbols (``_name``) unless ``--include-private`` is set
 - Symbols with ``# noqa: emend:deadcode`` on the definition line
+- Custom decorators specified via ``--entry-point-decorator``
+- Custom names specified via ``--entry-point-name``
 
 **String-as-reference detection:**
 
@@ -546,6 +559,13 @@ with ``--no-last-reference``.
 
    # Disable string matching and git annotation
    emend deadcode . --no-strings --no-last-reference
+
+   # Custom entry point exclusions
+   emend deadcode . --entry-point-decorator my_framework.handler
+   emend deadcode . --entry-point-name plugin_init
+
+   # Exclude entire directories from analysis
+   emend deadcode . --exclude-path frontends/devtools/ --exclude-path scripts/
 
 **Inline suppression:**
 
