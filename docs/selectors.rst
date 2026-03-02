@@ -1,7 +1,13 @@
 Selector Syntax
 ===============
 
-Selectors identify Python symbols and their components. emend supports three selector forms.
+Selectors identify Python symbols and their components. The general form is
+``file_scope::symbol.path[component][accessor]``.
+
+The ``::`` separator splits the file scope (left) from the query (right). When
+the right side is a valid selector, it identifies a symbol for lookup. When it
+isn't valid selector syntax (e.g. contains parentheses, operators, or multiple
+bare words), it's treated as a code **pattern** instead — see :doc:`patterns`.
 
 Symbol selectors
 ----------------
@@ -13,6 +19,8 @@ Address a symbol by its dotted path within a file:
    file.py::func                    # Module-level function
    file.py::Class.method            # Method in a class
    file.py::Class.method.nested     # Nested function inside a method
+   ::func                           # All files (shorthand for **::func)
+   func                             # Same (bare name fallback)
 
 Extended selectors (components)
 -------------------------------

@@ -79,6 +79,23 @@ File globs
     'src/**/*.py::func'            # match across multiple files
     '**::func'                     # all Python files recursively
 
+File scope with patterns
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``::`` separator also works with code patterns, not just selectors.
+When the right side of ``::`` doesn't parse as a valid selector, it is
+treated as a code pattern::
+
+    '**::print($X)'               # search all files for pattern
+    'src/::assert False'           # search src/ for literal pattern
+    'file.py::print()'             # search one file for pattern
+
+Detection order:
+
+1. Right side contains ``$`` → pattern mode (metavar search)
+2. Right side parses as valid selector → selector mode (symbol lookup)
+3. Right side fails selector parse → pattern mode (literal code search)
+
 Line selectors
 ~~~~~~~~~~~~~~
 
@@ -191,15 +208,19 @@ search
 
 Auto-detects mode from the query:
 
-- **Pattern mode**: query contains ``$`` metavariables
-- **Lookup mode**: query contains ``::`` or is a file path with filters
+- **Pattern mode**: query contains ``$`` metavariables, or right side of
+  ``::`` doesn't parse as a valid selector (e.g. ``assert False``, ``print()``)
+- **Lookup mode**: query contains ``::`` with a valid selector
 - **Summary mode**: bare file/dir path without filters
 - **Bare name**: name that doesn't match a file searches as ``**::name``
 
 ::
 
-    emend search 'print($X)' src/                         # pattern
-    emend search file.py::func[params]                     # lookup
+    emend search 'print($X)' src/                         # pattern (has $)
+    emend search '**::print($X)'                          # pattern with file scope
+    emend search '**::assert False'                        # literal pattern via ::
+    emend search 'src/::import os'                         # pattern scoped to src/
+    emend search file.py::func[params]                     # lookup (valid selector)
     emend search file.py                                   # summary
     emend search process_encounter                         # bare name
     emend search ::MyClass                                 # ::name shorthand

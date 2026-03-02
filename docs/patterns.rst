@@ -427,14 +427,40 @@ Only match when the root name in the pattern is imported from a specific module:
    # Match datetime usage only when from the datetime module
    emend search 'datetime.now()' src/ --imported-from datetime
 
+Literal patterns (no metavariables)
+------------------------------------
+
+Patterns don't require ``$`` metavariables — you can search for literal code.
+Use ``::`` to separate the file scope from the pattern when there are no
+metavariables, so emend knows the right side is a pattern (not a symbol
+selector):
+
+.. code-block:: bash
+
+   # Literal patterns via :: file scope
+   emend search '**::assert False'
+   emend search 'src/::import os'
+   emend search 'file.py::print()'
+
+   # With metavariables, :: is optional ($ triggers pattern mode):
+   emend search 'print($X)' src/
+   emend search '**::print($X)'    # equivalent
+
+When ``::`` is present, the right side is auto-detected:
+
+1. Contains ``$`` → pattern mode (metavar search)
+2. Parses as valid selector → selector mode (symbol lookup)
+3. Doesn't parse as selector → pattern mode (literal code search)
+
 Multi-file search
 -----------------
 
-The ``PATH`` argument accepts:
+The ``PATH`` argument (or the left side of ``::``) accepts:
 
 - A single file: ``src/api.py``
 - A glob: ``src/**/*.py``
 - A directory (searches all ``.py`` files recursively): ``src/``
+- ``**`` (all Python files recursively, the default)
 
 .. code-block:: bash
 
@@ -443,6 +469,9 @@ The ``PATH`` argument accepts:
 
    # Search with glob
    emend search 'print($X)' 'src/**/*.py'
+
+   # Equivalent using :: file scope
+   emend search 'src/**/*.py::print($X)'
 
 JSON output
 -----------

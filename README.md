@@ -214,7 +214,8 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 ### Search & Read
 
 **`search`** - Unified search with auto-detection
-- Pattern mode: `emend search 'print($X)' file.py`
+- Pattern mode: `emend search 'print($X)' file.py` or `emend search '**::print($X)'`
+- Literal pattern: `emend search '**::assert False'` or `emend search 'src/::import os'`
 - Lookup mode: `emend search file.py::func`
 - Summary mode: `emend search file.py` (list symbols)
 - Filters: `--kind`, `--name`, `--returns`, `--depth`, `--has-param`, `--output`, `--where`, `--imported-from`, `--scope-local`
