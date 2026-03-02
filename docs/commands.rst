@@ -4,7 +4,7 @@ Commands Reference
 search
 ------
 
-Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. If the query is a bare file/directory path with no filters, it shows a **symbol summary**. Otherwise, it uses **symbol lookup** mode.
+Unified search command that auto-detects the mode from the query. If the query contains metavariables (``$X``, ``$...Y``), it uses **pattern matching** mode. When ``::`` is present, the right side is auto-detected: if it parses as a valid selector, it uses **symbol lookup** mode; otherwise it's treated as a code pattern (e.g. ``**::assert False``). A bare file/directory path with no filters shows a **symbol summary**.
 
 Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuitive workflows.
 
@@ -14,8 +14,8 @@ Also available as: ``query``, ``show``, ``get``, ``lookup``, ``find`` for intuit
 
 **Arguments:**
 
-- ``QUERY`` -- A pattern with ``$X`` metavars (pattern mode), a selector like ``file.py::sym`` (lookup mode), or a bare file/dir path (summary/lookup mode)
-- ``PATH`` -- File, glob, or directory to search (pattern mode only)
+- ``QUERY`` -- A pattern with ``$X`` metavars (e.g. ``print($X)``), a selector (e.g. ``file.py::func``), a file-scoped pattern (e.g. ``**::assert False``), or a bare file/dir path (summary/lookup mode)
+- ``PATH`` -- File, glob, or directory to search (pattern mode). Alternative to embedding the file scope via ``::`` in the query.
 
 **Output format (--output / -o):**
 
@@ -26,7 +26,7 @@ Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MO
 +=====================+========================================+
 | ``code``            | Selector without component             |
 +---------------------+----------------------------------------+
-| ``location``        | Pattern mode (``$`` in query)          |
+| ``location``        | Pattern mode                           |
 +---------------------+----------------------------------------+
 | ``selector``        | Bare file/dir path with filters        |
 +---------------------+----------------------------------------+
@@ -102,12 +102,14 @@ Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MO
 
 .. code-block:: bash
 
-   # Pattern mode (has $):
+   # Pattern mode (has $ or non-selector after ::):
    emend search 'print($X)' src/
+   emend search '**::print($X)'
+   emend search '**::assert False'
+   emend search 'src/::import os'
    emend search 'assertEqual($A, $B)' tests/ --output count
-   emend search '$X = $Y' src/ --output selector
 
-   # Lookup mode (has :: or file path):
+   # Lookup mode (valid selector after ::):
    emend search file.py::func[params]
    emend search src/ --kind function
 

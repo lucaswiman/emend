@@ -3,6 +3,7 @@
 import glob as glob_mod
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -84,6 +85,68 @@ def parse_scope_in(scope_in: str | None, default_path: str | None = None) -> tup
         return scope, file_override
 
     return scope_in.split("."), None
+
+
+import re as _re_module
+
+
+@dataclass
+class QueryShape:
+    """Result of detecting a query's mode (pattern, selector, or line)."""
+    query: str
+    path: str | None
+    is_pattern_mode: bool
+    has_selector: bool
+    is_line_selector: bool
+
+
+def detect_query_shape(query: str, path: str | None = None) -> QueryShape:
+    """Detect whether a search query is a pattern, selector, or line selector.
+
+    When ``::`` is present, splits the file scope (left) from the query (right):
+    - Right side contains ``$`` → pattern mode (metavar search)
+    - Right side parses as a valid selector → selector mode (symbol lookup)
+    - Right side fails selector parse → pattern mode (literal code search)
+
+    Without ``::``; queries containing ``$`` use pattern mode.
+
+    Returns a ``QueryShape`` with possibly-modified ``query`` and ``path``.
+    """
+    is_line_selector = bool(_re_module.search(r':\d+(-\d+)?$', query))
+    is_pattern_mode = False
+    has_selector = False
+
+    if '::' in query and not is_line_selector:
+        _file_part, _right_part = query.split('::', 1)
+        if '$' in _right_part:
+            is_pattern_mode = True
+        else:
+            _sel_query = query if not query.startswith('::') else '**' + query
+            try:
+                parse_extended_selector(_sel_query)
+                has_selector = True
+            except Exception:
+                is_pattern_mode = True
+
+        if is_pattern_mode:
+            query = _right_part
+            _file_scope = _file_part.strip()
+            if not path:
+                if _file_scope and _file_scope != '**':
+                    path = _file_scope
+    elif '$' in query:
+        is_pattern_mode = True
+
+    if has_selector and query.startswith('::'):
+        query = '**' + query
+
+    return QueryShape(
+        query=query,
+        path=path,
+        is_pattern_mode=is_pattern_mode,
+        has_selector=has_selector,
+        is_line_selector=is_line_selector,
+    )
 
 
 _STRUCTURAL_KEYWORDS = (
@@ -241,11 +304,14 @@ def search(
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
-    If the query contains metavariables ($X, $...Y), uses pattern matching mode.
-    If the query contains :: or is a plain file path, uses symbol lookup mode.
-    A bare file/dir path with no filters shows a symbol summary.
-    A bare name that doesn't match any file is treated as a symbol search
-    across all Python files (equivalent to **::name).
+    The :: separator splits file scope (left) from query (right). The right
+    side is auto-detected as a pattern or selector:
+    - Contains $ metavariables → pattern mode
+    - Parses as valid selector (identifiers, dots, components) → selector mode
+    - Doesn't parse as selector (parens, operators, etc.) → pattern mode
+
+    Without ::, queries containing $ use pattern mode, bare names use symbol
+    lookup, and file/dir paths use summary mode.
 
     Output formats (--output):
         code          Full source of matched symbol(s) [default for selector]
@@ -271,7 +337,12 @@ def search(
         emend search 'print($X)' file.py
         emend search 'assertEqual($A, $B)' tests/ --output count
 
-        # Lookup mode (has :: or file path):
+        # Pattern mode with file scope (:: separator):
+        emend search '**::print($X)'
+        emend search 'src/::assert False'
+        emend search 'file.py::print()'
+
+        # Lookup mode (valid selector after ::):
         emend search file.py::func[params]
         emend search src/ --kind function --where '@app.command'
 
@@ -321,40 +392,13 @@ def search(
         output_base = parts[0]
         output_modifier = parts[1]
 
-    # Detect query shape
-    is_line_selector = _re.search(r':\d+(-\d+)?$', query) is not None
-    is_pattern_mode = False
-    has_selector = False
-
-    if '::' in query and not is_line_selector:
-        _file_part, _right_part = query.split('::', 1)
-        if '$' in _right_part:
-            # Metavar in the right side → definitely a pattern
-            is_pattern_mode = True
-        else:
-            # Try parsing as a selector; if it fails, the right side is a pattern.
-            # e.g. "**::assert False" or "**::print()" are patterns,
-            # while "**::MyClass.method" or "**::func[params]" are selectors.
-            _sel_query = query if not query.startswith('::') else '**' + query
-            try:
-                parse_extended_selector(_sel_query)
-                has_selector = True
-            except Exception:
-                is_pattern_mode = True
-
-        if is_pattern_mode:
-            # Extract file scope from before :: and use right side as the pattern
-            query = _right_part
-            _file_scope = _file_part.strip()
-            if not path:
-                if _file_scope and _file_scope != '**':
-                    path = _file_scope
-    elif '$' in query:
-        is_pattern_mode = True
-
-    # Normalize ::name → **::name (unspecified path defaults to recursive search)
-    if has_selector and query.startswith('::'):
-        query = '**' + query
+    # Detect query shape (shared logic with MCP server)
+    _shape = detect_query_shape(query, path)
+    query = _shape.query
+    path = _shape.path
+    is_pattern_mode = _shape.is_pattern_mode
+    has_selector = _shape.has_selector
+    is_line_selector = _shape.is_line_selector
 
     # If query looks like a file path/glob/directory (no $ or ::) but --where
     # provides a pattern (has $), the user likely intended:

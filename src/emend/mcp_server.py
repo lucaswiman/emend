@@ -85,9 +85,20 @@ Selectors identify symbols and their components in Python files.
 ### File globs
   'src/**/*.py::func'            # match across files
 
+### File scope with patterns
+  '**::print($X)'               # search all files for pattern
+  'src/::assert False'           # search src/ for literal pattern
+  'file.py::print()'             # search one file for pattern
+
+When :: is present, the right side is auto-detected as a pattern or selector:
+- Contains $ → pattern mode (metavar search)
+- Parses as valid selector → selector mode (symbol lookup)
+- Doesn't parse as selector → pattern mode (literal code search)
+
 ## Pattern syntax
 
 Patterns match code structures using metavariables (prefixed with $).
+Patterns can also be literal code without metavariables (e.g. 'assert False').
 
 ### Metavariables
   $X                # capture any single expression
@@ -151,8 +162,20 @@ def _capture_output(func: Any, *args: Any, **kwargs: Any) -> str:
 
 @mcp_app.tool()
 def search(
-    query: Annotated[str, Field(description="Pattern with $X metavars (e.g. 'print($X)'), selector (e.g. 'file.py::func'), or file/dir path.")],
-    path: Annotated[str | None, Field(description="File, glob, or directory to search in (pattern mode).")] = None,
+    query: Annotated[str, Field(description=(
+        "What to search for. Can be: "
+        "(1) a code pattern with $-metavars: 'print($X)', 'assert $A == $B'; "
+        "(2) a literal code pattern: 'assert False', 'import os'; "
+        "(3) a symbol selector: 'MyClass.method', 'func[params]'; "
+        "(4) a file/dir path for symbol summary. "
+        "The file scope can be embedded with :: (e.g. 'src/::print($X)') "
+        "but prefer using the separate 'files' parameter instead."
+    ))],
+    files: Annotated[str | None, Field(description=(
+        "File scope: a file path, glob pattern, or directory. "
+        "Examples: 'src/', '**/*.py', 'file.py'. "
+        "Defaults to current directory (all Python files)."
+    ))] = None,
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, method, class, async_function, async_method.")] = None,
     name: Annotated[str | None, Field(description="Name pattern filter (glob like 'test_*' or /regex/).")] = None,
     returns: Annotated[str | None, Field(description="Return type filter.")] = None,
@@ -167,13 +190,17 @@ def search(
 ) -> str:
     """Search for code patterns or symbols in Python files.
 
-    Three modes (auto-detected from query):
-    - Pattern mode: query contains $X metavariables (e.g. 'print($X)')
-    - Lookup mode:  query contains :: or is file:line (e.g. 'file.py::func')
-    - Summary mode:  bare file/directory path lists symbols
+    Mode is auto-detected from the query:
+    - Pattern mode: query has $-metavars ('print($X)') or isn't a valid
+      symbol selector ('assert False', 'import os')
+    - Lookup mode: query is a symbol selector ('MyClass.method', 'func[params]')
+    - Summary mode: query is a bare file/dir path with no filters
+
+    For pattern searches, set ``files`` to scope the search. For symbol
+    lookups, embed the file in the query ('file.py::func') or set ``files``.
     """
     import re as _re
-    from emend.cli import resolve_files, parse_where_clause
+    from emend.cli import resolve_files, parse_where_clause, detect_query_shape
 
     where_params = parse_where_clause([where] if where else [])
     where_scope = where_params.get("scope")
@@ -188,9 +215,12 @@ def search(
         output_base = parts[0]
         output_modifier = parts[1]
 
-    is_pattern_mode = "$" in query
-    is_line_selector = _re.search(r":\d+(-\d+)?$", query) is not None
-    has_selector = "::" in query and not is_pattern_mode
+    _shape = detect_query_shape(query, files)
+    query = _shape.query
+    files = _shape.path
+    is_pattern_mode = _shape.is_pattern_mode
+    has_selector = _shape.has_selector
+    is_line_selector = _shape.is_line_selector
 
     lookup_has_decorator: list[str] | None = None
     lookup_in_class: list[str] | None = None
@@ -280,12 +310,12 @@ def search(
 
     # --- Pattern mode ---
     if is_pattern_mode:
-        target_path = path or "."
+        target_path = files or "."
         import libcst as cst
 
-        files, is_multi_file = resolve_files(target_path)
+        resolved_files, is_multi_file = resolve_files(target_path)
         all_matches: list[tuple[str, Any]] = []
-        for file_path in files:
+        for file_path in resolved_files:
             file_path_str = str(file_path)
             try:
                 file_matches = find_pattern(

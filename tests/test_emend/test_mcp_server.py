@@ -68,7 +68,7 @@ def test_search_pattern(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("print('hello')\nprint('world')\n")
 
-    result = search(query="print($X)", path=str(p), output="json")
+    result = search(query="print($X)", files=str(p), output="json")
     data = json.loads(result)
     assert data["count"] == 2
     assert len(data["matches"]) == 2
@@ -78,7 +78,7 @@ def test_search_pattern_location(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("x = 1\ny = 2\n")
 
-    result = search(query="$X = $Y", path=str(p), output="location")
+    result = search(query="$X = $Y", files=str(p), output="location")
     assert str(p) in result
 
 
@@ -86,7 +86,7 @@ def test_search_pattern_count(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("a = 1\nb = 2\nc = 3\n")
 
-    result = search(query="$X = $Y", path=str(p), output="count")
+    result = search(query="$X = $Y", files=str(p), output="count")
     assert result.strip() == "3"
 
 
