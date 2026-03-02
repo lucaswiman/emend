@@ -1174,10 +1174,6 @@ def compile_pattern_to_matcher(pattern: Pattern) -> tuple[m.BaseMatcherNode, dic
     return matcher, ellipsis_info
 
 
-def compile_pattern_to_libcst(pattern: Pattern):
-    """Compile pattern to LibCST matcher. (Deprecated - use compile_pattern_to_matcher)"""
-    return compile_pattern_to_matcher(pattern)
-
 
 # ---------------------------------------------------------------------------
 # Rust IR compiler (for tree-sitter fast path)

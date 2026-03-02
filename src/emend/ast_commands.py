@@ -17,7 +17,6 @@ from emend.ast_utils import (
     find_nested_definitions,
     find_symbol_by_path,
     find_symbol_by_line,
-    get_byte_offset,
 )
 
 
@@ -511,21 +510,3 @@ def collect_symbols(
     if result_dicts:
         return dicts_to_tree_symbols(result_dicts[0][1])
     return []
-
-
-def cmd_list_symbols(
-    file: str,
-    project: Optional[str] = None,
-    tree_depth: int | None = None,
-    flat: bool = False,
-    selector: Optional[str] = None,
-):
-    """List symbols in a module using LibCST."""
-    symbols = collect_symbols(file, tree_depth=tree_depth, selector=selector)
-
-    print(f"\nModule: {file}")
-    if symbols:
-        if flat:
-            _print_symbol_flat(symbols)
-        else:
-            _print_symbol_tree(symbols, indent=1)

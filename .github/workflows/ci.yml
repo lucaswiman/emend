@@ -22,3 +22,6 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Check for dead code
+        run: make deadcode

@@ -258,12 +258,3 @@ def get_symbol_source(filepath: str, symbol: NestedSymbol, dedent: bool = False)
             source = ''.join(dedented_lines)
 
     return source
-
-
-def get_byte_offset(filepath: str, line: int, col: int = 0) -> int:
-    """Get the byte offset for a line and column."""
-    with open(filepath) as f:
-        lines = f.readlines()
-
-    offset = sum(len(lines[i]) for i in range(line - 1))
-    return offset + col
