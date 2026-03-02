@@ -759,59 +759,51 @@ def multi_file_project(tmp_path):
 
 
 class TestPatternPrefilter:
-    def test_candidate_files_narrows_scope(self, multi_file_project):
+    def test_index_prefilter_narrows_scope(self, multi_file_project):
         """Index prefilter should return only files containing the literal."""
-        from emend.editor_search import EditorSearchEngine
+        from emend.transform import _index_prefilter
 
-        engine = EditorSearchEngine(str(multi_file_project))
+        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
         try:
-            all_files = [
-                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
-            ]
             # "sqrt" only appears in b.py
-            candidates = engine._candidate_files_for_literals(
-                ["sqrt"], all_files
-            )
-            assert len(candidates) < len(all_files)
+            candidates = _index_prefilter(["sqrt"], conn)
+            assert candidates is not None
             assert any("b.py" in f for f in candidates)
         finally:
-            engine.close()
+            conn.close()
 
-    def test_candidate_files_intersection(self, multi_file_project):
+    def test_index_prefilter_intersection(self, multi_file_project):
         """Multiple literals should intersect — only files with ALL literals."""
-        from emend.editor_search import EditorSearchEngine
+        from emend.transform import _index_prefilter
 
-        engine = EditorSearchEngine(str(multi_file_project))
+        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
         try:
-            all_files = [
-                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
-            ]
             # "math" and "sqrt" both in b.py only
-            candidates = engine._candidate_files_for_literals(
-                ["math", "sqrt"], all_files
-            )
+            candidates = _index_prefilter(["math", "sqrt"], conn)
+            assert candidates is not None
             assert len(candidates) <= 1
             if candidates:
                 assert any("b.py" in f for f in candidates)
         finally:
-            engine.close()
+            conn.close()
 
-    def test_candidate_files_unknown_literal_falls_back(self, multi_file_project):
-        """Unknown literal not in the index should fall back to all files."""
-        from emend.editor_search import EditorSearchEngine
+    def test_index_prefilter_unknown_literal_returns_none(self, multi_file_project):
+        """Unknown literal not in the index should return None (no useful data)."""
+        from emend.transform import _index_prefilter
 
-        engine = EditorSearchEngine(str(multi_file_project))
+        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
         try:
-            all_files = [
-                str(multi_file_project / f) for f in ["a.py", "b.py", "c.py"]
-            ]
-            candidates = engine._candidate_files_for_literals(
-                ["xyzzy_nonexistent"], all_files
-            )
-            # Should fall back to the full list
-            assert candidates == all_files
+            candidates = _index_prefilter(["xyzzy_nonexistent"], conn)
+            # Should return None — index had nothing useful
+            assert candidates is None
         finally:
-            engine.close()
+            conn.close()
 
     def test_pattern_search_single_file(self, multi_file_project):
         """Pattern search on a single file should work without prefilter."""

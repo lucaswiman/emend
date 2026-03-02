@@ -17,6 +17,7 @@ from emend.transform import (
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph, find_dead_code,
     extract_pattern_literals, warm_caches,
+    find_pattern_in_project,
 )
 from emend import ast_commands
 
@@ -644,81 +645,17 @@ def search(
             # Build a lazy iterator over all matches, yielding as each file completes.
             # This allows streaming output rather than collecting everything first.
             def _iter_matches():
-                if is_multi_file and len(file_strs) > 1:
-                    literals = extract_pattern_literals(query)
-                    _logger.info("pattern literals for pre-filter: %r", literals)
-                    _t1 = _time.monotonic()
-                    file_contents = emend_core.read_and_filter_files(file_strs, literals)
-                    _logger.info("read_and_filter_files: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t1)
-
-                    # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
-                    rust_path_used = False
-                    if where_scope is None and imported_from is None and not scope_local and oracle is None:
-                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
-                        from emend.transform import PatternMatch
-                        pattern_ir = compile_pattern_to_rust_ir(query)
-                        if pattern_ir is not None:
-                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
-                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
-                            if (where_inside is None or inside_ir is not None) and \
-                               (where_not_inside is None or not_inside_ir is not None):
-                                _t1 = _time.monotonic()
-                                raw_matches = emend_core.find_pattern_in_files(
-                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
-                                )
-                                _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t1)
-                                for file_path_str, line, col, end_line, end_col, text in raw_matches:
-                                    yield (file_path_str, PatternMatch(
-                                        node=None, captures={}, line=line, matched_text=text,
-                                        end_line=end_line, col=col, end_col=end_col,
-                                    ))
-                                rust_path_used = True
-                        else:
-                            _logger.info("pattern could not be compiled to Rust IR, falling back to Python")
-
-                    if not rust_path_used:
-                        _logger.info("python path: processing %d files", len(file_contents))
-                        _t1 = _time.monotonic()
-
-                        def _find_one(args):
-                            fp, content = args
-                            try:
-                                return [(fp, m) for m in find_pattern(
-                                    query, fp,
-                                    scope=where_scope,
-                                    inside=where_inside,
-                                    not_inside=where_not_inside,
-                                    imported_from=imported_from,
-                                    scope_local=scope_local,
-                                    source_override=content,
-                                    type_oracle=oracle,
-                                )]
-                            except Exception:
-                                return []
-
-                        from concurrent.futures import ThreadPoolExecutor as _TPE
-                        n_py = 0
-                        with _TPE() as _executor:
-                            for batch in _executor.map(_find_one, file_contents):
-                                n_py += len(batch)
-                                yield from batch
-                        _logger.info("python path: %d matches in %.3fs", n_py, _time.monotonic() - _t1)
-                else:
-                    for fstr in file_strs:
-                        try:
-                            for match in find_pattern(
-                                query, fstr,
-                                scope=where_scope,
-                                inside=where_inside,
-                                not_inside=where_not_inside,
-                                imported_from=imported_from,
-                                scope_local=scope_local,
-                                type_oracle=oracle,
-                            ):
-                                yield (fstr, match)
-                        except FileNotFoundError:
-                            if not is_multi_file:
-                                raise
+                project_matches = find_pattern_in_project(
+                    query, file_strs,
+                    scope=where_scope,
+                    inside=where_inside,
+                    not_inside=where_not_inside,
+                    imported_from=imported_from,
+                    scope_local=scope_local,
+                    type_oracle=oracle,
+                )
+                for pm in project_matches:
+                    yield (pm.file_path, pm.match)
 
             if count_output:
                 n_total = sum(1 for _ in _iter_matches())

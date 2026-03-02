@@ -22,6 +22,7 @@ from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
 
 if TYPE_CHECKING:
+    import sqlite3
     from .type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
@@ -1684,6 +1685,238 @@ def extract_pattern_literals(pattern_str: str) -> list[str]:
                     'lambda', 'global', 'nonlocal', 'del', 'assert', 'async',
                     'await'}
     return [t for t in tokens if t not in _PY_KEYWORDS and len(t) > 1]
+
+
+@dataclass
+class ProjectPatternMatch:
+    """A pattern match paired with its originating file path."""
+    file_path: str
+    match: PatternMatch
+
+
+def find_pattern_in_project(
+    pattern_str: str,
+    file_paths: list[str],
+    *,
+    scope: list[str] | None = None,
+    inside: str | None = None,
+    not_inside: str | None = None,
+    imported_from: str | None = None,
+    scope_local: bool = False,
+    type_oracle: TypeOracle | None = None,
+    index_conn: sqlite3.Connection | None = None,
+    limit: int | None = None,
+) -> list[ProjectPatternMatch]:
+    """Search for a pattern across multiple files.
+
+    Four-stage pipeline, each stage reducing the file set:
+
+    1. **Index prefilter** (optional) — if *index_conn* is provided,
+       query ``reference_index`` / ``symbol_index`` for files that
+       mention the pattern's literal identifiers.
+    2. **Rust string-contains filter** — ``read_and_filter_files``
+       drops files whose text doesn't contain every required literal.
+    3. **Rust tree-sitter batch** — if the pattern compiles to Rust IR
+       and no advanced constraints are active, match all files at once
+       in Rust.
+    4. **Python/LibCST fallback** — parse and match remaining files
+       with LibCST, in parallel via ``ThreadPoolExecutor``.
+
+    Returns a list of ``ProjectPatternMatch`` (file_path + match).
+    """
+    # Validate constraints eagerly so callers see errors immediately.
+    if inside and not_inside:
+        raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
+
+    is_single_file = len(file_paths) == 1
+
+    literals = extract_pattern_literals(pattern_str)
+
+    # --- Stage 1: index prefilter ---
+    if literals and index_conn is not None and not is_single_file:
+        candidate_set = _index_prefilter(literals, index_conn)
+        if candidate_set is not None:
+            before = len(file_paths)
+            file_paths = [f for f in file_paths if f in candidate_set]
+            logger.debug(
+                "index prefilter: %d → %d files", before, len(file_paths),
+            )
+            if not file_paths:
+                return []
+
+    # --- Stage 2: Rust string-contains filter ---
+    if literals and len(file_paths) > 1:
+        try:
+            file_contents: list[tuple[str, str]] = _rust.read_and_filter_files(
+                file_paths, literals,
+            )
+        except Exception:
+            file_contents = _read_and_filter_py(file_paths, literals)
+    else:
+        file_contents = []
+        for fp in file_paths:
+            try:
+                file_contents.append((fp, Path(fp).read_text()))
+            except OSError:
+                # For single-file requests, propagate not-found so callers
+                # can report a meaningful error.
+                if is_single_file:
+                    raise FileNotFoundError(f"File not found: {fp}")
+                pass
+
+    logger.debug(
+        "string-contains filter: %d files surviving", len(file_contents),
+    )
+
+    if not file_contents:
+        return []
+
+    # --- Stage 3: Rust batch fast-path ---
+    has_constraints = (
+        scope is not None
+        or imported_from is not None
+        or scope_local
+        or type_oracle is not None
+    )
+
+    if not has_constraints:
+        from emend.pattern import (
+            compile_pattern_to_rust_ir,
+            compile_constraint_to_rust_ir,
+        )
+
+        pattern_ir = compile_pattern_to_rust_ir(pattern_str)
+        if pattern_ir is not None:
+            inside_ir = (
+                compile_constraint_to_rust_ir(inside) if inside else None
+            )
+            not_inside_ir = (
+                compile_constraint_to_rust_ir(not_inside)
+                if not_inside
+                else None
+            )
+            if (inside is None or inside_ir is not None) and (
+                not_inside is None or not_inside_ir is not None
+            ):
+                try:
+                    raw = _rust.find_pattern_in_files(
+                        list(file_contents), pattern_ir,
+                        inside_ir, not_inside_ir,
+                    )
+                    results = [
+                        ProjectPatternMatch(
+                            file_path=fp,
+                            match=PatternMatch(
+                                node=None, captures={},
+                                line=line, end_line=end_line,
+                                col=col, end_col=end_col,
+                                matched_text=text,
+                            ),
+                        )
+                        for fp, line, col, end_line, end_col, text in raw
+                    ]
+                    if limit is not None:
+                        results = results[:limit]
+                    return results
+                except Exception:
+                    logger.debug("Rust batch path failed, falling back")
+
+    # --- Stage 4: Python/LibCST fallback (parallel) ---
+    results: list[ProjectPatternMatch] = []
+
+    if is_single_file:
+        # Single file: call directly so errors propagate to caller.
+        fp, content = file_contents[0]
+        matches = find_pattern(
+            pattern_str, fp,
+            scope=scope, inside=inside, not_inside=not_inside,
+            imported_from=imported_from, scope_local=scope_local,
+            source_override=content, type_oracle=type_oracle,
+        )
+        results = [ProjectPatternMatch(file_path=fp, match=m) for m in matches]
+        if limit is not None:
+            results = results[:limit]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _find_one(args: tuple[str, str]) -> list[ProjectPatternMatch]:
+            fp, content = args
+            try:
+                matches = find_pattern(
+                    pattern_str, fp,
+                    scope=scope, inside=inside, not_inside=not_inside,
+                    imported_from=imported_from, scope_local=scope_local,
+                    source_override=content, type_oracle=type_oracle,
+                )
+                return [ProjectPatternMatch(file_path=fp, match=m) for m in matches]
+            except Exception:
+                return []
+
+        with ThreadPoolExecutor() as executor:
+            for batch in executor.map(_find_one, file_contents):
+                results.extend(batch)
+                if limit is not None and len(results) >= limit:
+                    results = results[:limit]
+                    break
+
+    return results
+
+
+def _index_prefilter(
+    literals: list[str],
+    conn: sqlite3.Connection,
+) -> set[str] | None:
+    """Query the index for files likely to contain *literals*.
+
+    Returns a set of file paths, or ``None`` if the index has no useful
+    data (caller should skip this stage).
+    """
+    per_literal: list[set[str]] = []
+    for lit in literals:
+        files_for_lit: set[str] = set()
+        try:
+            for (fp,) in conn.execute(
+                "SELECT DISTINCT file_path FROM reference_index "
+                "WHERE target_qn LIKE ?",
+                ("%" + lit + "%",),
+            ):
+                files_for_lit.add(fp)
+        except Exception:
+            pass
+        try:
+            for (fp,) in conn.execute(
+                "SELECT DISTINCT file_path FROM symbol_index "
+                "WHERE name = ? OR qualified_name LIKE ?",
+                (lit, "%" + lit + "%"),
+            ):
+                files_for_lit.add(fp)
+        except Exception:
+            pass
+        if files_for_lit:
+            per_literal.append(files_for_lit)
+
+    if not per_literal:
+        return None
+
+    candidates = per_literal[0]
+    for s in per_literal[1:]:
+        candidates &= s
+    return candidates
+
+
+def _read_and_filter_py(
+    file_paths: list[str], literals: list[str],
+) -> list[tuple[str, str]]:
+    """Pure-Python fallback for Rust ``read_and_filter_files``."""
+    results: list[tuple[str, str]] = []
+    for fp in file_paths:
+        try:
+            content = Path(fp).read_text()
+            if all(lit in content for lit in literals):
+                results.append((fp, content))
+        except Exception:
+            pass
+    return results
 
 
 # Helper functions for cross-project operations
