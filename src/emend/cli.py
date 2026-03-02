@@ -17,6 +17,7 @@ from emend.transform import (
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph, find_dead_code,
     extract_pattern_literals, warm_caches,
+    find_pattern_in_project,
 )
 from emend import ast_commands
 
@@ -621,81 +622,17 @@ def search(
             # Build a lazy iterator over all matches, yielding as each file completes.
             # This allows streaming output rather than collecting everything first.
             def _iter_matches():
-                if is_multi_file and len(file_strs) > 1:
-                    literals = extract_pattern_literals(query)
-                    _logger.info("pattern literals for pre-filter: %r", literals)
-                    _t1 = _time.monotonic()
-                    file_contents = emend_core.read_and_filter_files(file_strs, literals)
-                    _logger.info("read_and_filter_files: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t1)
-
-                    # Try Rust batch fast-path (no scope/imported_from/scope_local/type_oracle constraints)
-                    rust_path_used = False
-                    if where_scope is None and imported_from is None and not scope_local and oracle is None:
-                        from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
-                        from emend.transform import PatternMatch
-                        pattern_ir = compile_pattern_to_rust_ir(query)
-                        if pattern_ir is not None:
-                            inside_ir = compile_constraint_to_rust_ir(where_inside) if where_inside else None
-                            not_inside_ir = compile_constraint_to_rust_ir(where_not_inside) if where_not_inside else None
-                            if (where_inside is None or inside_ir is not None) and \
-                               (where_not_inside is None or not_inside_ir is not None):
-                                _t1 = _time.monotonic()
-                                raw_matches = emend_core.find_pattern_in_files(
-                                    list(file_contents), pattern_ir, inside_ir, not_inside_ir
-                                )
-                                _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t1)
-                                for file_path_str, line, col, end_line, end_col, text in raw_matches:
-                                    yield (file_path_str, PatternMatch(
-                                        node=None, captures={}, line=line, matched_text=text,
-                                        end_line=end_line, col=col, end_col=end_col,
-                                    ))
-                                rust_path_used = True
-                        else:
-                            _logger.info("pattern could not be compiled to Rust IR, falling back to Python")
-
-                    if not rust_path_used:
-                        _logger.info("python path: processing %d files", len(file_contents))
-                        _t1 = _time.monotonic()
-
-                        def _find_one(args):
-                            fp, content = args
-                            try:
-                                return [(fp, m) for m in find_pattern(
-                                    query, fp,
-                                    scope=where_scope,
-                                    inside=where_inside,
-                                    not_inside=where_not_inside,
-                                    imported_from=imported_from,
-                                    scope_local=scope_local,
-                                    source_override=content,
-                                    type_oracle=oracle,
-                                )]
-                            except Exception:
-                                return []
-
-                        from concurrent.futures import ThreadPoolExecutor as _TPE
-                        n_py = 0
-                        with _TPE() as _executor:
-                            for batch in _executor.map(_find_one, file_contents):
-                                n_py += len(batch)
-                                yield from batch
-                        _logger.info("python path: %d matches in %.3fs", n_py, _time.monotonic() - _t1)
-                else:
-                    for fstr in file_strs:
-                        try:
-                            for match in find_pattern(
-                                query, fstr,
-                                scope=where_scope,
-                                inside=where_inside,
-                                not_inside=where_not_inside,
-                                imported_from=imported_from,
-                                scope_local=scope_local,
-                                type_oracle=oracle,
-                            ):
-                                yield (fstr, match)
-                        except FileNotFoundError:
-                            if not is_multi_file:
-                                raise
+                project_matches = find_pattern_in_project(
+                    query, file_strs,
+                    scope=where_scope,
+                    inside=where_inside,
+                    not_inside=where_not_inside,
+                    imported_from=imported_from,
+                    scope_local=scope_local,
+                    type_oracle=oracle,
+                )
+                for pm in project_matches:
+                    yield (pm.file_path, pm.match)
 
             if count_output:
                 n_total = sum(1 for _ in _iter_matches())
@@ -2088,6 +2025,107 @@ def index_cmd(
         f"Indexed {stats['files']} files in {elapsed:.1f}s ({detail})",
         file=sys.stderr,
     )
+
+
+@app.command("editor-search")
+def editor_search_cmd(
+    query: Annotated[str, typer.Argument(help="Search query (symbol name, pattern with $, or selector with ::)")],
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root or file scope")
+    ] = ".",
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Max results")
+    ] = 50,
+    kind: Annotated[
+        Optional[str],
+        typer.Option("--kind", help="Symbol kind filter (function, class, method)")
+    ] = None,
+    mode: Annotated[
+        Optional[str],
+        typer.Option("--mode", help="Force search mode: symbol, pattern, selector, references")
+    ] = None,
+    file_scope: Annotated[
+        Optional[str],
+        typer.Option("--file", "-f", help="Restrict to file path (substring match)")
+    ] = None,
+):
+    """Fast one-shot search (JSON output) for editor integration.
+
+    Auto-detects search mode from the query:
+    - Contains ``$`` → pattern search (``print($X)``)
+    - Contains ``::`` → selector resolution (``file.py::Class.method``)
+    - Otherwise → symbol name search
+
+    Supports partial/incomplete patterns: ``foo(bar, $`` is auto-closed
+    to ``foo(bar, $_)`` for matching.
+
+    Examples:
+        emend editor-search parse
+        emend editor-search 'parse_pattern' --kind function
+        emend editor-search 'src/emend/pattern.py::parse'
+        emend editor-search 'print($X)' src/
+        emend editor-search 'foo(bar, $' src/
+    """
+    from emend.editor_search import EditorSearchEngine
+
+    engine = EditorSearchEngine(path)
+    try:
+        if mode == "references":
+            result = engine.search_references(query, limit=limit)
+        elif mode == "pattern":
+            result = engine.search_pattern(query, limit=limit, file_scope=file_scope)
+        elif mode == "symbols":
+            result = engine.search_symbols(query, limit=limit, file_scope=file_scope, kind=kind)
+        elif mode == "selector":
+            result = engine.resolve_selector(query, limit=limit)
+        else:
+            result = engine.search(query, limit=limit, file_scope=file_scope, kind=kind)
+
+        import json as _json
+        from dataclasses import asdict as _asdict
+        print(_json.dumps(_asdict(result), default=str))
+    finally:
+        engine.close()
+
+
+@app.command("editor-server")
+def editor_server_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Project root directory")
+    ] = ".",
+):
+    """Start a long-running search server for editor plugins (stdio JSON-RPC).
+
+    Keeps the SQLite index and FTS5 trigram table warm in memory,
+    giving sub-100ms response times for symbol search, pattern
+    matching, and reference lookup.
+
+    Each request is a JSON line on stdin, each response a JSON line on stdout.
+
+    Methods:
+        search         — auto-detect mode (symbol/pattern/selector)
+        symbols        — symbol name search
+        pattern        — code pattern search (supports partial input)
+        references     — find references by qualified name
+        selector       — resolve a selector (file.py::Class.method)
+        file_symbols   — file outline
+        status         — index status
+        reindex        — refresh stale files + rebuild FTS
+        shutdown       — clean exit
+
+    Examples:
+        emend editor-server
+        emend editor-server src/
+
+        # From the editor, send requests on stdin:
+        {"id": 1, "method": "search", "params": {"query": "parse"}}
+    """
+    from emend.editor_search import run_editor_server
+
+    run_editor_server(path)
 
 
 @app.command("mcp")
