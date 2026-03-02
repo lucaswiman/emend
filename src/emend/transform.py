@@ -29,6 +29,64 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Git worktree support: resolve cache path to main repo
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=4)
+def _resolve_cache_root(project_root: str | Path) -> Path:
+    """Return the main repo root for cache storage.
+
+    In a git worktree, the cache lives in the main repo so all
+    worktrees share a single parse.db.  For non-worktree repos
+    (or non-git projects), returns *project_root* unchanged.
+    """
+    root = Path(project_root).resolve()
+    git_path = root / ".git"
+
+    if git_path.is_file():
+        # Worktree: .git is a file like "gitdir: /main/.git/worktrees/foo"
+        try:
+            text = git_path.read_text().strip()
+        except OSError:
+            return root
+        if text.startswith("gitdir:"):
+            gitdir = Path(text.split(":", 1)[1].strip())
+            if not gitdir.is_absolute():
+                gitdir = (root / gitdir).resolve()
+            # gitdir is e.g. /main/repo/.git/worktrees/my-wt
+            # The commondir file points to the main .git
+            commondir_file = gitdir / "commondir"
+            if commondir_file.is_file():
+                try:
+                    commondir = commondir_file.read_text().strip()
+                    main_git_dir = (gitdir / commondir).resolve()
+                    # main_git_dir is /main/repo/.git → parent is /main/repo
+                    return main_git_dir.parent
+                except OSError:
+                    pass
+
+    # Not a worktree (or not git at all) — use project_root as-is
+    return root
+
+
+def _cache_db_dir(project_root: str | Path) -> Path:
+    """Return the directory for the shared cache DB."""
+    main_root = _resolve_cache_root(project_root)
+    return main_root / ".emend" / "cache"
+
+
+@lru_cache(maxsize=4)
+def _get_worktree_id(project_root: str | Path) -> str:
+    """Return a stable identifier for the current working tree.
+
+    This is the resolved absolute path of *project_root*.  Each worktree
+    gets its own manifest rows keyed by this ID, while sharing all
+    content-hashed cache data.
+    """
+    return str(Path(project_root).resolve())
+
+
+# ---------------------------------------------------------------------------
 # Module parse cache: avoids re-parsing the same source text
 # ---------------------------------------------------------------------------
 # Two-tier cache:
@@ -57,7 +115,7 @@ def _get_disk_cache() -> sqlite3.Connection | None:
         try:
             import sqlite3
             root = _find_project_root(".")
-            cache_dir = Path(root) / ".emend" / "cache"
+            cache_dir = _cache_db_dir(root)
             cache_dir.mkdir(parents=True, exist_ok=True)
             # Ensure ignore files exist so cache DB is never checked in
             _ensure_cache_ignore_files(root)
@@ -80,16 +138,22 @@ def _get_disk_cache() -> sqlite3.Connection | None:
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS file_manifest ("
-                "  path TEXT PRIMARY KEY,"
+                "  worktree_id TEXT NOT NULL DEFAULT '',"
+                "  path TEXT NOT NULL,"
                 "  mtime_ns INTEGER NOT NULL,"
                 "  size INTEGER NOT NULL,"
                 "  content_hash BLOB NOT NULL,"
-                "  indexed_at REAL NOT NULL"
+                "  indexed_at REAL NOT NULL,"
+                "  PRIMARY KEY (worktree_id, path)"
                 ")"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
                 "ON file_manifest(content_hash)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_manifest_worktree "
+                "ON file_manifest(worktree_id)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS symbol_index ("
@@ -831,6 +895,7 @@ def _scan_manifest(
     )
 
     project_root = _find_project_root(project_path)
+    worktree_id = _get_worktree_id(project_root)
     scan_root = str(Path(project_path).resolve())
     py_files = _collect_python_files_scandir(scan_root)
     py_files_resolved = {str(Path(f).resolve()): f for f in py_files}
@@ -838,7 +903,7 @@ def _scan_manifest(
     # Open DB (use provided conn or open fresh)
     close_conn = False
     if conn is None:
-        cache_dir = Path(project_root) / ".emend" / "cache"
+        cache_dir = _cache_db_dir(project_root)
         db_path = cache_dir / "parse.db"
         if not db_path.exists():
             # No index at all — everything is new
@@ -853,7 +918,8 @@ def _scan_manifest(
             return result
 
     try:
-        # Tier 1: Git HEAD check
+        # Tier 1: Git HEAD check (scoped to this worktree)
+        git_head_key = f"git_head:{worktree_id}"
         try:
             import subprocess as _sp
             git_result = _sp.run(
@@ -864,7 +930,8 @@ def _scan_manifest(
             if git_result.returncode == 0:
                 current_head = git_result.stdout.decode().strip()
                 stored = conn.execute(
-                    "SELECT value FROM index_meta WHERE key = 'git_head'"
+                    "SELECT value FROM index_meta WHERE key = ?",
+                    (git_head_key,),
                 ).fetchone()
                 if stored and stored[0] != current_head:
                     result.git_head_changed = True
@@ -872,11 +939,13 @@ def _scan_manifest(
             pass
 
         # Tier 2 + 3: Stat scan + hash verification
-        # Load manifest into memory for fast lookup
+        # Load manifest into memory for fast lookup (filtered by worktree)
         manifest: dict[str, tuple[int, int, bytes]] = {}
         try:
             for row in conn.execute(
-                "SELECT path, mtime_ns, size, content_hash FROM file_manifest"
+                "SELECT path, mtime_ns, size, content_hash FROM file_manifest "
+                "WHERE worktree_id = ?",
+                (worktree_id,),
             ).fetchall():
                 manifest[row[0]] = (row[1], row[2], row[3])
         except Exception:
@@ -920,8 +989,8 @@ def _scan_manifest(
                     try:
                         conn.execute(
                             "UPDATE file_manifest SET mtime_ns = ?, size = ? "
-                            "WHERE path = ?",
-                            (st.st_mtime_ns, st.st_size, resolved_path),
+                            "WHERE worktree_id = ? AND path = ?",
+                            (st.st_mtime_ns, st.st_size, worktree_id, resolved_path),
                         )
                         conn.commit()
                     except Exception:
@@ -953,7 +1022,8 @@ def _ensure_index_fresh(
     import sqlite3 as _sql3
 
     project_root = _find_project_root(project_path)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    worktree_id = _get_worktree_id(project_root)
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
     if not db_path.exists():
         return False
@@ -970,7 +1040,7 @@ def _ensure_index_fresh(
             ver = conn.execute(
                 "SELECT value FROM index_meta WHERE key = 'schema_version'"
             ).fetchone()
-            if ver is None or ver[0] != "3":
+            if ver is None or ver[0] != "4":
                 conn.close()
                 return False
         except Exception:
@@ -1039,9 +1109,9 @@ def _ensure_index_fresh(
                     st = _os.stat(resolved)
                     conn.execute(
                         "INSERT OR REPLACE INTO file_manifest "
-                        "(path, mtime_ns, size, content_hash, indexed_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (resolved, st.st_mtime_ns, st.st_size, content_hash, now),
+                        "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now),
                     )
                 except Exception:
                     pass
@@ -1052,8 +1122,9 @@ def _ensure_index_fresh(
             try:
                 # Get the content_hash for this path to clean derived tables
                 row = conn.execute(
-                    "SELECT content_hash FROM file_manifest WHERE path = ?",
-                    (deleted_path,),
+                    "SELECT content_hash FROM file_manifest "
+                    "WHERE worktree_id = ? AND path = ?",
+                    (worktree_id, deleted_path),
                 ).fetchone()
                 if row:
                     old_hash = row[0]
@@ -1067,7 +1138,8 @@ def _ensure_index_fresh(
                         "DELETE FROM reference_index WHERE content_hash = ?", (old_hash,)
                     )
                 conn.execute(
-                    "DELETE FROM file_manifest WHERE path = ?", (deleted_path,)
+                    "DELETE FROM file_manifest WHERE worktree_id = ? AND path = ?",
+                    (worktree_id, deleted_path),
                 )
             except Exception:
                 pass
@@ -1104,7 +1176,7 @@ def query_symbol_index(
         return None
 
     project_root = _find_project_root(project_path)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
 
     try:
@@ -1191,7 +1263,7 @@ def query_reference_index(
         return None
 
     project_root = _find_project_root(project_path)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
 
     try:
@@ -1243,7 +1315,7 @@ def query_import_graph(
     import sqlite3 as _sql3
 
     project_root = _find_project_root(project_path)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
     if not db_path.exists():
         return None
@@ -1267,7 +1339,7 @@ def get_index_status(project_path: str) -> dict | None:
     import sqlite3 as _sql3
 
     project_root = _find_project_root(project_path)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
     if not db_path.exists():
         return None
@@ -1371,7 +1443,7 @@ def warm_caches(
 
     # Phase 2: parse + QN index in subprocesses.
     # Resolve the DB path and ensure the directory exists before spawning workers.
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
     db_path = str(cache_dir / "parse.db")
@@ -1397,16 +1469,22 @@ def warm_caches(
         )
         _init_conn.execute(
             "CREATE TABLE IF NOT EXISTS file_manifest ("
-            "  path TEXT PRIMARY KEY,"
+            "  worktree_id TEXT NOT NULL DEFAULT '',"
+            "  path TEXT NOT NULL,"
             "  mtime_ns INTEGER NOT NULL,"
             "  size INTEGER NOT NULL,"
             "  content_hash BLOB NOT NULL,"
-            "  indexed_at REAL NOT NULL"
+            "  indexed_at REAL NOT NULL,"
+            "  PRIMARY KEY (worktree_id, path)"
             ")"
         )
         _init_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
             "ON file_manifest(content_hash)"
+        )
+        _init_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manifest_worktree "
+            "ON file_manifest(worktree_id)"
         )
         _init_conn.execute(
             "CREATE TABLE IF NOT EXISTS symbol_index ("
@@ -1522,6 +1600,7 @@ def warm_caches(
     )
 
     # Phase 2.5: Update file_manifest and index_meta with freshness data.
+    worktree_id = _get_worktree_id(project_root)
     try:
         import os as _os
         import sqlite3 as _sqlite3
@@ -1537,6 +1616,7 @@ def warm_caches(
             try:
                 st = _os.stat(py_file)
                 manifest_rows.append((
+                    worktree_id,
                     str(Path(py_file).resolve()),
                     st.st_mtime_ns,
                     st.st_size,
@@ -1548,11 +1628,12 @@ def warm_caches(
         if manifest_rows:
             _mf_conn.executemany(
                 "INSERT OR REPLACE INTO file_manifest "
-                "(path, mtime_ns, size, content_hash, indexed_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 manifest_rows,
             )
-        # Update git HEAD
+        # Update git HEAD (scoped to this worktree)
+        git_head_key = f"git_head:{worktree_id}"
         try:
             import subprocess as _sp
             result = _sp.run(
@@ -1564,17 +1645,17 @@ def warm_caches(
                 head_sha = result.stdout.decode().strip()
                 _mf_conn.execute(
                     "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-                    ("git_head", head_sha),
+                    (git_head_key, head_sha),
                 )
         except Exception:
             pass
         _mf_conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("indexed_at", str(now)),
+            (f"indexed_at:{worktree_id}", str(now)),
         )
         _mf_conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "3"),
+            ("schema_version", "4"),
         )
         _mf_conn.commit()
         _mf_conn.close()
@@ -1647,7 +1728,7 @@ def warm_caches(
 
 def _ensure_cache_ignore_files(project_root: str) -> None:
     """Create .gitignore and .dockerignore in the cache directory."""
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    cache_dir = _cache_db_dir(project_root)
     if not cache_dir.is_dir():
         return
     gitignore = cache_dir / ".gitignore"
@@ -6732,7 +6813,8 @@ def _find_dead_code_cached(
         warm_caches(scan_root, type_engine="none")
 
     project_root = _find_project_root(scan_root)
-    cache_dir = Path(project_root) / ".emend" / "cache"
+    worktree_id = _get_worktree_id(project_root)
+    cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
 
     conn = _sql3.connect(str(db_path), timeout=10)
@@ -6790,6 +6872,7 @@ def _find_dead_code_cached(
             INNER JOIN file_manifest fm
               ON si.content_hash = fm.content_hash
                  AND si.file_path = fm.path
+                 AND fm.worktree_id = ?
             WHERE {where}
               AND NOT EXISTS (
                 SELECT 1 FROM reference_index ri
@@ -6802,7 +6885,7 @@ def _find_dead_code_cached(
             ORDER BY si.file_path, si.line
         """
 
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(query, [worktree_id] + params).fetchall()
         conn.close()
 
         # Post-filter: custom entry point decorators.
