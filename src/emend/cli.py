@@ -226,6 +226,90 @@ def _app_callback(
 
 
 # ============================================================================
+# Pattern match display helpers
+# ============================================================================
+
+# ANSI escape codes for match highlighting
+_ANSI_RESET = "\033[0m"
+_ANSI_BOLD = "\033[1m"
+_ANSI_MAGENTA = "\033[35m"
+_ANSI_GREEN = "\033[32m"
+_ANSI_CYAN = "\033[36m"
+_ANSI_RED_BOLD = "\033[1;31m"
+
+
+def _print_pattern_match_code(
+    file_path_str: str,
+    match,
+    file_lines_cache: dict[str, list[str]],
+    *,
+    is_tty: bool = False,
+    module_for_node=None,
+) -> None:
+    """Print a pattern match with a file:line header followed by matched source lines.
+
+    In TTY mode, the matched characters are highlighted with ANSI colors.
+    """
+    if match.line is None:
+        if is_tty:
+            print(f"{_ANSI_MAGENTA}{file_path_str}{_ANSI_CYAN}:{_ANSI_GREEN}?{_ANSI_RESET}", flush=True)
+        else:
+            print(f"{file_path_str}:?", flush=True)
+        return
+
+    start_line = match.line
+    end_line = match.end_line or start_line
+
+    # Get source lines (cached per file)
+    if file_path_str not in file_lines_cache:
+        try:
+            file_lines_cache[file_path_str] = Path(file_path_str).read_text().splitlines()
+        except Exception:
+            file_lines_cache[file_path_str] = []
+    lines = file_lines_cache[file_path_str]
+
+    # Print header
+    if start_line == end_line:
+        line_range = str(start_line)
+    else:
+        line_range = f"{start_line}-{end_line}"
+
+    if is_tty:
+        print(f"{_ANSI_MAGENTA}{file_path_str}{_ANSI_CYAN}:{_ANSI_GREEN}{line_range}{_ANSI_RESET}", flush=True)
+    else:
+        print(f"{file_path_str}:{line_range}", flush=True)
+
+    # Print matched source lines with optional highlighting
+    col = match.col
+    end_col_val = match.end_col
+    for i in range(start_line, min(end_line + 1, len(lines) + 1)):
+        line_text = lines[i - 1] if i <= len(lines) else ""
+        if is_tty and col is not None and end_col_val is not None:
+            # Determine highlight range for this line
+            if start_line == end_line:
+                hl_start = col
+                hl_end = end_col_val
+            elif i == start_line:
+                hl_start = col
+                hl_end = len(line_text)
+            elif i == end_line:
+                hl_start = 0
+                hl_end = end_col_val
+            else:
+                hl_start = 0
+                hl_end = len(line_text)
+            # Clamp to line bounds
+            hl_start = max(0, min(hl_start, len(line_text)))
+            hl_end = max(hl_start, min(hl_end, len(line_text)))
+            before = line_text[:hl_start]
+            highlighted = line_text[hl_start:hl_end]
+            after = line_text[hl_end:]
+            print(f"{before}{_ANSI_RED_BOLD}{highlighted}{_ANSI_RESET}{after}", flush=True)
+        else:
+            print(line_text, flush=True)
+
+
+# ============================================================================
 # Unified Commands
 # ============================================================================
 
@@ -314,8 +398,8 @@ def search(
     lookup, and file/dir paths use summary mode.
 
     Output formats (--output):
-        code          Full source of matched symbol(s) [default for selector]
-        location      file.py:line [default for pattern mode]
+        code          Matched code with file:line header [default for pattern and selector]
+        location      file.py:line only
         selector      file.py::Symbol.path
         summary       Symbol tree with signatures [default for bare file/dir]
         metadata      Per-symbol detail: lines, offset, kind, decorators, params
@@ -468,7 +552,7 @@ def search(
     elif json_output or count_output:
         effective_output = "code"
     elif is_pattern_mode:
-        effective_output = "location"
+        effective_output = "code"
     elif has_component:
         effective_output = "component"
     elif has_selector or is_line_selector:
@@ -583,9 +667,10 @@ def search(
                                     list(file_contents), pattern_ir, inside_ir, not_inside_ir
                                 )
                                 _logger.info("rust find_pattern_in_files: %d matches in %.3fs", len(raw_matches), _time.monotonic() - _t1)
-                                for file_path_str, line, _col, _end_line, _end_col, text in raw_matches:
+                                for file_path_str, line, col, end_line, end_col, text in raw_matches:
                                     yield (file_path_str, PatternMatch(
-                                        node=None, captures={}, line=line, matched_text=text
+                                        node=None, captures={}, line=line, matched_text=text,
+                                        end_line=end_line, col=col, end_col=end_col,
                                     ))
                                 rust_path_used = True
                         else:
@@ -686,13 +771,23 @@ def search(
                                 print(f"{file_path_str}:{match.line}", flush=True)
                         else:
                             print(f"{file_path_str}:?", flush=True)
-                else:
+                elif effective_output in ("location", "summary"):
                     for file_path_str, match in _iter_matches():
                         n_total += 1
                         if match.line is not None:
                             print(f"{file_path_str}:{match.line}", flush=True)
                         else:
                             print(f"{file_path_str}:?", flush=True)
+                else:
+                    # Default code display: header + matched source lines
+                    _file_lines_cache: dict[str, list[str]] = {}
+                    is_tty = sys.stdout.isatty()
+                    for file_path_str, match in _iter_matches():
+                        n_total += 1
+                        _print_pattern_match_code(
+                            file_path_str, match, _file_lines_cache,
+                            is_tty=is_tty, module_for_node=cst.Module([]),
+                        )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             return
 

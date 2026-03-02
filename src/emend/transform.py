@@ -3596,6 +3596,9 @@ class PatternMatch:
     captures: dict[str, cst.CSTNode]
     line: int | None = None
     matched_text: str | None = None
+    end_line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
 
 def _extract_all_captures(node: cst.CSTNode, matcher: m.BaseMatcherNode, metavar_names: set[str]) -> dict[str, list[cst.CSTNode]]:
@@ -3734,16 +3737,25 @@ class PatternFinder(cst.CSTVisitor):
             # Handle ellipsis and partial dict captures
             _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
 
-            # Get line number if position provider is available
+            # Get position if position provider is available
             line = None
+            end_line = None
+            col = None
+            end_col = None
             if self.position_provider is not None:
                 try:
                     pos = self.position_provider[node]
                     line = pos.start.line
+                    end_line = pos.end.line
+                    col = pos.start.column
+                    end_col = pos.end.column
                 except KeyError:
                     pass  # Node position not available
 
-            self.matches.append(PatternMatch(node=node, captures=captures, line=line))
+            self.matches.append(PatternMatch(
+                node=node, captures=captures, line=line,
+                end_line=end_line, col=col, end_col=end_col,
+            ))
         return True  # Continue visiting children
 
 
@@ -3888,16 +3900,25 @@ class ConstrainedPatternFinder(cst.CSTVisitor):
 
             # Check if match satisfies inside/not_inside constraint
             if self._satisfies_constraint():
-                # Get line number if position provider is available
+                # Get position if position provider is available
                 line = None
+                end_line = None
+                col = None
+                end_col = None
                 if self.position_provider is not None:
                     try:
                         pos = self.position_provider[node]
                         line = pos.start.line
+                        end_line = pos.end.line
+                        col = pos.start.column
+                        end_col = pos.end.column
                     except KeyError:
                         pass  # Node position not available
 
-                self.matches.append(PatternMatch(node=node, captures=captures, line=line))
+                self.matches.append(PatternMatch(
+                    node=node, captures=captures, line=line,
+                    end_line=end_line, col=col, end_col=end_col,
+                ))
 
         return True  # Continue visiting children
 
@@ -3979,16 +4000,25 @@ class ScopedPatternFinder(cst.CSTVisitor):
             # Handle ellipsis and partial dict captures
             _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
 
-            # Get line number if position provider is available
+            # Get position if position provider is available
             line = None
+            end_line = None
+            col = None
+            end_col = None
             if self.position_provider is not None:
                 try:
                     pos = self.position_provider[node]
                     line = pos.start.line
+                    end_line = pos.end.line
+                    col = pos.start.column
+                    end_col = pos.end.column
                 except KeyError:
                     pass  # Node position not available
 
-            self.matches.append(PatternMatch(node=node, captures=captures, line=line))
+            self.matches.append(PatternMatch(
+                node=node, captures=captures, line=line,
+                end_line=end_line, col=col, end_col=end_col,
+            ))
         return True  # Continue visiting children
 
     def on_leave(self, original_node: cst.CSTNode) -> None:
@@ -4093,6 +4123,10 @@ def _assign_line_numbers_from_source(
             idx = source_code.find(code_snippet)
         if idx >= 0:
             match.line = offset_to_line(idx)
+            match.col = idx - line_starts[match.line - 1]
+            end_idx = idx + len(code_snippet)
+            match.end_line = offset_to_line(end_idx - 1) if end_idx > idx else match.line
+            match.end_col = end_idx - line_starts[match.end_line - 1]
             search_start = idx + 1
 
 
