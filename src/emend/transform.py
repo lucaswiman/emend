@@ -6450,6 +6450,29 @@ def _find_dead_code_cached(
 
     scan_root = str(Path(project_path).resolve())
 
+    def _glob_to_like(pattern: str) -> str:
+        """Convert a path pattern (possibly with globs) to SQL LIKE.
+
+        Supports ``*`` (any chars in one segment), ``**`` (any path
+        segments), and ``?`` (single char).  Patterns without glob
+        characters are treated as directory prefixes.
+        """
+        has_glob = "*" in pattern or "?" in pattern
+        if not has_glob:
+            resolved = str(Path(pattern).resolve())
+            safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            return f"{safe}%"
+        # Glob pattern: resolve relative portion if not starting with * or /
+        if not pattern.startswith("*") and not Path(pattern).is_absolute():
+            pattern = str(Path(scan_root) / pattern)
+        # Escape literal LIKE chars before converting globs.
+        pattern = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # Order matters: ** before * to avoid double replacement.
+        pattern = pattern.replace("**", "%").replace("*", "%").replace("?", "_")
+        if not pattern.endswith("%"):
+            pattern += "%"
+        return pattern
+
     # Ensure the index is fresh; build it if necessary.
     if not _ensure_index_fresh(scan_root):
         logger.info("dead_code: index stale/missing — warming caches")
@@ -6484,13 +6507,11 @@ def _find_dead_code_cached(
                 "(si.name NOT LIKE '\\_%' ESCAPE '\\' OR si.name LIKE '\\_\\_%\\_\\_%' ESCAPE '\\')"
             )
 
-        # Exclude entire directories from analysis.
+        # Exclude entire directories from analysis (supports globs).
         if exclude_paths:
             for pattern in exclude_paths:
-                resolved = str(Path(pattern).resolve())
                 conditions.append("si.file_path NOT LIKE ? ESCAPE '\\'")
-                safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                params.append(f"{safe}%")
+                params.append(_glob_to_like(pattern))
 
         # Custom entry point names: filter at SQL level.
         if entry_point_names:
@@ -6498,17 +6519,13 @@ def _find_dead_code_cached(
             conditions.append(f"si.name NOT IN ({placeholders})")
             params.extend(entry_point_names)
 
-        # Reference exclusion: ignore references from certain dirs.
+        # Reference exclusion: ignore references from certain dirs (supports globs).
         exclude_clause = ""
         if exclude_references_from:
             like_parts = []
             for pattern in exclude_references_from:
-                resolved = str(Path(pattern).resolve())
                 like_parts.append("ri.file_path NOT LIKE ? ESCAPE '\\'")
-                # Escape any existing % or _ in the path for LIKE,
-                # then append % for prefix matching.
-                safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                params.append(f"{safe}%")
+                params.append(_glob_to_like(pattern))
             exclude_clause = " AND " + " AND ".join(like_parts)
 
         where = " AND ".join(conditions)
@@ -6591,11 +6608,29 @@ def _find_dead_code_cached(
                 scan_root, git_tracked_only=not all_files,
             )
 
-            # Build exclude set for string scanning.
-            exclude_resolved: set[str] = set()
+            # Build exclude matchers for string scanning.
+            _exclude_prefixes: list[str] = []
+            _exclude_globs: list[str] = []
             if exclude_references_from:
+                import fnmatch as _fnmatch
                 for pattern in exclude_references_from:
-                    exclude_resolved.add(str(Path(pattern).resolve()))
+                    if "*" in pattern or "?" in pattern:
+                        # Normalise relative globs to absolute for matching.
+                        if not pattern.startswith("*") and not Path(pattern).is_absolute():
+                            pattern = str(Path(scan_root) / pattern)
+                        # Ensure trailing * so fnmatch matches files inside dirs.
+                        if not pattern.endswith("*"):
+                            pattern = pattern.rstrip("/") + "/*"
+                        _exclude_globs.append(pattern)
+                    else:
+                        _exclude_prefixes.append(str(Path(pattern).resolve()))
+
+            def _is_excluded_ref(path: str) -> bool:
+                if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
+                    return True
+                if _exclude_globs:
+                    return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
+                return False
 
             # file → content cache (only files containing a candidate name)
             file_cache: dict[str, str] = {}
@@ -6605,9 +6640,7 @@ def _find_dead_code_cached(
                 )
                 for fp, content in matched:
                     r = str(Path(fp).resolve())
-                    if exclude_resolved and any(
-                        r.startswith(ex) for ex in exclude_resolved
-                    ):
+                    if _is_excluded_ref(r):
                         continue
                     file_cache[r] = content
             except Exception:

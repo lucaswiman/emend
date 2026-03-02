@@ -342,6 +342,7 @@ Full configuration
      include-private: false                   # Include _private symbols
      exclude-references-from:                 # Ignore refs from these dirs
        - tests/
+       - "**/generated/"                       # Glob patterns supported
      strings-count-as-references: true        # String literals count as refs
      message: "Symbol appears to be unused"   # Custom message prefix
      entry-point-decorators:                  # Extra decorators that mark entry points
@@ -352,7 +353,7 @@ Full configuration
        - on_startup
      exclude-paths:                            # Directories to skip entirely
        - frontends/devtools/
-       - scripts/
+       - "**/migrations/"                      # Glob patterns supported
 
 +---------------------------------+----------+-----------------------------------------------+
 | Field                           | Default  | Description                                   |
@@ -363,7 +364,8 @@ Full configuration
 +---------------------------------+----------+-----------------------------------------------+
 | ``include-private``             | ``false``| Include ``_private`` symbols                  |
 +---------------------------------+----------+-----------------------------------------------+
-| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs  |
+| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs. |
+|                                 |          | Supports glob patterns (``*``, ``**``, ``?``).|
 +---------------------------------+----------+-----------------------------------------------+
 | ``strings-count-as-references`` | ``true`` | Treat string literals containing the symbol   |
 |                                 |          | name as references                            |
@@ -385,7 +387,8 @@ Full configuration
 +---------------------------------+----------+-----------------------------------------------+
 | ``exclude-paths``               | (none)   | Directories to exclude entirely from dead     |
 |                                 |          | code analysis. Symbols defined in these       |
-|                                 |          | paths are never reported.                     |
+|                                 |          | paths are never reported. Supports glob       |
+|                                 |          | patterns (``*``, ``**``, ``?``).              |
 +---------------------------------+----------+-----------------------------------------------+
 
 How it works

@@ -1404,6 +1404,100 @@ class TestExcludePaths:
         assert "truly_unused" in result.stdout
         assert "script_func" not in result.stdout
 
+    def test_exclude_paths_glob_pattern(self, tmp_path):
+        """Glob patterns like **/scripts/ work in exclude-paths."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        nested = project / "pkg" / "scripts"
+        nested.mkdir(parents=True)
+
+        (project / "lib.py").write_text(
+            "def truly_unused():\n"
+            "    return 1\n"
+        )
+        (nested / "run.py").write_text(
+            "def script_func():\n"
+            "    return 2\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            exclude_paths=["**/scripts/"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "truly_unused" in dead_names
+        assert "script_func" not in dead_names
+
+    def test_exclude_paths_star_glob(self, tmp_path):
+        """Single * glob matches within one path segment."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        gen_a = project / "gen_alpha"
+        gen_a.mkdir()
+        lib = project / "lib"
+        lib.mkdir()
+
+        (gen_a / "mod.py").write_text(
+            "def generated_func():\n"
+            "    return 1\n"
+        )
+        (lib / "mod.py").write_text(
+            "def real_unused():\n"
+            "    return 2\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            exclude_paths=[str(project / "gen_*")],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "real_unused" in dead_names
+        assert "generated_func" not in dead_names
+
+
+class TestExcludeReferencesFromGlob:
+    """Tests for glob patterns in exclude-references-from."""
+
+    def test_exclude_refs_glob(self, tmp_path):
+        """Glob patterns in exclude-references-from work."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        nested_tests = project / "pkg" / "tests"
+        nested_tests.mkdir(parents=True)
+
+        (project / "lib.py").write_text(
+            "def only_tested():\n"
+            "    return 42\n"
+        )
+        (nested_tests / "test_lib.py").write_text(
+            "from lib import only_tested\n"
+            "\n"
+            "def test_it():\n"
+            "    assert only_tested() == 42\n"
+        )
+
+        # Without exclusion: not dead
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "only_tested" not in dead_names
+
+        # With glob exclusion: dead
+        dead = list(find_dead_code(
+            str(project),
+            exclude_references_from=["**/tests/"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "only_tested" in dead_names
+
 
 class TestBuiltinSyncPostDecorator:
     """Tests for sync_post and similar built-in decorator basenames."""

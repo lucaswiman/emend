@@ -497,7 +497,8 @@ Also available as: ``dead-code``, ``dead_code``.
 | ``--json``                    | Output as JSON                                |
 +-------------------------------+-----------------------------------------------+
 | ``--exclude-references-from`` | Directories to ignore when scanning for       |
-|                               | references (e.g. ``tests/``). Can be repeated.|
+|                               | references (e.g. ``tests/``). Supports glob   |
+|                               | patterns (``*``, ``**``, ``?``). Repeatable.  |
 +-------------------------------+-----------------------------------------------+
 | ``--no-strings``              | Don't count string literals as references     |
 +-------------------------------+-----------------------------------------------+
@@ -511,8 +512,8 @@ Also available as: ``dead-code``, ``dead_code``.
 |                               | entry points. Can be repeated.                |
 +-------------------------------+-----------------------------------------------+
 | ``--exclude-path``            | Directories to exclude entirely from          |
-|                               | analysis. Symbols defined in these paths are  |
-|                               | never reported. Can be repeated.              |
+|                               | analysis. Supports glob patterns (``*``,      |
+|                               | ``**``, ``?``). Repeatable.                   |
 +-------------------------------+-----------------------------------------------+
 
 **Automatic exclusions:**
