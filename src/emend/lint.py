@@ -38,6 +38,9 @@ class DeadCodeConfig:
     exclude_references_from: list[str] | None = None
     strings_count_as_references: bool = True
     message: str = "Symbol appears to be unused"
+    entry_point_decorators: list[str] | None = None
+    entry_point_names: list[str] | None = None
+    exclude_paths: list[str] | None = None
 
 
 @dataclass
@@ -188,6 +191,15 @@ def load_rules(
             exclude = raw_dc.get("exclude-references-from")
             if isinstance(exclude, str):
                 exclude = [exclude]
+            ep_decorators = raw_dc.get("entry-point-decorators")
+            if isinstance(ep_decorators, str):
+                ep_decorators = [ep_decorators]
+            ep_names = raw_dc.get("entry-point-names")
+            if isinstance(ep_names, str):
+                ep_names = [ep_names]
+            excl_paths = raw_dc.get("exclude-paths")
+            if isinstance(excl_paths, str):
+                excl_paths = [excl_paths]
             deadcode_config = DeadCodeConfig(
                 enabled=raw_dc.get("enabled", True),
                 kind=raw_dc.get("kind"),
@@ -197,6 +209,9 @@ def load_rules(
                     "strings-count-as-references", True),
                 message=raw_dc.get(
                     "message", "Symbol appears to be unused"),
+                entry_point_decorators=ep_decorators,
+                entry_point_names=ep_names,
+                exclude_paths=excl_paths,
             )
 
     return rules, macros, deadcode_config
@@ -471,6 +486,9 @@ def run_lint(
                 exclude_references_from=deadcode_config.exclude_references_from,
                 strings_count_as_references=deadcode_config.strings_count_as_references,
                 show_last_reference=False,
+                entry_point_decorators=deadcode_config.entry_point_decorators,
+                entry_point_names=deadcode_config.entry_point_names,
+                exclude_paths=deadcode_config.exclude_paths,
             )
             for d in dead:
                 violations.append(LintViolation(

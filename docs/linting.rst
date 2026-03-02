@@ -342,8 +342,18 @@ Full configuration
      include-private: false                   # Include _private symbols
      exclude-references-from:                 # Ignore refs from these dirs
        - tests/
+       - "**/generated/"                       # Glob patterns supported
      strings-count-as-references: true        # String literals count as refs
      message: "Symbol appears to be unused"   # Custom message prefix
+     entry-point-decorators:                  # Extra decorators that mark entry points
+       - my_framework.handler
+       - celery_app.task
+     entry-point-names:                       # Extra function/class names to skip
+       - plugin_init
+       - on_startup
+     exclude-paths:                            # Directories to skip entirely
+       - frontends/devtools/
+       - "**/migrations/"                      # Glob patterns supported
 
 +---------------------------------+----------+-----------------------------------------------+
 | Field                           | Default  | Description                                   |
@@ -354,7 +364,8 @@ Full configuration
 +---------------------------------+----------+-----------------------------------------------+
 | ``include-private``             | ``false``| Include ``_private`` symbols                  |
 +---------------------------------+----------+-----------------------------------------------+
-| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs  |
+| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs. |
+|                                 |          | Supports glob patterns (``*``, ``**``, ``?``).|
 +---------------------------------+----------+-----------------------------------------------+
 | ``strings-count-as-references`` | ``true`` | Treat string literals containing the symbol   |
 |                                 |          | name as references                            |
@@ -363,6 +374,21 @@ Full configuration
 |                                 | appears  |                                               |
 |                                 | to be    |                                               |
 |                                 | unused"  |                                               |
++---------------------------------+----------+-----------------------------------------------+
+| ``entry-point-decorators``      | (none)   | Additional decorator names (or basenames)     |
+|                                 |          | that mark a symbol as an entry point.         |
+|                                 |          | Symbols with these decorators are never       |
+|                                 |          | flagged. Both full names (``pkg.deco``) and   |
+|                                 |          | basenames (``deco``) are matched.             |
++---------------------------------+----------+-----------------------------------------------+
+| ``entry-point-names``           | (none)   | Additional function/class names to treat as   |
+|                                 |          | entry points. Symbols with these names are    |
+|                                 |          | never flagged as dead code.                   |
++---------------------------------+----------+-----------------------------------------------+
+| ``exclude-paths``               | (none)   | Directories to exclude entirely from dead     |
+|                                 |          | code analysis. Symbols defined in these       |
+|                                 |          | paths are never reported. Supports glob       |
+|                                 |          | patterns (``*``, ``**``, ``?``).              |
 +---------------------------------+----------+-----------------------------------------------+
 
 How it works
@@ -376,7 +402,7 @@ Dead code detection uses LibCST's ``QualifiedNameProvider`` for scope-aware anal
 
 It automatically detects ``src/`` layout projects (via ``pyproject.toml``) and computes correct qualified names.
 
-Automatic exclusions are the same as the ``emend deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.
+Automatic exclusions are the same as the ``emend deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.  Use ``entry-point-decorators`` and ``entry-point-names`` to extend the built-in heuristics with project-specific exclusions.
 
 Interaction with rules
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -403,12 +429,15 @@ Inline suppression works the same way as for pattern rules:
 Standalone command
 ~~~~~~~~~~~~~~~~~~
 
-Dead code detection is also available as a standalone command with additional options (``--json``, ``--no-last-reference``):
+Dead code detection is also available as a standalone command with additional options (``--json``, ``--no-last-reference``, ``--entry-point-decorator``, ``--entry-point-name``, ``--exclude-path``):
 
 .. code-block:: bash
 
    emend deadcode src/
    emend deadcode src/ --exclude-references-from tests/ --json
+   emend deadcode . --entry-point-decorator my_framework.handler
+   emend deadcode . --entry-point-name plugin_init
+   emend deadcode . --exclude-path frontends/devtools/
 
 See :doc:`commands` for the full ``deadcode`` command reference.
 

@@ -981,3 +981,575 @@ class TestDeadCodeLint:
         names = [v.message for v in dc_violations]
         assert any("flagged" in m for m in names)
         assert not any("suppressed" in m for m in names)
+
+
+class TestEntryPointDecorators:
+    """Tests for custom entry-point-decorators config."""
+
+    def test_custom_decorator_excludes_symbol(self, tmp_path):
+        """Symbols with a custom entry-point decorator are not flagged."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def my_handler(f):\n"
+            "    return f\n"
+            "\n"
+            "@my_handler\n"
+            "def process_event():\n"
+            "    return 'done'\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            entry_point_decorators=["my_handler"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "process_event" not in dead_names
+        assert "truly_unused" in dead_names
+
+    def test_custom_decorator_basename_matching(self, tmp_path):
+        """Custom decorator basenames are matched (e.g. pkg.deco matches @x.deco)."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "class Router:\n"
+            "    def sync_post(self, path): return lambda f: f\n"
+            "\n"
+            "router = Router()\n"
+            "\n"
+            "@router.sync_post('/endpoint')\n"
+            "def my_endpoint():\n"
+            "    return {}\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            entry_point_decorators=["sync_post"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "my_endpoint" not in dead_names
+        assert "truly_unused" in dead_names
+
+    def test_custom_decorator_full_name_matching(self, tmp_path):
+        """Custom decorator full names are matched exactly."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "class App:\n"
+            "    def on_event(self, event): return lambda f: f\n"
+            "\n"
+            "app = App()\n"
+            "\n"
+            "@app.on_event('startup')\n"
+            "def startup_handler():\n"
+            "    pass\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            entry_point_decorators=["app.on_event"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "startup_handler" not in dead_names
+        assert "truly_unused" in dead_names
+
+    def test_without_custom_decorator_still_flagged(self, tmp_path):
+        """Without custom entry-point-decorators, symbol is flagged."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def my_handler(f):\n"
+            "    return f\n"
+            "\n"
+            "@my_handler\n"
+            "def process_event():\n"
+            "    return 'done'\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        # Without custom config, my_handler is not recognized as entry point
+        assert "process_event" in dead_names
+
+
+class TestEntryPointNames:
+    """Tests for custom entry-point-names config."""
+
+    def test_custom_name_excludes_symbol(self, tmp_path):
+        """Symbols with a custom entry-point name are not flagged."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def plugin_init():\n"
+            "    return 'initialized'\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            entry_point_names=["plugin_init"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "plugin_init" not in dead_names
+        assert "truly_unused" in dead_names
+
+    def test_multiple_custom_names(self, tmp_path):
+        """Multiple custom entry-point names all work."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def plugin_init():\n"
+            "    pass\n"
+            "\n"
+            "def on_startup():\n"
+            "    pass\n"
+            "\n"
+            "def truly_unused():\n"
+            "    pass\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            entry_point_names=["plugin_init", "on_startup"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "plugin_init" not in dead_names
+        assert "on_startup" not in dead_names
+        assert "truly_unused" in dead_names
+
+
+class TestEntryPointConfig:
+    """Tests for entry-point config loading from patterns.yaml."""
+
+    def test_load_entry_point_decorators(self, tmp_path):
+        """entry-point-decorators config is loaded from YAML."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "entry-point-decorators": [
+                    "my_framework.handler",
+                    "sync_post",
+                ],
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config is not None
+        assert dc_config.entry_point_decorators == [
+            "my_framework.handler", "sync_post",
+        ]
+
+    def test_load_entry_point_names(self, tmp_path):
+        """entry-point-names config is loaded from YAML."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "entry-point-names": ["plugin_init", "on_startup"],
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config is not None
+        assert dc_config.entry_point_names == ["plugin_init", "on_startup"]
+
+    def test_load_single_string_entry_point_decorators(self, tmp_path):
+        """A single string for entry-point-decorators is wrapped in a list."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "entry-point-decorators": "my_decorator",
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config.entry_point_decorators == ["my_decorator"]
+
+    def test_load_single_string_entry_point_names(self, tmp_path):
+        """A single string for entry-point-names is wrapped in a list."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "entry-point-names": "plugin_init",
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config.entry_point_names == ["plugin_init"]
+
+    def test_lint_integration_with_entry_point_decorators(self, tmp_path):
+        """Lint engine passes entry-point-decorators to find_dead_code."""
+        from emend.lint import load_rules, run_lint
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def my_handler(f):\n"
+            "    return f\n"
+            "\n"
+            "@my_handler\n"
+            "def process_event():\n"
+            "    return 'done'\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        config_file = project / ".emend" / "patterns.yaml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "entry-point-decorators": ["my_handler"],
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        violations = run_lint(
+            rules, [str(project / "mod.py")],
+            deadcode_config=dc_config,
+            project_path=str(project),
+        )
+
+        dc_violations = [v for v in violations if v.rule_name == "deadcode"]
+        names = [v.message for v in dc_violations]
+        assert not any("process_event" in m for m in names)
+        assert any("truly_unused" in m for m in names)
+
+    def test_cli_entry_point_decorator(self, tmp_path, run_emend_cmd):
+        """CLI --entry-point-decorator excludes decorated symbols."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def my_handler(f):\n"
+            "    return f\n"
+            "\n"
+            "@my_handler\n"
+            "def process_event():\n"
+            "    return 'done'\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        result = run_emend_cmd([
+            "deadcode", str(project),
+            "--entry-point-decorator", "my_handler",
+            "--no-last-reference",
+        ])
+        assert "process_event" not in result.stdout
+        assert "truly_unused" in result.stdout
+
+    def test_cli_entry_point_name(self, tmp_path, run_emend_cmd):
+        """CLI --entry-point-name excludes named symbols."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "def plugin_init():\n"
+            "    pass\n"
+            "\n"
+            "def truly_unused():\n"
+            "    pass\n"
+        )
+
+        result = run_emend_cmd([
+            "deadcode", str(project),
+            "--entry-point-name", "plugin_init",
+            "--no-last-reference",
+        ])
+        assert "plugin_init" not in result.stdout
+        assert "truly_unused" in result.stdout
+
+
+class TestExcludePaths:
+    """Tests for exclude-paths config (excluding directories from analysis)."""
+
+    def test_exclude_paths_skips_directory(self, tmp_path):
+        """Symbols in excluded directories are not reported."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        scripts = project / "scripts"
+        scripts.mkdir()
+
+        (project / "lib.py").write_text(
+            "def truly_unused():\n"
+            "    return 1\n"
+        )
+        (scripts / "run.py").write_text(
+            "def script_func():\n"
+            "    return 2\n"
+        )
+
+        # Without exclude: both flagged
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "truly_unused" in dead_names
+        assert "script_func" in dead_names
+
+        # With exclude: only lib.py symbol flagged
+        dead = list(find_dead_code(
+            str(project),
+            exclude_paths=[str(scripts)],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "truly_unused" in dead_names
+        assert "script_func" not in dead_names
+
+    def test_exclude_paths_config_loading(self, tmp_path):
+        """exclude-paths is loaded from patterns.yaml config."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "exclude-paths": ["scripts/", "frontends/devtools/"],
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config is not None
+        assert dc_config.exclude_paths == ["scripts/", "frontends/devtools/"]
+
+    def test_exclude_paths_single_string(self, tmp_path):
+        """A single string for exclude-paths is wrapped in a list."""
+        from emend.lint import load_rules
+
+        config_file = tmp_path / "patterns.yaml"
+        config_file.write_text(yaml.dump({
+            "deadcode": {
+                "enabled": True,
+                "exclude-paths": "scripts/",
+            },
+        }))
+
+        rules, macros, dc_config = load_rules(str(config_file))
+        assert dc_config.exclude_paths == ["scripts/"]
+
+    def test_cli_exclude_path(self, tmp_path, run_emend_cmd):
+        """CLI --exclude-path excludes directories from analysis."""
+        project = tmp_path / "project"
+        project.mkdir()
+        scripts = project / "scripts"
+        scripts.mkdir()
+
+        (project / "lib.py").write_text(
+            "def truly_unused():\n"
+            "    return 1\n"
+        )
+        (scripts / "run.py").write_text(
+            "def script_func():\n"
+            "    return 2\n"
+        )
+
+        result = run_emend_cmd([
+            "deadcode", str(project),
+            "--exclude-path", str(scripts),
+            "--no-last-reference",
+        ])
+        assert "truly_unused" in result.stdout
+        assert "script_func" not in result.stdout
+
+    def test_exclude_paths_glob_pattern(self, tmp_path):
+        """Glob patterns like **/scripts/ work in exclude-paths."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        nested = project / "pkg" / "scripts"
+        nested.mkdir(parents=True)
+
+        (project / "lib.py").write_text(
+            "def truly_unused():\n"
+            "    return 1\n"
+        )
+        (nested / "run.py").write_text(
+            "def script_func():\n"
+            "    return 2\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            exclude_paths=["**/scripts/"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "truly_unused" in dead_names
+        assert "script_func" not in dead_names
+
+    def test_exclude_paths_star_glob(self, tmp_path):
+        """Single * glob matches within one path segment."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        gen_a = project / "gen_alpha"
+        gen_a.mkdir()
+        lib = project / "lib"
+        lib.mkdir()
+
+        (gen_a / "mod.py").write_text(
+            "def generated_func():\n"
+            "    return 1\n"
+        )
+        (lib / "mod.py").write_text(
+            "def real_unused():\n"
+            "    return 2\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project),
+            exclude_paths=[str(project / "gen_*")],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "real_unused" in dead_names
+        assert "generated_func" not in dead_names
+
+
+class TestExcludeReferencesFromGlob:
+    """Tests for glob patterns in exclude-references-from."""
+
+    def test_exclude_refs_glob(self, tmp_path):
+        """Glob patterns in exclude-references-from work."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        nested_tests = project / "pkg" / "tests"
+        nested_tests.mkdir(parents=True)
+
+        (project / "lib.py").write_text(
+            "def only_tested():\n"
+            "    return 42\n"
+        )
+        (nested_tests / "test_lib.py").write_text(
+            "from lib import only_tested\n"
+            "\n"
+            "def test_it():\n"
+            "    assert only_tested() == 42\n"
+        )
+
+        # Without exclusion: not dead
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "only_tested" not in dead_names
+
+        # With glob exclusion: dead
+        dead = list(find_dead_code(
+            str(project),
+            exclude_references_from=["**/tests/"],
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "only_tested" in dead_names
+
+
+class TestBuiltinSyncPostDecorator:
+    """Tests for sync_post and similar built-in decorator basenames."""
+
+    def test_sync_post_is_entry_point(self, tmp_path):
+        """@router.sync_post() is recognized as an entry point."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "class Router:\n"
+            "    def sync_post(self, path): return lambda f: f\n"
+            "\n"
+            "router = Router()\n"
+            "\n"
+            "@router.sync_post('/endpoint')\n"
+            "def my_endpoint():\n"
+            "    return {}\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "my_endpoint" not in dead_names
+        assert "truly_unused" in dead_names
+
+    def test_websocket_is_entry_point(self, tmp_path):
+        """@router.websocket() is recognized as an entry point."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "mod.py").write_text(
+            "class Router:\n"
+            "    def websocket(self, path): return lambda f: f\n"
+            "\n"
+            "router = Router()\n"
+            "\n"
+            "@router.websocket('/ws')\n"
+            "def ws_handler():\n"
+            "    pass\n"
+            "\n"
+            "def truly_unused():\n"
+            "    return 'bye'\n"
+        )
+
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "ws_handler" not in dead_names
+        assert "truly_unused" in dead_names
