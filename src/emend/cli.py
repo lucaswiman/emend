@@ -63,29 +63,6 @@ def resolve_files(path: str) -> tuple[list[Path], bool]:
         return [path_obj], False
 
 
-def parse_scope_in(scope_in: str | None, default_path: str | None = None) -> tuple[list[str] | None, str | None]:
-    """Parse --in argument, supporting both dotted paths and selectors.
-
-    Args:
-        scope_in: The --in value (e.g., 'MyClass.method' or '**/*.py::MyClass.method')
-        default_path: The default file path if --in doesn't provide one.
-
-    Returns:
-        (scope, file_path_override) tuple. file_path_override is set only
-        if the --in value contained a :: selector with a file path.
-    """
-    if not scope_in:
-        return None, None
-
-    if '::' in scope_in:
-        sel = parse_extended_selector(scope_in)
-        scope = sel.symbol_path if sel.symbol_path else None
-        # Only override path if the selector has a file glob or specific file
-        file_override = sel.file_path if sel.file_path else None
-        return scope, file_override
-
-    return scope_in.split("."), None
-
 
 import re as _re_module
 

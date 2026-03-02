@@ -221,31 +221,6 @@ class TestAddFileGlob:
 # ============================================================================
 
 
-class TestInSelectorSupport:
-    def test_in_with_dotted_path(self):
-        from emend.cli import parse_scope_in
-        scope, override = parse_scope_in("MyClass.method")
-        assert scope == ["MyClass", "method"]
-        assert override is None
-
-    def test_in_with_selector(self):
-        from emend.cli import parse_scope_in
-        scope, override = parse_scope_in("file.py::MyClass.method")
-        assert scope == ["MyClass", "method"]
-        assert override == "file.py"
-
-    def test_in_with_glob_selector(self):
-        from emend.cli import parse_scope_in
-        scope, override = parse_scope_in("**/*.py::MyClass")
-        assert scope == ["MyClass"]
-        assert override == "**/*.py"
-
-    def test_in_none(self):
-        from emend.cli import parse_scope_in
-        scope, override = parse_scope_in(None)
-        assert scope is None
-        assert override is None
-
 
 # ============================================================================
 # --matching flag

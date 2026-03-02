@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 TESTS ?=
 
-.PHONY: venv test docs docs-html benchmark clean
+.PHONY: venv test deadcode docs docs-html benchmark clean
 
 RUST_SOURCES := $(wildcard rust/src/*.rs)
 
@@ -24,6 +24,9 @@ $(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	$(VENV)/bin/pytest --tb=short -n 8 $(if $(TESTS),$(TESTS),tests/)
+
+deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
+	$(VENV)/bin/emend deadcode src/emend/ --exclude-references-from tests/ --no-last-reference
 
 docs: docs-html
 
