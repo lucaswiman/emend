@@ -8,6 +8,94 @@ import yaml
 from emend.component_selector import ExtendedSelector
 
 
+class TestDeadCodeWarmPath:
+    """Tests for the index-accelerated warm path of find_dead_code()."""
+
+    def _build_index(self, project_path: str):
+        """Helper: build the parse.db index for a project."""
+        from emend.transform import warm_caches
+
+        warm_caches(project_path, type_engine="none")
+
+    def test_warm_path_finds_dead_function(self, tmp_path):
+        """Warm path should detect an unreferenced function."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            "def used():\n    return 1\n\n"
+            "def unused():\n    return 2\n\n"
+            "x = used()\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "unused" in dead_names
+        assert "used" not in dead_names
+
+    def test_warm_path_skips_entry_points(self, tmp_path):
+        """Warm path should skip test_, describe_, and dunder functions."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "tests.py").write_text(
+            "def test_foo():\n    pass\n\n"
+            "def describe_feature():\n    pass\n\n"
+            "def __init__():\n    pass\n\n"
+            "def real_dead():\n    pass\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "test_foo" not in dead_names
+        assert "describe_feature" not in dead_names
+        assert "__init__" not in dead_names
+        assert "real_dead" in dead_names
+
+    def test_warm_path_respects_all_exports(self, tmp_path):
+        """Warm path should exclude symbols listed in __all__."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            "__all__ = ['exported']\n\n"
+            "def exported():\n    return 1\n\n"
+            "def not_exported():\n    return 2\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "exported" not in dead_names
+        assert "not_exported" in dead_names
+
+    def test_warm_path_cross_file_reference(self, tmp_path):
+        """Warm path should detect cross-file references."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "lib.py").write_text(
+            "def helper():\n    return 1\n\n"
+            "def orphan():\n    return 2\n"
+        )
+        (project / "main.py").write_text(
+            "from lib import helper\n\n"
+            "x = helper()\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "helper" not in dead_names
+        assert "orphan" in dead_names
+
+
 class TestFindDeadCode:
     """Tests for find_dead_code() in transform.py."""
 
@@ -122,6 +210,28 @@ class TestFindDeadCode:
         dead_names = {d.name for d in dead}
         assert "test_something" not in dead_names
         assert "TestSuite" not in dead_names
+
+    def test_skips_describe_functions(self, tmp_path):
+        """Functions starting with describe_ are never flagged (pytest-describe)."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        test_file = project / "test_describe.py"
+        test_file.write_text(
+            "def describe_feature():\n"
+            "    def it_works():\n"
+            "        assert True\n"
+            "\n"
+            "def describe_another_feature():\n"
+            "    pass\n"
+        )
+
+        dead = list(find_dead_code(str(project)))
+        dead_names = {d.name for d in dead}
+        assert "describe_feature" not in dead_names
+        assert "describe_another_feature" not in dead_names
 
     def test_skips_main(self, tmp_path):
         """The 'main' function is never flagged."""
