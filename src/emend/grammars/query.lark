@@ -1,0 +1,186 @@
+// emend query & transform language grammar.
+//
+// Parses the synthesized GritQL-inspired language described in
+// docs/language-spec.md.  Code snippets inside backticks are opaque
+// to this grammar -- they are handed to tree-sitter (or LibCST) for
+// structural matching.
+
+start: statement
+
+// ---------------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------------
+
+?statement: rewrite
+          | search
+          | sequential
+          | multifile
+
+rewrite: matchable "=>" replacement where_clause?
+
+search: matchable where_clause?
+
+sequential: "sequential" "{" statement ("," statement)* ","? "}"
+
+multifile: "multifile" "{" file_stmt ("," file_stmt)* ","? "}"
+
+file_stmt: bubble? "file" "(" metavar ")" "where" "{" conditions "}"
+
+bubble: "bubble" ("(" metavar_list ")")?
+
+metavar_list: metavar ("," metavar)*
+
+// ---------------------------------------------------------------------------
+// Where clauses & conditions
+// ---------------------------------------------------------------------------
+
+where_clause: "where" "{" conditions "}"
+
+conditions: condition ("," condition)* ","?
+
+?condition: match_condition
+          | not_condition
+          | maybe_condition
+          | if_condition
+          | rewrite
+          | within_shorthand
+          | not_within_shorthand
+          | scope_local
+
+match_condition: expr "<:" matcher
+
+not_condition: "not" condition
+
+maybe_condition: "maybe" statement
+
+if_condition: "if" "(" condition ")" "{" statement+ "}" else_clause?
+
+else_clause: "else" "{" statement+ "}"
+
+// Short forms: "within def" without $var <:
+within_shorthand: "within" (code_snippet | keyword)
+not_within_shorthand: "not" "within" (code_snippet | keyword)
+
+scope_local: "scope_local"
+
+// ---------------------------------------------------------------------------
+// Expressions (left-hand side of <:)
+// ---------------------------------------------------------------------------
+
+?expr: metavar
+     | code_snippet
+
+// ---------------------------------------------------------------------------
+// Matchers (right-hand side of <:)
+// ---------------------------------------------------------------------------
+
+?matcher: code_snippet
+        | node_type
+        | predicate
+        | not_matcher
+        | or_matcher
+        | and_matcher
+        | regex
+        | metavar
+
+not_matcher: "not" matcher
+
+or_matcher: "or" "{" matcher ("," matcher)* ","? "}"
+
+and_matcher: matcher "and" matcher
+
+// ---------------------------------------------------------------------------
+// Predicates
+// ---------------------------------------------------------------------------
+
+?predicate: contains_pred
+          | within_pred
+          | not_within_pred
+          | imported_from_pred
+          | precedes_pred
+          | follows_pred
+          | type_pred
+          | returns_pred
+
+contains_pred: "contains" inline_rewrite
+             | "contains" matchable
+
+within_pred: "within" (matchable | keyword)
+
+not_within_pred: "not" "within" (matchable | keyword)
+
+imported_from_pred: "imported_from" "(" STRING ")"
+
+precedes_pred: "precedes" matchable
+
+follows_pred: "follows" matchable
+
+// Inline rewrite inside predicates: `pat` => `repl`
+inline_rewrite: matchable "=>" replacement
+
+type_pred: "type" "(" STRING ")"
+
+returns_pred: "returns" "(" STRING ")"
+
+// ---------------------------------------------------------------------------
+// Matchable (pattern + optional where clause, used in predicates)
+// ---------------------------------------------------------------------------
+
+?matchable: code_snippet
+          | metavar
+
+// ---------------------------------------------------------------------------
+// Replacement (right-hand side of =>)
+// ---------------------------------------------------------------------------
+
+?replacement: code_snippet
+            | DOT
+            | metavar
+
+DOT: "."
+
+// ---------------------------------------------------------------------------
+// Primitives
+// ---------------------------------------------------------------------------
+
+code_snippet: BACKTICK_STRING
+
+metavar: METAVAR
+
+node_type: NODE_TYPE
+
+keyword: KEYWORD
+
+regex: REGEX
+
+// ---------------------------------------------------------------------------
+// Terminals
+// ---------------------------------------------------------------------------
+
+// Backtick-delimited code snippet.  The content is opaque -- parsed by
+// tree-sitter or LibCST to build the structural matcher.
+BACKTICK_STRING: /`[^`]+`/
+
+// Metavariables: $name, $_, $...name, $...
+METAVAR: /\$(?:\.\.\.)?(?:[a-z_][a-z0-9_]*|_)/
+       | "$..."
+
+// Tree-sitter node types (snake_case identifiers without $)
+NODE_TYPE: /(?!or\b|and\b|not\b|where\b|within\b|contains\b|imported_from\b|precedes\b|follows\b|type\b|returns\b|scope_local\b|maybe\b|if\b|else\b|sequential\b|multifile\b|bubble\b|file\b)[a-z][a-z0-9_]*/
+
+// Keywords for scope shortcuts
+KEYWORD: /\b(?:def|class|for|while|try|with|if)\b/
+
+// Regex literal r"..."
+REGEX: /r"[^"]*"/
+
+// Quoted strings
+STRING: /\"[^\"]*\"/
+
+%import common.WS
+%ignore WS
+
+// Single-line comments
+COMMENT: /\/\/[^\n]*/
+       | /#[^\n]*/
+%ignore COMMENT
