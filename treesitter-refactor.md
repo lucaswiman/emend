@@ -1,0 +1,741 @@
+# Proposal: Replace LibCST with Tree-sitter Tooling
+
+## Executive Summary
+
+Emend currently uses LibCST (a pure-Python concrete syntax tree library) as its
+primary AST engine, with a Rust+tree-sitter extension (`emend_core`) handling
+performance-critical fast paths.  This proposal evaluates three approaches for
+migrating away from LibCST entirely:
+
+1. **GritQL** -- use the GritQL engine as a pattern matching / rewrite IR
+2. **ast-grep** -- use ast-grep's `ast_grep_core` Rust crate for pattern matching
+3. **Custom Rust** -- build everything from scratch on raw tree-sitter (the
+   existing proposal)
+
+**Recommendation**: Use **GritQL crates** (`grit-pattern-matcher`, `grit-util`,
+and `marzano-language`) for pattern matching and code rewriting, plus a **custom
+scope resolver** in Rust for qualified name resolution, plus a **language config
+file** for cross-language scoping rules.  This combines the maturity of GritQL's
+pattern/rewrite engine with the semantic depth that emend requires.
+
+### Why GritQL over ast-grep or custom Rust?
+
+| Criterion | GritQL | ast-grep | Custom Rust |
+|-----------|--------|----------|-------------|
+| Pattern matching maturity | Production (4.4k stars, MIT, used by Biome) | Production (very active) | Partial (1,309 LOC in matcher.rs) |
+| Rewrite engine | Built-in (`=>` operator), declarative | Built-in ("find & patch") | Must build (~500 LOC) |
+| Syntax alignment with emend | Very close (`$X` metavars, `where` clauses) | Similar but YAML-heavy for complex rules | N/A (custom) |
+| Multi-language support | 12 languages via tree-sitter grammars | 20+ languages via tree-sitter | Must add per-language |
+| Rust crate availability | `grit-pattern-matcher` on crates.io | `ast_grep_core` on crates.io (unstable API) | N/A |
+| Scope-aware operations | `imported_from` predicate, `multifile` mode | None | Must build |
+| Cross-file patterns | `multifile` + `sequential` built-in | Single-file only (CLI can iterate) | Must build |
+| IR for edits | Yes (pattern → rewrite → byte-range edit) | Yes (pattern → fix → edit) | Must design |
+| License | MIT | MIT | N/A |
+| Documentation | 5.3% of crate documented | Unstable API warning | N/A |
+
+**Key insight**: GritQL's syntax (`$metavar`, `where` clauses, `=>` rewrites,
+`within`/`contains` navigation, `imported_from` predicate) is very close to
+what emend already has.  We can make emend's pattern syntax compile down to
+GritQL as an IR, getting the entire rewrite engine for free while keeping
+emend's user-facing syntax stable.
+
+Neither GritQL nor ast-grep provides true scope-aware qualified name resolution
+-- both operate at the syntactic/AST level.  Emend needs QualifiedNameProvider
+semantics for `find-references`, `rename`, and `dead-code`.  So we must build
+the scope resolver regardless.  The question is only: do we also build the
+pattern matcher and rewrite engine, or reuse existing crates?
+
+---
+
+## Tool Analysis
+
+### GritQL Deep Dive
+
+**Architecture**: GritQL is a ~15-crate Rust workspace built on tree-sitter.
+The key crates are:
+
+| Crate | Published? | Purpose |
+|-------|-----------|---------|
+| `grit-pattern-matcher` | crates.io v0.5.1 | Core `Matcher` trait + pattern IR |
+| `grit-util` | crates.io v0.5.1 | Utilities (no grit deps) |
+| `marzano-language` | Workspace only | Language definitions (trait impls per language) |
+| `marzano-core` | Workspace only | Main engine: compile GritQL → IR → execute |
+| `cli` / `cli_bin` | Workspace only | CLI frontend |
+
+**Syntax alignment with emend**:
+
+| Emend | GritQL | Notes |
+|-------|--------|-------|
+| `$X` | `$x` | Same metavar concept, different convention |
+| `$...ARGS` | `$...` (spread) | GritQL uses unnamed spread |
+| `--inside` | `within` | Same semantics |
+| `--not-inside` | `not within` | Same semantics |
+| `--where` | `where { }` | GritQL's is more expressive |
+| `find ... replace` | `` `pattern` => `replacement` `` | GritQL's `=>` is elegant |
+| `:type[X]` | No equivalent | Need custom extension |
+| `file.py::Sym` | No equivalent | Emend selector syntax is richer |
+| `--imported-from` | `imported_from()` predicate | GritQL has this! |
+| `--scope-local` | `bubble` | Similar scoping concept |
+| `search --output summary` | No equivalent | Emend-specific |
+
+**Rewrite mechanism**: GritQL's rewrite works as:
+1. Parse GritQL pattern into pattern IR (tree of `Matcher`-implementing nodes)
+2. Match pattern against tree-sitter AST, collecting metavar bindings
+3. Substitute metavar bindings into replacement template
+4. Apply as byte-range edits on original source
+
+This is exactly the flow emend needs.  The key difference: GritQL expresses
+this declaratively (`` `old` => `new` ``) while emend uses CLI flags
+(`emend replace 'old' 'new'`).
+
+**Cross-file**: GritQL's `multifile` mode allows gathering info from one file
+and applying transforms across others.  The `imported_from(from=includes
+$source_file)` predicate tracks cross-file imports -- not full scope resolution,
+but useful for many rename/move operations.
+
+**Limitations for emend**:
+- No qualified name resolution (no scope graph / symbol table)
+- No dead code detection
+- No call graph analysis
+- The `marzano-language` and `marzano-core` crates are NOT published to
+  crates.io -- we'd need to vendor them or use git dependencies
+- Only 5.3% API documentation coverage
+- Pattern-level operations only -- no symbol-level operations (edit component,
+  add parameter, etc.)
+
+### ast-grep Deep Dive
+
+**Architecture**: ast-grep is a standalone Rust CLI tool with a core library
+(`ast_grep_core`) on crates.io.
+
+**Key crates**:
+
+| Crate | Purpose |
+|-------|---------|
+| `ast-grep-core` | Pattern matching, `Matcher` trait, `Pattern`, `NodeMatch` |
+| `ast-grep-language` | Language definitions |
+| `ast-grep-config` | YAML rule system |
+| `ast-grep-py` | Python bindings via PyO3 |
+
+**Strengths**:
+- Very active development (more commits than GritQL)
+- Used by Netflix, Shopify
+- Built-in fix/rewrite from day one
+- Code-snippet patterns ("pattern is code") -- intuitive
+- Python bindings exist
+
+**Limitations for emend**:
+- **Unstable Rust API** -- docs explicitly warn against depending on it
+- **No scope analysis at all** -- purely syntactic
+- **No cross-file coordination** -- operates file-by-file
+- **YAML-heavy for complex rules** -- less elegant than GritQL for conditions
+- **No `imported_from` equivalent** -- can't verify import chains
+
+### Custom Rust (existing proposal) Assessment
+
+The existing proposal is sound but underestimates the effort for the pattern
+matcher and rewrite engine (~3,000 additional LOC on top of the existing 1,309
+in `matcher.rs`).  The scope resolver estimate (~2,000-3,000 LOC) is accurate.
+
+**What we keep from the existing proposal**:
+- Custom scope resolver in Rust (Section 2: `scope.rs`)
+- Byte-range edit engine (Section 3: `transform.rs`)
+- Performance analysis and migration strategy structure
+
+**What we replace**:
+- Pattern IR and matcher (Section 4) → use GritQL crates
+- Pattern compilation → compile emend patterns to GritQL IR
+
+---
+
+## Recommended Architecture
+
+### Layer Diagram
+
+```
+                    Python CLI (cli.py)
+                         |
+                 Python API layer (thin)
+                         |
+            +------------+-------------+
+            |            |             |
+       emend_core     emend_core    type_oracle.py
+       (patterns)     (scope)       (LSP adapters)
+            |            |
+    +-------+----+   +---+---+
+    |            |   |       |
+  GritQL      byte  scope   lang
+  pattern     range resolver config
+  matcher     edits (custom) (TOML)
+  (vendored)  (custom)
+```
+
+### Core Rust Modules
+
+#### 1. Pattern Engine (vendored GritQL crates)
+
+Vendor `grit-pattern-matcher`, `grit-util`, and the Python language definition
+from `marzano-language` into `emend_core`.  This gives us:
+
+- The `Matcher` trait and full pattern IR (metavars, spread, conditions)
+- Pattern compilation from code snippets → tree-sitter match
+- Replacement template instantiation with metavar substitution
+- `within` / `contains` / `not` combinators
+
+**Emend pattern compilation pipeline**:
+
+```
+Emend pattern string         "$X.method($...ARGS)"
+        |
+        v
+  Lark parser (pattern.lark)     -- existing
+        |
+        v
+  Emend Pattern AST              -- existing
+        |
+        v
+  GritQL pattern IR              -- NEW: compile to grit-pattern-matcher types
+        |
+        v
+  tree-sitter match execution    -- provided by GritQL crate
+        |
+        v
+  Match results with captures    -- byte ranges + metavar bindings
+```
+
+For the `find ... replace` command:
+
+```
+emend replace '$X.old_method($A)' '$X.new_method($A, extra=True)'
+        |
+        v
+  Compile both patterns to GritQL IR
+        |
+        v
+  GritQL rewrite: pattern => replacement with metavar substitution
+        |
+        v
+  Byte-range edits on original source
+```
+
+**What this replaces**:
+- `compile_pattern_to_matcher()` (pattern.py:1038) → GritQL IR compilation
+- `compile_pattern_to_rust_ir()` (pattern.py:1486) → GritQL IR compilation
+- `PatternFinder` (transform.py:3880) → GritQL match execution
+- `ConstrainedPatternFinder` (transform.py:4011) → GritQL `within`/`not`
+- `ScopedPatternFinder` (transform.py:4109) → GritQL + scope resolver
+- `PatternReplacer` (transform.py:4585) → GritQL rewrite
+- `matcher.rs` (1,309 LOC) → replaced by vendored GritQL matcher
+- The entire LibCST `matchers` dependency
+
+#### 2. Scope Resolver (`scope.rs` -- custom, ~2,500 LOC)
+
+This is unchanged from the existing proposal.  Neither GritQL nor ast-grep
+provides this.  We build a custom Python scope resolver in Rust that:
+
+- Walks tree-sitter CST to build scope tree + binding table
+- Handles Python scoping: function, class (non-closure), comprehension,
+  global/nonlocal, conditional imports, `__all__`
+- Builds import graph for cross-file resolution
+- Maintains persistent QN index (keyed by content hash)
+- Exposes `qualified_names(file)`, `find_references(qn)`,
+  `goto_definition(file, pos)`, `find_dead_code(opts)`
+
+**Cross-language generalization** (see Section below): The scope resolver is
+parameterized by a language config file that defines scoping rules, making it
+possible to add TypeScript, Go, etc. without modifying Rust code.
+
+```rust
+pub struct ScopeResolver {
+    config: LanguageConfig,       // loaded from TOML
+    file_scopes: HashMap<ContentHash, FileScope>,
+    import_graph: ImportGraph,
+    qn_index: HashMap<String, Vec<Location>>,
+}
+```
+
+#### 3. Transform Engine (`transform.rs` -- custom, ~800 LOC)
+
+Byte-range edit engine, extended from the existing proposal to integrate with
+GritQL match results:
+
+```rust
+pub struct FileTransform {
+    source: String,
+    edits: Vec<Edit>,
+}
+
+impl FileTransform {
+    /// From a GritQL match result, apply the rewrite.
+    pub fn apply_grit_rewrite(&mut self, match_result: &MatchResult);
+
+    /// Direct byte-range operations for symbol-level edits.
+    pub fn replace_range(&mut self, start: usize, end: usize, text: &str);
+    pub fn insert_before(&mut self, pos: usize, text: &str);
+    pub fn insert_after(&mut self, pos: usize, text: &str);
+    pub fn remove_range(&mut self, start: usize, end: usize);
+
+    pub fn apply(self) -> String;
+}
+```
+
+The direct byte-range operations handle emend-specific operations that don't
+map to GritQL patterns:
+- `edit` command (modify symbol components by selector)
+- `add` command (insert into list components)
+- `copy-to` / `move` (whole-symbol operations)
+- `rename` (scope-aware, uses QN resolver)
+
+#### 4. Language Config (`languages/*.toml` -- new)
+
+A TOML config file per language that defines scoping rules for the scope
+resolver.  This enables cross-language qualified name resolution without
+modifying Rust code.
+
+```toml
+# languages/python.toml
+[language]
+name = "python"
+tree_sitter_grammar = "tree-sitter-python"
+file_extensions = ["py", "pyi"]
+
+[scoping]
+# Node types that create new scopes
+scope_creators = [
+    { node = "function_definition", kind = "function" },
+    { node = "class_definition", kind = "class" },
+    { node = "lambda", kind = "function" },
+    { node = "list_comprehension", kind = "comprehension" },
+    { node = "set_comprehension", kind = "comprehension" },
+    { node = "dictionary_comprehension", kind = "comprehension" },
+    { node = "generator_expression", kind = "comprehension" },
+]
+
+[scoping.class]
+# Python-specific: class scope does NOT participate in closure
+is_closure_boundary = true
+names_visible_to_inner = false
+
+[scoping.comprehension]
+# Only iteration variables are scoped, not the iterable
+scoped_children = ["for_in_clause.left"]
+
+[scoping.declarations]
+# Keywords that modify binding scope
+global_keyword = "global_statement"
+nonlocal_keyword = "nonlocal_statement"
+
+[bindings]
+# How names are bound in this language
+assignment_nodes = ["assignment", "augmented_assignment"]
+target_field = "left"
+for_binding = "for_in_clause.left"
+with_binding = "with_clause.alias"
+except_binding = "except_clause.name"
+# Function params are bindings in the function scope
+param_nodes = ["parameters.identifier", "default_parameter.name",
+               "typed_parameter.name", "typed_default_parameter.name"]
+
+[imports]
+# Import statement structure
+import_statement = "import_statement"
+import_from = "import_from_statement"
+module_field = "module_name"
+name_field = "name"
+alias_field = "alias"
+star_import = "wildcard_import"
+# How to resolve module paths
+resolution = "python"  # Built-in: file-based with src/ detection
+
+[qualified_names]
+# How to construct QNs from bindings
+module_separator = "."
+class_member_prefix = true  # module.Class.method
+nested_function_prefix = true  # module.outer.<locals>.inner
+
+[exports]
+# What counts as a public export
+all_variable = "__all__"
+public_by_default = true
+private_prefix = "_"
+```
+
+```toml
+# languages/typescript.toml
+[language]
+name = "typescript"
+tree_sitter_grammar = "tree-sitter-typescript"
+file_extensions = ["ts", "tsx"]
+
+[scoping]
+scope_creators = [
+    { node = "function_declaration", kind = "function" },
+    { node = "arrow_function", kind = "function" },
+    { node = "class_declaration", kind = "class" },
+    { node = "method_definition", kind = "function" },
+    { node = "for_statement", kind = "block" },
+    { node = "for_in_statement", kind = "block" },
+]
+
+[scoping.class]
+is_closure_boundary = false
+names_visible_to_inner = true  # TypeScript classes DO participate in closure
+
+[scoping.declarations]
+# var is function-scoped, let/const are block-scoped
+var_declaration = { node = "variable_declaration", scope = "function" }
+let_declaration = { node = "lexical_declaration", scope = "block" }
+
+[bindings]
+assignment_nodes = ["assignment_expression", "variable_declarator"]
+target_field = "left"
+# Destructuring adds complexity
+destructuring_nodes = ["object_pattern", "array_pattern"]
+
+[imports]
+import_statement = "import_statement"
+module_field = "source"
+name_field = "import_clause"
+resolution = "node"  # node_modules resolution
+
+[qualified_names]
+module_separator = "/"
+class_member_prefix = true
+
+[exports]
+export_statement = "export_statement"
+default_export = "export_default_declaration"
+public_by_default = false
+```
+
+The scope resolver reads this config at initialization and uses it to:
+1. Walk tree-sitter nodes, creating scopes when it encounters `scope_creators`
+2. Bind names according to `bindings` rules
+3. Resolve imports using the language-specific `resolution` strategy
+4. Construct qualified names using `qualified_names` conventions
+
+**Python-specific resolution strategies** (like `importlib` semantics, `src/`
+layout detection) are implemented as named strategies in Rust that the config
+selects.  Adding a new strategy (e.g., `"node"` for Node.js resolution) is a
+Rust code change, but the scoping rules themselves are data-driven.
+
+---
+
+## Mapping Emend Commands to New Architecture
+
+| Command | Current Implementation | New Implementation |
+|---------|----------------------|-------------------|
+| `search` (pattern mode) | LibCST matchers + Rust fast path | GritQL pattern matcher (all patterns) |
+| `search` (symbol mode) | `_SymbolCollector` (LibCST) | `symbols.rs` (existing Rust) |
+| `search --output summary` | `_ListSymbolsVisitor` → already Rust | No change |
+| `replace` | `PatternReplacer` (LibCST CSTTransformer) | GritQL rewrite (`=>`) + byte-range edits |
+| `edit` | `ComponentSetter` (LibCST CSTTransformer) | tree-sitter node lookup + byte-range edits |
+| `add` | `ComponentAdder` (LibCST CSTTransformer) | tree-sitter node lookup + byte-range insert |
+| `refs` | `_ReferenceFinder` + MetadataWrapper | Scope resolver `find_references()` |
+| `rename` | `_SymbolRenamer` + MetadataWrapper | Scope resolver + byte-range edits |
+| `deadcode` | `_BulkReferenceFinder` + MetadataWrapper | Scope resolver `find_dead_code()` |
+| `graph` | `_CallerFilter` + `_CalleeCollector` | Scope resolver + `collect_callees` (existing Rust) |
+| `move` / `copy-to` | `ImportRewriter` + `SymbolRemover` | Scope resolver + byte-range edits |
+| `lint` | LibCST matchers + `_StatementRangeMapper` | GritQL pattern matcher + tree-sitter ranges |
+| `lint --fix` | `PatternReplacer` | GritQL rewrite |
+
+---
+
+## Cross-Language Qualified Names Design
+
+The language config approach (Section 4 above) enables cross-language scope
+resolution without Rust code changes for most languages.  Here's how it works:
+
+### Generic Algorithm
+
+```
+resolve_qualified_name(file, position):
+    config = load_language_config(file.extension)
+    tree = parse(file)
+    scopes = build_scope_tree(tree, config.scoping)
+    bindings = collect_bindings(tree, config.bindings)
+    imports = collect_imports(tree, config.imports)
+
+    # Find the identifier at position
+    node = find_node_at(tree, position)
+    name = node.text
+
+    # Walk scope tree upward to find binding
+    scope = innermost_scope_at(scopes, position)
+    while scope:
+        if (scope.id, name) in bindings:
+            binding = bindings[(scope.id, name)]
+            return construct_qn(file, binding, config.qualified_names)
+        if config.scoping[scope.kind].is_closure_boundary:
+            break  # e.g., class scope in Python
+        scope = scope.parent
+
+    # Check imports
+    if name in imports:
+        return resolve_import(imports[name], config.imports.resolution)
+
+    # Check builtins
+    return None  # unresolved
+```
+
+### Language-Specific Resolution Strategies
+
+The config's `[imports] resolution = "python"` selects a built-in strategy.
+Initial strategies:
+
+| Strategy | Languages | Algorithm |
+|----------|-----------|-----------|
+| `python` | Python | `importlib` semantics: `sys.path` search, `src/` layout, `__init__.py`, relative imports |
+| `node` | JS/TS | `node_modules` resolution: `package.json` main/exports, index.js, `.ts`→`.js` mapping |
+| `go` | Go | Module path from `go.mod`, package = directory |
+| `rust` | Rust | `mod` declarations + `use` paths, crate root from `Cargo.toml` |
+
+Each strategy is ~200-400 LOC of Rust.  The scoping rules themselves (scope
+creation, binding, closure boundaries) are fully config-driven.
+
+### What This Enables
+
+With a language config + resolution strategy, emend can:
+- Find references across a TypeScript project
+- Rename a Go function across all callers
+- Detect dead code in a Rust crate
+- Move a Python class to another module and update imports
+
+All using the same scope resolver infrastructure, parameterized by config.
+
+---
+
+## Migration Strategy
+
+### Phase 0: Vendor GritQL Crates + Build Integration Layer (Week 1-2)
+
+1. **Vendor** `grit-pattern-matcher`, `grit-util`, and the Python language
+   definition from `marzano-language` into `emend_core/vendor/`
+2. **Build** a bridge: `EmendPattern` → `GritPattern` compilation
+3. **Wire** into `find_pattern_in_files`: replace current `matcher.rs` IR with
+   GritQL pattern IR
+4. **Test**: Run `test_find.py`, `test_pattern.py`, `test_transform.py` --
+   verify identical results
+5. **Benchmark**: Compare pattern matching speed with current Rust + LibCST paths
+
+**Validation**: All 265 test files pass with GritQL pattern engine.
+
+### Phase 1: Build Scope Resolver (Week 2-4)
+
+1. **Implement** `scope.rs`: scope tree, binding table, import table
+2. **Implement** Python language config (`languages/python.toml`)
+3. **Implement** `python` import resolution strategy
+4. **Build comparison harness**: for every `.py` file in `tests/`, compare
+   LibCST QualifiedNameProvider output with Rust scope resolver output
+5. **Fix discrepancies** (likely: star imports, `__all__`, conditional imports,
+   walrus operator, comprehension variable leaking)
+6. **Wire** into `find_references`, `find_callers`, `find_dead_code`
+7. **Feature flag**: `EMEND_USE_RUST_SCOPE=1` to toggle
+
+### Phase 2: Build Rewrite Engine + Migrate Transforms (Week 4-6)
+
+1. **Implement** `transform.rs`: byte-range edit engine
+2. **Wire** GritQL rewrite output → `FileTransform`
+3. **Migrate** `replace` command: GritQL rewrite replaces `PatternReplacer`
+4. **Migrate** `edit`/`add` commands: tree-sitter node lookup + byte-range edits
+   replace `ComponentSetter`/`ComponentAdder`/`ComponentRemover`
+5. **Migrate** `rename`: scope resolver + byte-range edits replace `_SymbolRenamer`
+6. **Migrate** `move`/`copy-to`: scope resolver + byte-range edits
+7. **Run full test suite at each step**
+
+### Phase 3: Remove LibCST (Week 6-7)
+
+1. Remove all `import libcst` statements
+2. Delete LibCST-specific code: `_cached_parse`, visitor base classes,
+   `compile_pattern_to_matcher`, `_NoOpTransformer`
+3. Remove `libcst` from `pyproject.toml` dependencies
+4. Run full test suite
+5. Benchmark: measure end-to-end speedup
+
+### Phase 4: Add Language Config + Second Language (Week 7-9)
+
+1. **Finalize** the language config TOML schema
+2. **Refactor** scope resolver to be config-driven
+3. **Add TypeScript config** (`languages/typescript.toml`)
+4. **Implement `node` resolution strategy** for JS/TS imports
+5. **Test** basic TypeScript operations: `search`, `refs`, `rename`
+6. **Add tree-sitter-typescript** grammar dependency
+
+---
+
+## Performance Expectations
+
+| Operation | Current (LibCST) | Expected (GritQL + Rust scope) |
+|-----------|------------------|-------------------------------|
+| Pattern search (500 files) | ~400ms (Rust fast path) / ~2s (LibCST fallback) | ~400ms (all via GritQL, no fallback) |
+| `rename` (500 files, warm) | ~1.7s (MetadataWrapper bottleneck) | ~250ms (scope index lookup + edits) |
+| `refs` (500 files, warm) | ~1.5s | ~150ms |
+| `deadcode` (500 files) | ~3s | ~400ms |
+| `replace` pattern (500 files) | ~800ms | ~300ms |
+| Parse cache hit | ~11ms (SQLite + zlib + pickle) | ~0.001ms (in-memory tree-sitter) |
+| `import emend` time | ~800ms (LibCST import) | ~200ms |
+
+The biggest win is eliminating MetadataWrapper (50-200ms per file), which
+dominates all cross-project operations.
+
+---
+
+## Risk Analysis
+
+### High Risk: GritQL Crate Stability
+
+The `grit-pattern-matcher` and `grit-util` crates haven't been updated in
+~12 months.  The core engine crates (`marzano-core`, `marzano-language`) are
+not published to crates.io.
+
+**Mitigation**:
+- Vendor the code (MIT license) rather than depending on crates.io releases
+- The pattern matcher is well-defined: `Matcher` trait + pattern IR.  If GritQL
+  stagnates, we own the vendored code and can evolve it.
+- The vendored code is likely ~5,000 LOC -- manageable to maintain.
+- Alternatively: evaluate Biome's fork of GritQL (`biomejs/gritql`) which may
+  be more actively maintained.
+
+### High Risk: Scope Resolver Fidelity
+
+Unchanged from existing proposal.  This is the hardest part regardless of
+which pattern matcher we use.
+
+**Mitigation**: Comparison harness, extensive test suite, feature flag for
+gradual rollout.
+
+### Medium Risk: GritQL Pattern Coverage
+
+GritQL may not support all of emend's pattern constructs (e.g., `:type[X]`
+oracle constraints, `:call` type filters, glob identifiers like `test_*`).
+
+**Mitigation**:
+- `:type[X]` / `:returns[X]` → post-filter using type oracle (same as today)
+- `:call` / `:str` / `:int` → tree-sitter node type filter (simple to add)
+- `test_*` glob → regex pattern in GritQL (`` r"test_.*" ``)
+- If a specific pattern is unsupported, add it to the vendored crate
+
+### Low Risk: Byte-Range Edit Correctness
+
+Same as existing proposal.  Well-understood problem, good test coverage.
+
+---
+
+## Dependency Changes
+
+### Removed
+- `libcst` (~40K lines, significant import time)
+- Custom `matcher.rs` IR (1,309 LOC) -- replaced by GritQL crates
+
+### Added (Rust, vendored)
+- `grit-pattern-matcher` (vendored, MIT)
+- `grit-util` (vendored, MIT)
+- Python language support from `marzano-language` (vendored, MIT)
+- `toml` (for language config parsing)
+
+### Added (Rust, crates.io)
+- `lru 0.12` (LRU cache)
+- `rusqlite 0.31` (persistent scope index)
+- `petgraph` (scope graph, optional)
+
+### Kept
+- `tree-sitter 0.24`
+- `tree-sitter-python 0.23`
+- `rayon 1.10`
+- `pyo3 0.25`
+- `memchr 2.7`
+- `lark` (selector/pattern grammar)
+- `typer`, `pyyaml`
+
+---
+
+## Appendix A: GritQL Syntax Mapping
+
+How emend's pattern syntax maps to GritQL:
+
+| Emend Pattern | GritQL Equivalent |
+|---------------|-------------------|
+| `func($X)` | `` `func($x)` `` |
+| `$X.method($...ARGS)` | `` `$x.method($...args)` `` |
+| `isinstance($X, str)` | `` `isinstance($x, str)` `` |
+| `def $FUNC($...PARAMS): $...BODY` | `` `def $func($...params): $...body` `` |
+| `class $CLS($...BASES): $...BODY` | `` `class $cls($...bases): $...body` `` |
+| `$X = $Y` | `` `$x = $y` `` |
+| `$X == $Y` | `` `$x == $y` `` |
+| `[$...ITEMS]` | `` `[$...items]` `` |
+| `{$KEY: $VALUE}` | `` `{$key: $value}` `` |
+
+**Emend-specific extensions** (not in GritQL, need custom handling):
+- `$X:type[Connection]` → post-filter with type oracle
+- `$X:returns[Optional[str]]` → post-filter with type oracle
+- `$X:call` → tree-sitter `node.kind() == "call"`
+- `$X:str` → tree-sitter `node.kind() == "string"`
+- `test_*` → GritQL `r"test_.*"` regex pattern
+- `$KEY=$VALUE` (keyword arg) → GritQL `` `$key=$value` `` within argument context
+
+## Appendix B: Inventory of LibCST Visitors to Replace
+
+(Preserved from original proposal -- see classes in transform.py, query.py,
+ast_utils.py, ast_commands.py, lint.py, type_oracle.py)
+
+### CSTVisitor subclasses (18 total) → replaced by:
+- GritQL pattern matcher (PatternFinder variants)
+- Rust scope resolver (ReferenceFinder, CallerFilter, BulkReferenceFinder)
+- Existing Rust `symbols.rs` (NestedDefinitionVisitor, ListSymbolsVisitor)
+
+### CSTTransformer subclasses (11 total) → replaced by:
+- GritQL rewrite engine (PatternReplacer)
+- Byte-range edit engine (ComponentSetter, ComponentAdder, ComponentRemover,
+  SymbolRemover, SymbolRenamer, ImportRewriter)
+
+## Appendix C: Honest Assessment of GritQL Limitations
+
+1. **Documentation is sparse**: Only 5.3% coverage.  We'll be reading source
+   code more than docs.  But MIT license means we can.
+
+2. **Core crates not published**: We must vendor, not depend.  This means
+   tracking upstream changes manually.
+
+3. **No true scope resolution**: GritQL's `imported_from` is pattern-based
+   heuristic, not full scope analysis.  For correctness, we need our own.
+
+4. **Last updated ~12 months ago**: The published crates may not track the
+   latest tree-sitter versions.  We may need to update vendored code.
+
+5. **Designed for CLI, not library**: GritQL's architecture is CLI-first.
+   Extracting the pattern matcher as a library requires understanding the
+   crate boundaries.  The `grit-pattern-matcher` crate is the cleanest
+   extraction point.
+
+6. **Biome fork complexity**: There are two forks (`getgrit/gritql` and
+   `biomejs/gritql`).  Need to evaluate which is more actively maintained
+   and which has better library ergonomics.
+
+Despite these limitations, vendoring GritQL's pattern matcher is still
+preferable to building our own from scratch:
+- The `Matcher` trait and pattern IR are well-designed
+- The metavar capture + replacement template system is exactly what we need
+- The `within`/`contains`/`not` combinators match emend's `--inside`/`--not-inside`
+- MIT license gives us full freedom
+
+## Appendix D: ast-grep as Alternative
+
+If GritQL vendoring proves too complex, ast-grep's `ast_grep_core` crate
+(crates.io, MIT license) is a viable fallback:
+
+**Pros**:
+- On crates.io (easier dependency management)
+- Very actively maintained (updated Jan 2026)
+- Code-snippet patterns are natural
+- Python bindings (`ast-grep-py`) exist
+
+**Cons**:
+- **API explicitly marked unstable** -- breaking changes expected
+- No cross-file coordination at all
+- No `imported_from` equivalent
+- Complex conditions require YAML, not inline syntax
+- Would still need our custom scope resolver
+
+If we go this route, we'd use `ast_grep_core` only for pattern matching and
+build everything else custom.  The net effort is similar to using GritQL but
+with a less expressive pattern language.

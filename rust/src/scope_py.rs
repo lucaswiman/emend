@@ -1,0 +1,120 @@
+//! PyO3 bindings for the scope resolver.
+
+use pyo3::prelude::*;
+use std::path::PathBuf;
+
+use crate::pattern::parse_python;
+use crate::scope::{LanguageConfig, ScopeResolver};
+
+/// Python-visible scope resolver.
+#[pyclass]
+pub struct PyScopeResolver {
+    inner: ScopeResolver,
+}
+
+#[pymethods]
+impl PyScopeResolver {
+    #[new]
+    fn new(project_root: &str) -> Self {
+        let config = LanguageConfig::python_default();
+        Self {
+            inner: ScopeResolver::new(config, PathBuf::from(project_root)),
+        }
+    }
+
+    /// Index a single file.  Re-indexes only if content hash changed.
+    fn index_file(&mut self, path: &str, source: &str) -> PyResult<()> {
+        let tree = parse_python(source).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to parse file")
+        })?;
+        self.inner.index_file(&PathBuf::from(path), source, &tree);
+        Ok(())
+    }
+
+    /// Index multiple files sequentially.
+    fn index_files(&mut self, files_and_sources: Vec<(String, String)>) -> PyResult<()> {
+        for (path, source) in &files_and_sources {
+            if let Some(tree) = parse_python(source) {
+                self.inner.index_file(&PathBuf::from(path), source, &tree);
+            }
+        }
+        Ok(())
+    }
+
+    fn definitions_in_file(&self, path: &str) -> Vec<(String, usize, usize)> {
+        let path = PathBuf::from(path);
+        self.inner
+            .file_scopes
+            .get(&path)
+            .map(|fs| {
+                fs.definitions
+                    .iter()
+                    .map(|(qn, loc)| (qn.name.clone(), loc.line, loc.column))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn all_qualified_names(&self) -> Vec<String> {
+        self.inner.qn_index.keys().cloned().collect()
+    }
+
+    fn lookup_qn(&self, qn: &str) -> Vec<(String, usize, usize)> {
+        self.inner
+            .qn_index
+            .get(qn)
+            .map(|locs| {
+                locs.iter()
+                    .map(|loc| (loc.file.to_string_lossy().into_owned(), loc.line, loc.column))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn imports_in_file(&self, path: &str) -> Vec<(String, String, Option<String>, bool)> {
+        let path = PathBuf::from(path);
+        self.inner
+            .file_scopes
+            .get(&path)
+            .map(|fs| {
+                fs.imports
+                    .values()
+                    .map(|imp| {
+                        (
+                            imp.local_name.clone(),
+                            imp.module_path.clone(),
+                            imp.imported_name.clone(),
+                            imp.is_star,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns (scope_kind, [(name, binding_kind, line, column)]).
+    fn scopes_in_file(&self, path: &str) -> Vec<(&'static str, Vec<(String, &'static str, usize, usize)>)> {
+        let path = PathBuf::from(path);
+        self.inner
+            .file_scopes
+            .get(&path)
+            .map(|fs| {
+                fs.scopes
+                    .iter()
+                    .map(|scope| {
+                        let bindings: Vec<_> = scope
+                            .bindings
+                            .values()
+                            .map(|b| (b.name.clone(), b.kind.as_str(), b.line, b.column))
+                            .collect();
+                        (scope.kind.as_str(), bindings)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn file_count(&self) -> usize {
+        self.inner.file_scopes.len()
+    }
+}

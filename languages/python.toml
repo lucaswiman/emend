@@ -1,0 +1,192 @@
+# Python language configuration for emend scope resolver.
+#
+# This file defines the scoping rules, binding conventions, import resolution
+# strategy, and qualified name construction rules for Python. The scope resolver
+# reads this config at initialization and uses it to build scope trees, resolve
+# names, and construct qualified names from tree-sitter CST nodes.
+#
+# See treesitter-refactor.md "Cross-Language Qualified Names Design" for the
+# full design rationale.
+
+[language]
+name = "python"
+tree_sitter_grammar = "tree-sitter-python"
+file_extensions = ["py", "pyi"]
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+# Node types that create new scopes, and what kind of scope they create.
+# Kinds: "module", "function", "class", "comprehension"
+[[scoping.scope_creators]]
+node = "module"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "function_definition"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "class_definition"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "lambda"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "list_comprehension"
+kind = "comprehension"
+
+[[scoping.scope_creators]]
+node = "set_comprehension"
+kind = "comprehension"
+
+[[scoping.scope_creators]]
+node = "dictionary_comprehension"
+kind = "comprehension"
+
+[[scoping.scope_creators]]
+node = "generator_expression"
+kind = "comprehension"
+
+# Scope kind-specific rules.
+[scoping.rules.class]
+# Python-specific: class scope is a closure boundary -- inner functions
+# cannot see class-level names without explicit `self.` or the class name.
+is_closure_boundary = true
+names_visible_to_inner = false
+
+[scoping.rules.function]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.comprehension]
+is_closure_boundary = false
+names_visible_to_inner = true
+# Only the iteration variable is scoped to the comprehension, not the
+# iterable expression. The tree-sitter field path to the scoped child:
+scoped_children = ["for_in_clause.left"]
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+# Keywords that alter binding scope.
+[scoping.declarations]
+global_keyword = "global_statement"
+nonlocal_keyword = "nonlocal_statement"
+
+# ---------------------------------------------------------------------------
+# Binding rules -- how names are introduced into scopes
+# ---------------------------------------------------------------------------
+[bindings]
+
+# Assignment forms that create bindings. Each entry has:
+#   node: tree-sitter node type
+#   target: field name or path to the name being bound
+[[bindings.assignment]]
+node = "assignment"
+target = "left"
+
+[[bindings.assignment]]
+node = "augmented_assignment"
+target = "left"
+
+[[bindings.assignment]]
+node = "annotated_assignment"
+target = "left"
+
+# For-loop bindings
+[[bindings.loop]]
+node = "for_statement"
+target = "left"
+
+[[bindings.loop]]
+node = "for_in_clause"
+target = "left"
+
+# With-statement bindings
+[[bindings.context_manager]]
+node = "with_clause"
+target = "alias"     # as-clause
+
+# Exception handler bindings
+[[bindings.exception]]
+node = "except_clause"
+target = "name"
+
+# Function/method parameters are bindings in the function scope.
+[bindings.parameters]
+param_nodes = [
+    "identifier",              # simple param: def f(x)
+    "default_parameter",       # def f(x=1) → name field
+    "typed_parameter",         # def f(x: int) → name field
+    "typed_default_parameter", # def f(x: int = 1) → name field
+    "list_splat_pattern",      # def f(*args)
+    "dictionary_splat_pattern",# def f(**kwargs)
+]
+name_field = "name"  # field within param node that holds the identifier
+
+# Function and class definition names are bindings in the enclosing scope.
+[bindings.definitions]
+function_def = "function_definition"
+class_def = "class_definition"
+name_field = "name"
+
+# Walrus operator
+[bindings.walrus]
+node = "named_expression"
+target = "name"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = "import_statement"
+import_from = "import_from_statement"
+module_field = "module_name"
+name_field = "name"
+alias_field = "alias"
+star_import = "wildcard_import"
+
+# Import resolution strategy. Built-in strategies:
+#   "python" -- importlib semantics: sys.path, src/ layout detection,
+#               __init__.py, relative imports, namespace packages
+#   "node"   -- node_modules resolution (for JS/TS)
+#   "go"     -- go.mod-based resolution
+#   "rust"   -- Cargo.toml + mod declarations
+resolution = "python"
+
+# Python-specific: detect src/ layout from pyproject.toml
+[imports.python_options]
+detect_src_layout = true
+init_file = "__init__.py"
+# Relative imports use leading dots: from . import foo, from ..bar import baz
+supports_relative_imports = true
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+# Separator between module parts: "foo.bar.baz"
+module_separator = "."
+# Whether class members include the class name: "module.Class.method"
+class_member_prefix = true
+# Whether nested functions use <locals>: "module.outer.<locals>.inner"
+nested_function_prefix = true
+locals_marker = "<locals>"
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+# Python uses __all__ to define public API
+all_variable = "__all__"
+# By default, names without leading underscore are public
+public_by_default = true
+private_prefix = "_"
+# Dunder methods are always considered public/entry-points
+dunder_is_public = true

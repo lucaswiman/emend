@@ -11,6 +11,8 @@ mod scanner;
 mod pattern;
 mod symbols;
 mod matcher;
+mod scope;
+mod scope_py;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -237,5 +239,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
+    m.add_class::<scope_py::PyScopeResolver>()?;
     Ok(())
 }

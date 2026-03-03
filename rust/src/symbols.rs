@@ -45,7 +45,7 @@ fn symbol_to_pydict(py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
 }
 
 /// Get node text as a &str from source bytes.
-fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
+pub fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
 }
 
