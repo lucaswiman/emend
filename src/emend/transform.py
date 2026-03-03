@@ -487,6 +487,21 @@ def _extract_all_exports(module: cst.Module) -> set[str]:
     return names
 
 
+_ALL_RE = re.compile(
+    r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
+    re.MULTILINE | re.DOTALL,
+)
+_ALL_NAME_RE = re.compile(r"""['"](\w+)['"]""")
+
+
+def _extract_all_exports_text(source: str) -> set[str]:
+    """Extract names from ``__all__`` using regex (no AST dependency)."""
+    m = _ALL_RE.search(source)
+    if m is None:
+        return set()
+    return set(_ALL_NAME_RE.findall(m.group(1)))
+
+
 _NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
 
 
@@ -526,6 +541,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     import sqlite3
     import zlib
     from .query import _collect_symbols as _collect_symbols_ts
+    from emend import emend_core as _rust
 
     db_path, source_root, project_root, file_batch = args
     parse_rows: list[tuple[bytes, bytes]] = []
@@ -536,6 +552,9 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     if not file_batch:
         return (0, 0, 0, 0, 0, 0)
+
+    # Scope resolver for QN and reference collection (replaces MetadataWrapper).
+    scope_resolver = _rust.PyScopeResolver(project_root)
 
     # Compute content hashes up-front so we can bulk-check the cache.
     file_hashes: list[tuple[bytes, str, str]] = [
@@ -607,14 +626,12 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             skipped += 1
             continue
 
-        # Parse (required for all index types).
-        try:
-            module = cst.parse_module(content)
-        except Exception:
-            continue
-
+        # LibCST parse is only needed for the parse_cache (other commands
+        # still use it).  QN, reference, and symbol indexing now use
+        # tree-sitter via the Rust scope resolver and emend_core.
         if need_parse:
             try:
+                module = cst.parse_module(content)
                 parse_blob = zlib.compress(
                     pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
                 )
@@ -622,20 +639,21 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
-        # MetadataWrapper is needed for QN, symbols, and references.
-        wrapper = None
-        if need_qn or need_sym or need_ref:
+        # Use Rust scope resolver for QN and reference collection
+        # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
+        scope_indexed = False
+        if need_qn or need_ref:
             try:
-                wrapper = cst.metadata.MetadataWrapper(module)
+                scope_resolver.index_file(py_file, content)
+                scope_indexed = True
             except Exception:
-                wrapper = None
+                pass
 
-        if need_qn and wrapper is not None:
+        if need_qn and scope_indexed:
             try:
-                collector = _QNCollector()
-                wrapper.visit(collector)
+                all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
                 qn_blob = zlib.compress(
-                    pickle.dumps(collector.all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
+                    pickle.dumps(all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
                     level=1,
                 )
                 qn_rows.append((content_hash, qn_blob))
@@ -659,7 +677,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 )
 
                 # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports(module)
+                exported_names = _extract_all_exports_text(content)
                 noqa_lines = _extract_noqa_lines(content)
 
                 for sym in syms_for_file:
@@ -710,11 +728,9 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
-        if need_ref and wrapper is not None:
+        if need_ref and scope_indexed:
             try:
-                ref_collector = _RefIndexCollector()
-                wrapper.visit(ref_collector)
-                for qn_str, line, col, kind in ref_collector.refs:
+                for qn_str, line, col, kind in scope_resolver.references_in_file(py_file):
                     ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
             except Exception:
                 pass

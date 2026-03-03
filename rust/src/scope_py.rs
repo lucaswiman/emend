@@ -114,6 +114,31 @@ impl PyScopeResolver {
             .unwrap_or_default()
     }
 
+    /// Returns all references in a file as (target_qn, line, col, kind).
+    fn references_in_file(&self, path: &str) -> Vec<(String, usize, usize, &'static str)> {
+        let path = PathBuf::from(path);
+        self.inner
+            .file_scopes
+            .get(&path)
+            .map(|fs| {
+                fs.references
+                    .iter()
+                    .map(|r| (r.qn.name.clone(), r.line, r.column, r.kind.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns all qualified name strings mentioned in a file (for pre-filter index).
+    fn all_qnames_in_file(&self, path: &str) -> Vec<String> {
+        let path = PathBuf::from(path);
+        self.inner
+            .file_scopes
+            .get(&path)
+            .map(|fs| fs.all_qnames.clone())
+            .unwrap_or_default()
+    }
+
     fn file_count(&self) -> usize {
         self.inner.file_scopes.len()
     }
