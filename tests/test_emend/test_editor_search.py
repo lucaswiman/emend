@@ -612,13 +612,14 @@ class TestServerProtocol:
         finally:
             engine.close()
 
-    def test_dispatch_shutdown(self, indexed_project):
+    def test_dispatch_shutdown_is_handled_by_server(self, indexed_project):
+        """Shutdown is handled by run_editor_server before _dispatch."""
         from emend.editor_search import EditorSearchEngine, _dispatch
 
         engine = EditorSearchEngine(str(indexed_project))
         try:
-            result = _dispatch(engine, "shutdown", {})
-            assert result == {"ok": True}
+            with pytest.raises(ValueError, match="Unknown method"):
+                _dispatch(engine, "shutdown", {})
         finally:
             engine.close()
 
