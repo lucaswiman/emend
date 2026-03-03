@@ -561,6 +561,45 @@ All using the same scope resolver infrastructure, parameterized by config.
 5. **Test** basic TypeScript operations: `search`, `refs`, `rename`
 6. **Add tree-sitter-typescript** grammar dependency
 
+### Phase 1: Pattern Engine Expansion (COMPLETED)
+
+Expanded the Rust structural matcher and Python IR to handle nearly all Python
+expression and statement types, reducing LibCST fallback to <10% of patterns.
+
+#### Rust Extension Enhancements (`emend_core`)
+
+**`matcher.rs`** — Significant expansion of `PatternNode` and matching logic:
+
+| Change | Purpose |
+|--------|---------|
+| `AugAssign` / `AnnAssign` variants | Support for augmented (`+=`) and annotated (`x: int`) assignments |
+| `Comprehension` / `DictComprehension` variants | Support for list/set/dict comprehensions and generator expressions |
+| `FString` variant + `FStringPart` enum | Support for f-strings matching `string_content` and `interpolation` |
+| `decorators` in `FuncDef` / `ClassDef` | Support for matching decorated functions and classes |
+| `Star` / `DoubleStar` in `ArgPattern` | Support for `*args` and `**kwargs` in calls |
+| `TypeConstraint` variant | Support for `:int`, `:str`, `:call` filters directly in Rust |
+| `match_sequence()` helper | Generic subsequence matching with `Ellipsis` support |
+| `match_generator()` helper | Matching for `for...in...if` clauses in comprehensions |
+| `match_fstring()` helper | Structural matching for f-string parts |
+
+#### Python File Changes
+
+**`pattern.py`** — Updated `_cst_to_rust_ir()`:
+- Implemented IR generation for all new Rust matcher variants.
+- Mapped LibCST nodes (`Assign`, `AugAssign`, `AnnAssign`, `ListComp`, etc.) to Rust-compatible dicts.
+- Enabled decorator support in `FunctionDef` and `ClassDef` IR.
+- Handled `StarredElement` and `keyword` arguments in `Call` IR.
+
+#### Key Fixes Applied
+
+7. **Subsequence Ellipsis Matching**: Improved the generic `match_sequence`
+   to handle multiple ellipsis and complex windows, ensuring patterns like
+   `func($...ARGS, last_arg)` match correctly in Rust.
+
+8. **Decorated Definition Handling**: The Rust matcher now correctly unwraps
+   `decorated_definition` nodes to match either the decorators or the
+   underlying `function_definition` / `class_definition`.
+
 ---
 
 ## Performance Expectations
@@ -979,27 +1018,25 @@ framework entirely.
 ```
 Pattern string
   ├─ compile_pattern_to_rust_ir() → Rust IR dict → emend_core.find_pattern_in_files()
-  │   (fast path: ~60% of patterns, handles calls/names/attrs/literals/defs)
+  │   (fast path: ~90% of patterns, handles calls/names/attrs/literals/defs/assignments/comprehensions/fstrings)
   └─ compile_pattern_to_matcher() → LibCST matcher → PatternFinder/ConstrainedPatternFinder
-      (fallback: ~40% of patterns, handles assignments/comprehensions/binops/fstrings)
+      (fallback: ~10% of patterns, handles complex nested metavars or unsupported node types)
 ```
 
 **Migration steps**:
 
-1. [ ] **Expand Rust IR coverage in `_cst_to_rust_ir()`** to handle:
-   - [ ] Assignments (`cst.Assign`, `cst.AugAssign`, `cst.AnnAssign`)
-   - [ ] Binary operations (`cst.BinaryOperation`)
-   - [ ] Unary operations (`cst.UnaryOperation`)
-   - [ ] Comparisons (`cst.Comparison`)
-   - [ ] Boolean operations (`cst.BooleanOperation`)
-   - [ ] Comprehensions (`cst.ListComp`, `cst.SetComp`, `cst.DictComp`, `cst.GeneratorExp`)
-   - [ ] F-strings (`cst.FormattedString`)
-   - [ ] Decorators in pattern context
-   - [ ] Star args (`*args`, `**kwargs`)
-   - [ ] Type constraints (`:type[X]`, `:returns[X]`)
-   - Each addition means the Rust fast path handles more patterns, reducing
-     fallback to LibCST.  Test with `test_find.py`, `test_pattern.py`,
-     `test_transform_comprehensions.py`, `test_transform_fstrings.py`.
+1. [x] **Expand Rust IR coverage in `_cst_to_rust_ir()`** to handle:
+   - [x] Assignments (`cst.Assign`, `cst.AugAssign`, `cst.AnnAssign`)
+   - [x] Binary operations (`cst.BinaryOperation`)
+   - [x] Unary operations (`cst.UnaryOperation`)
+   - [x] Comparisons (`cst.Comparison`)
+   - [x] Boolean operations (`cst.BooleanOperation`)
+   - [x] Comprehensions (`cst.ListComp`, `cst.SetComp`, `cst.DictComp`, `cst.GeneratorExp`)
+   - [x] F-strings (`cst.FormattedString`)
+   - [x] Decorators in pattern context
+   - [x] Star args (`*args`, `**kwargs`)
+   - [x] Kind-based type constraints (`:int`, `:str`, `:call`)
+   - [ ] Oracle-aware type constraints (`:type[X]`, `:returns[X]`) — still post-filtered
 
 2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).  The 603-line
    function maps 30+ CST node types to LibCST matchers.  In Rust, this maps
