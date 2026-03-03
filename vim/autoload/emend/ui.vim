@@ -10,12 +10,16 @@
 
 let s:list_buf = -1
 let s:preview_buf = -1
+let s:input_buf = -1
 let s:list_win = -1
 let s:preview_win = -1
+let s:input_win = -1
 let s:results = []        " list of result dicts
 let s:selected = 0        " currently highlighted index
 let s:query = ''
 let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
+let s:is_interactive = 0
+let s:search_timer = -1
 
 " Kind abbreviations (hoisted to avoid per-call allocation).
 let s:KIND_ICONS = {
@@ -32,16 +36,35 @@ let s:KIND_ICONS = {
 " ---------------------------------------------------------------------------
 
 function! emend#ui#prompt(...) abort
-  let l:initial = a:0 > 0 ? a:1 : ''
-  let l:query = input('emend> ', l:initial)
-  if l:query ==# ''
-    return
+  if a:0 > 0 && a:1 !=# ''
+    call emend#ui#search(a:1)
+  else
+    call emend#ui#interactive()
   endif
-  call emend#ui#search(l:query)
+endfunction
+
+function! emend#ui#interactive() abort
+  if !emend#is_running()
+    call emend#start()
+  endif
+  
+  let s:is_interactive = 1
+  let s:query = ''
+  let s:results = []
+  let s:selected = 0
+  
+  call s:ensure_ui_open()
+  
+  " In interactive mode, start focus in the input window
+  if s:input_win >= 0
+    call win_gotoid(s:input_win)
+    startinsert
+  endif
 endfunction
 
 function! emend#ui#search(query) abort
   let s:query = a:query
+  let s:is_interactive = 0
   if !emend#is_running()
     call emend#start()
   endif
@@ -73,7 +96,13 @@ function! emend#ui#on_search_result(result) abort
   let s:results = get(a:result, 'items', [])
   let s:selected = 0
 
-  if empty(s:results)
+  if s:ui_is_open()
+    call s:render_list()
+    call s:render_preview()
+    return
+  endif
+
+  if empty(s:results) && !s:is_interactive
     echo printf('emend: no results for "%s" [%gms]',
           \ s:query, get(a:result, 'elapsed_ms', 0))
     return
@@ -198,8 +227,28 @@ endfunction
 " Window / buffer management
 " ---------------------------------------------------------------------------
 
+function! s:ui_is_open() abort
+  if s:list_win < 0 || s:preview_win < 0
+    return 0
+  endif
+  if has('nvim')
+    return nvim_win_is_valid(s:list_win) && nvim_win_is_valid(s:preview_win)
+  else
+    return win_id2win(s:list_win) > 0 && win_id2win(s:preview_win) > 0
+  endif
+endfunction
+
+function! s:ensure_ui_open() abort
+  if s:ui_is_open()
+    return
+  endif
+  call s:open_ui()
+endfunction
+
 function! s:open_ui() abort
+  let l:interactive = s:is_interactive
   call s:close_ui_silent()
+  let s:is_interactive = l:interactive
 
   let l:total_h = &lines
   let l:total_w = &columns
@@ -209,6 +258,9 @@ function! s:open_ui() abort
 
   let s:list_buf = s:create_scratch_buf('emend://results')
   let s:preview_buf = s:create_scratch_buf('emend://preview')
+  if s:is_interactive
+    let s:input_buf = s:create_scratch_buf('emend://input')
+  endif
 
   if has('nvim')
     call s:open_nvim_float(l:height, l:list_w, l:preview_w)
@@ -237,6 +289,11 @@ endfunction
 function! s:open_nvim_float(height, list_w, preview_w) abort
   let l:row = max([1, (&lines - a:height) / 2])
   let l:col = max([1, (&columns - a:list_w - a:preview_w - 3) / 2])
+  
+  " If interactive, shift down slightly to make room for input box at top
+  if s:is_interactive
+    let l:row = max([4, l:row]) 
+  endif
 
   let s:list_win = nvim_open_win(s:list_buf, v:true, {
         \ 'relative': 'editor',
@@ -246,9 +303,10 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'height': a:height,
         \ 'style': 'minimal',
         \ 'border': 'rounded',
-        \ 'title': ' emend search ',
+        \ 'title': ' results ',
         \ 'title_pos': 'center',
         \ })
+  call nvim_win_set_option(s:list_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
 
   let s:preview_win = nvim_open_win(s:preview_buf, v:false, {
         \ 'relative': 'editor',
@@ -261,11 +319,28 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'title': ' preview ',
         \ 'title_pos': 'center',
         \ })
+  call nvim_win_set_option(s:preview_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
 
   call nvim_win_set_option(s:list_win, 'cursorline', v:true)
   call nvim_win_set_option(s:list_win, 'number', v:false)
   call nvim_win_set_option(s:preview_win, 'number', v:true)
   call nvim_win_set_option(s:preview_win, 'wrap', v:false)
+  
+  if s:is_interactive
+    let s:input_win = nvim_open_win(s:input_buf, v:true, {
+          \ 'relative': 'editor',
+          \ 'row': l:row - 3,
+          \ 'col': l:col,
+          \ 'width': a:list_w + a:preview_w + 2,
+          \ 'height': 1,
+          \ 'style': 'minimal',
+          \ 'border': 'rounded',
+          \ 'title': ' emend search ',
+          \ 'title_pos': 'left',
+          \ })
+    call nvim_win_set_option(s:input_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
+    call nvim_win_set_option(s:input_win, 'number', v:false)
+  endif
 endfunction
 
 function! s:open_vim_split(height, list_w) abort
@@ -278,6 +353,15 @@ function! s:open_vim_split(height, list_w) abort
   let s:preview_win = win_getid()
   execute 'buffer ' . s:preview_buf
   setlocal number nowrap
+  
+  if s:is_interactive
+    " In Vim split mode, input is tricky, for now just use a split above list
+    call win_gotoid(s:list_win)
+    leftabove 1new
+    let s:input_win = win_getid()
+    execute 'buffer ' . s:input_buf
+    setlocal nonumber norelativenumber nowrap
+  endif
 
   call win_gotoid(s:list_win)
   execute 'vertical resize ' . a:list_w
@@ -305,12 +389,18 @@ endfunction
 
 function! s:close_ui() abort
   call s:close_ui_silent()
+  let s:is_interactive = 0
 endfunction
 
 function! s:close_ui_silent() abort
   if s:cache_timer >= 0
     call timer_stop(s:cache_timer)
     let s:cache_timer = -1
+  endif
+  
+  if s:search_timer >= 0
+    call timer_stop(s:search_timer)
+    let s:search_timer = -1
   endif
 
   " Kill any running cache-warming job.
@@ -331,38 +421,109 @@ function! s:close_ui_silent() abort
 
   call s:close_win(s:list_win)
   let s:list_win = -1
+  
+  call s:close_win(s:input_win)
+  let s:input_win = -1
 
   let s:list_buf = -1
   let s:preview_buf = -1
+  let s:input_buf = -1
 endfunction
 
 " ---------------------------------------------------------------------------
-" Keymaps
+" Keymaps & Events
 " ---------------------------------------------------------------------------
 
 function! s:setup_keymaps() abort
-  let l:buf = s:list_buf
+  let l:orig_win = win_getid()
 
-  call s:map_buf(l:buf, 'n', '<CR>',      '<Cmd>call emend#ui#accept()<CR>')
-  call s:map_buf(l:buf, 'n', '<Esc>',     '<Cmd>call emend#ui#close()<CR>')
-  call s:map_buf(l:buf, 'n', 'q',         '<Cmd>call emend#ui#close()<CR>')
-  call s:map_buf(l:buf, 'n', 'j',         '<Cmd>call emend#ui#move(1)<CR>')
-  call s:map_buf(l:buf, 'n', 'k',         '<Cmd>call emend#ui#move(-1)<CR>')
-  call s:map_buf(l:buf, 'n', '<Down>',    '<Cmd>call emend#ui#move(1)<CR>')
-  call s:map_buf(l:buf, 'n', '<Up>',      '<Cmd>call emend#ui#move(-1)<CR>')
-  call s:map_buf(l:buf, 'n', '<C-d>',     '<Cmd>call emend#ui#move(10)<CR>')
-  call s:map_buf(l:buf, 'n', '<C-u>',     '<Cmd>call emend#ui#move(-10)<CR>')
-  call s:map_buf(l:buf, 'n', 'gg',        '<Cmd>call emend#ui#goto_first()<CR>')
-  call s:map_buf(l:buf, 'n', 'G',         '<Cmd>call emend#ui#goto_last()<CR>')
-  call s:map_buf(l:buf, 'n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
+  " List buffer maps
+  if s:list_win >= 0
+    call win_gotoid(s:list_win)
+    call s:map_current_buf('n', '<CR>',      '<Cmd>call emend#ui#accept()<CR>')
+    call s:map_current_buf('n', '<Esc>',     '<Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', 'q',         '<Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', 'j',         '<Cmd>call emend#ui#move(1)<CR>')
+    call s:map_current_buf('n', 'k',         '<Cmd>call emend#ui#move(-1)<CR>')
+    call s:map_current_buf('n', '<Down>',    '<Cmd>call emend#ui#move(1)<CR>')
+    call s:map_current_buf('n', '<Up>',      '<Cmd>call emend#ui#move(-1)<CR>')
+    call s:map_current_buf('n', '<C-d>',     '<Cmd>call emend#ui#move(10)<CR>')
+    call s:map_current_buf('n', '<C-u>',     '<Cmd>call emend#ui#move(-10)<CR>')
+    call s:map_current_buf('n', 'gg',        '<Cmd>call emend#ui#goto_first()<CR>')
+    call s:map_current_buf('n', 'G',         '<Cmd>call emend#ui#goto_last()<CR>')
+    call s:map_current_buf('n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
+  endif
+  
+  " Input buffer maps (if interactive)
+  if s:input_win >= 0
+    call win_gotoid(s:input_win)
+    call s:map_current_buf('i', '<CR>',      '<Esc><Cmd>call emend#ui#accept()<CR>')
+    call s:map_current_buf('n', '<CR>',      '<Cmd>call emend#ui#accept()<CR>')
+    call s:map_current_buf('i', '<Esc>',     '<Esc><Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', '<Esc>',     '<Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', 'q',         '<Cmd>call emend#ui#close()<CR>')
+    
+    " Navigation from input buffer
+    call s:map_current_buf('i', '<C-n>',     '<Cmd>call emend#ui#move(1)<CR>')
+    call s:map_current_buf('i', '<C-p>',     '<Cmd>call emend#ui#move(-1)<CR>')
+    call s:map_current_buf('i', '<Down>',    '<Cmd>call emend#ui#move(1)<CR>')
+    call s:map_current_buf('i', '<Up>',      '<Cmd>call emend#ui#move(-1)<CR>')
+    
+    " Trigger search on change
+    augroup emend_input
+      autocmd! * <buffer>
+      autocmd TextChangedI <buffer> call emend#ui#on_input_change()
+      autocmd TextChanged  <buffer> call emend#ui#on_input_change()
+    augroup END
+  endif
+
+  call win_gotoid(l:orig_win)
 endfunction
 
-function! s:map_buf(buf, mode, lhs, rhs) abort
+function! emend#ui#on_input_change() abort
+  if s:input_buf < 0 || !bufexists(s:input_buf)
+    return
+  endif
+  let l:lines = getbufline(s:input_buf, 1)
+  if empty(l:lines)
+    return
+  endif
+  let l:query = l:lines[0]
+  if l:query ==# s:query
+    return
+  endif
+  
+  let s:query = l:query
+  
+  if s:search_timer >= 0
+    call timer_stop(s:search_timer)
+    let s:search_timer = -1
+  endif
+  
+  if l:query ==# ''
+    let s:results = []
+    call s:render_list()
+    call s:render_preview()
+    return
+  endif
+  
+  let s:search_timer = timer_start(100, {t -> s:trigger_search()})
+endfunction
+
+function! s:trigger_search() abort
+  let s:search_timer = -1
+  if s:is_interactive && s:query !=# ''
+    call emend#search(s:query)
+  endif
+endfunction
+
+function! s:map_current_buf(mode, lhs, rhs) abort
   if has('nvim')
-    call nvim_buf_set_keymap(a:buf, a:mode, a:lhs, a:rhs,
+    let l:buf = nvim_get_current_buf()
+    call nvim_buf_set_keymap(l:buf, a:mode, a:lhs, a:rhs,
           \ {'noremap': v:true, 'silent': v:true, 'nowait': v:true})
   else
-    execute 'nnoremap <buffer=' . a:buf . '> <silent> <nowait> ' . a:lhs . ' ' . a:rhs
+    execute a:mode . 'noremap <buffer> <silent> <nowait> ' . a:lhs . ' ' . a:rhs
   endif
 endfunction
 
@@ -423,6 +584,9 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! s:render_list() abort
+  if s:list_buf < 0 || !bufexists(s:list_buf)
+    return
+  endif
   let l:lines = []
   let l:elapsed = get(s:last_result, 'elapsed_ms', 0)
   let l:mode = get(s:last_result, 'mode', '?')
@@ -504,7 +668,12 @@ endfunction
 let s:preview_ft = ''
 
 function! s:render_preview() abort
-  if s:preview_buf < 0 || empty(s:results) || s:selected >= len(s:results)
+  if s:preview_buf < 0 || !bufexists(s:preview_buf)
+    return
+  endif
+  
+  if empty(s:results) || s:selected >= len(s:results)
+    call s:set_buf_lines(s:preview_buf, [])
     return
   endif
 
