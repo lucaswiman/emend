@@ -19,6 +19,10 @@ pub enum ArgPattern {
     Ellipsis,
     /// A specific argument pattern.
     Pattern(PatternNode),
+    /// `*args` — matches a starred argument.
+    Star(PatternNode),
+    /// `**kwargs` — matches a double-starred argument.
+    DoubleStar(PatternNode),
 }
 
 /// Pattern for a function/lambda parameter.
@@ -58,11 +62,13 @@ pub enum PatternNode {
     FuncDef {
         name: Box<PatternNode>,
         params: Vec<ParamPattern>,
+        decorators: Vec<PatternNode>,
     },
     /// Class definition (compound statement pattern).
     ClassDef {
         name: Box<PatternNode>,
         bases: Vec<PatternNode>,
+        decorators: Vec<PatternNode>,
     },
     /// Integer literal.
     Integer(String),
@@ -99,6 +105,18 @@ pub enum PatternNode {
         target: Box<PatternNode>,
         value: Box<PatternNode>,
     },
+    /// Augmented assignment: `target += value`.
+    AugAssign {
+        target: Box<PatternNode>,
+        op: String,
+        value: Box<PatternNode>,
+    },
+    /// Annotated assignment: `target: type = value`.
+    AnnAssign {
+        target: Box<PatternNode>,
+        annotation: Box<PatternNode>,
+        value: Option<Box<PatternNode>>,
+    },
     /// Comparison: `a == b`, `a is b`, etc.
     Compare {
         left: Box<PatternNode>,
@@ -109,11 +127,67 @@ pub enum PatternNode {
         op: String,
         operand: Box<PatternNode>,
     },
+    /// Comprehension: `[elt for ... in ... if ...]`.
+    Comprehension {
+        kind: String, // "list_comprehension", "set_comprehension", "generator_expression"
+        elt: Box<PatternNode>,
+        generators: Vec<ComprehensionGenerator>,
+    },
+    /// Dictionary comprehension: `{key: value for ... in ... if ...]`.
+    DictComprehension {
+        key: Box<PatternNode>,
+        value: Box<PatternNode>,
+        generators: Vec<ComprehensionGenerator>,
+    },
+    /// F-string: `f"hello {name}"`.
+    FString {
+        parts: Vec<FStringPart>,
+    },
+    /// Type constraint: `:int`, `:str`, `:call`.
+    TypeConstraint {
+        kind: String,
+    },
+}
+
+/// Part of an f-string.
+#[derive(Debug, Clone)]
+pub enum FStringPart {
+    Text(String),
+    Expr(PatternNode),
+}
+
+/// Generator part of a comprehension: `for target in iter if cond`.
+#[derive(Debug, Clone)]
+pub struct ComprehensionGenerator {
+    pub target: PatternNode,
+    pub iter: PatternNode,
+    pub ifs: Vec<PatternNode>,
 }
 
 // ---------------------------------------------------------------------------
 // Deserialization from Python dicts
 // ---------------------------------------------------------------------------
+
+fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenerator> {
+    let d = obj.downcast::<PyDict>()?;
+    let target_obj = d.get_item("target")?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("Generator missing 'target'")
+    })?;
+    let target = deserialize_pattern(&target_obj)?;
+    let iter_obj = d.get_item("iter")?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("Generator missing 'iter'")
+    })?;
+    let iter = deserialize_pattern(&iter_obj)?;
+    let ifs_obj = d.get_item("ifs")?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("Generator missing 'ifs'")
+    })?;
+    let ifs_list = ifs_obj.downcast::<PyList>()?;
+    let mut ifs = Vec::new();
+    for item in ifs_list.iter() {
+        ifs.push(deserialize_pattern(&item)?);
+    }
+    Ok(ComprehensionGenerator { target, iter, ifs })
+}
 
 fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
     let d = obj.downcast::<PyDict>()?;
@@ -171,6 +245,18 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                     .extract()?;
                 if arg_type == "ellipsis" {
                     args.push(ArgPattern::Ellipsis);
+                } else if arg_type == "star" {
+                    let v = item_d.get_item("value")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Star arg missing 'value'")
+                    })?;
+                    args.push(ArgPattern::Star(deserialize_pattern(&v)?));
+                } else if arg_type == "double_star" {
+                    let v = item_d.get_item("value")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "DoubleStar arg missing 'value'",
+                        )
+                    })?;
+                    args.push(ArgPattern::DoubleStar(deserialize_pattern(&v)?));
                 } else {
                     args.push(ArgPattern::Pattern(deserialize_pattern(&item)?));
                 }
@@ -239,9 +325,21 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                     _ => params.push(ParamPattern::Any),
                 }
             }
+            let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
+                let decs_list = decs_obj.downcast::<PyList>()?;
+                let mut decs = Vec::new();
+                for item in decs_list.iter() {
+                    decs.push(deserialize_pattern(&item)?);
+                }
+                decs
+            } else {
+                Vec::new()
+            };
+
             Ok(PatternNode::FuncDef {
                 name: Box::new(name),
                 params,
+                decorators,
             })
         }
 
@@ -259,9 +357,22 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             for item in bases_list.iter() {
                 bases.push(deserialize_pattern(&item)?);
             }
+
+            let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
+                let decs_list = decs_obj.downcast::<PyList>()?;
+                let mut decs = Vec::new();
+                for item in decs_list.iter() {
+                    decs.push(deserialize_pattern(&item)?);
+                }
+                decs
+            } else {
+                Vec::new()
+            };
+
             Ok(PatternNode::ClassDef {
                 name: Box::new(name),
                 bases,
+                decorators,
             })
         }
 
@@ -375,6 +486,137 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             Ok(PatternNode::Assign {
                 target: Box::new(target),
                 value: Box::new(value),
+            })
+        }
+
+        "aug_assign" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("AugAssign pattern missing 'target'")
+            })?;
+            let target = deserialize_pattern(&target_obj)?;
+            let op: String = d
+                .get_item("op")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("AugAssign pattern missing 'op'")
+                })?
+                .extract()?;
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("AugAssign pattern missing 'value'")
+            })?;
+            let value = deserialize_pattern(&value_obj)?;
+            Ok(PatternNode::AugAssign {
+                target: Box::new(target),
+                op,
+                value: Box::new(value),
+            })
+        }
+
+        "comprehension" => {
+            let kind: String = d.get_item("kind")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Comprehension missing 'kind'")
+            })?.extract()?;
+            let elt_obj = d.get_item("elt")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Comprehension missing 'elt'")
+            })?;
+            let elt = deserialize_pattern(&elt_obj)?;
+            let gens_obj = d.get_item("generators")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Comprehension missing 'generators'")
+            })?;
+            let gens_list = gens_obj.downcast::<PyList>()?;
+            let mut generators = Vec::new();
+            for item in gens_list.iter() {
+                generators.push(deserialize_generator(&item)?);
+            }
+            Ok(PatternNode::Comprehension { kind, elt: Box::new(elt), generators })
+        }
+
+        "dict_comprehension" => {
+            let key_obj = d.get_item("key")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("DictComp missing 'key'")
+            })?;
+            let key = deserialize_pattern(&key_obj)?;
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("DictComp missing 'value'")
+            })?;
+            let value = deserialize_pattern(&value_obj)?;
+            let gens_obj = d.get_item("generators")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("DictComp missing 'generators'")
+            })?;
+            let gens_list = gens_obj.downcast::<PyList>()?;
+            let mut generators = Vec::new();
+            for item in gens_list.iter() {
+                generators.push(deserialize_generator(&item)?);
+            }
+            Ok(PatternNode::DictComprehension {
+                key: Box::new(key),
+                value: Box::new(value),
+                generators,
+            })
+        }
+
+        "fstring" => {
+            let parts_obj = d.get_item("parts")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("FString missing 'parts'")
+            })?;
+            let parts_list = parts_obj.downcast::<PyList>()?;
+            let mut parts = Vec::new();
+            for item in parts_list.iter() {
+                let item_d = item.downcast::<PyDict>()?;
+                let part_type: String = item_d
+                    .get_item("type")?
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("FString part missing 'type'")
+                    })?
+                    .extract()?;
+                if part_type == "fstring_text" {
+                    let value: String = item_d
+                        .get_item("value")?
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "FString text missing 'value'",
+                            )
+                        })?
+                        .extract()?;
+                    parts.push(FStringPart::Text(value));
+                } else if part_type == "fstring_expr" {
+                    let value_obj = item_d.get_item("value")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "FString expr missing 'value'",
+                        )
+                    })?;
+                    parts.push(FStringPart::Expr(deserialize_pattern(&value_obj)?));
+                }
+            }
+            Ok(PatternNode::FString { parts })
+        }
+
+        "type_constraint" => {
+            let kind: String = d
+                .get_item("kind")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("TypeConstraint missing 'kind'")
+                })?
+                .extract()?;
+            Ok(PatternNode::TypeConstraint { kind })
+        }
+
+        "ann_assign" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("AnnAssign pattern missing 'target'")
+            })?;
+            let target = deserialize_pattern(&target_obj)?;
+            let annotation_obj = d.get_item("annotation")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("AnnAssign pattern missing 'annotation'")
+            })?;
+            let annotation = deserialize_pattern(&annotation_obj)?;
+            let value = match d.get_item("value")? {
+                Some(v) if !v.is_none() => Some(Box::new(deserialize_pattern(&v)?)),
+                _ => None,
+            };
+            Ok(PatternNode::AnnAssign {
+                target: Box::new(target),
+                annotation: Box::new(annotation),
+                value,
             })
         }
 
@@ -500,6 +742,137 @@ fn collect_params<'a>(params_node: Node<'a>) -> Vec<Node<'a>> {
     params
 }
 
+/// Check if an f-string pattern matches a node.
+fn match_fstring(parts: &[FStringPart], node: Node, source: &[u8]) -> bool {
+    if node.kind() != "string" {
+        return false;
+    }
+    // Collect tree-sitter nodes corresponding to f-string parts
+    let mut cursor = node.walk();
+    let actual_parts: Vec<Node> = node
+        .children(&mut cursor)
+        .filter(|n| n.kind() == "string_content" || n.kind() == "interpolation")
+        .collect();
+
+    // The patterns also need to handle the case where multiple text parts
+    // are merged in tree-sitter or vice versa.
+    // For now, let's assume a one-to-one mapping if it matches exactly.
+    if actual_parts.len() != parts.len() {
+        return false;
+    }
+
+    for (i, p) in parts.iter().enumerate() {
+        let actual = actual_parts[i];
+        match p {
+            FStringPart::Text(t) => {
+                if actual.kind() != "string_content" {
+                    return false;
+                }
+                if node_text(actual, source) != t.as_str() {
+                    return false;
+                }
+            }
+            FStringPart::Expr(pnode) => {
+                if actual.kind() != "interpolation" {
+                    return false;
+                }
+                // Interpolation contains '{', the expression, then '}'
+                let mut c = actual.walk();
+                let inner = actual.children(&mut c).find(|n| n.is_named());
+                if let Some(inner_node) = inner {
+                    if !matches_node(inner_node, source, pnode) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Check if a comprehension generator pattern matches a node.
+fn match_generator(pattern: &ComprehensionGenerator, node: Node, source: &[u8]) -> bool {
+    if node.kind() != "for_in_clause" {
+        return false;
+    }
+    let target_node = match node.child_by_field_name("left") {
+        Some(n) => n,
+        None => return false,
+    };
+    let iter_node = match node.child_by_field_name("right") {
+        Some(n) => n,
+        None => return false,
+    };
+    if !matches_node(target_node, source, &pattern.target)
+        || !matches_node(iter_node, source, &pattern.iter)
+    {
+        return false;
+    }
+    // Collect all if_clause conditions
+    let mut cursor = node.walk();
+    let if_nodes: Vec<Node> = node
+        .children(&mut cursor)
+        .filter(|n| n.kind() == "if_clause")
+        .filter_map(|n| n.child_by_field_name("condition"))
+        .collect();
+
+    match_sequence(&pattern.ifs, &if_nodes, source)
+}
+
+/// Check if a list of comprehension generator patterns matches a list of nodes.
+fn match_generators(patterns: &[ComprehensionGenerator], nodes: &[Node], source: &[u8]) -> bool {
+    if nodes.len() != patterns.len() {
+        return false;
+    }
+    for (i, p) in patterns.iter().enumerate() {
+        if !match_generator(p, nodes[i], source) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a list of patterns matches a list of nodes, supporting Ellipsis.
+fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bool {
+    let has_ellipsis = patterns.iter().any(|p| matches!(p, PatternNode::Ellipsis));
+    if has_ellipsis && patterns.len() == 1 {
+        return true;
+    }
+    if !has_ellipsis {
+        if nodes.len() != patterns.len() {
+            return false;
+        }
+        for (i, p) in patterns.iter().enumerate() {
+            if !matches_node(nodes[i], source, p) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // Subsequence matching for mixed ellipsis
+    let non_ellipsis: Vec<&PatternNode> = patterns
+        .iter()
+        .filter(|p| !matches!(p, PatternNode::Ellipsis))
+        .collect();
+    if non_ellipsis.is_empty() {
+        return true;
+    }
+    if nodes.len() < non_ellipsis.len() {
+        return false;
+    }
+    'outer: for start in 0..=(nodes.len() - non_ellipsis.len()) {
+        for (j, pnode) in non_ellipsis.iter().enumerate() {
+            if !matches_node(nodes[start + j], source, pnode) {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
 /// Check if a list of arg patterns matches a list of call arg nodes.
 fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], exact: bool) -> bool {
     let has_ellipsis = arg_patterns.iter().any(|a| matches!(a, ArgPattern::Ellipsis));
@@ -513,10 +886,44 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
             return false;
         }
         for (i, pattern) in arg_patterns.iter().enumerate() {
-            if let ArgPattern::Pattern(pnode) = pattern {
-                if i >= call_args.len() || !matches_node(call_args[i], source, pnode) {
-                    return false;
+            if i >= call_args.len() {
+                return false;
+            }
+            match pattern {
+                ArgPattern::Pattern(pnode) => {
+                    if !matches_node(call_args[i], source, pnode) {
+                        return false;
+                    }
                 }
+                ArgPattern::Star(pnode) => {
+                    if call_args[i].kind() != "list_splat" {
+                        return false;
+                    }
+                    let mut cursor = call_args[i].walk();
+                    let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
+                    if let Some(inner_node) = inner {
+                        if !matches_node(inner_node, source, pnode) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                ArgPattern::DoubleStar(pnode) => {
+                    if call_args[i].kind() != "dictionary_splat" {
+                        return false;
+                    }
+                    let mut cursor = call_args[i].walk();
+                    let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
+                    if let Some(inner_node) = inner {
+                        if !matches_node(inner_node, source, pnode) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                _ => return false,
             }
         }
         return true;
@@ -529,30 +936,59 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
     }
 
     // General case: collect non-Ellipsis patterns in order
-    let non_ellipsis: Vec<&PatternNode> = arg_patterns
+    // (Note: Star/DoubleStar patterns are also included in the subsequence check)
+    if call_args.len() < arg_patterns.iter().filter(|a| !matches!(a, ArgPattern::Ellipsis)).count() {
+        return false;
+    }
+
+    let non_ellipsis: Vec<&ArgPattern> = arg_patterns
         .iter()
-        .filter_map(|a| {
-            if let ArgPattern::Pattern(p) = a {
-                Some(p)
-            } else {
-                None
-            }
-        })
+        .filter(|a| !matches!(a, ArgPattern::Ellipsis))
         .collect();
 
     if non_ellipsis.is_empty() {
-        return true; // Only Ellipsis patterns
-    }
-
-    if call_args.len() < non_ellipsis.len() {
-        return false;
+        return true;
     }
 
     // Find a contiguous window matching all non-ellipsis patterns in order
     'outer: for start in 0..=(call_args.len() - non_ellipsis.len()) {
-        for (j, pnode) in non_ellipsis.iter().enumerate() {
-            if !matches_node(call_args[start + j], source, pnode) {
-                continue 'outer;
+        for (j, pattern) in non_ellipsis.iter().enumerate() {
+            let node = call_args[start + j];
+            match pattern {
+                ArgPattern::Pattern(pnode) => {
+                    if !matches_node(node, source, pnode) {
+                        continue 'outer;
+                    }
+                }
+                ArgPattern::Star(pnode) => {
+                    if node.kind() != "list_splat" {
+                        continue 'outer;
+                    }
+                    let mut cursor = node.walk();
+                    let inner = node.children(&mut cursor).find(|n| n.is_named());
+                    if let Some(inner_node) = inner {
+                        if !matches_node(inner_node, source, pnode) {
+                            continue 'outer;
+                        }
+                    } else {
+                        continue 'outer;
+                    }
+                }
+                ArgPattern::DoubleStar(pnode) => {
+                    if node.kind() != "dictionary_splat" {
+                        continue 'outer;
+                    }
+                    let mut cursor = node.walk();
+                    let inner = node.children(&mut cursor).find(|n| n.is_named());
+                    if let Some(inner_node) = inner {
+                        if !matches_node(inner_node, source, pnode) {
+                            continue 'outer;
+                        }
+                    } else {
+                        continue 'outer;
+                    }
+                }
+                _ => continue 'outer,
             }
         }
         return true;
@@ -677,18 +1113,39 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             matches_node(obj_node, source, value) && node_text(attr_node, source) == attr.as_str()
         }
 
-        PatternNode::FuncDef { name, params } => {
-            if node.kind() != "function_definition" {
+        PatternNode::FuncDef {
+            name,
+            params,
+            decorators,
+        } => {
+            let (actual_decs, func_node) = if node.kind() == "decorated_definition" {
+                let mut cursor = node.walk();
+                let decs: Vec<Node> = node
+                    .children(&mut cursor)
+                    .filter(|n| n.kind() == "decorator")
+                    .collect();
+                let def = node.child_by_field_name("definition").unwrap_or(node);
+                (decs, def)
+            } else {
+                (Vec::new(), node)
+            };
+
+            if func_node.kind() != "function_definition" {
                 return false;
             }
-            let name_node = match node.child_by_field_name("name") {
+
+            if !match_sequence(decorators, &actual_decs, source) {
+                return false;
+            }
+
+            let name_node = match func_node.child_by_field_name("name") {
                 Some(n) => n,
                 None => return false,
             };
             if !matches_node(name_node, source, name) {
                 return false;
             }
-            let params_node = match node.child_by_field_name("parameters") {
+            let params_node = match func_node.child_by_field_name("parameters") {
                 Some(n) => n,
                 None => return false,
             };
@@ -696,11 +1153,32 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             match_params(params, &param_nodes, source)
         }
 
-        PatternNode::ClassDef { name, bases } => {
-            if node.kind() != "class_definition" {
+        PatternNode::ClassDef {
+            name,
+            bases,
+            decorators,
+        } => {
+            let (actual_decs, class_node) = if node.kind() == "decorated_definition" {
+                let mut cursor = node.walk();
+                let decs: Vec<Node> = node
+                    .children(&mut cursor)
+                    .filter(|n| n.kind() == "decorator")
+                    .collect();
+                let def = node.child_by_field_name("definition").unwrap_or(node);
+                (decs, def)
+            } else {
+                (Vec::new(), node)
+            };
+
+            if class_node.kind() != "class_definition" {
                 return false;
             }
-            let name_node = match node.child_by_field_name("name") {
+
+            if !match_sequence(decorators, &actual_decs, source) {
+                return false;
+            }
+
+            let name_node = match class_node.child_by_field_name("name") {
                 Some(n) => n,
                 None => return false,
             };
@@ -717,7 +1195,7 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             }
 
             // Get superclasses from the `superclasses` field
-            let superclasses = match node.child_by_field_name("superclasses") {
+            let superclasses = match class_node.child_by_field_name("superclasses") {
                 Some(n) => n,
                 None => return false, // Pattern requires bases but none found
             };
@@ -729,15 +1207,7 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                     .collect()
             };
 
-            if base_nodes.len() != bases.len() {
-                return false;
-            }
-            for (i, base_pattern) in bases.iter().enumerate() {
-                if !matches_node(base_nodes[i], source, base_pattern) {
-                    return false;
-                }
-            }
-            true
+            match_sequence(bases, &base_nodes, source)
         }
 
         PatternNode::Integer(v) => {
@@ -994,7 +1464,7 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
         }
 
         PatternNode::Assign { target, value } => {
-            if node.kind() != "assignment" && node.kind() != "augmented_assignment" {
+            if node.kind() != "assignment" {
                 return false;
             }
             let left_node = match node.child_by_field_name("left") {
@@ -1006,6 +1476,55 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 None => return false,
             };
             matches_node(left_node, source, target) && matches_node(right_node, source, value)
+        }
+
+        PatternNode::AugAssign { target, op, value } => {
+            if node.kind() != "augmented_assignment" {
+                return false;
+            }
+            let left_node = match node.child_by_field_name("left") {
+                Some(n) => n,
+                None => return false,
+            };
+            let op_node = match node.child_by_field_name("operator") {
+                Some(n) => n,
+                None => return false,
+            };
+            let right_node = match node.child_by_field_name("right") {
+                Some(n) => n,
+                None => return false,
+            };
+            node_text(op_node, source) == op.as_str()
+                && matches_node(left_node, source, target)
+                && matches_node(right_node, source, value)
+        }
+
+        PatternNode::AnnAssign {
+            target,
+            annotation,
+            value,
+        } => {
+            if node.kind() != "annotated_assignment" {
+                return false;
+            }
+            let left_node = match node.child_by_field_name("left") {
+                Some(n) => n,
+                None => return false,
+            };
+            let type_node = match node.child_by_field_name("type") {
+                Some(n) => n,
+                None => return false,
+            };
+            if !matches_node(left_node, source, target)
+                || !matches_node(type_node, source, annotation)
+            {
+                return false;
+            }
+            match (value, node.child_by_field_name("value")) {
+                (Some(p), Some(n)) => matches_node(n, source, p),
+                (None, None) => true,
+                _ => false,
+            }
         }
 
         PatternNode::Compare { left, ops } => {
@@ -1079,6 +1598,67 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             node_text(op_node, source) == op.as_str()
                 && matches_node(arg_node, source, operand)
         }
+
+        PatternNode::Comprehension {
+            kind,
+            elt,
+            generators,
+        } => {
+            if node.kind() != kind.as_str() {
+                return false;
+            }
+            let body_node = match node.child_by_field_name("body") {
+                Some(n) => n,
+                None => return false,
+            };
+            if !matches_node(body_node, source, elt) {
+                return false;
+            }
+            // Collect generators
+            let mut cursor = node.walk();
+            let gen_nodes: Vec<Node> = node
+                .children(&mut cursor)
+                .filter(|n| n.kind() == "for_in_clause")
+                .collect();
+            match_generators(generators, &gen_nodes, source)
+        }
+
+        PatternNode::DictComprehension {
+            key,
+            value,
+            generators,
+        } => {
+            if node.kind() != "dictionary_comprehension" {
+                return false;
+            }
+            let key_node = match node.child_by_field_name("key") {
+                Some(n) => n,
+                None => return false,
+            };
+            let value_node = match node.child_by_field_name("value") {
+                Some(n) => n,
+                None => return false,
+            };
+            if !matches_node(key_node, source, key) || !matches_node(value_node, source, value) {
+                return false;
+            }
+            // Collect generators
+            let mut cursor = node.walk();
+            let gen_nodes: Vec<Node> = node
+                .children(&mut cursor)
+                .filter(|n| n.kind() == "for_in_clause")
+                .collect();
+            match_generators(generators, &gen_nodes, source)
+        }
+
+        PatternNode::FString { parts } => match_fstring(parts, node, source),
+
+        PatternNode::TypeConstraint { kind } => match kind.as_str() {
+            "int" => node.kind() == "integer",
+            "str" => node.kind() == "string" || node.kind() == "concatenated_string",
+            "call" => node.kind() == "call",
+            _ => false,
+        },
 
         PatternNode::NoneLiteral => node.kind() == "none",
 

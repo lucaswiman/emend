@@ -1221,7 +1221,9 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
     if isinstance(node, cst.Name):
         if node.value in metavar_map:
             metavar = metavar_map[node.value]
-            # Type constraints not yet supported in Rust matcher — fall back
+            # Type constraints support
+            if metavar.type_constraint in (":int", ":str", ":call"):
+                return {"type": "type_constraint", "kind": metavar.type_constraint[1:]}
             if metavar.type_constraint is not None:
                 return None
             if metavar.ellipsis:
@@ -1246,20 +1248,31 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         args_ir = []
         has_ellipsis = False
         for arg in node.args:
-            # Star/double-star args not yet supported in Rust matcher — fall back
-            if arg.star in ("*", "**"):
-                return None
             # Check if this is an ellipsis metavar in arg position
-            if isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
+            if arg.star == "" and isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
                 metavar = metavar_map[arg.value.value]
                 if metavar.ellipsis:
                     args_ir.append({"type": "ellipsis"})
                     has_ellipsis = True
                     continue
+
             arg_ir = _cst_to_rust_ir(arg.value, metavar_map)
             if arg_ir is None:
                 return None
-            args_ir.append(arg_ir)
+
+            if arg.star == "*":
+                args_ir.append({"type": "star", "value": arg_ir})
+            elif arg.star == "**":
+                args_ir.append({"type": "double_star", "value": arg_ir})
+            elif arg.keyword is not None:
+                # keyword arguments are handled as special IR if needed,
+                # but currently Rust's KeywordArg is a PatternNode,
+                # whereas Call args are ArgPattern.
+                # Actually, tree-sitter treats keyword_argument as a named node.
+                kname = arg.keyword.value
+                args_ir.append({"type": "keyword_arg", "key": kname, "value": arg_ir})
+            else:
+                args_ir.append(arg_ir)
 
         return {
             "type": "call",
@@ -1296,9 +1309,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return {"type": "list", "elements": elems_ir}
 
     elif isinstance(node, cst.FunctionDef):
-        # Decorators not yet supported in Rust matcher — fall back
-        if node.decorators:
-            return None
         # Async functions not yet distinguished in Rust matcher — fall back
         if node.asynchronous is not None:
             return None
@@ -1306,6 +1316,14 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         name_ir = _cst_to_rust_ir(node.name, metavar_map)
         if name_ir is None:
             return None
+
+        # Decorators support
+        decorators_ir = []
+        for dec in node.decorators:
+            dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
+            if dec_ir is None:
+                return None
+            decorators_ir.append(dec_ir)
 
         params = node.params
         param_patterns = []
@@ -1358,12 +1376,25 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             else:
                 param_patterns.append({"type": "any"})
 
-        return {"type": "funcdef", "name": name_ir, "params": param_patterns}
+        return {
+            "type": "funcdef",
+            "name": name_ir,
+            "params": param_patterns,
+            "decorators": decorators_ir
+        }
 
     elif isinstance(node, cst.ClassDef):
         name_ir = _cst_to_rust_ir(node.name, metavar_map)
         if name_ir is None:
             return None
+
+        # Decorators support
+        decorators_ir = []
+        for dec in node.decorators:
+            dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
+            if dec_ir is None:
+                return None
+            decorators_ir.append(dec_ir)
 
         bases_ir = []
         for base_arg in node.bases:
@@ -1372,7 +1403,12 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                 return None
             bases_ir.append(base_ir)
 
-        return {"type": "classdef", "name": name_ir, "bases": bases_ir}
+        return {
+            "type": "classdef",
+            "name": name_ir,
+            "bases": bases_ir,
+            "decorators": decorators_ir
+        }
 
     elif isinstance(node, cst.Subscript):
         value_ir = _cst_to_rust_ir(node.value, metavar_map)
@@ -1435,6 +1471,45 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             return None
         return {"type": "assign", "target": target_ir, "value": value_ir}
 
+    elif isinstance(node, cst.AugAssign):
+        target_ir = _cst_to_rust_ir(node.target, metavar_map)
+        if target_ir is None:
+            return None
+        value_ir = _cst_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        # Map the operator to a string
+        op_map = {
+            cst.AddAssign: "+=", cst.SubtractAssign: "-=", cst.MultiplyAssign: "*=",
+            cst.DivideAssign: "/=", cst.FloorDivideAssign: "//=", cst.ModuloAssign: "%=",
+            cst.PowerAssign: "**=", cst.BitAndAssign: "&=", cst.BitOrAssign: "|=",
+            cst.BitXorAssign: "^=", cst.LeftShiftAssign: "<<=", cst.RightShiftAssign: ">>=",
+            cst.MatrixMultiplyAssign: "@=",
+        }
+        op_str = op_map.get(type(node.operator))
+        if op_str is None:
+            return None
+        return {"type": "aug_assign", "target": target_ir, "op": op_str, "value": value_ir}
+
+    elif isinstance(node, cst.AnnAssign):
+        target_ir = _cst_to_rust_ir(node.target, metavar_map)
+        if target_ir is None:
+            return None
+        annotation_ir = _cst_to_rust_ir(node.annotation, metavar_map)
+        if annotation_ir is None:
+            return None
+        value_ir = None
+        if node.value:
+            value_ir = _cst_to_rust_ir(node.value, metavar_map)
+            if value_ir is None:
+                return None
+        return {
+            "type": "ann_assign",
+            "target": target_ir,
+            "annotation": annotation_ir,
+            "value": value_ir
+        }
+
     elif isinstance(node, cst.Comparison):
         left_ir = _cst_to_rust_ir(node.left, metavar_map)
         if left_ir is None:
@@ -1469,6 +1544,83 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             return None
         return {"type": "unary_op", "op": op_str, "operand": operand_ir}
 
+    elif isinstance(node, (cst.ListComp, cst.SetComp, cst.GeneratorExp)):
+        elt_ir = _cst_to_rust_ir(node.elt, metavar_map)
+        if elt_ir is None:
+            return None
+        
+        generators_ir = []
+        for gen in node.for_in:
+            target_ir = _cst_to_rust_ir(gen.target, metavar_map)
+            if target_ir is None:
+                return None
+            iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
+            if iter_ir is None:
+                return None
+            
+            ifs_ir = []
+            for if_clause in gen.ifs:
+                if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
+                if if_ir is None:
+                    return None
+                ifs_ir.append(if_ir)
+            
+            generators_ir.append({
+                "target": target_ir,
+                "iter": iter_ir,
+                "ifs": ifs_ir
+            })
+        
+        kind = "list_comprehension"
+        if isinstance(node, cst.SetComp):
+            kind = "set_comprehension"
+        elif isinstance(node, cst.GeneratorExp):
+            kind = "generator_expression"
+            
+        return {
+            "type": "comprehension",
+            "kind": kind,
+            "elt": elt_ir,
+            "generators": generators_ir
+        }
+
+    elif isinstance(node, cst.DictComp):
+        key_ir = _cst_to_rust_ir(node.key, metavar_map)
+        if key_ir is None:
+            return None
+        value_ir = _cst_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        
+        generators_ir = []
+        for gen in node.for_in:
+            target_ir = _cst_to_rust_ir(gen.target, metavar_map)
+            if target_ir is None:
+                return None
+            iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
+            if iter_ir is None:
+                return None
+            
+            ifs_ir = []
+            for if_clause in gen.ifs:
+                if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
+                if if_ir is None:
+                    return None
+                ifs_ir.append(if_ir)
+            
+            generators_ir.append({
+                "target": target_ir,
+                "iter": iter_ir,
+                "ifs": ifs_ir
+            })
+            
+        return {
+            "type": "dict_comprehension",
+            "key": key_ir,
+            "value": value_ir,
+            "generators": generators_ir
+        }
+
     elif isinstance(node, cst.Float):
         return {"type": "string", "value": node.value}
 
@@ -1476,7 +1628,18 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return {"type": "string", "value": None}
 
     elif isinstance(node, cst.FormattedString):
-        return {"type": "string", "value": None}
+        parts_ir = []
+        for part in node.parts:
+            if isinstance(part, cst.FormattedStringText):
+                parts_ir.append({"type": "fstring_text", "value": part.value})
+            elif isinstance(part, cst.FormattedStringExpression):
+                expr_ir = _cst_to_rust_ir(part.expression, metavar_map)
+                if expr_ir is None:
+                    return None
+                parts_ir.append({"type": "fstring_expr", "value": expr_ir})
+            else:
+                return None
+        return {"type": "fstring", "parts": parts_ir}
 
     else:
         # Unsupported node type — fall back to LibCST path
@@ -1559,6 +1722,7 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
             "type": "funcdef",
             "name": {"type": "any_expr"},
             "params": [{"type": "ellipsis"}],
+            "decorators": [{"type": "ellipsis"}],
         }
 
     if constraint == "async def":
@@ -1571,6 +1735,7 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
             "type": "classdef",
             "name": {"type": "any_expr"},
             "bases": [{"type": "ellipsis"}],
+            "decorators": [{"type": "ellipsis"}],
         }
 
     # "def name_pattern" or "class name_pattern"
@@ -1588,12 +1753,14 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
                     "type": "funcdef",
                     "name": name_ir,
                     "params": [{"type": "ellipsis"}],
+                    "decorators": [{"type": "ellipsis"}],
                 }
             else:
                 return {
                     "type": "classdef",
                     "name": name_ir,
                     "bases": [{"type": "ellipsis"}],
+                    "decorators": [{"type": "ellipsis"}],
                 }
 
     # Try as a full pattern (e.g., "class $C(TestCase):")
