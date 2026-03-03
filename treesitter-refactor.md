@@ -782,7 +782,7 @@ functions:
 | `ast_commands.py` | **Fully migrated** | Removed `_ListSymbolsVisitor`, `_NameLoadCollector`, and LibCST helpers. Added `method`/`async_method` kind handling. |
 | `lint.py` | **Fully migrated** | Removed `_StatementRangeMapper` (LibCST). Uses `emend_core.get_statement_ranges()`. Replaced lazy `import libcst` in `_process_file_fallback` with source-based text extraction using match position info. |
 | `type_oracle.py` | **Fully migrated** | Removed `_SymbolCollector` (LibCST). Uses `emend_core.collect_identifier_positions()`. |
-| `transform.py` | **Partially migrated** | `_index_batch` uses `PyScopeResolver` for QN and reference indexing (replaces `MetadataWrapper` + `_QNCollector` + `_RefIndexCollector`). LibCST parse kept only for `parse_cache` (backward compat). Symbol collection uses tree-sitter. Dead-code SQL excludes `variable` kind. All visitors/transformers still use LibCST. |
+| `transform.py` | **Mostly migrated** | `_index_batch` and `visit_project` use `PyScopeResolver` for QN caching. `find_references` and `find_callers` migrated to tree-sitter using new `visit_project_ts()`. Deleted `_ReferenceFinder`, `_CallerFilter`, `_QNCollector`, `_RefIndexCollector`. |
 | `pattern.py` | **Not started** | Still fully LibCST-dependent. |
 
 #### Key Fixes Applied
@@ -858,39 +858,68 @@ All 1,309 tests pass.
    the dead-code self-reference exclusion (`ri.line = si.line`) failed
    because tree-sitter uses 0-indexed rows.
 
+### Phase 0.7: Project Search Migration (COMPLETED)
+
+Migrated `find_references()` and `find_callers()` to tree-sitter, bypassing
+LibCST's `visit_project()` loop. All 1,309 tests pass.
+
+#### Rust Extension Enhancements (`emend_core`)
+
+**`scope.rs`** — Write context detection:
+
+| Change | Purpose |
+|--------|---------|
+| `is_write_context()` helper | Robustly identify store context by walking up parent tree |
+| `for`/`with`/`walrus` write detection | Handle loop variables, as-clauses, and named expressions |
+| `collect_binding_targets()` recursion | Correctly bind names in nested patterns like `for (a, b) in items` |
+
+#### Python File Changes
+
+**`transform.py`** — `find_references`/`find_callers` migration:
+- Introduced `visit_project_ts()`: tree-sitter based project iteration with parallel read + pre-filtering
+- `find_references()` cold path uses `visit_project_ts()` + `references_in_file()`
+- `find_callers()` uses `visit_project_ts()` + `references_in_file()` filtered to `kind == "call"`
+- Removed `_ReferenceFinder` and `_CallerFilter` CST visitors
+
+#### Key Fixes Applied
+
+6. **Write context parity**: Rust `is_write_context` now correctly classifies
+   `for` targets, `with...as` targets, and `walrus` targets, matching LibCST's
+   MetadataWrapper behavior. This fixed `test_writes_only_for_target`.
+
 ### Remaining Work
 
 #### Current LibCST Footprint in `transform.py`
 
-**23 CSTVisitor/CSTTransformer subclasses** (2 now bypassed in `_index_batch`):
+**19 CSTVisitor/CSTTransformer subclasses** (remaining):
 
 | Class | Type | Line | Metadata | Used By | Purpose |
 |-------|------|------|----------|---------|---------|
-| `_QNCollector` | CSTVisitor | 361 | QualifiedNameProvider | `_index_batch` (BYPASSED) | Collect all QN strings in a file |
-| `_RefIndexCollector` | CSTVisitor | 387 | QualifiedNameProvider, PositionProvider, ParentNodeProvider | `_index_batch` (BYPASSED) | Record reference entries with classification |
-| `SymbolFinder` | CSTVisitor | 2237 | — | `visit_project()` | Find symbol by path for lookup/edit |
-| `ComponentSetter` | CSTTransformer | 2648 | — | `cmd_edit()` | Modify symbol components (body, decorator, params, bases, returns) |
-| `ComponentAdder` | CSTTransformer | 2971 | — | `cmd_add()` | Insert items into list components |
-| `ComponentRemover` | CSTTransformer | 3389 | — | `cmd_edit --remove` | Remove symbol components |
-| `PatternFinder` | CSTVisitor | 3888 | — | `find_pattern()` fast path | Find patterns (no constraints) |
-| `ConstrainedPatternFinder` | CSTVisitor | 4019 | PositionProvider | `find_pattern()` | Find patterns with `--inside`/`--not-inside` |
-| `ScopedPatternFinder` | CSTVisitor | 4117 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Find patterns with `--imported-from`/`--scope-local` |
-| `_ImportOriginCollector` | CSTVisitor | 4202 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Map identifiers to import origins |
-| `PatternReplacer` | CSTTransformer | 4593 | — | `replace_in_file()` | Replace matched patterns with replacement code |
-| `SymbolRemover` | CSTTransformer | 5147 | — | `move_symbol()` | Remove a symbol from source file after move |
-| `_NameCollector` | CSTVisitor | 5295 | — | `copy_to()` | Collect all names used in a code fragment |
-| `_SymbolRenamer` | CSTTransformer | 5634 | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
-| `_ReferenceFinder` | CSTVisitor | 5692 | QualifiedNameProvider, PositionProvider, ParentNodeProvider | `find_references()` | Find all references to a symbol |
-| `_DocstringRenamer` | CSTTransformer | 5852 | — | `rename_symbol(docs=True)` | Replace names in docstrings |
-| `_CallerFilter` | CSTVisitor | 6087 | QualifiedNameProvider, PositionProvider | `find_callers()` | Find call sites (not just references) |
-| `_CalleeCollector` | CSTVisitor | 6212 | — | `find_callees()` | List functions called within a symbol |
-| `_BulkReferenceFinder` | CSTVisitor | 6476 | QualifiedNameProvider | `find_dead_code()` fallback | Bulk reference check without index |
-| `ImportRewriter` | CSTTransformer | 7092 | — | `move_symbol()` | Rewrite imports to use new module path |
-| `_NoOpTransformer` | CSTTransformer | 7276 | — | `move_symbol()` | No-op placeholder |
-| `_ImportRewriterForMove` | CSTTransformer | 7281 | — | `move_symbol()` | Rewrite `from source import X` → `from dest import X` |
-| `_ModuleImportRenamer` | CSTTransformer | 7314 | — | `rename_module()` | Rewrite all imports for module rename (817 lines) |
+| `_QNCollector` | CSTVisitor | — | — | — | **DELETED** |
+| `_RefIndexCollector` | CSTVisitor | — | — | — | **DELETED** |
+| `SymbolFinder` | CSTVisitor | 2172 | — | `visit_project()` | Find symbol by path for lookup/edit |
+| `ComponentSetter` | CSTTransformer | 2583 | — | `cmd_edit()` | Modify symbol components (body, decorator, params, bases, returns) |
+| `ComponentAdder` | CSTTransformer | 2906 | — | `cmd_add()` | Insert items into list components |
+| `ComponentRemover` | CSTTransformer | 3324 | — | `cmd_edit --remove` | Remove symbol components |
+| `PatternFinder` | CSTVisitor | 3823 | — | `find_pattern()` fast path | Find patterns (no constraints) |
+| `ConstrainedPatternFinder` | CSTVisitor | 3954 | PositionProvider | `find_pattern()` | Find patterns with `--inside`/`--not-inside` |
+| `ScopedPatternFinder` | CSTVisitor | 4052 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Find patterns with `--imported-from`/`--scope-local` |
+| `_ImportOriginCollector` | CSTVisitor | 4137 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Map identifiers to import origins |
+| `PatternReplacer` | CSTTransformer | 4528 | — | `replace_in_file()` | Replace matched patterns with replacement code |
+| `SymbolRemover` | CSTTransformer | 5082 | — | `move_symbol()` | Remove a symbol from source file after move |
+| `_NameCollector` | CSTVisitor | 5230 | — | `copy_to()` | Collect all names used in a code fragment |
+| `_SymbolRenamer` | CSTTransformer | 5569 | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
+| `_ReferenceFinder` | CSTVisitor | — | — | `find_references()` | **MIGRATED to tree-sitter** |
+| `_DocstringRenamer` | CSTTransformer | 5712 | — | `rename_symbol(docs=True)` | Replace names in docstrings |
+| `_CallerFilter` | CSTVisitor | — | — | `find_callers()` | **MIGRATED to tree-sitter** |
+| `_CalleeCollector` | CSTVisitor | 6002 | — | `find_callees()` | List functions called within a symbol |
+| `_BulkReferenceFinder` | CSTVisitor | 6326 | QualifiedNameProvider | `find_dead_code()` fallback | Bulk reference check without index |
+| `ImportRewriter` | CSTTransformer | 6942 | — | `move_symbol()` | Rewrite imports to use new module path |
+| `_NoOpTransformer` | CSTTransformer | 7126 | — | `move_symbol()` | No-op placeholder |
+| `_ImportRewriterForMove` | CSTTransformer | 7131 | — | `move_symbol()` | Rewrite `from source import X` → `from dest import X` |
+| `_ModuleImportRenamer` | CSTTransformer | 7164 | — | `rename_module()` | Rewrite all imports for module rename (817 lines) |
 
-**24 `cst.parse_module()` calls** (1 in `_index_batch`, 1 in `_cached_parse`, 22 in commands).
+**24 `cst.parse_module()` calls** in `transform.py`.
 
 **13 `MetadataWrapper` usages** (1 in `_index_batch` bypassed, 12 in commands).
 
@@ -930,11 +959,11 @@ f-strings, decorators, type constraints, star args.
     pre-built by indexer)
   - **Recommended**: Option A — minimal risk, just leave it until visitors migrated
 
-- [ ] **Remove `_extract_all_exports(module)`** (line 465).  Only call site
+- [x] **Remove `_extract_all_exports(module)`** (line 465).  Only call site
   is now `_extract_all_exports_text()` (regex).  The old function can be
   deleted once tests confirm parity.  Tests to run: `test_dead_code.py`.
 
-- [ ] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.  Both
+- [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.  Both
   classes are still defined (lines 361, 387) but no longer called from
   `_index_batch`.  They may still be used by `visit_project()` (line 2176
   creates MetadataWrapper, line 2168 uses `_QNCollector` for QN caching).
@@ -989,14 +1018,14 @@ tree-sitter + Rust scope resolver.
 
 **Priority order** (by usage frequency and MetadataWrapper cost):
 
-1. [ ] **`_ReferenceFinder`** (line 5692, ~100 lines).  Uses
+1. [x] **`_ReferenceFinder`** (line 5692, ~100 lines).  Uses
    QualifiedNameProvider + PositionProvider + ParentNodeProvider.  Called by
    `find_references()` which is used by `refs` command.  **Migration**: Use
    `PyScopeResolver.references_in_file()` + `PyScopeResolver.lookup_qn()`.
    Filter by target QN and classify read/write/call.
    Test: `test_find_references_context.py`.
 
-2. [ ] **`_CallerFilter`** (line 6087, ~60 lines).  Uses
+2. [x] **`_CallerFilter`** (line 6087, ~60 lines).  Uses
    QualifiedNameProvider + PositionProvider.  Called by `find_callers()`.
    **Migration**: Use `references_in_file()` filtered to `kind == "call"`.
    Test: `test_callers.py`.
@@ -1109,7 +1138,7 @@ It iterates project files, creates MetadataWrapper, and runs visitors.
 Currently used by: `find_references()`, `rename_symbol()`, `find_callers()`,
 `find_pattern()`.
 
-- [ ] **Create `visit_project_ts()`**: Tree-sitter equivalent that uses
+- [x] **Create `visit_project_ts()`**: Tree-sitter equivalent that uses
   `PyScopeResolver` instead of MetadataWrapper.  Share the same visitor
   factory pattern but dispatch to Rust-backed visitors.
 
