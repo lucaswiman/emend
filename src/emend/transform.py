@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_SCHEMA_VERSION = "4"
+
 
 # ---------------------------------------------------------------------------
 # Git worktree support: resolve cache path to main repo
@@ -317,33 +319,11 @@ def _cached_parse(source: str) -> cst.Module:
 # operations can skip MetadataWrapper for files whose QN set doesn't overlap
 # with the target.  Content-hash keyed, persisted in the same SQLite DB.
 
-def _ensure_qn_table() -> None:
-    """Create the qn_index table if it doesn't exist (idempotent)."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return
-    try:
-        with _disk_cache_lock:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS qn_index "
-                "(hash BLOB PRIMARY KEY, qnames BLOB)"
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-_qn_table_ready = False
-
-
 def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     """Look up cached qualified-name set for a file by content hash."""
-    global _qn_table_ready
     conn = _get_disk_cache()
     if conn is None:
         return None
-    if not _qn_table_ready:
-        _ensure_qn_table()
-        _qn_table_ready = True
     try:
         import pickle
         import zlib
@@ -359,13 +339,9 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
 
 def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
     """Cache a file's qualified-name set (best-effort)."""
-    global _qn_table_ready
     conn = _get_disk_cache()
     if conn is None:
         return
-    if not _qn_table_ready:
-        _ensure_qn_table()
-        _qn_table_ready = True
     try:
         import pickle
         import zlib
@@ -757,51 +733,25 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     if has_data:
         try:
             conn = sqlite3.connect(db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # Ensure schema exists (idempotent; normally pre-created by
+            # warm_caches, but needed when _index_batch is called directly).
+            _init_cache_schema(conn)
             if parse_rows:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS parse_cache "
-                    "(hash BLOB PRIMARY KEY, data BLOB)"
-                )
                 conn.executemany(
                     "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", parse_rows
                 )
             if qn_rows:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS qn_index "
-                    "(hash BLOB PRIMARY KEY, qnames BLOB)"
-                )
                 conn.executemany(
                     "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
                 )
             if sym_rows:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS symbol_index ("
-                    "  content_hash BLOB NOT NULL,"
-                    "  file_path TEXT NOT NULL,"
-                    "  name TEXT NOT NULL,"
-                    "  qualified_name TEXT NOT NULL,"
-                    "  module_qn TEXT,"
-                    "  kind TEXT NOT NULL,"
-                    "  line INTEGER NOT NULL,"
-                    "  end_line INTEGER NOT NULL,"
-                    "  depth INTEGER NOT NULL DEFAULT 1,"
-                    "  parent TEXT,"
-                    "  signature TEXT,"
-                    "  returns TEXT,"
-                    "  decorators TEXT,"
-                    "  is_entry_point INTEGER NOT NULL DEFAULT 0,"
-                    "  is_exported INTEGER NOT NULL DEFAULT 0,"
-                    "  has_noqa INTEGER NOT NULL DEFAULT 0"
-                    ")"
-                )
-                # Delete old entries for these hashes before inserting
+                # Bulk-delete old entries before inserting
                 hashes_with_syms = list({r[0] for r in sym_rows})
-                for h in hashes_with_syms:
-                    conn.execute(
-                        "DELETE FROM symbol_index WHERE content_hash = ?", (h,)
-                    )
+                placeholders = ",".join("?" * len(hashes_with_syms))
+                conn.execute(
+                    f"DELETE FROM symbol_index WHERE content_hash IN ({placeholders})",
+                    hashes_with_syms,
+                )
                 conn.executemany(
                     "INSERT INTO symbol_index "
                     "(content_hash, file_path, name, qualified_name, module_qn, kind, "
@@ -811,19 +761,12 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                     sym_rows,
                 )
             if import_rows:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS import_graph ("
-                    "  content_hash BLOB NOT NULL,"
-                    "  file_path TEXT NOT NULL,"
-                    "  imported_module TEXT NOT NULL,"
-                    "  PRIMARY KEY (content_hash, imported_module)"
-                    ")"
-                )
                 hashes_with_imports = list({r[0] for r in import_rows})
-                for h in hashes_with_imports:
-                    conn.execute(
-                        "DELETE FROM import_graph WHERE content_hash = ?", (h,)
-                    )
+                placeholders = ",".join("?" * len(hashes_with_imports))
+                conn.execute(
+                    f"DELETE FROM import_graph WHERE content_hash IN ({placeholders})",
+                    hashes_with_imports,
+                )
                 conn.executemany(
                     "INSERT OR IGNORE INTO import_graph "
                     "(content_hash, file_path, imported_module) "
@@ -831,21 +774,12 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                     import_rows,
                 )
             if ref_rows:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS reference_index ("
-                    "  content_hash BLOB NOT NULL,"
-                    "  target_qn TEXT NOT NULL,"
-                    "  file_path TEXT NOT NULL,"
-                    "  line INTEGER NOT NULL,"
-                    "  col INTEGER NOT NULL,"
-                    "  ref_kind TEXT NOT NULL"
-                    ")"
-                )
                 hashes_with_refs = list({r[0] for r in ref_rows})
-                for h in hashes_with_refs:
-                    conn.execute(
-                        "DELETE FROM reference_index WHERE content_hash = ?", (h,)
-                    )
+                placeholders = ",".join("?" * len(hashes_with_refs))
+                conn.execute(
+                    f"DELETE FROM reference_index WHERE content_hash IN ({placeholders})",
+                    hashes_with_refs,
+                )
                 conn.executemany(
                     "INSERT INTO reference_index "
                     "(content_hash, target_qn, file_path, line, col, ref_kind) "
@@ -961,6 +895,7 @@ def _scan_manifest(
         # Deleted files
         result.deleted = list(manifest_paths - current_paths)
 
+        mtime_updates: list[tuple] = []
         for resolved_path, original_path in py_files_resolved.items():
             if resolved_path not in manifest:
                 result.new_files.append(original_path)
@@ -987,21 +922,26 @@ def _scan_manifest(
                 ).digest()
                 if actual_hash == stored_hash:
                     # Content identical — just mtime changed (e.g. git checkout)
-                    # Update manifest mtime in-place
-                    try:
-                        conn.execute(
-                            "UPDATE file_manifest SET mtime_ns = ?, size = ? "
-                            "WHERE worktree_id = ? AND path = ?",
-                            (st.st_mtime_ns, st.st_size, worktree_id, resolved_path),
-                        )
-                        conn.commit()
-                    except Exception:
-                        pass
+                    mtime_updates.append(
+                        (st.st_mtime_ns, st.st_size, worktree_id, resolved_path)
+                    )
                     result.unchanged.append(original_path)
                 else:
                     result.changed.append((original_path, stored_hash, actual_hash))
             except Exception:
                 result.new_files.append(original_path)
+
+        # Batch-commit all mtime updates (avoids per-file fsync)
+        if mtime_updates:
+            try:
+                conn.executemany(
+                    "UPDATE file_manifest SET mtime_ns = ?, size = ? "
+                    "WHERE worktree_id = ? AND path = ?",
+                    mtime_updates,
+                )
+                conn.commit()
+            except Exception:
+                pass
     finally:
         if close_conn and conn:
             conn.close()
@@ -1042,7 +982,7 @@ def _ensure_index_fresh(
             ver = conn.execute(
                 "SELECT value FROM index_meta WHERE key = 'schema_version'"
             ).fetchone()
-            if ver is None or ver[0] != "4":
+            if ver is None or ver[0] != _SCHEMA_VERSION:
                 conn.close()
                 return False
         except Exception:
@@ -1549,7 +1489,7 @@ def warm_caches(
         )
         _mf_conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("schema_version", "4"),
+            ("schema_version", _SCHEMA_VERSION),
         )
         _mf_conn.commit()
         _mf_conn.close()
@@ -1612,10 +1552,6 @@ def warm_caches(
     except Exception as exc:
         logger.debug("warm_caches: FTS rebuild skipped: %s", exc)
         stats["fts_indexed"] = 0
-
-    # Ensure the cache directory has ignore files so it doesn't get checked
-    # in or built into Docker images.
-    _ensure_cache_ignore_files(project_root)
 
     return stats
 

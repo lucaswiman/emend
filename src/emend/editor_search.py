@@ -45,7 +45,7 @@ import re
 import sqlite3
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -57,48 +57,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class SymbolHit:
-    """A symbol search result."""
-
-    name: str
-    qualified_name: str
-    kind: str
-    file_path: str
-    line: int
-    end_line: int
-    signature: str | None = None
-    returns: str | None = None
-    depth: int = 1
-    parent: str | None = None
-    score: float = 0.0
-
-
-@dataclass
-class PatternHit:
-    """A pattern / code search result."""
-
-    file_path: str
-    line: int
-    end_line: int
-    col: int
-    end_col: int
-    matched_text: str
-    score: float = 0.0
-
-
-@dataclass
-class ReferenceHit:
-    """A reference search result."""
-
-    file_path: str
-    line: int
-    col: int
-    ref_kind: str
-    target_qn: str = ""
-    score: float = 0.0
-
-
-@dataclass
 class SearchResult:
     """Wrapper returned by all search methods."""
 
@@ -107,6 +65,65 @@ class SearchResult:
     mode: str  # "symbol", "pattern", "selector", "reference", "file_symbols"
     truncated: bool = False
     query: str = ""
+
+    def to_dict(self) -> dict:
+        """Lightweight serialization (avoids ``dataclasses.asdict`` deep-copy)."""
+        return {
+            "items": self.items,
+            "elapsed_ms": self.elapsed_ms,
+            "mode": self.mode,
+            "truncated": self.truncated,
+            "query": self.query,
+        }
+
+
+def _timed(method):
+    """Decorator that stamps ``elapsed_ms`` and ``query`` on the SearchResult.
+
+    Expects the first positional argument after ``self`` to be the query string.
+    """
+    import functools
+    import inspect
+
+    # Identify the name of the first parameter after 'self' so we can
+    # extract the query value regardless of positional/keyword usage.
+    params = list(inspect.signature(method).parameters)
+    query_param = params[1] if len(params) > 1 else None
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        t0 = time.monotonic()
+        result = method(self, *args, **kwargs)
+        result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
+        # Extract the query value from positional or keyword args.
+        if args:
+            result.query = args[0]
+        elif query_param and query_param in kwargs:
+            result.query = kwargs[query_param]
+        return result
+
+    return wrapper
+
+
+# Column names returned by ``SELECT rowid, name, ... FROM symbol_index``
+_SYM_FIELDS_WITH_ROWID = (
+    "name", "qualified_name", "kind", "file_path",
+    "line", "end_line", "signature", "returns", "depth", "parent",
+)
+
+# Column names when rowid is not in the SELECT (e.g. file_symbols)
+_SYM_FIELDS_NO_ROWID = _SYM_FIELDS_WITH_ROWID
+
+
+def _row_to_symbol_dict(row: tuple, *, has_rowid: bool = True) -> dict:
+    """Map a ``symbol_index`` row tuple to a dict.
+
+    When *has_rowid* is True, ``row[0]`` is the rowid and fields start at
+    index 1.  Otherwise fields start at index 0.
+    """
+    offset = 1 if has_rowid else 0
+    fields = _SYM_FIELDS_WITH_ROWID
+    return {fields[i]: row[i + offset] for i in range(len(fields))}
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +388,7 @@ class EditorSearchEngine:
 
     # -- symbol search ------------------------------------------------------
 
+    @_timed
     def search_symbols(
         self,
         query: str,
@@ -379,13 +397,9 @@ class EditorSearchEngine:
         file_scope: str | None = None,
         kind: str | None = None,
     ) -> SearchResult:
-        t0 = time.monotonic()
-        result = self._search_symbols(
+        return self._search_symbols(
             query, limit=limit, file_scope=file_scope, kind=kind
         )
-        result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
-        result.query = query
-        return result
 
     def _search_symbols(
         self,
@@ -400,6 +414,8 @@ class EditorSearchEngine:
 
         # Collect candidate rows keyed by rowid → dict
         candidates: dict[int, dict] = {}
+        # Cap per-strategy rows to avoid pulling the whole index for short queries.
+        per_strategy_limit = max(limit * 4, 200)
 
         base = (
             "SELECT rowid, name, qualified_name, kind, file_path, "
@@ -407,83 +423,72 @@ class EditorSearchEngine:
             "FROM symbol_index"
         )
 
+        _FTS_JOIN = (
+            "SELECT s.rowid, s.name, s.qualified_name, s.kind, s.file_path, "
+            "s.line, s.end_line, s.signature, s.returns, s.depth, s.parent "
+            "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
+            "WHERE f.{column} MATCH ?"
+        )
+
         def _add(sql: str, params: tuple) -> None:
             try:
                 for row in conn.execute(sql, params):
                     rid = row[0]
                     if rid not in candidates:
-                        candidates[rid] = {
-                            "name": row[1],
-                            "qualified_name": row[2],
-                            "kind": row[3],
-                            "file_path": row[4],
-                            "line": row[5],
-                            "end_line": row[6],
-                            "signature": row[7],
-                            "returns": row[8],
-                            "depth": row[9],
-                            "parent": row[10],
-                        }
+                        candidates[rid] = _row_to_symbol_dict(row)
             except Exception:
                 pass
 
         # Strategy 1: exact name (uses idx_sym_name)
-        _add(f"{base} WHERE name = ?", (query,))
+        _add(f"{base} WHERE name = ? LIMIT ?", (query, per_strategy_limit))
 
         # Strategy 2: case-insensitive exact
         if query != query_lower:
-            _add(f"{base} WHERE lower(name) = ? AND name != ?", (query_lower, query))
+            _add(
+                f"{base} WHERE lower(name) = ? AND name != ? LIMIT ?",
+                (query_lower, query, per_strategy_limit),
+            )
 
         # Strategy 3: prefix (uses idx_sym_name B-tree range scan)
         _add(
-            f"{base} WHERE name >= ? AND name < ? AND name != ?",
-            (query, query[:-1] + chr(ord(query[-1]) + 1) if query else "~", query),
+            f"{base} WHERE name >= ? AND name < ? AND name != ? LIMIT ?",
+            (query, query[:-1] + chr(ord(query[-1]) + 1) if query else "~", query, per_strategy_limit),
         )
 
         # Strategy 4: case-insensitive prefix
         _add(
-            f"{base} WHERE lower(name) LIKE ? AND lower(name) != ?",
-            (query_lower + "%", query_lower),
+            f"{base} WHERE lower(name) LIKE ? AND lower(name) != ? LIMIT ?",
+            (query_lower + "%", query_lower, per_strategy_limit),
         )
 
-        # Strategy 5: FTS5 trigram substring (needs ≥ 3 chars)
-        if len(query) >= 3 and self._ensure_fts():
+        # FTS5 strategies (needs ≥ 3 chars)
+        fts_ok = len(query) >= 3 and self._ensure_fts()
+        if fts_ok:
             fts_q = '"' + query.replace('"', '""') + '"'
+
+            # Strategy 5: FTS5 trigram substring on name
             _add(
-                "SELECT s.rowid, s.name, s.qualified_name, s.kind, s.file_path, "
-                "s.line, s.end_line, s.signature, s.returns, s.depth, s.parent "
-                "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
-                "WHERE f.name MATCH ?",
-                (fts_q,),
+                _FTS_JOIN.format(column="name") + " LIMIT ?",
+                (fts_q, per_strategy_limit),
             )
 
         # Strategy 6: qualified-name search for dotted queries
         if "." in query:
             _add(
-                f"{base} WHERE qualified_name LIKE ?",
-                ("%" + query + "%",),
+                f"{base} WHERE qualified_name LIKE ? LIMIT ?",
+                ("%" + query + "%", per_strategy_limit),
             )
-            if len(query) >= 3 and self._ensure_fts():
-                fts_q = '"' + query.replace('"', '""') + '"'
+            if fts_ok:
                 _add(
-                    "SELECT s.rowid, s.name, s.qualified_name, s.kind, "
-                    "s.file_path, s.line, s.end_line, s.signature, s.returns, "
-                    "s.depth, s.parent "
-                    "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
-                    "WHERE f.qualified_name MATCH ?",
-                    (fts_q,),
+                    _FTS_JOIN.format(column="qualified_name") + " LIMIT ?",
+                    (fts_q, per_strategy_limit),
                 )
 
         # Strategy 7: signature substring (for parameter-based search)
-        if len(query) >= 3 and self._ensure_fts():
-            fts_q = '"' + query.replace('"', '""') + '"'
+        if fts_ok:
             _add(
-                "SELECT s.rowid, s.name, s.qualified_name, s.kind, "
-                "s.file_path, s.line, s.end_line, s.signature, s.returns, "
-                "s.depth, s.parent "
-                "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
-                "WHERE f.signature MATCH ?",
-                (fts_q,),
+                _FTS_JOIN.format(column="signature") + " LIMIT ?",
+                (fts_q, per_strategy_limit),
             )
 
         # Apply post-filters
@@ -512,6 +517,7 @@ class EditorSearchEngine:
 
     # -- pattern search -----------------------------------------------------
 
+    @_timed
     def search_pattern(
         self,
         pattern: str,
@@ -519,11 +525,7 @@ class EditorSearchEngine:
         limit: int = 50,
         file_scope: str | None = None,
     ) -> SearchResult:
-        t0 = time.monotonic()
-        result = self._search_pattern(pattern, limit=limit, file_scope=file_scope)
-        result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
-        result.query = pattern
-        return result
+        return self._search_pattern(pattern, limit=limit, file_scope=file_scope)
 
     def _search_pattern(
         self,
@@ -572,7 +574,7 @@ class EditorSearchEngine:
             _collect_python_files_scandir,
         )
 
-        scope_path = file_scope or "."
+        scope_path = file_scope or self.project_root
         scope_resolved = Path(scope_path).resolve()
 
         if scope_resolved.is_file():
@@ -646,14 +648,11 @@ class EditorSearchEngine:
 
     # -- selector resolution ------------------------------------------------
 
+    @_timed
     def resolve_selector(
         self, selector: str, *, limit: int = 50
     ) -> SearchResult:
-        t0 = time.monotonic()
-        result = self._search_selector(selector, limit=limit)
-        result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
-        result.query = selector
-        return result
+        return self._search_selector(selector, limit=limit)
 
     def _search_selector(self, selector: str, *, limit: int = 50) -> SearchResult:
         """Resolve a (possibly partial) selector against the index."""
@@ -713,19 +712,9 @@ class EditorSearchEngine:
         items: list[dict] = []
         try:
             for row in conn.execute(sql, params):
-                items.append({
-                    "name": row[1],
-                    "qualified_name": row[2],
-                    "kind": row[3],
-                    "file_path": row[4],
-                    "line": row[5],
-                    "end_line": row[6],
-                    "signature": row[7],
-                    "returns": row[8],
-                    "depth": row[9],
-                    "parent": row[10],
-                    "score": 1000.0,
-                })
+                d = _row_to_symbol_dict(row)
+                d["score"] = 1000.0
+                items.append(d)
         except Exception as exc:
             logger.debug("Selector query failed: %s", exc)
 
@@ -801,18 +790,7 @@ class EditorSearchEngine:
                 "ORDER BY line",
                 (resolved,),
             ):
-                items.append({
-                    "name": row[0],
-                    "qualified_name": row[1],
-                    "kind": row[2],
-                    "file_path": row[3],
-                    "line": row[4],
-                    "end_line": row[5],
-                    "signature": row[6],
-                    "returns": row[7],
-                    "depth": row[8],
-                    "parent": row[9],
-                })
+                items.append(_row_to_symbol_dict(row, has_rowid=False))
         except Exception as exc:
             logger.debug("File symbols query failed: %s", exc)
 
@@ -892,41 +870,26 @@ class EditorSearchEngine:
 # JSON-RPC server
 # ---------------------------------------------------------------------------
 
-_METHODS = {
-    "search",
-    "symbols",
-    "pattern",
-    "references",
-    "selector",
-    "file_symbols",
-    "status",
-    "reindex",
-    "shutdown",
-}
-
-
 def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     """Route a JSON-RPC method to the engine."""
     if method == "search":
-        return asdict(engine.search(**params))
+        return engine.search(**params).to_dict()
     elif method == "symbols":
-        return asdict(engine.search_symbols(**params))
+        return engine.search_symbols(**params).to_dict()
     elif method == "pattern":
-        return asdict(engine.search_pattern(**params))
+        return engine.search_pattern(**params).to_dict()
     elif method == "references":
-        return asdict(engine.search_references(**params))
+        return engine.search_references(**params).to_dict()
     elif method == "selector":
         sel = params.pop("selector", params.pop("query", ""))
-        return asdict(engine.resolve_selector(sel, **params))
+        return engine.resolve_selector(sel, **params).to_dict()
     elif method == "file_symbols":
         fp = params.pop("file", params.pop("file_path", ""))
-        return asdict(engine.file_symbols(fp, **params))
+        return engine.file_symbols(fp, **params).to_dict()
     elif method == "status":
-        return asdict(engine.status())
+        return engine.status().to_dict()
     elif method == "reindex":
-        return asdict(engine.reindex())
-    elif method == "shutdown":
-        return {"ok": True}
+        return engine.reindex().to_dict()
     else:
         raise ValueError(f"Unknown method: {method!r}")
 
