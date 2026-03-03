@@ -1,0 +1,176 @@
+*emend.txt*  Search Python code with emend from Vim/Neovim
+
+Author:  Lucas Wiman
+License: MPL-2.0
+
+==============================================================================
+CONTENTS                                                      *emend-contents*
+
+    1. Introduction ........................ |emend-introduction|
+    2. Installation ........................ |emend-installation|
+    3. Commands ............................ |emend-commands|
+    4. Configuration ....................... |emend-configuration|
+    5. Key mappings ........................ |emend-keymaps|
+    6. Architecture ........................ |emend-architecture|
+
+==============================================================================
+1. INTRODUCTION                                           *emend-introduction*
+
+emend.vim provides a fast, interactive search interface for Python codebases
+using the emend refactoring tool.  It communicates with the `emend
+editor-server` via JSON-RPC over stdio pipes, keeping the process warm for
+sub-100ms searches.
+
+Features:
+
+- Auto-detecting search: symbols, patterns (`$`), selectors (`::`)
+- Split-pane UI: navigable result list + file preview
+- Async communication: non-blocking searches via job channels
+- Cache warming: automatic index build with progress display
+- Works in both Vim 8+ and Neovim
+
+==============================================================================
+2. INSTALLATION                                           *emend-installation*
+
+Prerequisites:~
+
+Install emend (Python 3.10+): >
+    uv tool install emend
+<
+Or for development, point to a local checkout (see |g:emend_command|).
+
+vim-plug:~
+>
+    " From PyPI (requires emend on PATH or installed via uv):
+    Plug 'lucaswiman/emend', { 'rtp': 'vim' }
+
+    " Or from a local checkout:
+    Plug '~/src/emend', { 'rtp': 'vim' }
+<
+
+packer.nvim:~
+>
+    use { 'lucaswiman/emend', rtp = 'vim' }
+<
+
+lazy.nvim:~
+>
+    { 'lucaswiman/emend', config = function() end,
+      init = function()
+        vim.opt.rtp:append(vim.fn.stdpath('data') .. '/lazy/emend/vim')
+      end }
+<
+
+After installing, run `:helptags ALL` to index this help file.
+
+==============================================================================
+3. COMMANDS                                                 *emend-commands*
+
+                                                                     *:Emend*
+:Emend [query]          Open the search prompt.  If [query] is given, search
+                        immediately without prompting.
+
+                                                               *:EmendSearch*
+:EmendSearch {query}    Search for {query} without prompting.  The query is
+                        auto-detected as one of:
+
+                        - Symbol name:   `parse_pattern`
+                        - Pattern:       `print($X)` (contains `$`)
+                        - Selector:      `file.py::Class.method` (contains `::`)
+
+                                                              *:EmendOutline*
+:EmendOutline           Show all symbols in the current file (outline view).
+
+                                                                 *:EmendRefs*
+:EmendRefs [name]       Find references to [name].  Without an argument, uses
+                        the word under the cursor.
+
+                                                                *:EmendStart*
+:EmendStart             Start the emend editor-server process.  This happens
+                        automatically on first search.
+
+                                                                 *:EmendStop*
+:EmendStop              Shut down the editor-server process.
+
+                                                               *:EmendStatus*
+:EmendStatus            Show index statistics (symbol count, file count, etc).
+
+                                                              *:EmendReindex*
+:EmendReindex           Re-index changed files and rebuild the FTS index.
+
+==============================================================================
+4. CONFIGURATION                                       *emend-configuration*
+
+                                                           *g:emend_command*
+g:emend_command         String.  Path to the emend executable.  When empty
+                        (default), the plugin auto-detects:
+                        1. uv tool path (`uv tool install emend`)
+                        2. `emend` on $PATH
+>
+                        let g:emend_command = '~/src/emend/.venv/bin/emend'
+<
+
+                                                      *g:emend_project_root*
+g:emend_project_root    String.  Override the project root directory.  When
+                        empty (default), uses the current working directory.
+>
+                        let g:emend_project_root = '~/myproject'
+<
+
+                                                             *g:emend_limit*
+g:emend_limit           Number.  Maximum search results.  Default: 50.
+
+                                                    *g:emend_preview_height*
+g:emend_preview_height  Number.  Height of the search UI as a percentage of
+                        the editor height.  Default: 60.
+
+                                                  *g:emend_default_mappings*
+g:emend_default_mappings
+                        Boolean.  When 1, define default key mappings:
+                        `<Leader>es`  →  |:Emend|
+                        `<Leader>eo`  →  |:EmendOutline|
+                        `<Leader>er`  →  |:EmendRefs|
+                        Default: 0 (no mappings created).
+
+==============================================================================
+5. KEY MAPPINGS                                             *emend-keymaps*
+
+Inside the search results window:
+
+    `j` / `<Down>`      Move selection down
+    `k` / `<Up>`        Move selection up
+    `<C-d>`             Move selection down 10 lines
+    `<C-u>`             Move selection up 10 lines
+    `gg`                Jump to first result
+    `G`                 Jump to last result
+    `<CR>`              Open the selected file at the matching line
+    `q` / `<Esc>`       Close the search UI
+    `/`                 Start a new search
+
+==============================================================================
+6. ARCHITECTURE                                         *emend-architecture*
+
+The plugin spawns `emend editor-server` as a child process and communicates
+via newline-delimited JSON-RPC over stdin/stdout pipes.
+
+The server keeps a SQLite database (with FTS5 trigram indexing) warm in
+memory, enabling sub-5ms symbol lookups and fast pattern searches.
+
+On first use, if the index does not exist, the plugin automatically runs
+`emend index -vv` and displays progress in the preview pane.  This one-time
+index build typically takes 5-15 seconds for a medium-sized codebase.
+
+JSON-RPC methods:~
+
+    search          Auto-detect mode and search
+    symbols         Symbol name search
+    pattern         Code pattern search (supports `$` metavars)
+    selector        Resolve `file.py::Sym.path` selectors
+    references      Find references by qualified name
+    file_symbols    File outline (all symbols in a file)
+    status          Index statistics
+    reindex         Refresh stale files + rebuild FTS
+    shutdown        Clean server exit
+
+==============================================================================
+ vim:tw=78:ts=8:ft=help:norl:

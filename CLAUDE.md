@@ -15,8 +15,20 @@
 | `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
+| `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial pattern normalization |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
 | `grammars/pattern.lark` | Lark grammar for pattern syntax |
+
+### Vim Plugin (`vim/`)
+
+| File | Purpose |
+|------|---------|
+| `plugin/emend.vim` | Plugin entry point: `:Emend`, `:EmendSearch`, `:EmendOutline`, `:EmendRefs` commands |
+| `autoload/emend.vim` | RPC client over stdio, server lifecycle, executable detection (`uv tool` / `$PATH`) |
+| `autoload/emend/ui.vim` | Split-pane search UI: floating windows (Neovim) / splits (Vim), navigation, preview, cache warming |
+| `doc/emend.txt` | Vim help documentation (`:help emend`) |
+| `test/emend.vader` | Vader.vim plugin tests |
+| `test/run_tests.sh` | Test runner (auto-downloads vader.vim) |
 
 ### Tests (`tests/test_emend/`)
 
@@ -61,6 +73,7 @@
 | `test_transform_inside.py` | `--inside` / `--not-inside` constraints |
 | `test_type_oracle.py` | `TypeOracle` unit tests: `parse_type_string`, `TypeDescriptor`, `FileTypes`, cache, parsers, `detect_type_engine`, stress tests, optional pyrefly/pyright integration |
 | `test_typeoracle_integration.py` | End-to-end integration: `:type[X]`/`:returns[X]` pattern constraints, oracle-aware lookup, `cmd_edit`/`cmd_add` wiring |
+| `test_vim_rpc.py` | Vim plugin JSON-RPC protocol tests: dispatch, search, selector, file_symbols, status, reindex, error handling, serialization |
 | `test_visit_project.py` | `visit_project()` helper |
 
 ## Commands
@@ -81,6 +94,8 @@
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
 | `index` | Pre-build parse, QN-index, and type-cache schema in `parse.db` for faster cross-project operations (`--jobs`) |
+| `editor-search` | One-shot JSON search for editor integration (auto-detects symbol/pattern/selector mode) |
+| `editor-server` | Long-running JSON-RPC server over stdio for the Vim plugin (methods: search, symbols, pattern, selector, file_symbols, references, status, reindex, shutdown) |
 
 ## Architecture
 

@@ -126,6 +126,29 @@ Use ``--scope`` with ``claude mcp add`` to choose. See the
 `Claude Code MCP documentation <https://code.claude.com/docs/en/mcp>`_ for
 full details on scopes, environment variables, and managed configurations.
 
+Vim / Neovim plugin
+-------------------
+
+emend ships with a Vim/Neovim plugin for interactive code search.  It
+communicates with ``emend editor-server`` via JSON-RPC over stdio pipes,
+keeping the server warm for sub-5ms symbol lookups.
+
+Install with `vim-plug <https://github.com/junegunn/vim-plug>`_:
+
+.. code-block:: vim
+
+   Plug 'lucaswiman/emend', { 'rtp': 'vim' }
+
+Or for local development, point to your checkout:
+
+.. code-block:: vim
+
+   Plug '~/src/emend', { 'rtp': 'vim' }
+   let g:emend_command = '~/src/emend/.venv/bin/emend'
+
+After installing, use ``:Emend`` to open the search prompt.  See
+``vim/README.md`` and ``:help emend`` for full documentation.
+
 Verifying installation
 ----------------------
 

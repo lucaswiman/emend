@@ -1,0 +1,135 @@
+" emend.vader — Unit tests for the emend Vim plugin.
+"
+" These tests verify the VimL/plugin layer.  They don't require a running
+" emend server (the RPC integration is tested separately in Python).
+
+" ===========================================================================
+" Plugin loading
+" ===========================================================================
+
+Execute (plugin is loaded):
+  Assert exists('g:loaded_emend'), 'g:loaded_emend should be set'
+
+Execute (commands are defined):
+  Assert exists(':Emend'), ':Emend command should exist'
+  Assert exists(':EmendSearch'), ':EmendSearch command should exist'
+  Assert exists(':EmendOutline'), ':EmendOutline command should exist'
+  Assert exists(':EmendRefs'), ':EmendRefs command should exist'
+  Assert exists(':EmendStart'), ':EmendStart command should exist'
+  Assert exists(':EmendStop'), ':EmendStop command should exist'
+  Assert exists(':EmendStatus'), ':EmendStatus command should exist'
+  Assert exists(':EmendReindex'), ':EmendReindex command should exist'
+
+" ===========================================================================
+" Configuration defaults
+" ===========================================================================
+
+Execute (default config values are set):
+  AssertEqual '', g:emend_command
+  AssertEqual '', g:emend_project_root
+  AssertEqual 50, g:emend_limit
+  AssertEqual 60, g:emend_preview_height
+
+Execute (config can be overridden):
+  let g:emend_limit = 100
+  AssertEqual 100, g:emend_limit
+  let g:emend_limit = 50
+
+" ===========================================================================
+" Server state
+" ===========================================================================
+
+Execute (server is not running initially):
+  Assert !emend#is_running(), 'server should not be running before start'
+  Assert !emend#is_ready(), 'server should not be ready before start'
+
+" ===========================================================================
+" UI module loading
+" ===========================================================================
+
+Execute (ui module functions are autoloadable):
+  " Explicitly source the autoload file — exists('*autoload#fn') does not
+  " trigger autoloading on Neovim < 0.10.
+  runtime autoload/emend/ui.vim
+  Assert exists('*emend#ui#prompt'), 'emend#ui#prompt should be autoloadable'
+  Assert exists('*emend#ui#search'), 'emend#ui#search should be autoloadable'
+  Assert exists('*emend#ui#on_search_result'), 'emend#ui#on_search_result should be autoloadable'
+  Assert exists('*emend#ui#move'), 'emend#ui#move should be autoloadable'
+  Assert exists('*emend#ui#accept'), 'emend#ui#accept should be autoloadable'
+  Assert exists('*emend#ui#close'), 'emend#ui#close should be autoloadable'
+
+" ===========================================================================
+" Search result callback — empty results
+" ===========================================================================
+
+Execute (on_search_result handles empty results without crashing):
+  " Simulate an empty search result.  Should echo a message, not open UI.
+  call emend#ui#on_search_result({'items': [], 'mode': 'symbol', 'elapsed_ms': 1.5, 'query': 'xyz', 'truncated': v:false})
+  " If we get here without error, the test passes.
+
+" ===========================================================================
+" Search result callback — error response
+" ===========================================================================
+
+Execute (on_search_result handles error responses):
+  call emend#ui#on_search_result({'error': {'code': -32603, 'message': 'test error'}})
+  " Should show error message, not crash.
+
+" ===========================================================================
+" Search result callback — successful results open UI
+" ===========================================================================
+
+Execute (on_search_result with items opens the UI):
+  let result = {
+        \ 'items': [
+        \   {'name': 'foo', 'kind': 'function', 'file_path': '/tmp/test.py',
+        \    'line': 10, 'end_line': 15, 'qualified_name': 'mod.foo',
+        \    'signature': '(x, y)', 'score': 1000.0},
+        \ ],
+        \ 'mode': 'symbol',
+        \ 'elapsed_ms': 2.3,
+        \ 'query': 'foo',
+        \ 'truncated': v:false,
+        \ }
+  call emend#ui#on_search_result(result)
+
+  " The UI should have opened.  Close it to clean up.
+  call emend#ui#close()
+
+" ===========================================================================
+" Navigation with multiple results
+" ===========================================================================
+
+Execute (navigation through multiple results):
+  let result = {
+        \ 'items': [
+        \   {'name': 'alpha', 'kind': 'function', 'file_path': '/tmp/a.py',
+        \    'line': 1, 'end_line': 5, 'qualified_name': 'a.alpha',
+        \    'signature': '()', 'score': 900.0},
+        \   {'name': 'beta', 'kind': 'function', 'file_path': '/tmp/b.py',
+        \    'line': 10, 'end_line': 20, 'qualified_name': 'b.beta',
+        \    'signature': '(x)', 'score': 800.0},
+        \   {'name': 'gamma', 'kind': 'class', 'file_path': '/tmp/c.py',
+        \    'line': 1, 'end_line': 50, 'qualified_name': 'c.gamma',
+        \    'signature': '', 'score': 700.0},
+        \ ],
+        \ 'mode': 'symbol',
+        \ 'elapsed_ms': 1.0,
+        \ 'query': 'test',
+        \ 'truncated': v:false,
+        \ }
+  call emend#ui#on_search_result(result)
+
+  " Move down.
+  call emend#ui#move(1)
+  call emend#ui#move(1)
+
+  " Move up.
+  call emend#ui#move(-1)
+
+  " Jump to edges.
+  call emend#ui#goto_first()
+  call emend#ui#goto_last()
+
+  " Clean up.
+  call emend#ui#close()
