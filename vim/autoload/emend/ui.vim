@@ -44,10 +44,6 @@ function! emend#ui#prompt(...) abort
 endfunction
 
 function! emend#ui#interactive() abort
-  if !emend#is_running()
-    call emend#start()
-  endif
-  
   let s:is_interactive = 1
   let s:query = ''
   let s:results = []
@@ -65,13 +61,6 @@ endfunction
 function! emend#ui#search(query) abort
   let s:query = a:query
   let s:is_interactive = 0
-  if !emend#is_running()
-    call emend#start()
-  endif
-  if !emend#is_ready()
-    call s:show_cache_warming(a:query)
-    return
-  endif
   call emend#search(a:query)
 endfunction
 

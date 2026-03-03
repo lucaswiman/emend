@@ -27,6 +27,7 @@ Execute (commands are defined):
 Execute (default config values are set):
   AssertEqual '', g:emend_command
   AssertEqual '', g:emend_project_root
+  AssertEqual 1, g:emend_auto_start
   AssertEqual 50, g:emend_limit
   AssertEqual 60, g:emend_preview_height
 
