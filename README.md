@@ -112,6 +112,28 @@ for details on scopes, environment variables, and managed configurations.
 
 Run `emend --help` to verify. Full documentation at [lucaswiman.github.io/emend](https://lucaswiman.github.io/emend/).
 
+### Vim / Neovim plugin
+
+emend ships with a Vim/Neovim plugin for interactive code search. Install with
+[vim-plug](https://github.com/junegunn/vim-plug):
+
+```vim
+Plug 'lucaswiman/emend', { 'rtp': 'vim' }
+```
+
+Then use `:Emend` to open the search prompt, or `:Emend parse` to search
+directly. The plugin communicates with `emend editor-server` via JSON-RPC over
+stdio pipes — the server stays warm for sub-5ms lookups.
+
+For local development, point to your checkout:
+
+```vim
+Plug '~/src/emend', { 'rtp': 'vim' }
+let g:emend_command = '~/src/emend/.venv/bin/emend'
+```
+
+See [vim/README.md](vim/README.md) for full documentation.
+
 ### Indexing (recommended for large codebases)
 
 After installing, run `emend index` in your project root to pre-build caches:
@@ -605,6 +627,11 @@ emend/
 ├── rust/                     # emend_core Rust extension (bundled in wheel)
 │   ├── src/lib.rs            # PyO3 bindings, GIL-free module definition
 │   └── Cargo.toml
+├── vim/                      # Vim/Neovim plugin (JSON-RPC over stdio)
+│   ├── plugin/emend.vim      # Commands (:Emend, :EmendSearch, etc.)
+│   ├── autoload/emend.vim    # RPC client, server lifecycle
+│   ├── autoload/emend/ui.vim # Split-pane search UI
+│   └── doc/emend.txt         # Vim help (:help emend)
 ├── tests/test_emend/         # Test suite
 ├── Makefile
 └── pyproject.toml            # maturin build (bundles Rust + Python in one wheel)

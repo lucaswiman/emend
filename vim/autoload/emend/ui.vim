@@ -15,9 +15,17 @@ let s:preview_win = -1
 let s:results = []        " list of result dicts
 let s:selected = 0        " currently highlighted index
 let s:query = ''
-let s:mode = ''
-let s:elapsed_ms = 0
-let s:project_root = ''
+let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
+
+" Kind abbreviations (hoisted to avoid per-call allocation).
+let s:KIND_ICONS = {
+      \ 'class': 'C',
+      \ 'function': 'f',
+      \ 'method': 'm',
+      \ 'async_function': 'af',
+      \ 'async_method': 'am',
+      \ 'variable': 'v',
+      \ }
 
 " ---------------------------------------------------------------------------
 " Public entry — prompt and search
@@ -34,12 +42,10 @@ endfunction
 
 function! emend#ui#search(query) abort
   let s:query = a:query
-  " Check if the server is running; start + warm cache if needed.
   if !emend#is_running()
     call emend#start()
   endif
   if !emend#is_ready()
-    " Server still starting — show cache-warming UI.
     call s:show_cache_warming(a:query)
     return
   endif
@@ -52,7 +58,6 @@ endfunction
 
 function! emend#ui#on_search_result(result) abort
   if has_key(a:result, 'error')
-    " Check if this is a cache miss / index not ready.
     let l:msg = get(get(a:result, 'error', {}), 'message', '')
     if l:msg =~# 'no such table\|symbol_index\|unable to open'
       call s:show_cache_warming(s:query)
@@ -64,13 +69,13 @@ function! emend#ui#on_search_result(result) abort
     return
   endif
 
+  let s:last_result = a:result
   let s:results = get(a:result, 'items', [])
-  let s:mode = get(a:result, 'mode', '?')
-  let s:elapsed_ms = get(a:result, 'elapsed_ms', 0)
   let s:selected = 0
 
   if empty(s:results)
-    echo 'emend: no results for "' . s:query . '" [' . s:elapsed_ms . 'ms]'
+    echo 'emend: no results for "' . s:query . '"'
+          \ . ' [' . get(a:result, 'elapsed_ms', 0) . 'ms]'
     return
   endif
 
@@ -86,10 +91,8 @@ let s:cache_start = 0
 let s:cache_job = v:null
 
 function! s:show_cache_warming(query) abort
-  " Open a simple buffer showing that we're warming the cache.
   call s:open_ui()
 
-  " Fill the list side with a status message.
   call s:set_buf_lines(s:list_buf, [
         \ '  emend — Warming cache...',
         \ '',
@@ -105,58 +108,35 @@ function! s:show_cache_warming(query) abort
 
   let s:cache_start = reltime()
 
-  " Start `emend index -vv` and capture output.
-  let l:emend = s:find_emend_or_default()
+  let l:emend = emend#find_executable()
+  if l:emend ==# ''
+    let l:emend = 'emend'
+  endif
   let l:root = g:emend_project_root !=# '' ? g:emend_project_root : getcwd()
 
   if has('nvim')
     let s:cache_job = jobstart([l:emend, 'index', l:root, '-vv'], {
-          \ 'on_stdout': function('s:on_cache_stdout'),
-          \ 'on_stderr': function('s:on_cache_stderr'),
+          \ 'on_stdout': {id, data, ev -> s:append_cache_output(data)},
+          \ 'on_stderr': {id, data, ev -> s:append_cache_output(data)},
           \ 'on_exit':   function('s:on_cache_exit', [a:query]),
           \ 'stdout_buffered': v:false,
           \ })
   else
     let s:cache_job = job_start([l:emend, 'index', l:root, '-vv'], {
-          \ 'out_cb':  function('s:on_cache_output'),
-          \ 'err_cb':  function('s:on_cache_output'),
-          \ 'exit_cb': function('s:on_cache_done', [a:query]),
+          \ 'out_cb':  {ch, msg -> s:append_cache_output(msg)},
+          \ 'err_cb':  {ch, msg -> s:append_cache_output(msg)},
+          \ 'exit_cb': {job, status -> s:on_cache_exit(a:query, job, status)},
           \ })
   endif
 
-  " Start a timer to update elapsed time display.
   let s:cache_timer = timer_start(500, function('s:update_cache_ticker'), {'repeat': -1})
 endfunction
 
-function! s:find_emend_or_default() abort
-  " Reuse the detection from the main module.
-  let l:cmd = g:emend_command
-  if l:cmd !=# ''
-    return l:cmd
-  endif
-  if executable('emend')
-    return 'emend'
-  endif
-  return 'emend'
-endfunction
-
-function! s:on_cache_stdout(job_id, data, ...) abort
+function! s:append_cache_output(data) abort
   if s:preview_buf < 0 || !bufexists(s:preview_buf)
     return
   endif
   let l:lines = type(a:data) == v:t_list ? a:data : split(a:data, "\n")
-  call s:append_buf_lines(s:preview_buf, l:lines)
-endfunction
-
-function! s:on_cache_stderr(job_id, data, ...) abort
-  call s:on_cache_stdout(a:job_id, a:data)
-endfunction
-
-function! s:on_cache_output(channel, msg) abort
-  if s:preview_buf < 0 || !bufexists(s:preview_buf)
-    return
-  endif
-  let l:lines = split(a:msg, "\n")
   call s:append_buf_lines(s:preview_buf, l:lines)
 endfunction
 
@@ -180,13 +160,8 @@ function! s:on_cache_exit(query, job_id, exit_code, ...) abort
   call timer_start(300, {_ -> s:retry_search(a:query)})
 endfunction
 
-function! s:on_cache_done(query, job, status) abort
-  call s:on_cache_exit(a:query, a:job, a:status)
-endfunction
-
 function! s:retry_search(query) abort
   call emend#start()
-  " Wait for ready, then search.
   call timer_start(500, {_ -> s:wait_and_search(a:query, 0)})
 endfunction
 
@@ -215,7 +190,6 @@ function! s:update_cache_ticker(timer) abort
   let l:elapsed = reltimefloat(reltime(s:cache_start))
   let l:secs = float2nr(l:elapsed)
   let l:ticks = repeat('.', (l:secs % 3) + 1)
-  " Update the first line with elapsed time.
   call s:set_buf_line(s:list_buf, 0,
         \ '  emend — Warming cache' . l:ticks . ' (' . l:secs . 's)')
 endfunction
@@ -225,20 +199,15 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! s:open_ui() abort
-  " Close any existing emend UI windows first.
   call s:close_ui_silent()
 
-  " Calculate dimensions.
   let l:total_h = &lines
   let l:total_w = &columns
   let l:height = max([10, l:total_h * g:emend_preview_height / 100])
   let l:list_w = max([30, l:total_w * 35 / 100])
-  let l:preview_w = l:total_w - l:list_w - 3  " 3 for separator + borders
+  let l:preview_w = l:total_w - l:list_w - 3
 
-  " Create list buffer.
   let s:list_buf = s:create_scratch_buf('emend://results')
-
-  " Create preview buffer.
   let s:preview_buf = s:create_scratch_buf('emend://preview')
 
   if has('nvim')
@@ -247,13 +216,11 @@ function! s:open_ui() abort
     call s:open_vim_split(l:height, l:list_w)
   endif
 
-  " Populate the result list.
   if !empty(s:results)
     call s:render_list()
     call s:render_preview()
   endif
 
-  " Set up keybindings in the list window.
   call s:setup_keymaps()
 endfunction
 
@@ -271,7 +238,6 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
   let l:row = max([1, (&lines - a:height) / 2])
   let l:col = max([1, (&columns - a:list_w - a:preview_w - 3) / 2])
 
-  " List window (left pane).
   let s:list_win = nvim_open_win(s:list_buf, v:true, {
         \ 'relative': 'editor',
         \ 'row': l:row,
@@ -284,7 +250,6 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'title_pos': 'center',
         \ })
 
-  " Preview window (right pane).
   let s:preview_win = nvim_open_win(s:preview_buf, v:false, {
         \ 'relative': 'editor',
         \ 'row': l:row,
@@ -297,7 +262,6 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'title_pos': 'center',
         \ })
 
-  " Style.
   call nvim_win_set_option(s:list_win, 'cursorline', v:true)
   call nvim_win_set_option(s:list_win, 'number', v:false)
   call nvim_win_set_option(s:preview_win, 'number', v:true)
@@ -305,7 +269,6 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
 endfunction
 
 function! s:open_vim_split(height, list_w) abort
-  " In classic Vim, use horizontal + vertical splits at the bottom.
   execute 'botright ' . a:height . 'new'
   let s:list_win = win_getid()
   execute 'buffer ' . s:list_buf
@@ -316,9 +279,28 @@ function! s:open_vim_split(height, list_w) abort
   execute 'buffer ' . s:preview_buf
   setlocal number nowrap
 
-  " Resize the list pane.
   call win_gotoid(s:list_win)
   execute 'vertical resize ' . a:list_w
+endfunction
+
+" Close a single window (Vim or Neovim).
+function! s:close_win(win_id) abort
+  if a:win_id < 0
+    return
+  endif
+  try
+    if has('nvim')
+      if nvim_win_is_valid(a:win_id)
+        call nvim_win_close(a:win_id, v:true)
+      endif
+    else
+      let l:winnr = win_id2win(a:win_id)
+      if l:winnr > 0
+        execute l:winnr . 'wincmd c'
+      endif
+    endif
+  catch
+  endtry
 endfunction
 
 function! s:close_ui() abort
@@ -326,46 +308,29 @@ function! s:close_ui() abort
 endfunction
 
 function! s:close_ui_silent() abort
-  " Stop any cache warming timer.
   if s:cache_timer >= 0
     call timer_stop(s:cache_timer)
     let s:cache_timer = -1
   endif
 
-  " Close windows safely.
-  if s:preview_win >= 0
+  " Kill any running cache-warming job.
+  if s:cache_job isnot v:null
     try
       if has('nvim')
-        if nvim_win_is_valid(s:preview_win)
-          call nvim_win_close(s:preview_win, v:true)
-        endif
+        call jobstop(s:cache_job)
       else
-        let l:winnr = win_id2win(s:preview_win)
-        if l:winnr > 0
-          execute l:winnr . 'wincmd c'
-        endif
+        call job_stop(s:cache_job, 'kill')
       endif
     catch
     endtry
-    let s:preview_win = -1
+    let s:cache_job = v:null
   endif
 
-  if s:list_win >= 0
-    try
-      if has('nvim')
-        if nvim_win_is_valid(s:list_win)
-          call nvim_win_close(s:list_win, v:true)
-        endif
-      else
-        let l:winnr = win_id2win(s:list_win)
-        if l:winnr > 0
-          execute l:winnr . 'wincmd c'
-        endif
-      endif
-    catch
-    endtry
-    let s:list_win = -1
-  endif
+  call s:close_win(s:preview_win)
+  let s:preview_win = -1
+
+  call s:close_win(s:list_win)
+  let s:list_win = -1
 
   let s:list_buf = -1
   let s:preview_buf = -1
@@ -376,7 +341,6 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! s:setup_keymaps() abort
-  " All mappings are buffer-local to the list buffer.
   let l:buf = s:list_buf
 
   call s:map_buf(l:buf, 'n', '<CR>',      '<Cmd>call emend#ui#accept()<CR>')
@@ -407,8 +371,7 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! emend#ui#move(delta) abort
-  let l:new = s:selected + a:delta
-  let l:new = max([0, min([l:new, len(s:results) - 1])])
+  let l:new = max([0, min([s:selected + a:delta, len(s:results) - 1])])
   if l:new == s:selected
     return
   endif
@@ -418,15 +381,11 @@ function! emend#ui#move(delta) abort
 endfunction
 
 function! emend#ui#goto_first() abort
-  let s:selected = 0
-  call s:highlight_selected()
-  call s:render_preview()
+  call emend#ui#move(-len(s:results))
 endfunction
 
 function! emend#ui#goto_last() abort
-  let s:selected = max([0, len(s:results) - 1])
-  call s:highlight_selected()
-  call s:render_preview()
+  call emend#ui#move(len(s:results))
 endfunction
 
 function! emend#ui#accept() abort
@@ -465,50 +424,51 @@ endfunction
 
 function! s:render_list() abort
   let l:lines = []
+  let l:elapsed = get(s:last_result, 'elapsed_ms', 0)
+  let l:mode = get(s:last_result, 'mode', '?')
 
-  " Header.
   let l:header = '  ' . len(s:results) . ' results'
-  if get(s:, 'elapsed_ms', 0) > 0
-    let l:header .= ' [' . s:elapsed_ms . 'ms]'
+  if l:elapsed > 0
+    let l:header .= ' [' . l:elapsed . 'ms]'
   endif
-  let l:header .= '  (' . s:mode . ')'
+  let l:header .= '  (' . l:mode . ')'
   call add(l:lines, l:header)
   call add(l:lines, repeat('─', 40))
 
-  " Items.
+  " Compute cwd prefix once for all items.
+  let l:cwd = getcwd() . '/'
+
   for l:i in range(len(s:results))
-    let l:item = s:results[l:i]
-    let l:line = s:format_result_line(l:item, l:i)
-    call add(l:lines, l:line)
+    call add(l:lines, s:format_result_line(s:results[l:i], l:i, l:cwd))
   endfor
 
   call s:set_buf_lines(s:list_buf, l:lines)
   call s:highlight_selected()
 endfunction
 
-function! s:format_result_line(item, index) abort
+function! s:format_result_line(item, index, cwd) abort
   let l:name = get(a:item, 'name', get(a:item, 'matched_text', '?'))
   let l:kind = get(a:item, 'kind', '')
   let l:file = get(a:item, 'file_path', '')
   let l:line = get(a:item, 'line', '')
   let l:end_line = get(a:item, 'end_line', '')
 
-  " Shorten file path.
-  let l:short_file = s:shorten_path(l:file)
-
-  " Build display line.
   let l:prefix = a:index == s:selected ? ' > ' : '   '
   let l:text = l:prefix
 
   if l:kind !=# ''
-    let l:kind_icon = s:kind_icon(l:kind)
-    let l:text .= l:kind_icon . ' '
+    let l:text .= get(s:KIND_ICONS, l:kind, '·') . ' '
   endif
 
   let l:text .= l:name
 
-  if l:short_file !=# ''
-    let l:loc = l:short_file
+  if l:file !=# ''
+    " Shorten path relative to cwd.
+    let l:short = l:file
+    if stridx(l:short, a:cwd) == 0
+      let l:short = strpart(l:short, len(a:cwd))
+    endif
+    let l:loc = l:short
     if l:line !=# '' && l:line isnot v:null
       let l:loc .= ':' . l:line
       if l:end_line !=# '' && l:end_line isnot v:null && l:end_line != l:line
@@ -521,38 +481,13 @@ function! s:format_result_line(item, index) abort
   return l:text
 endfunction
 
-function! s:kind_icon(kind) abort
-  let l:icons = {
-        \ 'class': 'C',
-        \ 'function': 'f',
-        \ 'method': 'm',
-        \ 'async_function': 'af',
-        \ 'async_method': 'am',
-        \ 'variable': 'v',
-        \ }
-  return get(l:icons, a:kind, '·')
-endfunction
-
-function! s:shorten_path(path) abort
-  if a:path ==# ''
-    return ''
-  endif
-  " Make relative to cwd.
-  let l:cwd = getcwd() . '/'
-  let l:p = a:path
-  if stridx(l:p, l:cwd) == 0
-    let l:p = strpart(l:p, len(l:cwd))
-  endif
-  return l:p
-endfunction
-
 function! s:highlight_selected() abort
   if s:list_win < 0
     return
   endif
 
-  " The result items start at line index 2 (after header + separator).
-  let l:target_line = s:selected + 3  " 1-indexed, +2 for header lines
+  " Result items start at line 3 (1-indexed, after header + separator).
+  let l:target_line = s:selected + 3
 
   try
     if has('nvim')
@@ -560,14 +495,13 @@ function! s:highlight_selected() abort
         call nvim_win_set_cursor(s:list_win, [l:target_line, 0])
       endif
     else
-      let l:winnr = win_id2win(s:list_win)
-      if l:winnr > 0
-        call win_execute(s:list_win, 'call cursor(' . l:target_line . ', 1)')
-      endif
+      call win_execute(s:list_win, 'call cursor(' . l:target_line . ', 1)')
     endif
   catch
   endtry
 endfunction
+
+let s:preview_ft = ''
 
 function! s:render_preview() abort
   if s:preview_buf < 0 || empty(s:results) || s:selected >= len(s:results)
@@ -580,45 +514,46 @@ function! s:render_preview() abort
   let l:end_line = get(l:item, 'end_line', l:start_line)
   let l:matched_text = get(l:item, 'matched_text', '')
 
-  " If we have matched_text (pattern mode), show it with context.
+  " Pattern mode: show matched_text directly.
   if l:matched_text !=# ''
-    let l:lines = ['  File: ' . s:shorten_path(l:file), '  Lines: ' . l:start_line . '-' . l:end_line, '']
+    let l:cwd = getcwd() . '/'
+    let l:short = l:file
+    if stridx(l:short, l:cwd) == 0
+      let l:short = strpart(l:short, len(l:cwd))
+    endif
+    let l:lines = ['  File: ' . l:short, '  Lines: ' . l:start_line . '-' . l:end_line, '']
     let l:lines += split(l:matched_text, "\n")
     call s:set_buf_lines(s:preview_buf, l:lines)
-    " Try to set filetype for syntax highlighting.
-    call setbufvar(s:preview_buf, '&filetype', 'python')
+    call s:set_preview_ft('python')
     return
   endif
 
-  " Otherwise read the file and show relevant lines.
   if l:file ==# '' || !filereadable(l:file)
     call s:set_buf_lines(s:preview_buf, ['  (file not available)'])
     return
   endif
 
-  let l:all_lines = readfile(l:file)
+  " Read only as many lines as needed (avoid reading entire large files).
+  let l:ctx = 5
+  let l:max_line = l:end_line + l:ctx
+  let l:all_lines = readfile(l:file, '', l:max_line)
   if empty(l:all_lines)
     call s:set_buf_lines(s:preview_buf, ['  (empty file)'])
     return
   endif
 
-  " Show context around the match.
-  let l:ctx = 5
   let l:from = max([0, l:start_line - 1 - l:ctx])
-  let l:to = min([len(l:all_lines), l:end_line + l:ctx])
+  let l:to = min([len(l:all_lines), l:max_line])
   let l:preview_lines = l:all_lines[l:from : l:to - 1]
 
   call s:set_buf_lines(s:preview_buf, l:preview_lines)
 
-  " Set filetype for syntax highlighting.
+  " Set filetype only when it changes (avoids re-triggering autocommands).
   let l:ext = fnamemodify(l:file, ':e')
-  if l:ext ==# 'py'
-    call setbufvar(s:preview_buf, '&filetype', 'python')
-  elseif l:ext !=# ''
-    call setbufvar(s:preview_buf, '&filetype', l:ext)
-  endif
+  let l:ft = l:ext ==# 'py' ? 'python' : l:ext
+  call s:set_preview_ft(l:ft)
 
-  " Scroll preview window to center on the match.
+  " Scroll to the match.
   let l:preview_target = l:start_line - l:from
   try
     if has('nvim')
@@ -630,6 +565,13 @@ function! s:render_preview() abort
     endif
   catch
   endtry
+endfunction
+
+function! s:set_preview_ft(ft) abort
+  if a:ft !=# '' && a:ft !=# s:preview_ft
+    let s:preview_ft = a:ft
+    call setbufvar(s:preview_buf, '&filetype', a:ft)
+  endif
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -644,7 +586,6 @@ function! s:set_buf_lines(buf, lines) abort
   if has('nvim')
     call nvim_buf_set_lines(a:buf, 0, -1, v:false, a:lines)
   else
-    " Classic Vim: delete all, then append.
     silent call deletebufline(a:buf, 1, '$')
     call setbufline(a:buf, 1, a:lines)
   endif

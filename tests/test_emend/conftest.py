@@ -1,6 +1,7 @@
 """Shared test fixtures and utilities for emend tests."""
 
 import ast
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,60 @@ def get_import_statements(code: str) -> list[str]:
             imports.append(f"from {module} import {names}")
 
     return imports
+
+
+def build_indexed_project(
+    tmp_path: Path,
+    files: dict[str, str],
+) -> Path:
+    """Create a small Python project with indexed symbols.
+
+    Args:
+        tmp_path: pytest tmp_path for the project root.
+        files: Mapping of filename (e.g. ``"app.py"``) to source content.
+
+    Returns:
+        Path to the project root directory.
+    """
+    from emend.transform import _index_batch
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    cache = proj / ".emend" / "cache"
+    cache.mkdir(parents=True)
+    db_path = cache / "parse.db"
+
+    for name, content in files.items():
+        (proj / name).write_text(content)
+
+    batch = [(str(proj / name), content) for name, content in files.items()]
+    _index_batch((str(db_path), str(proj), str(proj), batch))
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS index_meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_manifest ("
+        "  worktree_id TEXT NOT NULL DEFAULT '',"
+        "  path TEXT NOT NULL,"
+        "  mtime_ns INTEGER NOT NULL,"
+        "  size INTEGER NOT NULL,"
+        "  content_hash BLOB NOT NULL,"
+        "  indexed_at REAL NOT NULL,"
+        "  PRIMARY KEY (worktree_id, path)"
+        ")"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+        ("schema_version", "4"),
+    )
+    conn.commit()
+    conn.close()
+
+    return proj
 
 
 def get_decorator_names(code: str, target_path: str = None) -> list[str]:
