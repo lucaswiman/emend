@@ -337,6 +337,8 @@ def run_lint(
         file_violations: list[LintViolation] = []
         # Build noqa ranges lazily: only when a rule actually produces matches.
         noqa_ranges: list[tuple[int, int, set[str] | None]] | None = None
+        # Build line-offset table lazily for extracting match text from source.
+        line_starts: list[int] | None = None
         for rule in libcst_rules:
             if file_path not in rule_file_sets.get(rule.name, set()):
                 continue
@@ -361,12 +363,25 @@ def run_lint(
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)
                     noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
+            # Build line-offset table on first match (once per file)
+            if line_starts is None:
+                line_starts = [0]
+                for i, ch in enumerate(source):
+                    if ch == '\n':
+                        line_starts.append(i + 1)
             for match in matches:
                 if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
                     continue
-                # Extract match text from source using byte range
-                import libcst as cst
-                match_text = cst.Module([]).code_for_node(match.node).strip()
+                # Extract match text from source using line/col positions
+                if match.matched_text is not None:
+                    match_text = match.matched_text.strip()
+                elif (match.line and match.col is not None
+                      and match.end_line and match.end_col is not None):
+                    start = line_starts[match.line - 1] + match.col
+                    end = line_starts[match.end_line - 1] + match.end_col
+                    match_text = source[start:end].strip()
+                else:
+                    match_text = ""
                 file_violations.append(LintViolation(
                     rule_name=rule.name,
                     message=rule.message,
