@@ -14,8 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import libcst as cst
-from libcst.metadata import PositionProvider, MetadataWrapper
 
 if TYPE_CHECKING:
     from emend.type_oracle import FileTypes, TypeOracle
@@ -159,152 +157,76 @@ def _match_pattern(
     return bool(re.search(regex, value, flags))
 
 
-def _cst_get_return_annotation(node: cst.FunctionDef) -> str | None:
-    """Extract return type annotation as string from a LibCST FunctionDef."""
-    if node.returns is not None:
-        return cst.Module([]).code_for_node(node.returns.annotation).strip()
-    return None
+def _extract_params_from_signature(signature: str | None) -> list[str]:
+    """Parse parameter strings from Rust signature like '(x: int, y, *args, **kwargs) -> str'."""
+    if not signature:
+        return []
+    # Strip return type
+    sig = signature
+    if " -> " in sig:
+        sig = sig[:sig.index(" -> ")]
+    # Strip parens
+    sig = sig.strip()
+    if sig.startswith("(") and sig.endswith(")"):
+        sig = sig[1:-1]
+    if not sig.strip():
+        return []
+    # Split on commas (simple split — no nested parens handling needed for param names)
+    return [p.strip() for p in sig.split(",") if p.strip()]
 
 
-def _cst_get_decorators(decorators: tuple[cst.Decorator, ...]) -> list[str]:
-    """Extract decorator strings with @ prefix from LibCST decorators."""
-    result = []
-    for dec in decorators:
-        code = cst.Module([]).code_for_node(dec.decorator).strip()
-        result.append(f"@{code}")
-    return result
+def _rust_dict_to_symbol_info_list(
+    dicts: list[dict], filepath: str, depth: int = 1, parent: str | None = None,
+) -> list[SymbolInfo]:
+    """Convert flat Rust symbol dicts to a list of SymbolInfo objects."""
+    symbols: list[SymbolInfo] = []
+    for d in dicts:
+        kind = d.get("kind", "")
+        sym_path = list(d.get("path", []))
 
+        # Skip reference symbols
+        if kind == "reference":
+            continue
 
-def _cst_format_param(param: cst.Param) -> str:
-    """Format a single parameter with optional annotation and default."""
-    name = param.name.value
-    if param.annotation is not None:
-        ann = cst.Module([]).code_for_node(param.annotation.annotation).strip()
-        name += f": {ann}"
-    if param.default is not None:
-        default = cst.Module([]).code_for_node(param.default).strip()
-        name += f" = {default}"
-    return name
+        path_str = f"{filepath}::{'.'.join(sym_path)}"
 
+        # Extract decorators with @ prefix
+        raw_decorators = list(d.get("decorators", []))
+        decorators = [f"@{dec}" for dec in raw_decorators]
 
-def _cst_get_parameters(params: cst.Parameters) -> list[str]:
-    """Extract parameter strings with type annotations from LibCST Parameters."""
-    result = []
+        # Extract parameters from signature
+        signature = d.get("signature")
+        parameters = _extract_params_from_signature(signature)
 
-    # Positional-only args
-    if hasattr(params, 'posonly_params'):
-        for p in params.posonly_params:
-            result.append(_cst_format_param(p))
+        # Get return type
+        returns = d.get("returns")
 
-    # Regular positional args
-    for p in params.params:
-        result.append(_cst_format_param(p))
-
-    # *args
-    if params.star_arg is not None and isinstance(params.star_arg, cst.Param):
-        result.append(f"*{_cst_format_param(params.star_arg)}")
-
-    # Keyword-only args
-    for p in params.kwonly_params:
-        result.append(_cst_format_param(p))
-
-    # **kwargs
-    if params.star_kwarg:
-        result.append(f"**{_cst_format_param(params.star_kwarg)}")
-
-    return result
-
-
-class _SymbolCollector(cst.CSTVisitor):
-    """LibCST visitor to collect all symbols with query info."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self, filepath: str):
-        self.filepath = filepath
-        self.symbols: list[SymbolInfo] = []
-        self._path: list[str] = []
-        self._depth: int = 1
-        self._in_class_stack: list[bool] = [False]
-        self._parent_name_stack: list[str | None] = [None]
-
-    def _get_position(self, node: cst.CSTNode) -> tuple[int, int]:
-        """Get (line_start, line_end) for a node."""
-        pos = self.get_metadata(PositionProvider, node)
-        return pos.start.line, pos.end.line
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        name = node.name.value
-        symbol_path = self._path + [name]
-        path_str = f"{self.filepath}::{'.'.join(symbol_path)}"
-        line, end_line = self._get_position(node)
-
-        self.symbols.append(
+        symbols.append(
             SymbolInfo(
                 path=path_str,
-                name=name,
-                kind="class",
-                line=line,
-                end_line=end_line,
-                decorators=_cst_get_decorators(node.decorators),
-                parent=self._parent_name_stack[-1],
-                depth=self._depth,
-            )
-        )
-
-        self._path = symbol_path
-        self._depth += 1
-        self._in_class_stack.append(True)
-        self._parent_name_stack.append(name)
-        return True
-
-    def leave_ClassDef(self, node: cst.ClassDef) -> None:
-        self._path = self._path[:-1]
-        self._depth -= 1
-        self._in_class_stack.pop()
-        self._parent_name_stack.pop()
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        name = node.name.value
-        symbol_path = self._path + [name]
-        path_str = f"{self.filepath}::{'.'.join(symbol_path)}"
-        line, end_line = self._get_position(node)
-
-        is_async = node.asynchronous is not None
-        is_method = self._in_class_stack[-1]
-
-        if is_async:
-            kind = "async_method" if is_method else "async_function"
-        else:
-            kind = "method" if is_method else "function"
-
-        self.symbols.append(
-            SymbolInfo(
-                path=path_str,
-                name=name,
+                name=d["name"],
                 kind=kind,
-                line=line,
-                end_line=end_line,
-                decorators=_cst_get_decorators(node.decorators),
-                parameters=_cst_get_parameters(node.params),
-                returns=_cst_get_return_annotation(node),
-                parent=self._parent_name_stack[-1],
-                depth=self._depth,
+                line=d["line"],
+                end_line=d["end_line"],
+                decorators=decorators,
+                parameters=parameters,
+                returns=returns,
+                parent=parent,
+                depth=depth,
             )
         )
 
-        # Functions inside functions are not methods
-        self._path = symbol_path
-        self._depth += 1
-        self._in_class_stack.append(False)
-        self._parent_name_stack.append(self._parent_name_stack[-1])
-        return True
+        # Recurse into children
+        children = d.get("children", [])
+        if children:
+            child_parent = d["name"] if kind == "class" else parent
+            symbols.extend(
+                _rust_dict_to_symbol_info_list(
+                    children, filepath, depth=depth + 1, parent=child_parent,
+                )
+            )
 
-    def leave_FunctionDef(self, node: cst.FunctionDef) -> None:
-        self._path = self._path[:-1]
-        self._depth -= 1
-        self._in_class_stack.pop()
-        self._parent_name_stack.pop()
+    return symbols
 
 
 # Symbol cache: content_hash -> (filepath_used, symbols)
@@ -318,7 +240,7 @@ def _collect_symbols(
     filepath: Path,
     source: str,
 ) -> list[SymbolInfo]:
-    """Collect all symbols from source using LibCST, with caching.
+    """Collect all symbols from source using tree-sitter via Rust, with caching.
 
     Caches results by content hash so repeated queries on unchanged files
     are near-instant.
@@ -350,17 +272,16 @@ def _collect_symbols(
             remapped.append(new_sym)
         return remapped
 
-    module = cst.parse_module(source)
-    wrapper = MetadataWrapper(module)
-    visitor = _SymbolCollector(str(filepath))
-    wrapper.visit(visitor)
+    from emend import emend_core
+    rust_syms = emend_core.collect_symbols_from_str(source)
+    symbols = _rust_dict_to_symbol_info_list(rust_syms, str(filepath))
 
     if len(_symbol_cache) >= _SYMBOL_CACHE_MAX:
         keys_to_evict = list(_symbol_cache.keys())[:_SYMBOL_CACHE_MAX // 4]
         for k in keys_to_evict:
             del _symbol_cache[k]
-    _symbol_cache[key] = (str(filepath), visitor.symbols)
-    return visitor.symbols
+    _symbol_cache[key] = (str(filepath), symbols)
+    return symbols
 
 
 def _filter_by_kind(symbol: SymbolInfo, kinds: list[str]) -> bool:

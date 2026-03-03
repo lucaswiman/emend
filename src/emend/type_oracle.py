@@ -22,8 +22,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Any
 
-import libcst as cst
-from libcst.metadata import PositionProvider, MetadataWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -221,33 +219,14 @@ class LSPClient:
 # AST traversal for symbol collection
 # ---------------------------------------------------------------------------
 
-_PYTHON_KEYWORDS = frozenset({"True", "False", "None"})
-
-
-class _SymbolCollector(cst.CSTVisitor):
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(self):
-        self.positions: list[tuple[str, int, int, int]] = []
-
-    def visit_Name(self, node: cst.Name):
-        if node.value in _PYTHON_KEYWORDS:
-            return
-        pos = self.get_metadata(PositionProvider, node)
-        self.positions.append((node.value, pos.start.line, pos.start.column + 1, pos.end.column + 1))
-
-    def visit_Attribute(self, node: cst.Attribute):
-        pos = self.get_metadata(PositionProvider, node.attr)
-        self.positions.append((node.attr.value, pos.start.line, pos.start.column + 1, pos.end.column + 1))
-
-
 def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
-    """Collect all identifiers and their positions in the source."""
-    module = cst.parse_module(source)
-    wrapper = MetadataWrapper(module)
-    collector = _SymbolCollector()
-    wrapper.visit(collector)
-    return collector.positions
+    """Collect all identifiers and their positions in the source.
+
+    Uses the Rust tree-sitter extension for fast parsing.
+    Returns (name, line, start_col_1indexed, end_col_1indexed) tuples.
+    """
+    from emend import emend_core
+    return emend_core.collect_identifier_positions(source)
 
 
 # ---------------------------------------------------------------------------

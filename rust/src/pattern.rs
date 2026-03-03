@@ -325,3 +325,60 @@ where
         }
     }
 }
+
+/// Python keywords that look like identifiers in tree-sitter but aren't.
+const PYTHON_KEYWORDS: &[&str] = &["True", "False", "None"];
+
+/// Collect all identifier and attribute positions from Python source.
+///
+/// Returns a list of (name, line, start_col_1indexed, end_col_1indexed) tuples.
+/// Used by type_oracle to replace LibCST's _SymbolCollector.
+pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, usize)> {
+    let tree = match parse_python(source) {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut results: Vec<(String, usize, usize, usize)> = Vec::new();
+
+    fn collect(node: Node, source: &[u8], results: &mut Vec<(String, usize, usize, usize)>) {
+        match node.kind() {
+            "identifier" => {
+                let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                    .unwrap_or("");
+                if !PYTHON_KEYWORDS.contains(&text) {
+                    let line = node.start_position().row + 1;
+                    let start_col = node.start_position().column + 1;
+                    let end_col = node.end_position().column + 1;
+                    results.push((text.to_string(), line, start_col, end_col));
+                }
+            }
+            "attribute" => {
+                // For `obj.attr`, emit the full dotted name
+                let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                    .unwrap_or("");
+                let line = node.start_position().row + 1;
+                let start_col = node.start_position().column + 1;
+                let end_col = node.end_position().column + 1;
+                results.push((text.to_string(), line, start_col, end_col));
+                // Don't recurse into children — we've captured the whole attribute
+                return;
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                collect(cursor.node(), source, results);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    collect(root, source_bytes, &mut results);
+    results
+}

@@ -11,14 +11,19 @@ use std::collections::HashSet;
 /// Internal symbol representation (not a pyclass to avoid recursive Vec issues).
 struct RustSymbol {
     name: String,
-    kind: String, // "function", "async_function", "class", "variable", "reference"
+    kind: String, // "function", "async_function", "method", "async_method", "class", "variable", "reference"
     signature: Option<String>,
     type_annotation: Option<String>,
+    returns: Option<String>,
     line: usize,
     end_line: usize,
+    col_offset: usize,
     children: Vec<RustSymbol>,
     path: Vec<String>,
     depth: usize,
+    decorators: Vec<String>,
+    decorator_line_start: Option<usize>,
+    param_names: Vec<String>,
 }
 
 /// Convert a RustSymbol tree to a Python dict (recursively).
@@ -28,12 +33,22 @@ fn symbol_to_pydict(py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
     d.set_item("kind", &sym.kind)?;
     d.set_item("signature", sym.signature.as_deref())?;
     d.set_item("type_annotation", sym.type_annotation.as_deref())?;
+    d.set_item("returns", sym.returns.as_deref())?;
     d.set_item("line", sym.line)?;
     d.set_item("end_line", sym.end_line)?;
+    d.set_item("col_offset", sym.col_offset)?;
     d.set_item("depth", sym.depth)?;
 
     let path_list = PyList::new(py, sym.path.iter().map(|s| s.as_str()))?;
     d.set_item("path", path_list)?;
+
+    let dec_list = PyList::new(py, sym.decorators.iter().map(|s| s.as_str()))?;
+    d.set_item("decorators", dec_list)?;
+
+    d.set_item("decorator_line_start", sym.decorator_line_start)?;
+
+    let param_list = PyList::new(py, sym.param_names.iter().map(|s| s.as_str()))?;
+    d.set_item("param_names", param_list)?;
 
     let children_list = PyList::empty(py);
     for child in &sym.children {
@@ -47,6 +62,99 @@ fn symbol_to_pydict(py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
 /// Get node text as a &str from source bytes.
 pub fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
+}
+
+/// Extract decorator strings from a `decorated_definition` node.
+///
+/// Returns (decorator_strings, decorator_line_start).
+fn extract_decorators(node: tree_sitter::Node, source: &[u8]) -> (Vec<String>, Option<usize>) {
+    let mut decorators = Vec::new();
+    let mut first_line: Option<usize> = None;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "decorator" {
+            let line = child.start_position().row + 1;
+            if first_line.is_none() {
+                first_line = Some(line);
+            }
+            // Get the decorator text without the leading @
+            let text = node_text(child, source).trim().to_string();
+            let dec_str = if text.starts_with('@') {
+                text[1..].to_string()
+            } else {
+                text
+            };
+            decorators.push(dec_str);
+        }
+    }
+
+    (decorators, first_line)
+}
+
+/// Extract parameter names from a function definition.
+fn extract_param_names(func_node: tree_sitter::Node, source: &[u8]) -> Vec<String> {
+    let params_node = match func_node.child_by_field_name("parameters") {
+        Some(n) => n,
+        None => return vec![],
+    };
+
+    let mut names = Vec::new();
+    let mut cursor = params_node.walk();
+    let children: Vec<tree_sitter::Node> = params_node.children(&mut cursor).collect();
+
+    for child in &children {
+        match child.kind() {
+            "(" | ")" | "," => {}
+            "identifier" => {
+                names.push(node_text(*child, source).to_string());
+            }
+            "typed_parameter" => {
+                let name = child
+                    .named_child(0)
+                    .map(|n| node_text(n, source))
+                    .unwrap_or("");
+                names.push(name.to_string());
+            }
+            "default_parameter" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(n, source))
+                    .unwrap_or("");
+                names.push(name.to_string());
+            }
+            "typed_default_parameter" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(n, source))
+                    .unwrap_or("");
+                names.push(name.to_string());
+            }
+            "list_splat_pattern" => {
+                let inner = child
+                    .named_child(0)
+                    .map(|n| node_text(n, source))
+                    .unwrap_or("");
+                names.push(format!("*{}", inner));
+            }
+            "dictionary_splat_pattern" => {
+                let inner = child
+                    .named_child(0)
+                    .map(|n| node_text(n, source))
+                    .unwrap_or("");
+                names.push(format!("**{}", inner));
+            }
+            "positional_separator" => {
+                names.push("/".to_string());
+            }
+            "keyword_separator" => {
+                names.push("*".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    names
 }
 
 /// Extract function signature string from a `function_definition` node.
@@ -73,8 +181,6 @@ fn extract_signature(func_node: tree_sitter::Node, source: &[u8]) -> String {
                 parts.push(node_text(*child, source).to_string());
             }
             // Typed parameter: `x: int`
-            // In tree-sitter-python, typed_parameter has no "name" field —
-            // the identifier is the first named child; "type" is a field.
             "typed_parameter" => {
                 let name = child
                     .named_child(0)
@@ -124,7 +230,6 @@ fn extract_signature(func_node: tree_sitter::Node, source: &[u8]) -> String {
             }
             // *args
             "list_splat_pattern" => {
-                // The child identifier
                 let inner = child
                     .named_child(0)
                     .map(|n| node_text(n, source))
@@ -156,8 +261,6 @@ fn extract_signature(func_node: tree_sitter::Node, source: &[u8]) -> String {
     // Append return type if present
     if let Some(ret_node) = func_node.child_by_field_name("return_type") {
         let ret_text = node_text(ret_node, source);
-        // tree-sitter includes the `->` in the return_type field text
-        // but we want just the type. Check if it starts with `->`
         let ret_clean = ret_text.trim_start_matches("->").trim();
         sig.push_str(&format!(" -> {}", ret_clean));
     }
@@ -165,12 +268,17 @@ fn extract_signature(func_node: tree_sitter::Node, source: &[u8]) -> String {
     sig
 }
 
+/// Extract return type string from a function definition, or None.
+fn extract_return_type(func_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    func_node
+        .child_by_field_name("return_type")
+        .map(|ret_node| {
+            let ret_text = node_text(ret_node, source);
+            ret_text.trim_start_matches("->").trim().to_string()
+        })
+}
+
 /// Check if a node at the given path matches the selector path filter.
-///
-/// Mirrors `_ListSymbolsVisitor._matches_selector`:
-/// - If selector_path is None → always match
-/// - If current_path is a prefix of selector_path → match (we're on the way down)
-/// - If selector_path is a prefix of current_path → match (we're inside the target)
 fn matches_selector(current_path: &[String], selector_path: &Option<Vec<String>>) -> bool {
     let sel = match selector_path {
         None => return true,
@@ -188,7 +296,6 @@ fn matches_selector(current_path: &[String], selector_path: &Option<Vec<String>>
 fn collect_loaded_names(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String>) {
     match node.kind() {
         "assignment" => {
-            // Skip the `left` field (assignment target), visit `right` and `type`
             if let Some(right) = node.child_by_field_name("right") {
                 collect_loaded_names(right, source, out);
             }
@@ -197,7 +304,6 @@ fn collect_loaded_names(node: tree_sitter::Node, source: &[u8], out: &mut Vec<St
             }
         }
         "augmented_assignment" => {
-            // left and right are both reads in augmented assignment (x += y)
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 collect_loaded_names(child, source, out);
@@ -224,6 +330,7 @@ fn collect_from_body(
     path: &[String],
     selector_path: &Option<Vec<String>>,
     defined_names_stack: &mut Vec<std::collections::HashSet<String>>,
+    in_class: bool,
 ) -> Vec<RustSymbol> {
     let mut symbols: Vec<RustSymbol> = Vec::new();
 
@@ -231,7 +338,14 @@ fn collect_from_body(
     for child in node.children(&mut cursor) {
         match child.kind() {
             "function_definition" | "decorated_definition" => {
-                // For decorated functions, unwrap to the actual function_definition
+                // Extract decorators if this is a decorated_definition
+                let (decorators, decorator_line_start) = if child.kind() == "decorated_definition" {
+                    extract_decorators(child, source)
+                } else {
+                    (vec![], None)
+                };
+
+                // For decorated definitions, unwrap to the actual definition
                 let func_node = if child.kind() == "decorated_definition" {
                     child.child_by_field_name("definition").unwrap_or(child)
                 } else {
@@ -250,14 +364,16 @@ fn collect_from_body(
                         let current_path: Vec<String> = path.iter().cloned().chain(std::iter::once(name.clone())).collect();
 
                         if depth < max_depth && matches_selector(&current_path, selector_path) {
-                            let start_line = child.start_position().row + 1;
+                            // Use class_node line (the `class` keyword), not decorated_definition start
+                            let start_line = class_node.start_position().row + 1;
                             let end_line = child.end_position().row + 1;
+                            let col_offset = class_node.start_position().column;
 
                             let child_defined: HashSet<String> = HashSet::new();
                             defined_names_stack.push(child_defined);
 
                             let children = if let Some(body) = class_node.child_by_field_name("body") {
-                                collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack)
+                                collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack, true)
                             } else {
                                 vec![]
                             };
@@ -273,11 +389,16 @@ fn collect_from_body(
                                 kind: "class".to_string(),
                                 signature: None,
                                 type_annotation: None,
+                                returns: None,
                                 line: start_line,
                                 end_line,
+                                col_offset,
                                 children,
                                 path: current_path,
                                 depth,
+                                decorators,
+                                decorator_line_start,
+                                param_names: vec![],
                             });
                         } else {
                             if let Some(top) = defined_names_stack.last_mut() {
@@ -297,25 +418,37 @@ fn collect_from_body(
                 let current_path: Vec<String> = path.iter().cloned().chain(std::iter::once(name.clone())).collect();
 
                 if depth < max_depth && matches_selector(&current_path, selector_path) {
-                    let start_line = child.start_position().row + 1;
+                    // Use func_node line (the `def` line), not the decorated_definition start
+                    let start_line = func_node.start_position().row + 1;
                     let end_line = child.end_position().row + 1;
+                    let col_offset = func_node.start_position().column;
 
-                    // Detect async: look for "async" keyword as first non-whitespace child
+                    // Detect async: look for "async" keyword
                     let is_async = {
                         let mut c = func_node.walk();
-                        let found = func_node.children(&mut c).any(|ch| ch.kind() == "async");
-                        found
+                        let children: Vec<tree_sitter::Node> = func_node.children(&mut c).collect();
+                        children.iter().any(|ch| ch.kind() == "async")
                     };
-                    let kind = if is_async { "async_function" } else { "function" };
+
+                    // Determine kind based on whether we're inside a class
+                    let kind = match (is_async, in_class) {
+                        (true, true) => "async_method",
+                        (true, false) => "async_function",
+                        (false, true) => "method",
+                        (false, false) => "function",
+                    };
 
                     let sig = extract_signature(func_node, source);
+                    let returns = extract_return_type(func_node, source);
+                    let param_names = extract_param_names(func_node, source);
 
                     // Collect child symbols from function body
                     let child_defined: HashSet<String> = HashSet::new();
                     defined_names_stack.push(child_defined);
 
+                    // Functions inside functions are NOT methods
                     let mut children = if let Some(body) = func_node.child_by_field_name("body") {
-                        collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack)
+                        collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack, false)
                     } else {
                         vec![]
                     };
@@ -326,16 +459,12 @@ fn collect_from_body(
                             let mut loaded: Vec<String> = Vec::new();
                             collect_loaded_names(body, source, &mut loaded);
 
-                            // Check which loaded names are in outer scopes
-                            // defined_names_stack still has the inner scope on top
-                            // We need to check all scopes BELOW the current top
                             let stack_len = defined_names_stack.len();
                             let mut seen: HashSet<String> = HashSet::new();
                             for name_ref in &loaded {
                                 if seen.contains(name_ref) {
                                     continue;
                                 }
-                                // Check outer scopes (all except the innermost we just pushed)
                                 let found_outer = defined_names_stack[..stack_len - 1]
                                     .iter()
                                     .any(|scope| scope.contains(name_ref));
@@ -347,11 +476,16 @@ fn collect_from_body(
                                             kind: "reference".to_string(),
                                             signature: None,
                                             type_annotation: None,
+                                            returns: None,
                                             line: 0,
                                             end_line: 0,
+                                            col_offset: 0,
                                             children: vec![],
                                             path: vec![],
                                             depth: depth + 1,
+                                            decorators: vec![],
+                                            decorator_line_start: None,
+                                            param_names: vec![],
                                         });
                                     }
                                     seen.insert(name_ref.clone());
@@ -371,11 +505,16 @@ fn collect_from_body(
                         kind: kind.to_string(),
                         signature: Some(sig),
                         type_annotation: None,
+                        returns,
                         line: start_line,
                         end_line,
+                        col_offset,
                         children,
                         path: current_path,
                         depth,
+                        decorators,
+                        decorator_line_start,
+                        param_names,
                     });
                 } else {
                     if let Some(top) = defined_names_stack.last_mut() {
@@ -395,12 +534,13 @@ fn collect_from_body(
                 if depth < max_depth && matches_selector(&current_path, selector_path) {
                     let start_line = child.start_position().row + 1;
                     let end_line = child.end_position().row + 1;
+                    let col_offset = child.start_position().column;
 
                     let child_defined: HashSet<String> = HashSet::new();
                     defined_names_stack.push(child_defined);
 
                     let children = if let Some(body) = child.child_by_field_name("body") {
-                        collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack)
+                        collect_from_body(body, source, depth + 1, max_depth, &current_path, selector_path, defined_names_stack, true)
                     } else {
                         vec![]
                     };
@@ -416,11 +556,16 @@ fn collect_from_body(
                         kind: "class".to_string(),
                         signature: None,
                         type_annotation: None,
+                        returns: None,
                         line: start_line,
                         end_line,
+                        col_offset,
                         children,
                         path: current_path,
                         depth,
+                        decorators: vec![],
+                        decorator_line_start: None,
+                        param_names: vec![],
                     });
                 } else {
                     if let Some(top) = defined_names_stack.last_mut() {
@@ -430,13 +575,9 @@ fn collect_from_body(
             }
 
             "expression_statement" => {
-                // In tree-sitter-python 0.23, both plain and annotated assignments
-                // appear as `expression_statement` → `assignment`.
-                // Annotated `x: int = 5` has a `type` field on the assignment node.
                 let mut inner_cursor = child.walk();
                 for inner_child in child.children(&mut inner_cursor) {
                     if inner_child.kind() == "assignment" {
-                        // Check if left side is a simple identifier
                         if let Some(left) = inner_child.child_by_field_name("left") {
                             if left.kind() == "identifier" {
                                 let name = node_text(left, source).to_string();
@@ -445,8 +586,8 @@ fn collect_from_body(
                                 if depth < max_depth && matches_selector(&current_path, selector_path) {
                                     let start_line = inner_child.start_position().row + 1;
                                     let end_line = inner_child.end_position().row + 1;
+                                    let col_offset = inner_child.start_position().column;
 
-                                    // Check for type annotation (annotated assignment: `x: int = 5`)
                                     let type_annotation = inner_child
                                         .child_by_field_name("type")
                                         .map(|n| node_text(n, source).to_string());
@@ -456,11 +597,16 @@ fn collect_from_body(
                                         kind: "variable".to_string(),
                                         signature: None,
                                         type_annotation,
+                                        returns: None,
                                         line: start_line,
                                         end_line,
+                                        col_offset,
                                         children: vec![],
                                         path: current_path,
                                         depth,
+                                        decorators: vec![],
+                                        decorator_line_start: None,
+                                        param_names: vec![],
                                     });
                                 }
 
@@ -496,13 +642,10 @@ fn collect_symbols_from_source(
 
     let mut defined_names_stack: Vec<std::collections::HashSet<String>> = vec![std::collections::HashSet::new()];
 
-    collect_from_body(root, source_bytes, 0, max_depth, &[], selector, &mut defined_names_stack)
+    collect_from_body(root, source_bytes, 0, max_depth, &[], selector, &mut defined_names_stack, false)
 }
 
 /// Collect symbols from multiple Python files in parallel.
-///
-/// Returns a list of `(file_path, symbols_list)` where each `symbols_list`
-/// is a Python list of dicts matching the `TreeSymbol` dataclass fields.
 #[pyfunction]
 #[pyo3(signature = (files, max_depth=None, selector=None))]
 pub fn collect_symbols_batch(
@@ -516,7 +659,6 @@ pub fn collect_symbols_batch(
         s.split('.').map(|part| part.to_string()).collect()
     });
 
-    // Parse all files in parallel (rayon), collect Vec<(String, Vec<RustSymbol>)>
     let raw_results: Vec<(String, Vec<RustSymbol>)> = files
         .into_par_iter()
         .filter_map(|path| {
@@ -526,7 +668,6 @@ pub fn collect_symbols_batch(
         })
         .collect();
 
-    // Convert to Python dicts on the main thread (requires GIL)
     let mut result = Vec::with_capacity(raw_results.len());
     for (path, rust_syms) in raw_results {
         let py_list = PyList::empty(py);
@@ -537,4 +678,73 @@ pub fn collect_symbols_batch(
     }
 
     Ok(result)
+}
+
+/// Collect symbols from source code directly (without file I/O).
+#[pyfunction]
+#[pyo3(signature = (source, max_depth=None, selector=None))]
+pub fn collect_symbols_from_str(
+    py: Python,
+    source: &str,
+    max_depth: Option<usize>,
+    selector: Option<String>,
+) -> PyResult<PyObject> {
+    let depth = max_depth.unwrap_or(usize::MAX);
+    let selector_path: Option<Vec<String>> = selector.map(|s| {
+        s.split('.').map(|part| part.to_string()).collect()
+    });
+
+    let rust_syms = collect_symbols_from_source(source, depth, &selector_path);
+
+    let py_list = PyList::empty(py);
+    for sym in &rust_syms {
+        py_list.append(symbol_to_pydict(py, sym)?)?;
+    }
+
+    Ok(py_list.into())
+}
+
+/// Get the line ranges of all simple statements in a Python source string.
+///
+/// Returns a list of (start_line, end_line) tuples, 1-indexed.
+/// Used for mapping noqa comments to their enclosing statement ranges.
+#[pyfunction]
+pub fn get_statement_ranges(source: &str) -> PyResult<Vec<(usize, usize)>> {
+    let tree = match crate::pattern::parse_python(source) {
+        Some(t) => t,
+        None => return Ok(vec![]),
+    };
+
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut ranges = Vec::new();
+
+    fn collect_simple_stmts(node: tree_sitter::Node, _source: &[u8], ranges: &mut Vec<(usize, usize)>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "expression_statement" | "return_statement" | "delete_statement"
+                | "raise_statement" | "pass_statement" | "break_statement"
+                | "continue_statement" | "import_statement" | "import_from_statement"
+                | "future_import_statement" | "global_statement" | "nonlocal_statement"
+                | "assert_statement" | "type_alias_statement" | "print_statement" => {
+                    let start = child.start_position().row + 1;
+                    let end = child.end_position().row + 1;
+                    ranges.push((start, end));
+                }
+                // Recurse into compound statements to find nested simples
+                "if_statement" | "for_statement" | "while_statement" | "try_statement"
+                | "with_statement" | "function_definition" | "class_definition"
+                | "decorated_definition" | "match_statement" | "block" | "module"
+                | "elif_clause" | "else_clause" | "except_clause" | "finally_clause"
+                | "case_clause" => {
+                    collect_simple_stmts(child, _source, ranges);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    collect_simple_stmts(root, source_bytes, &mut ranges);
+    Ok(ranges)
 }

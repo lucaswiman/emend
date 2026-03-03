@@ -222,6 +222,14 @@ fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<V
     Ok(result)
 }
 
+/// Collect all identifier and attribute positions from Python source.
+///
+/// Returns a list of (name, line, start_col, end_col) tuples (1-indexed).
+#[pyfunction]
+fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, usize, usize)>> {
+    Ok(pattern::collect_identifier_positions(source))
+}
+
 /// Python module definition.
 #[pymodule(gil_used = false)]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -237,6 +245,9 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
     m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::collect_symbols_from_str, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
     m.add_class::<scope_py::PyScopeResolver>()?;

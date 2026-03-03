@@ -525,8 +525,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     import pickle
     import sqlite3
     import zlib
-    from .query import _SymbolCollector
-    from libcst.metadata import PositionProvider, MetadataWrapper
+    from .query import _collect_symbols as _collect_symbols_ts
 
     db_path, source_root, project_root, file_batch = args
     parse_rows: list[tuple[bytes, bytes]] = []
@@ -645,14 +644,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
         if need_sym:
             try:
-                if wrapper is not None:
-                    sym_collector = _SymbolCollector(py_file)
-                    wrapper.visit(sym_collector)
-                else:
-                    # Fallback: create wrapper just for PositionProvider
-                    w = cst.metadata.MetadataWrapper(module)
-                    sym_collector = _SymbolCollector(py_file)
-                    w.visit(sym_collector)
+                syms_for_file = _collect_symbols_ts(Path(py_file), content)
 
                 # Compute module_qn prefix for this file.
                 _src = Path(source_root)
@@ -670,7 +662,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 exported_names = _extract_all_exports(module)
                 noqa_lines = _extract_noqa_lines(content)
 
-                for sym in sym_collector.symbols:
+                for sym in syms_for_file:
                     # Build qualified_name from file module path + symbol path
                     # For index batch, use the dotted symbol path from the selector
                     parts = sym.path.split("::", 1)
@@ -6664,6 +6656,14 @@ def _find_dead_code_cached(
             conditions.append("si.kind IN ('function', 'async_function')")
         elif kind == "class":
             conditions.append("si.kind = 'class'")
+        else:
+            # By default, only analyze functions, async functions, methods,
+            # and classes.  Variables are excluded since module-level
+            # assignments are often configs/constants.
+            conditions.append(
+                "si.kind IN ('function', 'async_function', 'method', "
+                "'async_method', 'class')"
+            )
 
         if not include_private:
             # Exclude _private names (but keep dunders — they're already

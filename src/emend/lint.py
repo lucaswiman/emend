@@ -11,8 +11,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 import yaml
-import libcst as cst
-
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals, _NOQA_RE
 
 
@@ -82,19 +80,17 @@ def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
     return result
 
 
-class _StatementRangeMapper(cst.CSTVisitor):
-    """Map each line to the (start, end) range of its enclosing simple statement."""
+def _build_statement_line_map(source: str) -> dict[int, tuple[int, int]]:
+    """Build a mapping from line -> (stmt_start, stmt_end) using Rust tree-sitter.
 
-    METADATA_DEPENDENCIES = (cst.metadata.PositionProvider,)
-
-    def __init__(self) -> None:
-        self.line_to_range: dict[int, tuple[int, int]] = {}
-
-    def visit_SimpleStatementLine(self, node: cst.SimpleStatementLine) -> bool:
-        pos = self.get_metadata(cst.metadata.PositionProvider, node)
-        for line in range(pos.start.line, pos.end.line + 1):
-            self.line_to_range[line] = (pos.start.line, pos.end.line)
-        return True
+    Replaces the LibCST ``_StatementRangeMapper`` visitor.
+    """
+    from emend import emend_core
+    line_to_range: dict[int, tuple[int, int]] = {}
+    for start, end in emend_core.get_statement_ranges(source):
+        for line in range(start, end + 1):
+            line_to_range[line] = (start, end)
+    return line_to_range
 
 
 def build_noqa_ranges(
@@ -311,20 +307,10 @@ def run_lint(
                 noqa_comments = parse_noqa_comments(src)
                 noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
-                    try:
-                        module = cst.parse_module(src)
-                        wrapper = cst.MetadataWrapper(module)
-                        mapper = _StatementRangeMapper()
-                        wrapper.visit(mapper)
-                        noqa_ranges_for_file = build_noqa_ranges(
-                            noqa_comments, mapper.line_to_range
-                        )
-                    except cst.ParserSyntaxError:
-                        logger.debug(
-                            "Failed to parse %s for noqa ranges",
-                            file_path_str,
-                            exc_info=True,
-                        )
+                    line_map = _build_statement_line_map(src)
+                    noqa_ranges_for_file = build_noqa_ranges(
+                        noqa_comments, line_map
+                    )
                 noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
 
             if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
@@ -344,7 +330,7 @@ def run_lint(
         files_needing_processing |= rule_file_sets.get(rule.name, set())
 
     # --- LibCST find-only rules ---
-    def _process_file_libcst(file_path: str) -> list[LintViolation]:
+    def _process_file_fallback(file_path: str) -> list[LintViolation]:
         source = all_file_contents.get(file_path)
         if source is None:
             return []
@@ -373,19 +359,13 @@ def run_lint(
                 noqa_ranges = []
                 noqa_comments = parse_noqa_comments(source)
                 if noqa_comments:
-                    try:
-                        module = cst.parse_module(source)
-                        wrapper = cst.MetadataWrapper(module)
-                        mapper = _StatementRangeMapper()
-                        wrapper.visit(mapper)
-                        noqa_ranges = build_noqa_ranges(noqa_comments, mapper.line_to_range)
-                    except cst.ParserSyntaxError:
-                        logger.debug(
-                            "Failed to parse %s for noqa ranges", file_path, exc_info=True
-                        )
+                    line_map = _build_statement_line_map(source)
+                    noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
             for match in matches:
                 if is_noqa_suppressed(match.line or 0, rule.name, noqa_ranges):
                     continue
+                # Extract match text from source using byte range
+                import libcst as cst
                 match_text = cst.Module([]).code_for_node(match.node).strip()
                 file_violations.append(LintViolation(
                     rule_name=rule.name,
@@ -398,7 +378,7 @@ def run_lint(
 
     for fp in paths:
         if fp in files_needing_processing:
-            violations.extend(_process_file_libcst(fp))
+            violations.extend(_process_file_fallback(fp))
 
     # --- Fix rules: these mutate the file so must run sequentially ---
     for file_path in paths:
@@ -410,14 +390,8 @@ def run_lint(
         noqa_comments = parse_noqa_comments(source)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
-            try:
-                module = cst.parse_module(source)
-                wrapper = cst.MetadataWrapper(module)
-                mapper = _StatementRangeMapper()
-                wrapper.visit(mapper)
-                noqa_ranges = build_noqa_ranges(noqa_comments, mapper.line_to_range)
-            except cst.ParserSyntaxError:
-                logger.debug("Failed to parse %s for noqa ranges", file_path, exc_info=True)
+            line_map = _build_statement_line_map(source)
+            noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
 
         for rule in fix_rules:
             try:
