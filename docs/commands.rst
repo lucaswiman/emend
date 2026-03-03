@@ -822,9 +822,11 @@ faster.
 | Qualified-name index    | Skips MetadataWrapper for non-matching files       |
 +-------------------------+---------------------------------------------------+
 
-The cache is stored in ``.emend/cache/`` and keyed by file content hash, so
-it self-invalidates when files change.  The directory is auto-gitignored and
-dockerignored.
+The cache is stored in ``.emend/cache/parse.db`` and keyed by file content
+hash, so it self-invalidates when files change.  The directory is
+auto-gitignored and dockerignored.  Git worktrees automatically share a
+single cache with the main repo — running ``emend index`` in any worktree
+populates the shared cache, and all worktrees benefit.
 
 .. code-block:: bash
 
