@@ -87,7 +87,8 @@ After installing, run `:helptags ALL` to index this help file.
 
                                                                 *:EmendStart*
 :EmendStart             Start the emend editor-server process.  This happens
-                        automatically on first search.
+                        automatically when a Python file is opened (see
+                        |g:emend_auto_start|), or on first search.
 
                                                                  *:EmendStop*
 :EmendStop              Shut down the editor-server process.
@@ -119,6 +120,13 @@ g:emend_project_root    String.  Override the project root directory.  When
 
                                                              *g:emend_limit*
 g:emend_limit           Number.  Maximum search results.  Default: 50.
+
+                                                        *g:emend_auto_start*
+g:emend_auto_start      Boolean.  When 1 (default), automatically start the
+                        emend editor-server the first time a Python file is
+                        opened.  This keeps the server warm so that searches
+                        are fast.  Set to 0 to disable and start manually
+                        with |:EmendStart|.
 
                                                     *g:emend_preview_height*
 g:emend_preview_height  Number.  Height of the search UI as a percentage of

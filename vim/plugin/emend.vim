@@ -26,6 +26,9 @@ let g:emend_command = get(g:, 'emend_command', '')
 " Project root override. Empty = auto-detect (cwd).
 let g:emend_project_root = get(g:, 'emend_project_root', '')
 
+" Auto-start the editor-server when a Python file is opened.
+let g:emend_auto_start = get(g:, 'emend_auto_start', 1)
+
 " Maximum results per search.
 let g:emend_limit = get(g:, 'emend_limit', 50)
 
@@ -55,6 +58,18 @@ command! -nargs=0 EmendStop call emend#stop()
 " Index status and reindex.
 command! -nargs=0 EmendStatus call emend#status()
 command! -nargs=0 EmendReindex call emend#reindex()
+
+" ---------------------------------------------------------------------------
+" Auto-start server (opt-out via g:emend_auto_start = 0)
+" ---------------------------------------------------------------------------
+
+if g:emend_auto_start
+  augroup emend_auto_start
+    autocmd!
+    " Start the server the first time a Python file is opened.
+    autocmd FileType python ++once call emend#start()
+  augroup END
+endif
 
 " ---------------------------------------------------------------------------
 " Default mappings (opt-in via g:emend_default_mappings)
