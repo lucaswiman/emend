@@ -20,7 +20,6 @@ from emend.query_ast import (
     NotCondition,
     NotMatcher,
     NotWithinPred,
-    NotWithinShorthand,
     OrMatcher,
     PrecedesPred,
     Regex,
@@ -144,16 +143,11 @@ class TestWhereClause:
         ast = parse_query("`global $x` where { not within class }")
         assert isinstance(ast, Search)
         cond = ast.where.conditions[0]
-        # May parse as NotCondition(WithinShorthand(...)) or NotWithinShorthand(...)
-        # Both are semantically equivalent
-        if isinstance(cond, NotWithinShorthand):
-            assert isinstance(cond.target, Keyword)
-            assert cond.target.name == "class"
-        else:
-            assert isinstance(cond, NotCondition)
-            assert isinstance(cond.inner, WithinShorthand)
-            assert isinstance(cond.inner.target, Keyword)
-            assert cond.inner.target.name == "class"
+        # "not within X" parses as NotCondition(WithinShorthand(X))
+        assert isinstance(cond, NotCondition)
+        assert isinstance(cond.inner, WithinShorthand)
+        assert isinstance(cond.inner.target, Keyword)
+        assert cond.inner.target.name == "class"
 
     def test_within_pattern(self):
         ast = parse_query("`print($x)` where { within `def test_$_($...): $...` }")

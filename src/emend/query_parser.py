@@ -15,9 +15,39 @@ Usage::
 from __future__ import annotations
 
 import importlib.resources
-from lark import Lark, Transformer, Token, Tree
+import re
+from dataclasses import dataclass
+from lark import Lark, Transformer, Token
 
 from . import query_ast as Q
+
+
+# Pre-compiled regex for extract_metavars
+_METAVAR_RE = re.compile(r'\$(?:\.\.\.)?(?:[a-z_][a-z0-9_]*|_)')
+
+
+@dataclass(frozen=True)
+class _ElseBody:
+    """Internal sentinel for else-clause results during tree transformation."""
+    statements: tuple[Q.Statement, ...]
+
+
+def _is_dot(token: object) -> bool:
+    """Test whether a Lark token is the DOT (deletion) terminal."""
+    return isinstance(token, Token) and token.type == "DOT"
+
+
+def _make_rewrite(
+    match_pattern: Q.Pattern,
+    replacement: object,
+    where: Q.WhereClause | None = None,
+) -> Q.Rewrite:
+    """Build a Rewrite node, normalizing DOT to None (deletion)."""
+    return Q.Rewrite(
+        match_pattern=match_pattern,
+        replacement=None if _is_dot(replacement) else replacement,
+        where=where,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -33,17 +63,8 @@ class _QueryTransformer(Transformer):
         return items[0]
 
     def rewrite(self, items):
-        match_pattern = items[0]
-        replacement = items[1]
         where = items[2] if len(items) > 2 else None
-        # DOT means deletion
-        if isinstance(replacement, Token) and replacement.type == "DOT":
-            replacement = None
-        return Q.Rewrite(
-            match_pattern=match_pattern,
-            replacement=replacement,
-            where=where,
-        )
+        return _make_rewrite(items[0], items[1], where)
 
     def search(self, items):
         pattern = items[0]
@@ -102,12 +123,11 @@ class _QueryTransformer(Transformer):
 
     def if_condition(self, items):
         condition = items[0]
-        # Collect then statements (before else_clause)
         then_stmts = []
         else_body = None
         for item in items[1:]:
-            if isinstance(item, tuple) and len(item) == 2 and item[0] == "__else__":
-                else_body = item[1]
+            if isinstance(item, _ElseBody):
+                else_body = item.statements
             else:
                 then_stmts.append(item)
         return Q.IfCondition(
@@ -117,13 +137,10 @@ class _QueryTransformer(Transformer):
         )
 
     def else_clause(self, items):
-        return ("__else__", tuple(items))
+        return _ElseBody(statements=tuple(items))
 
     def within_shorthand(self, items):
         return Q.WithinShorthand(target=items[0])
-
-    def not_within_shorthand(self, items):
-        return Q.NotWithinShorthand(target=items[0])
 
     def scope_local(self, items):
         return Q.ScopeLocal()
@@ -146,15 +163,7 @@ class _QueryTransformer(Transformer):
         return Q.ContainsPred(pattern=items[0])
 
     def inline_rewrite(self, items):
-        match_pattern = items[0]
-        replacement = items[1]
-        if isinstance(replacement, Token) and replacement.type == "DOT":
-            replacement = None
-        return Q.Rewrite(
-            match_pattern=match_pattern,
-            replacement=replacement,
-            where=None,
-        )
+        return _make_rewrite(items[0], items[1])
 
     def within_pred(self, items):
         return Q.WithinPred(target=items[0])
@@ -256,10 +265,9 @@ def extract_metavars(pattern: Q.CodeSnippet) -> list[Q.MetaVar]:
     This is useful for building the metavar map needed by the
     tree-sitter / LibCST pattern compiler.
     """
-    import re
-    metavars = []
-    seen = set()
-    for match in re.finditer(r'\$(?:\.\.\.)?(?:[a-z_][a-z0-9_]*|_)', pattern.code):
+    metavars: list[Q.MetaVar] = []
+    seen: set[str] = set()
+    for match in _METAVAR_RE.finditer(pattern.code):
         text = match.group()
         if text in seen:
             continue

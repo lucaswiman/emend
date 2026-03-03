@@ -7,7 +7,7 @@ GritQL-inspired language spec in docs/language-spec.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Union
 
 
@@ -273,16 +273,6 @@ class WithinShorthand:
         return f"within {self.target}"
 
 
-@dataclass(frozen=True)
-class NotWithinShorthand:
-    """``not within def`` -- shorthand."""
-
-    target: Union[CodeSnippet, Keyword]
-
-    def __str__(self) -> str:
-        return f"not within {self.target}"
-
-
 # Forward reference: Condition includes Rewrite (defined below)
 # We define Condition after all statement types.
 
@@ -419,7 +409,6 @@ Condition = Union[
     IfCondition,
     Rewrite,
     WithinShorthand,
-    NotWithinShorthand,
     ScopeLocal,
 ]
 

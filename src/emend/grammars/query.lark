@@ -44,7 +44,6 @@ conditions: condition ("," condition)* ","?
           | if_condition
           | rewrite
           | within_shorthand
-          | not_within_shorthand
           | scope_local
 
 match_condition: expr "<:" matcher
@@ -57,9 +56,9 @@ if_condition: "if" "(" condition ")" "{" statement+ "}" else_clause?
 
 else_clause: "else" "{" statement+ "}"
 
-// Short forms: "within def" without $var <:
+// Short form: "within def" without $var <:
+// "not within def" is handled by not_condition wrapping within_shorthand
 within_shorthand: "within" (code_snippet | keyword)
-not_within_shorthand: "not" "within" (code_snippet | keyword)
 
 scope_local: "scope_local"
 
