@@ -15,6 +15,24 @@ endif
 let g:loaded_emend = 1
 
 " ---------------------------------------------------------------------------
+" Configuration (must live here, not in autoload, so it's set before any call)
+" ---------------------------------------------------------------------------
+
+" Path to the emend executable.  When empty the plugin auto-detects:
+"   1. uv tool path     (uv tool install emend)
+"   2. $PATH lookup
+let g:emend_command = get(g:, 'emend_command', '')
+
+" Project root override. Empty = auto-detect (cwd).
+let g:emend_project_root = get(g:, 'emend_project_root', '')
+
+" Maximum results per search.
+let g:emend_limit = get(g:, 'emend_limit', 50)
+
+" Preview window height (percentage of editor height).
+let g:emend_preview_height = get(g:, 'emend_preview_height', 60)
+
+" ---------------------------------------------------------------------------
 " Commands
 " ---------------------------------------------------------------------------
 

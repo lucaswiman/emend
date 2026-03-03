@@ -48,7 +48,9 @@ Execute (server is not running initially):
 " ===========================================================================
 
 Execute (ui module functions are autoloadable):
-  " Just verify the autoload functions can be referenced without error.
+  " Explicitly source the autoload file — exists('*autoload#fn') does not
+  " trigger autoloading on Neovim < 0.10.
+  runtime autoload/emend/ui.vim
   Assert exists('*emend#ui#prompt'), 'emend#ui#prompt should be autoloadable'
   Assert exists('*emend#ui#search'), 'emend#ui#search should be autoloadable'
   Assert exists('*emend#ui#on_search_result'), 'emend#ui#on_search_result should be autoloadable'

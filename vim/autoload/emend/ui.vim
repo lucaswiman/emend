@@ -74,8 +74,8 @@ function! emend#ui#on_search_result(result) abort
   let s:selected = 0
 
   if empty(s:results)
-    echo 'emend: no results for "' . s:query . '"'
-          \ . ' [' . get(a:result, 'elapsed_ms', 0) . 'ms]'
+    echo printf('emend: no results for "%s" [%gms]',
+          \ s:query, get(a:result, 'elapsed_ms', 0))
     return
   endif
 
@@ -429,7 +429,7 @@ function! s:render_list() abort
 
   let l:header = '  ' . len(s:results) . ' results'
   if l:elapsed > 0
-    let l:header .= ' [' . l:elapsed . 'ms]'
+    let l:header .= printf(' [%gms]', l:elapsed)
   endif
   let l:header .= '  (' . l:mode . ')'
   call add(l:lines, l:header)

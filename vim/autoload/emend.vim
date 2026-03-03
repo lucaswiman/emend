@@ -4,25 +4,6 @@
 " provides the public API used by commands in plugin/emend.vim.
 
 " ---------------------------------------------------------------------------
-" Configuration
-" ---------------------------------------------------------------------------
-
-" Path to the emend executable.  When empty the plugin auto-detects:
-"   1. g:emend_command  (user override)
-"   2. uv tool path     (uv tool install emend)
-"   3. $PATH lookup
-let g:emend_command = get(g:, 'emend_command', '')
-
-" Project root override. Empty = auto-detect (cwd).
-let g:emend_project_root = get(g:, 'emend_project_root', '')
-
-" Maximum results per search.
-let g:emend_limit = get(g:, 'emend_limit', 50)
-
-" Preview window height (percentage of editor height).
-let g:emend_preview_height = get(g:, 'emend_preview_height', 60)
-
-" ---------------------------------------------------------------------------
 " Internal state
 " ---------------------------------------------------------------------------
 
