@@ -926,36 +926,46 @@ LibCST's `visit_project()` loop. All 1,309 tests pass.
    `for` targets, `with...as` targets, and `walrus` targets, matching LibCST's
    MetadataWrapper behavior. This fixed `test_writes_only_for_target`.
 
+### Phase 0.8: Read-Only Visitor & Core Command Migration (COMPLETED)
+
+Migrated more read-only visitors and core symbol-related commands to tree-sitter.
+Enabled fast-path for scoped searches. All 1,309 tests pass.
+
+#### Python File Changes
+
+**`transform.py`** — Major cleanup and migration:
+- **`find_callees()`**: Fully migrated to tree-sitter using `PyScopeResolver.references_in_file()` + `find_nested_definitions()`. Deleted `_CalleeCollector`.
+- **Scoped search**: Refactored `find_pattern()` to handle `scope` as a post-filter using tree-sitter ranges. This allows scoped searches to use the Rust matcher fast-path. Deleted `ScopedPatternFinder`.
+- **Import/Local filters**: Refactored `_filter_matches_by_import` and `_filter_matches_by_scope_local` to use `PyScopeResolver` instead of `MetadataWrapper` + `_ImportOriginCollector`. Deleted `_ImportOriginCollector`.
+- **`get_symbol_source()`**: Refactored to use tree-sitter symbol discovery and direct line extraction.
+- **`remove_symbol()`**: Refactored to use tree-sitter for validation and byte-range line deletion. Deleted `SymbolRemover`.
+- **Cleanup**: Deleted `_BulkReferenceFinder` (already unused).
+
+#### Key Fixes Applied
+
+9. **Fast-path for Scoped Search**: By moving `scope` handling to a post-filter, `find_pattern` can now use the Rust accelerator for queries like `emend search 'print($X)' --in file.py::MyClass.method`, which previously fell back to LibCST.
+
+---
+
 ### Remaining Work
 
 #### Current LibCST Footprint in `transform.py`
 
-**19 CSTVisitor/CSTTransformer subclasses** (remaining):
+**12 CSTVisitor/CSTTransformer subclasses** (remaining):
 
 | Class | Type | Line | Metadata | Used By | Purpose |
 |-------|------|------|----------|---------|---------|
-| `_QNCollector` | CSTVisitor | — | — | — | **DELETED** |
-| `_RefIndexCollector` | CSTVisitor | — | — | — | **DELETED** |
-| `SymbolFinder` | CSTVisitor | 2172 | — | `visit_project()` | Find symbol by path for lookup/edit |
+| `SymbolFinder` | CSTVisitor | 2172 | — | `cmd_edit()`, `remove_component()` | Find symbol by path for lookup/edit |
 | `ComponentSetter` | CSTTransformer | 2583 | — | `cmd_edit()` | Modify symbol components (body, decorator, params, bases, returns) |
 | `ComponentAdder` | CSTTransformer | 2906 | — | `cmd_add()` | Insert items into list components |
-| `ComponentRemover` | CSTTransformer | 3324 | — | `cmd_edit --remove` | Remove symbol components |
+| `ComponentRemover` | CSTTransformer | 3324 | — | `remove_component()` | Remove symbol components |
 | `PatternFinder` | CSTVisitor | 3823 | — | `find_pattern()` fast path | Find patterns (no constraints) |
 | `ConstrainedPatternFinder` | CSTVisitor | 3954 | PositionProvider | `find_pattern()` | Find patterns with `--inside`/`--not-inside` |
-| `ScopedPatternFinder` | CSTVisitor | 4052 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Find patterns with `--imported-from`/`--scope-local` |
-| `_ImportOriginCollector` | CSTVisitor | 4137 | QualifiedNameProvider, PositionProvider | `find_pattern()` | Map identifiers to import origins |
 | `PatternReplacer` | CSTTransformer | 4528 | — | `replace_in_file()` | Replace matched patterns with replacement code |
-| `SymbolRemover` | CSTTransformer | 5082 | — | `move_symbol()` | Remove a symbol from source file after move |
 | `_NameCollector` | CSTVisitor | 5230 | — | `copy_to()` | Collect all names used in a code fragment |
 | `_SymbolRenamer` | CSTTransformer | 5569 | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
-| `_ReferenceFinder` | CSTVisitor | — | — | `find_references()` | **MIGRATED to tree-sitter** |
 | `_DocstringRenamer` | CSTTransformer | 5712 | — | `rename_symbol(docs=True)` | Replace names in docstrings |
-| `_CallerFilter` | CSTVisitor | — | — | `find_callers()` | **MIGRATED to tree-sitter** |
-| `_CalleeCollector` | CSTVisitor | 6002 | — | `find_callees()` | List functions called within a symbol |
-| `_BulkReferenceFinder` | CSTVisitor | 6326 | QualifiedNameProvider | `find_dead_code()` fallback | Bulk reference check without index |
 | `ImportRewriter` | CSTTransformer | 6942 | — | `move_symbol()` | Rewrite imports to use new module path |
-| `_NoOpTransformer` | CSTTransformer | 7126 | — | `move_symbol()` | No-op placeholder |
-| `_ImportRewriterForMove` | CSTTransformer | 7131 | — | `move_symbol()` | Rewrite `from source import X` → `from dest import X` |
 | `_ModuleImportRenamer` | CSTTransformer | 7164 | — | `rename_module()` | Rewrite all imports for module rename (817 lines) |
 
 **24 `cst.parse_module()` calls** in `transform.py`.
@@ -966,223 +976,49 @@ LibCST's `visit_project()` loop. All 1,309 tests pass.
 
 **1,610 lines**, 163 `cst.*` usages, 212 `m.*` matcher usages.
 
-| Function | Lines | Size | Purpose |
-|----------|-------|------|---------|
-| `compile_pattern_to_matcher()` | 1038-1174 | 137 lines | Pattern → LibCST matcher (main entry) |
-| `_cst_to_matcher()` | 398-1001 | **603 lines** | Recursive CST node → matcher conversion (core engine) |
-| `_cst_to_rust_ir()` | 1216-1485 | 270 lines | Recursive CST node → Rust IR dict (fast path) |
-| `compile_pattern_to_rust_ir()` | 1486-1539 | 54 lines | Pattern → Rust IR dict (returns None if unsupported) |
-| `_operator_to_matcher()` | 244-276 | 33 lines | Comparison operators → matchers |
-| `_binary_operator_to_matcher()` | 279-317 | 39 lines | Binary ops → matchers |
-| `_boolean_operator_to_matcher()` | 320-334 | 15 lines | Boolean ops → matchers |
-| `_unary_operator_to_matcher()` | 337-355 | 19 lines | Unary ops → matchers |
-| `_aug_operator_to_matcher()` | 358-394 | 37 lines | Augmented assignment ops → matchers |
-| `_comp_for_to_matcher()` | 138-170 | 33 lines | Comprehension for-clauses |
-| `_type_constraint_matcher()` | 193-238 | 46 lines | Type constraints (`:int`, `:str`, `:call`) |
-
-The Rust IR fast path in `compile_pattern_to_rust_ir()` currently supports: calls,
-attributes, names, integers, strings, lists, function defs, class defs.
-**Unsupported** (falls back to LibCST): assignments, comprehensions, binary ops,
-f-strings, decorators, type constraints, star args.
-
 #### Near-term: Remove LibCST from `_index_batch` entirely
 
 - [ ] **Remove `parse_cache` dependency from `_index_batch`**.
-  `cst.parse_module()` at line 634 only populates `parse_cache`.  This cache
-  is used by `_cached_parse()` (line 295) which is called by all LibCST
-  visitors/transformers.  To remove it from `_index_batch`:
-  - Option A: Keep `_index_batch` as-is until all visitors are migrated
-    (then the parse_cache table can be dropped entirely)
-  - Option B: Move the parse_cache population out of `_index_batch` into a
-    lazy on-demand path in `_cached_parse()` (parse when first needed, not
-    pre-built by indexer)
-  - **Recommended**: Option A — minimal risk, just leave it until visitors migrated
-
-- [x] **Remove `_extract_all_exports(module)`** (line 465).  Only call site
-  is now `_extract_all_exports_text()` (regex).  The old function can be
-  deleted once tests confirm parity.  Tests to run: `test_dead_code.py`.
-
-- [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.  Both
-  classes are still defined (lines 361, 387) but no longer called from
-  `_index_batch`.  They may still be used by `visit_project()` (line 2176
-  creates MetadataWrapper, line 2168 uses `_QNCollector` for QN caching).
-  Check all call sites before removing.
+- [x] **Remove `_extract_all_exports(module)`**.
+- [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
 
 #### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`)
 
-**Goal**: Replace `compile_pattern_to_matcher()` → LibCST matcher path with
-a Rust-native tree-sitter pattern matcher, eliminating the LibCST matcher
-framework entirely.
-
-**Current dual-backend architecture**:
-```
-Pattern string
-  ├─ compile_pattern_to_rust_ir() → Rust IR dict → emend_core.find_pattern_in_files()
-  │   (fast path: ~90% of patterns, handles calls/names/attrs/literals/defs/assignments/comprehensions/fstrings)
-  └─ compile_pattern_to_matcher() → LibCST matcher → PatternFinder/ConstrainedPatternFinder
-      (fallback: ~10% of patterns, handles complex nested metavars or unsupported node types)
-```
-
-**Migration steps**:
-
-1. [x] **Expand Rust IR coverage in `_cst_to_rust_ir()`** to handle:
-   - [x] Assignments (`cst.Assign`, `cst.AugAssign`, `cst.AnnAssign`)
-   - [x] Binary operations (`cst.BinaryOperation`)
-   - [x] Unary operations (`cst.UnaryOperation`)
-   - [x] Comparisons (`cst.Comparison`)
-   - [x] Boolean operations (`cst.BooleanOperation`)
-   - [x] Comprehensions (`cst.ListComp`, `cst.SetComp`, `cst.DictComp`, `cst.GeneratorExp`)
-   - [x] F-strings (`cst.FormattedString`)
-   - [x] Decorators in pattern context
-   - [x] Star args (`*args`, `**kwargs`)
-   - [x] Kind-based type constraints (`:int`, `:str`, `:call`)
-   - [ ] Oracle-aware type constraints (`:type[X]`, `:returns[X]`) — still post-filtered
-
-2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).  The 603-line
-   function maps 30+ CST node types to LibCST matchers.  In Rust, this maps
-   tree-sitter node kinds to a tree-sitter query or structural matcher.
-   Key challenge: metavar capture (`m.SaveMatchedNode`) and ellipsis
-   (`m.ZeroOrMore`) need Rust equivalents.
-
-3. [ ] **Remove LibCST matcher dependency** once 100% of patterns go through
-   Rust.  Delete `compile_pattern_to_matcher()`, `_cst_to_matcher()`, and
-   all operator-to-matcher helpers.  Remove `from libcst import matchers as m`.
+1. [x] **Expand Rust IR coverage in `_cst_to_rust_ir()`**
+2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).
+3. [ ] **Remove LibCST matcher dependency** once 100% of patterns go through Rust.
 
 #### Medium-term Phase 2: Read-Only Visitor Migration (`transform.py`)
 
-**Goal**: Replace CSTVisitor subclasses that use `MetadataWrapper` with
-tree-sitter + Rust scope resolver.
-
-**Priority order** (by usage frequency and MetadataWrapper cost):
-
-1. [x] **`_ReferenceFinder`** (line 5692, ~100 lines).  Uses
-   QualifiedNameProvider + PositionProvider + ParentNodeProvider.  Called by
-   `find_references()` which is used by `refs` command.  **Migration**: Use
-   `PyScopeResolver.references_in_file()` + `PyScopeResolver.lookup_qn()`.
-   Filter by target QN and classify read/write/call.
-   Test: `test_find_references_context.py`.
-
-2. [x] **`_CallerFilter`** (line 6087, ~60 lines).  Uses
-   QualifiedNameProvider + PositionProvider.  Called by `find_callers()`.
-   **Migration**: Use `references_in_file()` filtered to `kind == "call"`.
-   Test: `test_callers.py`.
-
-3. [ ] **`ScopedPatternFinder`** (line 4117, ~80 lines).  Uses
-   QualifiedNameProvider + PositionProvider.  Handles `--imported-from` and
-   `--scope-local` constraints in `find_pattern()`.  **Migration**: Use
-   `PyScopeResolver.imports_in_file()` for import origin, scope resolver
-   for local scope checks.  Test: `test_imported_from.py`,
-   `test_power_features.py`.
-
-4. [ ] **`_ImportOriginCollector`** (line 4202, ~30 lines).  Uses
-   QualifiedNameProvider + PositionProvider.  Maps identifiers to their
-   import origin module.  **Migration**: Use `PyScopeResolver.imports_in_file()`.
-   Test: `test_imported_from.py`.
-
-5. [ ] **`ConstrainedPatternFinder`** (line 4019, ~90 lines).  Uses
-   PositionProvider.  Handles `--inside`/`--not-inside` constraints.
-   **Migration**: Rust pattern matcher already handles inside/not_inside
-   constraints via `find_pattern_in_files()`.  Extend to cover all cases
-   currently falling back to this visitor.  Test: `test_transform_inside.py`.
-
-6. [ ] **`PatternFinder`** (line 3888, ~120 lines).  No metadata deps.
-   Simple pattern matching via `libcst.matchers.matches()`.  **Migration**:
-   This is the main fallback when Rust IR can't handle a pattern.
-   Eliminated once Pattern Engine Migration (Phase 1) is complete.
-   Test: `test_find.py`.
-
-7. [ ] **`_BulkReferenceFinder`** (line 6476, ~100 lines).  Uses
-   QualifiedNameProvider.  Fallback for dead-code when index unavailable.
-   **Migration**: Use `PyScopeResolver` in bulk mode (create resolver,
-   index all files, query references).  Test: `test_dead_code.py`.
-
-8. [ ] **`_CalleeCollector`** (line 6212, ~40 lines).  No metadata deps.
-   Lists called functions in a body.  **Migration**: Already mostly replaced
-   by `emend_core.collect_callees()`.  Check if any edge cases remain.
-   Test: `test_callees.py`.
-
-9. [ ] **`SymbolFinder`** (line 2237).  No metadata deps.  Finds symbol by
-   path.  **Migration**: Already mostly handled by tree-sitter symbols.
-   Used in `visit_project()` — needs careful migration since it's the
-   core visitor dispatch for many commands.
+1. [x] **`_ReferenceFinder`**
+2. [x] **`_CallerFilter`**
+3. [x] **`ScopedPatternFinder`**
+4. [x] **`_ImportOriginCollector`**
+5. [ ] **`ConstrainedPatternFinder`** (line 4019, ~90 lines).
+6. [ ] **`PatternFinder`** (line 3888, ~120 lines).
+7. [x] **`_BulkReferenceFinder`**
+8. [x] **`_CalleeCollector`**
+9. [ ] **`SymbolFinder`** (line 2237).
 
 #### Medium-term Phase 3: Transformer Migration (`transform.py`)
 
-**Goal**: Replace CSTTransformer subclasses with tree-sitter byte-range
-edits.  Transformers modify source code — instead of AST transformation,
-compute (start_byte, end_byte, replacement_text) edits from tree-sitter
-positions and apply them to the source string.
-
-**Priority order**:
-
-1. [ ] **`PatternReplacer`** (line 4593, ~200 lines).  Replaces matched
-   patterns.  **Migration**: Rust `find_pattern_in_files()` already returns
-   byte ranges.  Add replacement logic: compute replacement text from
-   captures, apply byte-range substitutions.  Test: `test_transform.py`,
-   `test_cli_transform.py`.
-
-2. [ ] **`_SymbolRenamer`** (line 5634, ~50 lines).  Uses
-   QualifiedNameProvider.  Scope-aware rename.  **Migration**: Use
-   `PyScopeResolver.references_in_file()` to find all references to target
-   QN, compute byte-range replacements.  Test: `test_rename_symbol.py`.
-
-3. [ ] **`ComponentSetter`** (line 2648, ~300 lines).  Modifies symbol
-   components (decorator, body, params, bases, returns).  **Migration**:
-   Use tree-sitter to locate the specific component within the symbol,
-   compute byte range, replace.  Test: `test_edit.py`.
-
-4. [ ] **`ComponentAdder`** (line 2971, ~400 lines).  Inserts items into
-   list components.  **Migration**: Similar to ComponentSetter — locate
-   insertion point via tree-sitter, compute byte-range insertion.
-   Test: `test_add_parameter.py`.
-
-5. [ ] **`ComponentRemover`** (line 3389, ~200 lines).  Removes components.
-   **Migration**: Locate component via tree-sitter, compute byte-range
-   deletion.  Test: `test_edit.py` (remove scenarios).
-
-6. [ ] **`SymbolRemover`** (line 5147, ~140 lines).  Removes entire symbol.
-   **Migration**: Use tree-sitter symbol positions for byte-range deletion.
-   Test: `test_move.py`.
-
-7. [ ] **`_ModuleImportRenamer`** (line 7314, **817 lines**).  The largest
-   transformer.  Rewrites all import statements for module rename.
-   **Migration**: Use tree-sitter import node positions + regex/string
-   operations.  Test: `test_rename_module.py`.
-
-8. [ ] **`_ImportRewriterForMove`** (line 7281, ~30 lines).  Rewrites
-   imports after symbol move.  **Migration**: Straightforward byte-range
-   edit on import statement.  Test: `test_move.py`.
-
-9. [ ] **`ImportRewriter`** (line 7092, ~180 lines).  Rewrites imports in
-   move operations.  **Migration**: Same approach as `_ImportRewriterForMove`.
-   Test: `test_move.py`.
-
-10. [ ] **`_DocstringRenamer`** (line 5852, ~30 lines).  Replaces names in
-    docstrings.  **Migration**: Simple text replacement within string node
-    byte ranges.  Test: `test_regressions.py` (--docs scenarios).
-
-11. [ ] **`_NoOpTransformer`** (line 7276, 5 lines).  Trivial — can be
-    replaced with a no-op function or removed entirely.
-
-12. [ ] **`_NameCollector`** (line 5295, ~30 lines).  Collects identifier
-    names.  **Migration**: Use `emend_core.collect_identifier_positions()`.
-    Test: `test_copy_to.py`.
+1. [ ] **`PatternReplacer`**
+2. [ ] **`_SymbolRenamer`**
+3. [ ] **`ComponentSetter`**
+4. [ ] **`ComponentAdder`**
+5. [ ] **`ComponentRemover`**
+6. [x] **`SymbolRemover`**
+7. [ ] **`_ModuleImportRenamer`**
+8. [ ] **`_ImportRewriterForMove`**
+9. [ ] **`ImportRewriter`**
+10. [ ] **`_DocstringRenamer`**
+11. [ ] **`_NoOpTransformer`**
+12. [ ] **`_NameCollector`**
 
 #### Medium-term Phase 4: `visit_project()` Migration
 
-**`visit_project()`** (line 2075, ~180 lines) is the central dispatch loop.
-It iterates project files, creates MetadataWrapper, and runs visitors.
-Currently used by: `find_references()`, `rename_symbol()`, `find_callers()`,
-`find_pattern()`.
-
-- [x] **Create `visit_project_ts()`**: Tree-sitter equivalent that uses
-  `PyScopeResolver` instead of MetadataWrapper.  Share the same visitor
-  factory pattern but dispatch to Rust-backed visitors.
-
-- [ ] **Migrate `_cached_parse()` call sites**: All 22 remaining
-  `cst.parse_module()` calls in commands use `_cached_parse()` (line 295).
-  Once visitors don't need LibCST modules, these can switch to tree-sitter
-  parsing (already available via `emend_core`).
+- [x] **Create `visit_project_ts()`**.
+- [ ] **Migrate `_cached_parse()` call sites**.
 
 #### Long-term: Full LibCST Removal
 
