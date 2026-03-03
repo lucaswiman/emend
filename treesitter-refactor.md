@@ -739,3 +739,95 @@ If GritQL vendoring proves too complex, ast-grep's `ast_grep_core` crate
 If we go this route, we'd use `ast_grep_core` only for pattern matching and
 build everything else custom.  The net effort is similar to using GritQL but
 with a less expressive pattern language.
+
+---
+
+## Appendix E: Implementation Progress
+
+### Phase 0.5: Symbol Collection Migration (COMPLETED)
+
+Migrated 5 of 7 LibCST-dependent Python files to use tree-sitter via the
+Rust extension.  All 1,309 tests pass.
+
+#### Rust Extension Enhancements (`emend_core`)
+
+**`symbols.rs`** — Major enhancement to `collect_symbols_batch()` and new
+functions:
+
+| Change | Purpose |
+|--------|---------|
+| `decorator` strings + `decorator_line_start` fields | Decorator metadata for dead-code entry-point filtering |
+| `method` / `async_method` kind distinction | Differentiate methods from standalone functions |
+| `col_offset` field | Positional info for metadata output |
+| `param_names` field | Parameter names for symbol info |
+| `returns` field (separate from signature) | Return type annotation for oracle integration |
+| `collect_symbols_from_str()` (new PyO3 function) | In-memory symbol collection without file I/O |
+| `get_statement_ranges()` (new PyO3 function) | Statement line ranges for noqa mapping |
+| `line_start` fix for decorated definitions | Report `def`/`class` line, not decorator line |
+
+**`pattern.rs`** — New function:
+
+| Change | Purpose |
+|--------|---------|
+| `collect_identifier_positions()` | Identifier/attribute positions for type oracle |
+
+**`lib.rs`** — Registered 3 new PyO3 functions.
+
+#### Python File Migrations
+
+| File | Status | Changes |
+|------|--------|---------|
+| `ast_utils.py` | **Fully migrated** | Removed `_NestedDefinitionVisitor` (LibCST). Uses `emend_core.collect_symbols_from_str()`. Filters out module-level variables to match old behavior. |
+| `query.py` | **Fully migrated** | Removed `_SymbolCollector` (LibCST). Added `_rust_dict_to_symbol_info_list()` and `_extract_params_from_signature()`. |
+| `ast_commands.py` | **Fully migrated** | Removed `_ListSymbolsVisitor`, `_NameLoadCollector`, and LibCST helpers. Added `method`/`async_method` kind handling. |
+| `lint.py` | **Mostly migrated** | Removed `_StatementRangeMapper` (LibCST). Uses `emend_core.get_statement_ranges()`. Still has lazy `import libcst` in `_process_file_fallback` for match text extraction. |
+| `type_oracle.py` | **Fully migrated** | Removed `_SymbolCollector` (LibCST). Uses `emend_core.collect_identifier_positions()`. |
+| `transform.py` | **Partially migrated** | `_index_batch_worker` uses tree-sitter symbols. Dead-code SQL excludes `variable` kind. All visitors/transformers still use LibCST. |
+| `pattern.py` | **Not started** | Still fully LibCST-dependent. |
+
+#### Key Fixes Applied
+
+1. **Decorated function `line_start`**: Rust now reports the `def`/`class`
+   keyword line as `line`, not the first decorator line. `decorator_line_start`
+   holds the decorator line. This fixed self-reference exclusion in dead-code
+   detection.
+
+2. **Dead-code variable filtering**: Added SQL condition to exclude `variable`
+   kind from dead-code analysis, since module-level variables weren't tracked
+   by the old LibCST backend and are often configs/constants.
+
+3. **Module-level variable filtering in `find_nested_definitions()`**: Variables
+   at depth 0 are filtered out to match old LibCST behavior (only function/class
+   definitions). This fixed the line-selector test.
+
+4. **Method/async_method kind handling**: Updated `_print_symbol_flat` and
+   `_print_symbol_tree` to handle the new kinds.
+
+### Remaining Work
+
+#### Near-term (to fully remove LibCST from migrated files)
+
+- [ ] `lint.py`: Replace lazy `import libcst` in `_process_file_fallback`
+  with tree-sitter-based match text extraction
+- [ ] `transform.py` `_index_batch_worker`: Still uses `cst.parse_module()`
+  for parse cache and `cst.metadata.MetadataWrapper` for QN and reference
+  indexing — needs Rust scope resolver
+
+#### Medium-term (Phase 1-2 from design)
+
+- [ ] **Pattern engine migration** (`pattern.py`): Replace
+  `compile_pattern_to_matcher()` with GritQL or equivalent Rust matcher
+- [ ] **Read-only visitors** (`transform.py`): Migrate `PatternFinder`,
+  `ConstrainedPatternFinder`, `ScopedPatternFinder`, `_ReferenceFinder`,
+  `_CallerFilter`, `_CalleeCollector`, `_BulkReferenceFinder` to Rust
+- [ ] **Transformers** (`transform.py`): Migrate `PatternReplacer`,
+  `ComponentSetter`, `ComponentAdder`, `ComponentRemover`, `SymbolRemover`,
+  `_SymbolRenamer`, `_ModuleImportRenamer`, `ImportRewriter` to Rust
+  byte-range edits
+
+#### Long-term (Phase 3-4)
+
+- [ ] Remove `libcst` from `pyproject.toml` dependencies
+- [ ] Build scope resolver (`scope.rs`)
+- [ ] Add language config system
+- [ ] Second language support (TypeScript)

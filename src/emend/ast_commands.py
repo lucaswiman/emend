@@ -5,9 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import libcst as cst
-from libcst.metadata import PositionProvider, MetadataWrapper
-
 from emend.component_selector import parse_extended_selector, ExtendedSelector
 from emend.transform import (
     get_component, set_component, add_to_component,
@@ -119,308 +116,13 @@ class TreeSymbol:
     path: list[str] = field(default_factory=list)
 
 
-def _cst_format_param(param: cst.Param, prefix: str = "") -> str:
-    """Format a single parameter with optional annotation and default."""
-    p = prefix + param.name.value
-    if param.annotation is not None:
-        ann = cst.Module([]).code_for_node(param.annotation.annotation).strip()
-        p += f": {ann}"
-    if param.default is not None:
-        default = cst.Module([]).code_for_node(param.default).strip()
-        p += f" = {default}"
-    return p
-
-
-def _cst_get_function_signature(node: cst.FunctionDef) -> str:
-    """Build function signature string with type annotations from LibCST FunctionDef."""
-    params = node.params
-    parts: list[str] = []
-
-    # 1. Positional-only params (before /)
-    if hasattr(params, 'posonly_params') and params.posonly_params:
-        for p in params.posonly_params:
-            parts.append(_cst_format_param(p))
-        parts.append("/")
-
-    # 2. Regular positional-or-keyword params
-    for p in params.params:
-        parts.append(_cst_format_param(p))
-
-    # 3. *args or bare * separator
-    if params.star_arg is not None:
-        if isinstance(params.star_arg, cst.Param):
-            parts.append(_cst_format_param(params.star_arg, prefix="*"))
-        elif isinstance(params.star_arg, cst.ParamStar):
-            parts.append("*")
-    elif params.kwonly_params:
-        parts.append("*")
-
-    # 4. Keyword-only params
-    for p in params.kwonly_params:
-        parts.append(_cst_format_param(p))
-
-    # 5. **kwargs
-    if params.star_kwarg:
-        parts.append(_cst_format_param(params.star_kwarg, prefix="**"))
-
-    sig = f"({', '.join(parts)})"
-    if node.returns is not None:
-        ret = cst.Module([]).code_for_node(node.returns.annotation).strip()
-        sig += f" -> {ret}"
-    return sig
-
-
-class _NameLoadCollector(cst.CSTVisitor):
-    """Collect all Name nodes that are used as reads (not in assignment targets)."""
-
-    def __init__(self):
-        self.referenced_names: set[str] = set()
-        self._in_assign_target = False
-
-    def visit_Assign(self, node: cst.Assign) -> bool:
-        return True
-
-    def visit_AssignTarget(self, node: cst.AssignTarget) -> bool:
-        self._in_assign_target = True
-        return True
-
-    def leave_AssignTarget(self, node: cst.AssignTarget) -> None:
-        self._in_assign_target = False
-
-    def visit_AnnAssign(self, node: cst.AnnAssign) -> bool:
-        return True
-
-    def visit_Name(self, node: cst.Name) -> None:
-        if not self._in_assign_target:
-            self.referenced_names.add(node.value)
-
-
-class _ListSymbolsVisitor(cst.CSTVisitor):
-    """LibCST visitor to collect symbols for list-symbols output."""
-
-    METADATA_DEPENDENCIES = (PositionProvider,)
-
-    def __init__(
-        self,
-        max_depth: float,
-        selector_path: list[str] | None,
-    ):
-        self.max_depth = max_depth
-        self.selector_path = selector_path
-        self.symbols: list[TreeSymbol] = []
-        self._path: list[str] = []
-        self._depth: int = 0
-        self._symbol_stack: list[list[TreeSymbol]] = [self.symbols]
-        self._defined_names_stack: list[set[str]] = [set()]
-        self._current_func_nodes: list[cst.FunctionDef | None] = [None]
-
-    def _matches_selector(self, current_path: list[str]) -> bool:
-        if self.selector_path is None:
-            return True
-        if len(current_path) < len(self.selector_path):
-            return self.selector_path[:len(current_path)] == current_path
-        return current_path[:len(self.selector_path)] == self.selector_path
-
-    def _get_position(self, node: cst.CSTNode) -> tuple[int, int]:
-        pos = self.get_metadata(PositionProvider, node)
-        return pos.start.line, pos.end.line
-
-    def _add_outer_references(self, func_node: cst.FunctionDef, sym: TreeSymbol):
-        """Find references to outer-scope variables within a function body."""
-        if self._depth + 1 >= self.max_depth:
-            return
-
-        collector = _NameLoadCollector()
-        # Visit the function body to find referenced names
-        # We need to wrap it in a dummy module for visiting
-        try:
-            func_node.body.visit(collector)
-        except Exception:
-            return
-
-        referenced_names = collector.referenced_names
-
-        # Check which ones are defined in outer scopes
-        seen = set()
-        for outer_scope in self._defined_names_stack:
-            for name in referenced_names:
-                if name in outer_scope and name not in seen:
-                    if not any(c.name == name and c.kind == "reference" for c in sym.children):
-                        ref = TreeSymbol(
-                            name=name,
-                            kind="reference",
-                            signature=None,
-                            type_annotation=None,
-                            children=[],
-                            depth=self._depth + 1,
-                        )
-                        sym.children.append(ref)
-                    seen.add(name)
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        name = node.name.value
-        current_path = self._path + [name]
-
-        if self._depth < self.max_depth and self._matches_selector(current_path):
-            line, end_line = self._get_position(node)
-            is_async = node.asynchronous is not None
-            kind = "async_function" if is_async else "function"
-            sig = _cst_get_function_signature(node)
-            sym = TreeSymbol(
-                name=name,
-                kind=kind,
-                signature=sig,
-                type_annotation=None,
-                children=[],
-                depth=self._depth,
-                line=line,
-                end_line=end_line,
-                path=current_path,
-            )
-
-            self._symbol_stack[-1].append(sym)
-
-            # Push state
-            self._path = current_path
-            self._depth += 1
-            self._symbol_stack.append(sym.children)
-            child_defined = set()
-            self._defined_names_stack.append(child_defined)
-            self._current_func_nodes.append(node)
-            return True
-        else:
-            if self._defined_names_stack:
-                self._defined_names_stack[-1].add(name)
-            # Don't traverse children when not matching
-            return False
-
-    def leave_FunctionDef(self, node: cst.FunctionDef) -> None:
-        name = node.name.value
-
-        # Only pop state if we actually pushed (i.e., we entered in visit_FunctionDef)
-        if self._path and self._path[-1] == name:
-            func_node = self._current_func_nodes.pop()
-            self._defined_names_stack.pop()
-            children_list = self._symbol_stack.pop()
-            self._depth -= 1
-            self._path = self._path[:-1]
-
-            # Now add outer references
-            if func_node is not None:
-                # Find the TreeSymbol we created
-                parent_children = self._symbol_stack[-1]
-                for sym in parent_children:
-                    if sym.name == name and sym.kind in ("function", "async_function"):
-                        self._add_outer_references(func_node, sym)
-                        break
-
-            # Register name in parent scope
-            if self._defined_names_stack:
-                self._defined_names_stack[-1].add(name)
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        name = node.name.value
-        current_path = self._path + [name]
-
-        if self._depth < self.max_depth and self._matches_selector(current_path):
-            line, end_line = self._get_position(node)
-            sym = TreeSymbol(
-                name=name,
-                kind="class",
-                signature=None,
-                type_annotation=None,
-                children=[],
-                depth=self._depth,
-                line=line,
-                end_line=end_line,
-                path=current_path,
-            )
-
-            self._symbol_stack[-1].append(sym)
-
-            # Push state
-            self._path = current_path
-            self._depth += 1
-            self._symbol_stack.append(sym.children)
-            child_defined = set()
-            self._defined_names_stack.append(child_defined)
-            self._current_func_nodes.append(None)
-            return True
-        else:
-            if self._defined_names_stack:
-                self._defined_names_stack[-1].add(name)
-            return False
-
-    def leave_ClassDef(self, node: cst.ClassDef) -> None:
-        name = node.name.value
-        if self._path and self._path[-1] == name:
-            self._current_func_nodes.pop()
-            self._defined_names_stack.pop()
-            self._symbol_stack.pop()
-            self._depth -= 1
-            self._path = self._path[:-1]
-
-            if self._defined_names_stack:
-                self._defined_names_stack[-1].add(name)
-
-    def visit_AnnAssign(self, node: cst.AnnAssign) -> bool:
-        if not isinstance(node.target, cst.Name):
-            return False
-
-        name = node.target.value
-        current_path = self._path + [name]
-
-        if self._depth < self.max_depth and self._matches_selector(current_path):
-            line, end_line = self._get_position(node)
-            type_str = cst.Module([]).code_for_node(node.annotation.annotation).strip()
-            sym = TreeSymbol(
-                name=name,
-                kind="variable",
-                signature=None,
-                type_annotation=type_str,
-                children=[],
-                depth=self._depth,
-                line=line,
-                end_line=end_line,
-                path=current_path,
-            )
-            self._symbol_stack[-1].append(sym)
-
-        if self._defined_names_stack:
-            self._defined_names_stack[-1].add(name)
-        return False
-
-    def visit_Assign(self, node: cst.Assign) -> bool:
-        for target in node.targets:
-            if isinstance(target.target, cst.Name):
-                name = target.target.value
-                current_path = self._path + [name]
-
-                if self._depth < self.max_depth and self._matches_selector(current_path):
-                    line, end_line = self._get_position(node)
-                    sym = TreeSymbol(
-                        name=name,
-                        kind="variable",
-                        signature=None,
-                        type_annotation=None,
-                        children=[],
-                        depth=self._depth,
-                        line=line,
-                        end_line=end_line,
-                        path=current_path,
-                    )
-                    self._symbol_stack[-1].append(sym)
-
-                if self._defined_names_stack:
-                    self._defined_names_stack[-1].add(name)
-        return False
-
-
 def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0):
     """Print symbols in tree format with full Python keywords."""
     KIND_KEYWORD = {
         "function": "def",
         "async_function": "async def",
+        "method": "def",
+        "async_method": "async def",
         "class": "class",
         "variable": "var",
         "reference": "ref",
@@ -436,7 +138,7 @@ def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0):
         else:
             line_suffix = ""
 
-        if sym.kind in ("function", "async_function"):
+        if sym.kind in ("function", "async_function", "method", "async_method"):
             print(f"{prefix}{kind_keyword} {sym.name}{sym.signature or '()'}{line_suffix}")
         elif sym.kind == "class":
             print(f"{prefix}{kind_keyword} {sym.name}{line_suffix}")
@@ -455,6 +157,8 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
     KIND_KEYWORD = {
         "function": "def",
         "async_function": "async def",
+        "method": "def",
+        "async_method": "async def",
         "class": "class",
         "variable": "var",
         "reference": "ref",
@@ -470,7 +174,7 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
         else:
             line_suffix = ""
 
-        if sym.kind in ("function", "async_function"):
+        if sym.kind in ("function", "async_function", "method", "async_method"):
             print(f"{kind_keyword} {full_path}{sym.signature or '()'}{line_suffix}")
         elif sym.kind == "class":
             print(f"{kind_keyword} {full_path}{line_suffix}")
