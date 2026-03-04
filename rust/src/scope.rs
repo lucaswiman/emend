@@ -596,14 +596,6 @@ impl ScopeResolver {
                     }
                 }
             }
-            // Write contexts
-            if pk == "assignment" || pk == "augmented_assignment" || pk == "annotated_assignment" {
-                if let Some(left) = parent.child_by_field_name("left") {
-                    if left.id() == node.id() {
-                        return ReferenceKind::Write;
-                    }
-                }
-            }
             // Function/class definitions (the name itself is a definition)
             if pk == "function_definition" || pk == "class_definition" {
                 if let Some(name) = parent.child_by_field_name("name") {
@@ -613,7 +605,70 @@ impl ScopeResolver {
                 }
             }
         }
-        ReferenceKind::Read
+        if self.is_write_context(node) {
+            ReferenceKind::Write
+        } else {
+            ReferenceKind::Read
+        }
+    }
+
+    /// Check if a node is in a write (assignment) context.
+    fn is_write_context(&self, node: &tree_sitter::Node) -> bool {
+        let mut current = *node;
+        while let Some(parent) = current.parent() {
+            let pk = parent.kind();
+            match pk {
+                "assignment" | "augmented_assignment" | "annotated_assignment" => {
+                    if let Some(left) = parent.child_by_field_name("left") {
+                        if left.byte_range().contains(&node.start_byte()) {
+                            return true;
+                        }
+                    }
+                    return false; // it's in the value (right) side
+                }
+                "for_in_clause" | "for_statement" => {
+                    if let Some(left) = parent.child_by_field_name("left") {
+                        if left.byte_range().contains(&node.start_byte()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                "as_pattern" | "as_pattern_target" | "with_statement" => {
+                    if pk == "with_statement" {
+                         // with_statement itself doesn't have a simple 'left'
+                         // it contains with_clause which contains as_pattern
+                         continue;
+                    }
+                    return true;
+                }
+                "named_expression" => {
+                    if let Some(name) = parent.child_by_field_name("name") {
+                        if name.id() == node.id() {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                "except_clause" => {
+                    if let Some(name) = parent.child_by_field_name("name") {
+                        if name.id() == node.id() {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                "function_definition" | "class_definition" | "call" | "attribute" => {
+                    // These are boundaries where we know it's not a general write context
+                    return false;
+                }
+                _ => {
+                    // Continue walking up
+                }
+            }
+            current = parent;
+        }
+        false
     }
 
     /// Collect a dotted attribute name from an `attribute` node.
@@ -924,17 +979,39 @@ impl ScopeResolver {
         // Collect assignments
         if node_kind == "assignment" || node_kind == "augmented_assignment" || node_kind == "annotated_assignment" {
             if let Some(left) = node.child_by_field_name("left") {
-                if left.kind() == "identifier" {
-                    let name = ctx.text(left);
-                    let binding = Binding {
-                        name: name.to_string(),
-                        kind: BindingKind::Assignment,
-                        line: left.start_position().row,
-                        column: left.start_position().column,
-                        byte_offset: left.start_byte(),
-                    };
-                    ctx.add_binding_if_absent(scope_for_children, binding);
-                }
+                self.collect_binding_targets(ctx, &left, scope_for_children, BindingKind::Assignment);
+            }
+        }
+
+        // Collect for loop variables
+        if node_kind == "for_in_clause" || node_kind == "for_statement" {
+            if let Some(left) = node.child_by_field_name("left") {
+                self.collect_binding_targets(ctx, &left, scope_for_children, BindingKind::Assignment);
+            }
+        }
+
+        // Collect with statement variables
+        if node_kind == "as_pattern" || node_kind == "as_pattern_target" || node_kind == "with_statement" {
+             // In `with ... as x`, `x` is the target.
+             if node_kind == "with_statement" {
+                 // Tree-sitter python with_statement has with_clause children
+                 // but let's check for as_pattern recursively via walk_node
+             } else {
+                 self.collect_binding_targets(ctx, &node, scope_for_children, BindingKind::Assignment);
+             }
+        }
+
+        // Collect walrus operator variables
+        if node_kind == "named_expression" {
+            if let Some(name) = node.child_by_field_name("name") {
+                self.collect_binding_targets(ctx, &name, scope_for_children, BindingKind::Assignment);
+            }
+        }
+
+        // Collect exception handler variables
+        if node_kind == "except_clause" {
+            if let Some(name) = node.child_by_field_name("name") {
+                self.collect_binding_targets(ctx, &name, scope_for_children, BindingKind::Assignment);
             }
         }
 
@@ -967,6 +1044,39 @@ impl ScopeResolver {
                 }
             }
             cursor.goto_parent();
+        }
+    }
+
+    /// Collect recursive binding targets (e.g., in a = (b, c)).
+    fn collect_binding_targets(
+        &self,
+        ctx: &mut BuildContext,
+        node: &tree_sitter::Node,
+        scope_id: ScopeId,
+        kind: BindingKind,
+    ) {
+        match node.kind() {
+            "identifier" => {
+                let name = ctx.text(*node);
+                let binding = Binding {
+                    name: name.to_string(),
+                    kind,
+                    line: node.start_position().row,
+                    column: node.start_position().column,
+                    byte_offset: node.start_byte(),
+                };
+                ctx.add_binding_if_absent(scope_id, binding);
+            }
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern"
+            | "as_pattern" | "as_pattern_target" => {
+                for_each_child(node, |child| {
+                    let ck = child.kind();
+                    if ck != "," && ck != "(" && ck != ")" && ck != "[" && ck != "]" && ck != "as" {
+                        self.collect_binding_targets(ctx, &child, scope_id, kind);
+                    }
+                });
+            }
+            _ => {}
         }
     }
 

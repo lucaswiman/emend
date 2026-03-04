@@ -19,7 +19,15 @@ import io
 import json
 import time
 from .component_selector import ExtendedSelector, parse_extended_selector
-from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
+from .pattern import (
+    parse_pattern,
+    compile_pattern_to_matcher,
+    compile_pattern_to_rust_ir,
+    compile_constraint_to_rust_ir,
+    Pattern,
+    is_oracle_type_constraint,
+    parse_oracle_type_constraint,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -358,135 +366,6 @@ def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
         pass
 
 
-class _QNCollector(cst.CSTVisitor):
-    """Lightweight visitor that collects all qualified-name strings in a file.
-
-    Designed to run as a second pass on an already-resolved MetadataWrapper
-    (so QualifiedNameProvider metadata is already computed — this just reads it).
-    """
-    METADATA_DEPENDENCIES = (cst.metadata.QualifiedNameProvider,)
-
-    def __init__(self) -> None:
-        self.all_qnames: set[str] = set()
-
-    def visit_Name(self, node: cst.Name) -> None:
-        try:
-            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
-                self.all_qnames.add(qn.name)
-        except KeyError:
-            pass
-
-    def visit_Attribute(self, node: cst.Attribute) -> None:
-        try:
-            for qn in self.get_metadata(cst.metadata.QualifiedNameProvider, node):
-                self.all_qnames.add(qn.name)
-        except KeyError:
-            pass
-
-
-class _RefIndexCollector(cst.CSTVisitor):
-    """Visitor that collects reference index entries for every Name/Attribute node.
-
-    Records (target_qn, line, col, ref_kind) for each resolved qualified name.
-    Designed to run on an already-resolved MetadataWrapper (like _QNCollector).
-    """
-    METADATA_DEPENDENCIES = (
-        cst.metadata.QualifiedNameProvider,
-        cst.metadata.PositionProvider,
-        cst.metadata.ParentNodeProvider,
-    )
-
-    def __init__(self) -> None:
-        self.refs: list[tuple[str, int, int, str]] = []  # (qn, line, col, kind)
-        self._in_import = False
-
-    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
-        self._in_import = True
-        return True
-
-    def leave_ImportFrom(self, node: cst.ImportFrom) -> None:
-        self._in_import = False
-
-    def visit_Import(self, node: cst.Import) -> bool:
-        self._in_import = True
-        return True
-
-    def leave_Import(self, node: cst.Import) -> None:
-        self._in_import = False
-
-    def _classify(self, node: cst.CSTNode) -> str:
-        """Determine the reference kind for a node."""
-        if self._in_import:
-            return "import"
-        try:
-            parent = self.get_metadata(cst.metadata.ParentNodeProvider, node)
-            # Check if this is a call target
-            if isinstance(parent, cst.Call) and parent.func is node:
-                return "call"
-            # Check if parent is an Attribute and that Attribute is the call target
-            if isinstance(parent, cst.Attribute):
-                try:
-                    grandparent = self.get_metadata(
-                        cst.metadata.ParentNodeProvider, parent
-                    )
-                    if isinstance(grandparent, cst.Call) and grandparent.func is parent:
-                        return "call"
-                except KeyError:
-                    pass
-            # Check for write contexts
-            if isinstance(parent, cst.AssignTarget):
-                return "write"
-            if isinstance(parent, (cst.AugAssign,)):
-                return "write"
-        except KeyError:
-            pass
-        return "read"
-
-    def _record(self, node: cst.CSTNode) -> None:
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-        except KeyError:
-            return
-        try:
-            pos = self.get_metadata(cst.metadata.PositionProvider, node)
-        except KeyError:
-            return
-        kind = self._classify(node)
-        for qn in qnames:
-            self.refs.append((qn.name, pos.start.line, pos.start.column, kind))
-
-    def visit_Name(self, node: cst.Name) -> None:
-        self._record(node)
-
-    def visit_Attribute(self, node: cst.Attribute) -> None:
-        self._record(node)
-
-
-def _extract_all_exports(module: cst.Module) -> set[str]:
-    """Extract names from ``__all__`` without re-parsing (index-time helper)."""
-    names: set[str] = set()
-    for stmt in module.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if (isinstance(item, cst.Assign)
-                        and len(item.targets) == 1
-                        and isinstance(item.targets[0].target, cst.Name)
-                        and item.targets[0].target.value == '__all__'):
-                    value = item.value
-                    elements = None
-                    if isinstance(value, (cst.List, cst.Tuple)):
-                        elements = value.elements
-                    if elements:
-                        for el in elements:
-                            if isinstance(el, cst.Element) and isinstance(
-                                el.value, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString)
-                            ):
-                                raw = el.value.evaluated_value if hasattr(el.value, 'evaluated_value') else None
-                                if isinstance(raw, str):
-                                    names.add(raw)
-    return names
-
-
 _ALL_RE = re.compile(
     r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
     re.MULTILINE | re.DOTALL,
@@ -524,12 +403,12 @@ def _extract_noqa_lines(source: str) -> set[int]:
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
-    Runs in a subprocess.  Parses a batch of files, resolves qualified
-    names, collects symbol definitions, import relationships, and
-    reference entries, then writes directly to the SQLite disk cache.
+    Runs in a subprocess.  Parses a batch of files (LibCST), resolves
+    qualified names, collects symbol definitions, import relationships,
+    and reference entries, then writes directly to the SQLite disk cache.
 
     Files whose content hash is already present in all cache tables are
-    skipped without parsing (cache-hit fast path).
+    skipped (cache-hit fast path).
 
     Args:
         args: (db_path, source_root, project_root, [(file_path, content), ...])
@@ -626,9 +505,8 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             skipped += 1
             continue
 
-        # LibCST parse is only needed for the parse_cache (other commands
-        # still use it).  QN, reference, and symbol indexing now use
-        # tree-sitter via the Rust scope resolver and emend_core.
+        # LibCST parse is needed for the parse_cache until refactoring
+        # commands are fully migrated to tree-sitter.
         if need_parse:
             try:
                 module = cst.parse_module(content)
@@ -2164,6 +2042,19 @@ def visit_project(
         )
         file_contents = filtered_contents
 
+    def _cache_qnames_for_file(py_file: str, content: str) -> None:
+        """Cache qualified names from the Rust scope resolver (thread-safe)."""
+        try:
+            resolver = _rust.PyScopeResolver(project_root)
+            resolver.index_file(py_file, content)
+            all_qnames = set(resolver.all_qnames_in_file(py_file))
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            _store_qnames(content_hash, all_qnames)
+        except Exception:
+            pass
+
     if metadata_providers and len(file_contents) > 1:
         # Parallel path: each MetadataWrapper is independent per file — no shared state
         def _visit_one(args: tuple[str, str]) -> tuple[str, cst.Module, object] | None:
@@ -2175,18 +2066,8 @@ def visit_project(
                 visitor = visitor_factory(py_file, is_def_file)
                 wrapper = cst.metadata.MetadataWrapper(module)
                 result_module = wrapper.visit(visitor)
-                # Cache QN data as a side-effect (second pass is cheap
-                # because QualifiedNameProvider is already resolved).
                 if _uses_qnp:
-                    try:
-                        collector = _QNCollector()
-                        wrapper.visit(collector)
-                        content_hash = hashlib.md5(
-                            content.encode(), usedforsecurity=False
-                        ).digest()
-                        _store_qnames(content_hash, collector.all_qnames)
-                    except Exception:
-                        pass
+                    _cache_qnames_for_file(py_file, content)
                 return (py_file, result_module, visitor)
             except Exception:
                 return None
@@ -2213,17 +2094,8 @@ def visit_project(
                 if metadata_providers:
                     wrapper = cst.metadata.MetadataWrapper(module)
                     result_module = wrapper.visit(visitor)
-                    # Cache QN data
                     if _uses_qnp:
-                        try:
-                            collector = _QNCollector()
-                            wrapper.visit(collector)
-                            content_hash = hashlib.md5(
-                                content.encode(), usedforsecurity=False
-                            ).digest()
-                            _store_qnames(content_hash, collector.all_qnames)
-                        except Exception:
-                            pass
+                        _cache_qnames_for_file(py_file, content)
                 else:
                     result_module = module.visit(visitor)
                 logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
@@ -2232,6 +2104,66 @@ def visit_project(
             except Exception:
                 continue
         logger.info("visit_project: sequential visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
+
+
+def visit_project_ts(
+    name_hint: str,
+    project_path: str,
+    target_file: str | None = None,
+    candidate_files: set[str] | None = None,
+    target_qnames: set[str] | None = None,
+) -> Iterator[tuple[str, str, _rust.PyScopeResolver]]:
+    """Iterate over Python files using tree-sitter + PyScopeResolver.
+
+    Yields (file_path, content, resolver).
+    The same resolver instance is used for all files in the batch.
+    """
+    t_start = time.monotonic()
+    project_root = project_path
+    py_files = _collect_python_files(project_root)
+
+    if candidate_files is not None:
+        py_files = [f for f in py_files
+                    if f in candidate_files
+                    or (target_file and str(Path(f).resolve()) == target_file)]
+
+    # Structural pre-filter
+    if name_hint:
+        py_files = prefilter_files_structural(py_files, name_hint)
+        if target_file and target_file not in py_files:
+            py_files.append(target_file)
+
+    # Read and filter files
+    file_contents = _rust.read_and_filter_files(py_files, [name_hint] if name_hint else [])
+
+    # QN-index pre-filter
+    if target_qnames:
+        filtered_contents = []
+        for py_file, content in file_contents:
+            if target_file and str(Path(py_file).resolve()) == target_file:
+                filtered_contents.append((py_file, content))
+                continue
+
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            cached_qns = _get_cached_qnames(content_hash)
+            if cached_qns is not None:
+                if not target_qnames.intersection(cached_qns):
+                    continue
+            filtered_contents.append((py_file, content))
+        file_contents = filtered_contents
+
+    # Index and yield
+    resolver = _rust.PyScopeResolver(project_root)
+    for py_file, content in file_contents:
+        try:
+            resolver.index_file(py_file, content)
+            yield py_file, content, resolver
+        except Exception:
+            continue
+
+    logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
 
 
 class SymbolFinder(cst.CSTVisitor):
@@ -2928,25 +2860,25 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+
+    source_code = file_path.read_text()
+    module = cst.parse_module(source_code)
 
     # Apply transformation
     transformer = ComponentSetter(
@@ -3346,20 +3278,20 @@ def add_to_component(
     if selector.component == "imports" and not selector.symbol_path:
         return _add_import(module, value, position, file_path, apply, source_code)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component == "params":
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
 
@@ -3645,25 +3577,25 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+
+    source_code = file_path.read_text()
+    module = cst.parse_module(source_code)
 
     # Apply transformation
     transformer = ComponentRemover(
@@ -3931,6 +3863,64 @@ class PatternFinder(cst.CSTVisitor):
         return True  # Continue visiting children
 
 
+class RustGuidedFinder(cst.CSTVisitor):
+    """Visitor that uses pre-calculated Rust match positions to extract captures.
+
+    This avoids running the slow LibCST m.matches() on every node.
+    """
+
+    def __init__(
+        self,
+        matcher: m.BaseMatcherNode,
+        ellipsis_info: dict,
+        position_provider: cst.metadata.PositionProvider,
+        rust_matches: set[tuple[int, int, int, int]],
+        metavar_names: set[str],
+    ):
+        self.matcher = matcher
+        self.ellipsis_info = ellipsis_info
+        self.position_provider = position_provider
+        # Set of (line, col, end_line, end_col)
+        self.rust_matches = rust_matches
+        self.metavar_names = metavar_names
+        self.matches: list[PatternMatch] = []
+
+    def on_visit(self, node: cst.CSTNode) -> bool:
+        try:
+            pos = self.position_provider[node]
+            # Rust uses 1-based line, 0-based column
+            # LibCST PositionProvider uses 1-based line, 0-based column
+            key = (pos.start.line, pos.start.column, pos.end.line, pos.end.column)
+
+            if key in self.rust_matches:
+                # This node corresponds to a Rust match.
+                # Extract captures using LibCST matcher.
+                # We can assume m.matches(node, self.matcher) is mostly True,
+                # but we call m.extract which returns None if no match.
+                captures = m.extract(node, self.matcher)
+
+                if captures is not None:
+                    # Validate repeated metavars
+                    if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
+                        return True
+
+                    # Handle ellipsis and partial dict captures
+                    _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
+
+                    self.matches.append(PatternMatch(
+                        node=node,
+                        captures=captures,
+                        line=pos.start.line,
+                        end_line=pos.end.line,
+                        col=pos.start.column,
+                        end_col=pos.end.column,
+                    ))
+        except (KeyError, AttributeError):
+            pass
+
+        return True
+
+
 def _parse_constraint(constraint: str) -> callable:
     """Parse a constraint string into a node checker function.
 
@@ -4114,147 +4104,74 @@ class ConstrainedPatternFinder(cst.CSTVisitor):
         return True  # No constraint
 
 
-class ScopedPatternFinder(cst.CSTVisitor):
-    """Visitor to find all matches of a pattern within a specific scope."""
-
-    def __init__(self, matcher: m.BaseMatcherNode, ellipsis_info: dict | None = None, position_provider: cst.metadata.PositionProvider | None = None, scope: list[str] | None = None, metavar_names: set[str] | None = None):
-        self.matcher = matcher
-        self.ellipsis_info = ellipsis_info or {}
-        self.position_provider = position_provider
-        self.scope = scope or []
-        self.metavar_names = metavar_names or set()
-        self.current_path: list[str] = []
-        self.matches: list[PatternMatch] = []
-
-    def _is_in_scope(self) -> bool:
-        """Check if we're currently inside the target scope."""
-        if len(self.current_path) < len(self.scope):
-            return False
-        return self.current_path[:len(self.scope)] == self.scope
-
-    def _track_scope_entry(self, node: cst.CSTNode, name: str) -> None:
-        """Track entering a scope (class or function)."""
-        self.current_path.append(name)
-        # Store a marker so we know to pop on leave
-        if not hasattr(self, '_scope_stack'):
-            self._scope_stack = []
-        self._scope_stack.append((id(node), name))
-
-    def _track_scope_exit(self, node: cst.CSTNode) -> None:
-        """Track leaving a scope."""
-        if hasattr(self, '_scope_stack') and self._scope_stack:
-            node_id, name = self._scope_stack[-1]
-            if node_id == id(node):
-                self._scope_stack.pop()
-                if self.current_path and self.current_path[-1] == name:
-                    self.current_path.pop()
-
-    def on_visit(self, node: cst.CSTNode) -> bool:
-        """Check if this node matches the pattern and is in scope."""
-        # Track scope for function and class definitions
-        if isinstance(node, cst.FunctionDef):
-            self._track_scope_entry(node, node.name.value)
-        elif isinstance(node, cst.ClassDef):
-            self._track_scope_entry(node, node.name.value)
-
-        if not self._is_in_scope():
-            return True  # Continue visiting to find the scope
-
-        # Try to match this node
-        if m.matches(node, self.matcher):
-            # Validate repeated metavars captured equal values
-            if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
-                return True  # Continue visiting, but don't add this as a match
-
-            # Extract captures
-            captures = m.extract(node, self.matcher)
-
-            # Handle ellipsis and partial dict captures
-            _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
-
-            # Get position if position provider is available
-            line = None
-            end_line = None
-            col = None
-            end_col = None
-            if self.position_provider is not None:
-                try:
-                    pos = self.position_provider[node]
-                    line = pos.start.line
-                    end_line = pos.end.line
-                    col = pos.start.column
-                    end_col = pos.end.column
-                except KeyError:
-                    pass  # Node position not available
-
-            self.matches.append(PatternMatch(
-                node=node, captures=captures, line=line,
-                end_line=end_line, col=col, end_col=end_col,
-            ))
-        return True  # Continue visiting children
-
-    def on_leave(self, original_node: cst.CSTNode) -> None:
-        """Track leaving scopes."""
-        if isinstance(original_node, (cst.FunctionDef, cst.ClassDef)):
-            self._track_scope_exit(original_node)
+def _build_ref_map(
+    file_path: str, project_root: str, content: str,
+) -> dict[tuple[int, int], tuple[str, str]]:
+    """Build a (line, col) -> (qn, kind) map using PyScopeResolver."""
+    resolver = _rust.PyScopeResolver(project_root)
+    resolver.index_file(file_path, content)
+    refs = resolver.references_in_file(file_path)
+    ref_map: dict[tuple[int, int], tuple[str, str]] = {}
+    for qn, line, col, kind in refs:
+        ref_map[(line, col)] = (qn, kind)
+    return ref_map
 
 
-class _ImportOriginCollector(cst.CSTVisitor):
-    """Collect QualifiedNames for all Name nodes, keyed by node identity."""
-
-    METADATA_DEPENDENCIES = (cst.metadata.QualifiedNameProvider,)
-
-    def __init__(self):
-        self.qnames_by_id: dict[int, set] = {}
-
-    def visit_Name(self, node: cst.Name) -> None:
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-            # Store as list of (name, source) tuples
-            self.qnames_by_id[id(node)] = qnames
-        except KeyError:
-            pass
+def _root_name_node(node: cst.CSTNode) -> cst.CSTNode:
+    """Walk to the leftmost Name node (for dotted access like json.loads)."""
+    root = node
+    while isinstance(root, cst.Call):
+        root = root.func
+    while isinstance(root, cst.Attribute):
+        root = root.value
+    return root
 
 
 def _filter_matches_by_import(
     matches: list[PatternMatch],
     imported_from: str,
-    wrapper: cst.metadata.MetadataWrapper,
+    file_path: str,
+    project_root: str,
+    content: str,
+    position_provider: Mapping,
 ) -> list[PatternMatch]:
     """Post-filter pattern matches to only include those where the root name
     is imported from the specified module.
 
-    Uses QualifiedNameProvider to resolve the qualified name of the leftmost
+    Uses PyScopeResolver to resolve the qualified name of the leftmost
     Name node in each match. If the QN starts with ``imported_from.``, the
     match is kept.
     """
-    collector = _ImportOriginCollector()
-    wrapper.visit(collector)
+    ref_map = _build_ref_map(file_path, project_root, content)
 
     filtered = []
     for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node (for dotted access like json.loads)
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
+        root_name = _root_name_node(match.node)
 
         if not isinstance(root_name, cst.Name):
             continue
 
-        qnames = collector.qnames_by_id.get(id(root_name), set())
+        try:
+            pos = position_provider[root_name]
+            line = pos.start.line
+            col = pos.start.column
+        except (KeyError, AttributeError):
+            continue
 
-        for qn in qnames:
-            # Only consider IMPORT-sourced names (not LOCAL definitions)
-            if qn.source == cst.metadata.QualifiedNameSource.LOCAL:
-                continue
-            # Match if QN starts with module prefix (e.g. "json.loads")
-            # or if QN equals the module name itself
-            if qn.name == imported_from or qn.name.startswith(imported_from + "."):
-                filtered.append(match)
-                break
+        qn_info = ref_map.get((line, col))
+        if not qn_info:
+            continue
+        
+        qn, kind = qn_info
+        # Only consider IMPORT-sourced names (not LOCAL definitions)
+        if kind == "definition":
+            continue
+            
+        # Match if QN starts with module prefix (e.g. "json.loads")
+        # or if QN equals the module name itself
+        if qn == imported_from or qn.startswith(imported_from + "."):
+            filtered.append(match)
+            
     return filtered
 
 
@@ -4312,7 +4229,7 @@ def find_pattern(
     where: str | None = None,
     scope_local: bool = False,
     source_override: str | None = None,
-    type_oracle: TypeOracle | None = None,
+    type_oracle: "TypeOracle | None" = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -4393,96 +4310,152 @@ def find_pattern(
         source_code = file.read_text()
     module = _cached_parse(source_code)
 
-    # Fast path: for basic pattern matching (no constraints, no scope,
-    # no import/scope filters), skip the expensive MetadataWrapper and
-    # compute line numbers from the source text afterwards.
-    # Oracle type constraints need position info for TypeOracle lookups.
-    needs_wrapper = bool(inside or not_inside or scope is not None
-                         or imported_from is not None or scope_local
-                         or oracle_constraints)
+    # Try using Rust pattern matcher if available and applicable
+    rust_ir = compile_pattern_to_rust_ir(pattern)
+    rust_matches = None
+    
+    if rust_ir is not None:
+        # Compile constraints to Rust IR
+        inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
+        not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+        
+        # Only proceed if we have valid IR for all constraints present
+        if (inside is None or inside_ir is not None) and \
+           (not_inside is None or not_inside_ir is not None):
+            
+            raw_matches = _rust.find_pattern_in_files(
+                [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
+            )
+            # raw_matches is list of (file, line, col, end_line, end_col, text)
+            # Rust uses 1-based lines, 0-based columns
+            rust_matches = {
+                (m[1], m[2], m[3], m[4]) for m in raw_matches
+            }
 
-    if not needs_wrapper:
-        # Basic pattern matching without MetadataWrapper
-        finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
-        module.visit(finder)
-        # Compute line numbers from source text for each match
-        if finder.matches:
-            _assign_line_numbers_from_source(finder.matches, source_code, module)
-        return finder.matches
+    matches = []
+    position_provider = None
 
-    # Full path: use MetadataWrapper for position info and post-filters
-    wrapper = cst.MetadataWrapper(module)
-    position_provider = wrapper.resolve(cst.metadata.PositionProvider)
-
-    # Find all matches - choose finder based on parameters
-    if inside or not_inside:
-        # Use constrained finder for inside/not_inside constraints
-        finder = ConstrainedPatternFinder(matcher, ellipsis_info, position_provider, inside, not_inside, metavar_names)
-    elif scope is not None:
-        # Use scoped finder for scope-based searching
-        finder = ScopedPatternFinder(matcher, ellipsis_info, position_provider, scope, metavar_names)
+    if rust_matches is not None:
+        # Use Rust-guided extraction (requires PositionProvider)
+        wrapper = cst.MetadataWrapper(module)
+        position_provider = wrapper.resolve(cst.metadata.PositionProvider)
+        
+        finder = RustGuidedFinder(
+            matcher, ellipsis_info, position_provider, rust_matches, metavar_names
+        )
+        wrapper.visit(finder)
+        matches = finder.matches
     else:
-        # Use basic finder for unconstrained searching
-        finder = PatternFinder(matcher, ellipsis_info, position_provider, metavar_names)
-    wrapper.visit(finder)
+        # Fallback to LibCST visitors
+        needs_wrapper = bool(inside or not_inside
+                             or imported_from is not None or scope_local
+                             or oracle_constraints)
 
-    matches = finder.matches
+        if not needs_wrapper:
+            # Basic pattern matching without MetadataWrapper
+            finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
+            module.visit(finder)
+            # Compute line numbers from source text for each match
+            if finder.matches:
+                _assign_line_numbers_from_source(finder.matches, source_code, module)
+            matches = finder.matches
+        else:
+            # Full path: use MetadataWrapper for position info and post-filters
+            wrapper = cst.MetadataWrapper(module)
+            position_provider = wrapper.resolve(cst.metadata.PositionProvider)
 
-    # Post-filter by import origin if requested
-    if imported_from is not None:
-        matches = _filter_matches_by_import(matches, imported_from, wrapper)
+            # Find all matches - choose finder based on parameters
+            if inside or not_inside:
+                # Use constrained finder for inside/not_inside constraints
+                finder = ConstrainedPatternFinder(
+                    matcher, ellipsis_info, position_provider, inside, not_inside, metavar_names
+                )
+            else:
+                # Use basic finder for unconstrained searching
+                finder = PatternFinder(matcher, ellipsis_info, position_provider, metavar_names)
+            wrapper.visit(finder)
+            matches = finder.matches
 
-    # Post-filter by scope locality if requested
-    if scope_local:
-        matches = _filter_matches_by_scope_local(matches, wrapper)
+    # Post-filter by scope if requested
+    if scope is not None:
+        from .ast_utils import find_nested_definitions, find_symbol_by_path
+        symbols = find_nested_definitions(file_path)
+        target_sym = find_symbol_by_path(symbols, scope)
+        if target_sym:
+            matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
+        else:
+            # Scope not found -- no matches
+            matches = []
+
+    # Post-filter by import origin or scope locality
+    if (imported_from is not None or scope_local) and position_provider:
+        project_root = _find_project_root(file_path)
+        if imported_from is not None:
+            matches = _filter_matches_by_import(
+                matches, imported_from, file_path, project_root, source_code, position_provider
+            )
+        if scope_local:
+            matches = _filter_matches_by_scope_local(
+                matches, file_path, project_root, source_code, position_provider
+            )
 
     # Post-filter by TypeOracle type constraints
     if oracle_constraints and type_oracle is not None:
-        matches = _filter_matches_by_type_oracle(
-            matches, oracle_constraints, type_oracle,
-            file_path, position_provider,
-        )
+        if position_provider:
+            matches = _filter_matches_by_type_oracle(
+                matches, oracle_constraints, type_oracle,
+                file_path, position_provider,
+            )
 
     return matches
 
 
 def _filter_matches_by_scope_local(
     matches: list[PatternMatch],
-    wrapper: cst.metadata.MetadataWrapper,
+    file_path: str,
+    project_root: str,
+    content: str,
+    position_provider: Mapping,
 ) -> list[PatternMatch]:
     """Post-filter pattern matches to only include those where the root name
     is locally defined (not imported).
 
-    Uses QualifiedNameProvider to check if the root Name node in each match
-    has a LOCAL source.
+    Uses PyScopeResolver to check if the root Name node in each match
+    is a definition or a reference to a local name.
     """
-    collector = _ImportOriginCollector()
-    wrapper.visit(collector)
+    ref_map = _build_ref_map(file_path, project_root, content)
+    module_path = _file_to_module(file_path, project_root)
 
     filtered = []
     for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
+        root_name = _root_name_node(match.node)
 
         if not isinstance(root_name, cst.Name):
             # Non-name matches are kept (e.g., literals)
             filtered.append(match)
             continue
 
-        qnames = collector.qnames_by_id.get(id(root_name), set())
+        try:
+            pos = position_provider[root_name]
+            line = pos.start.line
+            col = pos.start.column
+        except (KeyError, AttributeError):
+            # No position info -- keep the match
+            filtered.append(match)
+            continue
 
-        if not qnames:
+        qn_info = ref_map.get((line, col))
+        if not qn_info:
             # No QN info -- keep the match (could be a builtin or unresolved)
             filtered.append(match)
             continue
 
-        # Keep if at least one QN has LOCAL source
-        if any(qn.source == cst.metadata.QualifiedNameSource.LOCAL for qn in qnames):
+        qn, kind = qn_info
+        # Definition is always local.
+        # For other references, we check if the QN starts with the current module path.
+        if kind == "definition":
+            filtered.append(match)
+        elif qn == module_path or qn.startswith(module_path + "."):
             filtered.append(match)
 
     return filtered
@@ -5144,48 +5117,10 @@ class ScopedPatternReplacer(PatternReplacer):
         return super()._do_replacement(node)
 
 
-class SymbolRemover(cst.CSTTransformer):
-    """Transformer to remove a symbol by path."""
 
-    def __init__(self, target_path: list[str]):
-        self.target_path = target_path
-        self.current_path: list[str] = []
-        self.removed = False
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_ClassDef(
-        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
-    ) -> cst.ClassDef | cst.RemovalSentinel:
-        """Leave class definition, possibly removing it."""
-        if self.current_path == self.target_path:
-            self.removed = True
-            self.current_path.pop()
-            return cst.RemovalSentinel.REMOVE
-        self.current_path.pop()
-        return updated_node
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_FunctionDef(
-        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
-    ) -> cst.FunctionDef | cst.RemovalSentinel:
-        """Leave function definition, possibly removing it."""
-        if self.current_path == self.target_path:
-            self.removed = True
-            self.current_path.pop()
-            return cst.RemovalSentinel.REMOVE
-        self.current_path.pop()
-        return updated_node
-
-
-def remove_symbol(selector: ExtendedSelector, apply: bool = False) -> str:
+def remove_symbol(
+    selector: ExtendedSelector, apply: bool = False,
+) -> str:
     """Remove a symbol (function, class) from a file.
 
     Args:
@@ -5203,24 +5138,29 @@ def remove_symbol(selector: ExtendedSelector, apply: bool = False) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
-
-    # Validate that symbol exists
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    # Use tree-sitter symbols to find the target symbol's range
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    symbols = find_nested_definitions(str(file_path))
+    sym = find_symbol_by_path(symbols, selector.symbol_path)
+    
+    if sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    # Apply transformation
-    remover = SymbolRemover(selector.symbol_path)
-    new_module = module.visit(remover)
-
-    if not remover.removed:
-        raise ValueError(f"Failed to remove symbol {'.'.join(selector.symbol_path)}")
-
-    new_code = new_module.code
+    # Read original source
+    source_code = file_path.read_text()
+    lines = source_code.splitlines(keepends=True)
+    
+    # Symbols in tree-sitter include decorators if they are part of a decorated_definition.
+    # Our NestedSymbol uses decorator_line_start if decorators are present.
+    start_line = sym.decorator_line_start if sym.decorator_line_start is not None else sym.line_start
+    
+    # Remove the specified lines (1-indexed)
+    # We want to remove the range [start_line, sym.line_end]
+    start_idx = start_line - 1
+    end_idx = sym.line_end
+    
+    new_lines = lines[:start_idx] + lines[end_idx:]
+    new_code = "".join(new_lines)
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -5272,22 +5212,39 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
         return code
 
     # Handle symbol-based selectors
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
-
-    # Find the symbol
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    symbols = find_nested_definitions(str(file_path))
+    sym = find_symbol_by_path(symbols, selector.symbol_path)
+    
+    if sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    # Convert the node to source code
-    code = module.code_for_node(finder.found_node)
+    # Extract source lines
+    source_code = file_path.read_text()
+    lines = source_code.splitlines(keepends=True)
+    
+    # Symbols in tree-sitter include decorators if they are part of a decorated_definition.
+    # Our NestedSymbol uses decorator_line_start if decorators are present.
+    start_line = sym.decorator_line_start if sym.decorator_line_start is not None else sym.line_start
+    
+    # line numbers are 1-indexed
+    symbol_lines = lines[start_line - 1 : sym.line_end]
+    code = "".join(symbol_lines)
 
-    if dedent:
-        import textwrap
-        code = textwrap.dedent(code)
+    # We ALWAYS dedent here because we extracted raw lines from a potentially
+    # indented context (e.g. a method in a class). LibCST's code_for_node
+    # returned the node's code relative to its own start, which is effectively
+    # dedented.
+    import textwrap
+    code = textwrap.dedent(code)
+    
+    # If the explicit dedent flag is True, we've already done it above.
+    # Standard LibCST behavior was that get_symbol_source(selector) returned 
+    # dedented code for the symbol.
+    
+    # Ensure it ends with exactly one newline to match expected test behavior
+    if not code.endswith("\n"):
+        code += "\n"
 
     return code
 
@@ -5689,153 +5646,6 @@ class _SymbolRenamer(cst.CSTTransformer):
         return updated_node
 
 
-class _ReferenceFinder(cst.CSTVisitor):
-    """Scope-aware reference finder using QualifiedNameProvider.
-
-    Only reports references whose qualified name matches the target symbol.
-    """
-
-    METADATA_DEPENDENCIES = (
-        cst.metadata.PositionProvider,
-        cst.metadata.QualifiedNameProvider,
-        cst.metadata.ParentNodeProvider,
-    )
-
-    def __init__(self, symbol_name: str, file_path: str,
-                 target_qns: set[str], target_module: str | None,
-                 is_definition_file: bool):
-        self.symbol_name = symbol_name
-        self.file_path = file_path
-        self.target_qns = target_qns
-        self.target_module = target_module
-        self.is_definition_file = is_definition_file
-        self.references: list[Reference] = []
-        self._in_import = False
-        self._current_import_module: str | None = None
-
-    def _matches_target(self, node: cst.CSTNode) -> bool:
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-            return any(qn.name in self.target_qns for qn in qnames)
-        except KeyError:
-            return False
-
-    def _is_write_context(self, node: cst.Name) -> bool:
-        """Check if a Name node is in a write (store) context."""
-        try:
-            parent = self.get_metadata(cst.metadata.ParentNodeProvider, node)
-        except KeyError:
-            return False
-
-        # Direct assignment target: x = ...
-        if isinstance(parent, cst.AssignTarget):
-            return True
-
-        # Augmented assignment target: x += ...
-        if isinstance(parent, cst.AugAssign):
-            return parent.target is node
-
-        # Annotated assignment target: x: int = ...
-        if isinstance(parent, cst.AnnAssign):
-            return parent.target is node
-
-        # For loop target: for x in ...
-        if isinstance(parent, cst.For):
-            return parent.target is node
-
-        # With...as target: with ... as x
-        if isinstance(parent, cst.AsName):
-            return True
-
-        # Named expression (walrus): (x := ...)
-        if isinstance(parent, cst.NamedExpr):
-            return parent.target is node
-
-        return False
-
-    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
-        self._in_import = True
-        if node.module is not None:
-            self._current_import_module = cst.Module([]).code_for_node(node.module).strip()
-        return True
-
-    def leave_ImportFrom(self, node: cst.ImportFrom) -> None:
-        self._in_import = False
-        self._current_import_module = None
-
-    def visit_Import(self, node: cst.Import) -> bool:
-        self._in_import = True
-        return True
-
-    def leave_Import(self, node: cst.Import) -> None:
-        self._in_import = False
-
-    def visit_Name(self, node: cst.Name) -> None:
-        if node.value != self.symbol_name:
-            return
-        if not self._matches_target(node):
-            return
-        pos = self.get_metadata(cst.metadata.PositionProvider, node)
-        self.references.append(Reference(
-            file_path=self.file_path,
-            line=pos.start.line,
-            column=pos.start.column,
-            offset=0,
-            is_definition=False,
-            is_import=self._in_import,
-            is_write=self._is_write_context(node),
-        ))
-
-    def visit_ImportAlias(self, node: cst.ImportAlias) -> None:
-        if (isinstance(node.name, cst.Name)
-                and node.name.value == self.symbol_name
-                and self._current_import_module is not None
-                and self.target_module is not None
-                and self._current_import_module == self.target_module):
-            pos = self.get_metadata(cst.metadata.PositionProvider, node.name)
-            self.references.append(Reference(
-                file_path=self.file_path,
-                line=pos.start.line,
-                column=pos.start.column,
-                offset=0,
-                is_definition=False,
-                is_import=True,
-                is_write=False,
-            ))
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        if (self.is_definition_file
-                and node.name.value == self.symbol_name
-                and self._matches_target(node.name)):
-            pos = self.get_metadata(cst.metadata.PositionProvider, node.name)
-            self.references.append(Reference(
-                file_path=self.file_path,
-                line=pos.start.line,
-                column=pos.start.column,
-                offset=0,
-                is_definition=True,
-                is_import=False,
-                is_write=False,
-            ))
-        return True
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        if (self.is_definition_file
-                and node.name.value == self.symbol_name
-                and self._matches_target(node.name)):
-            pos = self.get_metadata(cst.metadata.PositionProvider, node.name)
-            self.references.append(Reference(
-                file_path=self.file_path,
-                line=pos.start.line,
-                column=pos.start.column,
-                offset=0,
-                is_definition=True,
-                is_import=False,
-                is_write=False,
-            ))
-        return True
-
-
 def _compute_target_qns(symbol_name: str, target_module: str,
                         is_definition_file: bool) -> set[str]:
     """Compute the set of qualified names to match for a target symbol.
@@ -6000,8 +5810,8 @@ def find_references(
 
     # scan_root: where to collect files (respects --project for scope limiting)
     # module_root: project root for computing dotted module names (always git root)
-    scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
+    scan_root = project_path if project_path else module_root
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
 
@@ -6040,37 +5850,40 @@ def find_references(
         return _gen_warm()
 
     # Cold path: full project scan
-    def factory(py_file: str, is_def_file: bool):
-        target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
-        return _ReferenceFinder(
-            symbol_name, py_file, target_qns, target_module, is_def_file
-        )
-
-    # Use import graph to pre-filter: only check files that import
-    # from the module defining the target symbol.
     candidates = _files_importing_module(scan_root, target_module)
 
-    # Use an inner generator so validation above runs eagerly on call, not on first iteration.
     def _gen() -> Iterator[Reference]:
-        for _py_file, _module, finder in visit_project(
+        for py_file, _content, resolver in visit_project_ts(
             name_hint=symbol_name,
-            visitor_factory=factory,
             project_path=scan_root,
-            metadata_providers=_ReferenceFinder.METADATA_DEPENDENCIES,
             target_file=resolved_target,
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            for ref in finder.references:
-                if not include_definition and ref.is_definition:
-                    continue
-                if not include_imports and ref.is_import:
-                    continue
-                if writes_only and not ref.is_write:
-                    continue
-                if reads_only and ref.is_write:
-                    continue
-                yield ref
+            for qn, line, col, kind in resolver.references_in_file(py_file):
+                if qn in all_target_qns:
+                    is_def = kind == "definition"
+                    is_imp = kind == "import"
+                    is_wr = kind == "write"
+
+                    if not include_definition and is_def:
+                        continue
+                    if not include_imports and is_imp:
+                        continue
+                    if writes_only and not is_wr:
+                        continue
+                    if reads_only and is_wr:
+                        continue
+
+                    yield Reference(
+                        file_path=py_file,
+                        line=line,
+                        column=col,
+                        offset=0,
+                        is_definition=is_def,
+                        is_import=is_imp,
+                        is_write=is_wr,
+                    )
 
     return _gen()
 
@@ -6082,78 +5895,6 @@ class Callee:
     qualified_name: str | None
     file_path: str | None
     line: int | None
-
-
-class _CallerFilter(cst.CSTVisitor):
-    """Visitor that checks if a Name node appears as the function in a Call.
-
-    Used to filter find_references results to only call sites.
-    """
-
-    METADATA_DEPENDENCIES = (
-        cst.metadata.PositionProvider,
-        cst.metadata.QualifiedNameProvider,
-    )
-
-    def __init__(self, symbol_name: str, file_path: str,
-                 target_qns: set[str], target_module: str | None,
-                 is_definition_file: bool):
-        self.symbol_name = symbol_name
-        self.file_path = file_path
-        self.target_qns = target_qns
-        self.target_module = target_module
-        self.is_definition_file = is_definition_file
-        self.call_references: list[Reference] = []
-        self._in_import = False
-        self._current_import_module: str | None = None
-
-    def _matches_target(self, node: cst.CSTNode) -> bool:
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-            return any(qn.name in self.target_qns for qn in qnames)
-        except KeyError:
-            return False
-
-    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
-        self._in_import = True
-        if node.module is not None:
-            self._current_import_module = cst.Module([]).code_for_node(node.module).strip()
-        return True
-
-    def leave_ImportFrom(self, node: cst.ImportFrom) -> None:
-        self._in_import = False
-        self._current_import_module = None
-
-    def visit_Call(self, node: cst.Call) -> bool:
-        func = node.func
-        # Direct call: process(...)
-        if isinstance(func, cst.Name) and func.value == self.symbol_name:
-            if self._matches_target(func):
-                pos = self.get_metadata(cst.metadata.PositionProvider, func)
-                self.call_references.append(Reference(
-                    file_path=self.file_path,
-                    line=pos.start.line,
-                    column=pos.start.column,
-                    offset=0,
-                    is_definition=False,
-                    is_import=False,
-                    is_write=False,
-                ))
-        # Attribute call: module.process(...)
-        elif isinstance(func, cst.Attribute) and isinstance(func.attr, cst.Name):
-            if func.attr.value == self.symbol_name:
-                if self._matches_target(func):
-                    pos = self.get_metadata(cst.metadata.PositionProvider, func)
-                    self.call_references.append(Reference(
-                        file_path=self.file_path,
-                        line=pos.start.line,
-                        column=pos.start.column,
-                        offset=0,
-                        is_definition=False,
-                        is_import=False,
-                        is_write=False,
-                    ))
-        return True
 
 
 def find_callers(
@@ -6170,24 +5911,16 @@ def find_callers(
         project_path: Project root (auto-detected if None)
 
     Returns:
-        List of Reference objects at call sites
+        Iterator of Reference objects at call sites
     """
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callers")
 
-    # scan_root: where to collect files (respects --project for scope limiting)
-    # module_root: project root for computing dotted module names (always git root)
-    scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
+    scan_root = project_path if project_path else module_root
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
-
-    def factory(py_file: str, is_def_file: bool):
-        target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
-        return _CallerFilter(
-            symbol_name, py_file, target_qns, target_module, is_def_file
-        )
 
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
@@ -6195,70 +5928,26 @@ def find_callers(
     all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
 
     def _gen() -> Iterator[Reference]:
-        for _py_file, _module, visitor in visit_project(
+        for py_file, _content, resolver in visit_project_ts(
             name_hint=symbol_name,
-            visitor_factory=factory,
             project_path=scan_root,
-            metadata_providers=_CallerFilter.METADATA_DEPENDENCIES,
             target_file=resolved_target,
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            yield from visitor.call_references
+            for qn, line, col, kind in resolver.references_in_file(py_file):
+                if qn in all_target_qns and kind == "call":
+                    yield Reference(
+                        file_path=py_file,
+                        line=line,
+                        column=col,
+                        offset=0,
+                        is_definition=False,
+                        is_import=False,
+                        is_write=False,
+                    )
 
     return _gen()
-
-
-class _CalleeCollector(cst.CSTVisitor):
-    """Visitor that collects all Call nodes inside a function body."""
-
-    METADATA_DEPENDENCIES = (
-        cst.metadata.PositionProvider,
-        cst.metadata.QualifiedNameProvider,
-    )
-
-    def __init__(self):
-        self.callees: list[Callee] = []
-        self._seen: set[str] = set()
-
-    def visit_Call(self, node: cst.Call) -> bool:
-        func = node.func
-        name = None
-        qn_str = None
-
-        if isinstance(func, cst.Name):
-            name = func.value
-            try:
-                qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, func)
-                if qnames:
-                    qn_str = next(iter(qnames)).name
-            except KeyError:
-                pass
-        elif isinstance(func, cst.Attribute) and isinstance(func.attr, cst.Name):
-            name = func.attr.value
-            try:
-                qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, func)
-                if qnames:
-                    qn_str = next(iter(qnames)).name
-            except KeyError:
-                pass
-
-        if name and name not in self._seen:
-            self._seen.add(name)
-            line = None
-            try:
-                pos = self.get_metadata(cst.metadata.PositionProvider, node)
-                line = pos.start.line
-            except KeyError:
-                pass
-            self.callees.append(Callee(
-                name=name,
-                qualified_name=qn_str,
-                file_path=None,
-                line=line,
-            ))
-
-        return True
 
 
 def find_callees(
@@ -6284,27 +5973,38 @@ def find_callees(
     except FileNotFoundError:
         raise ValueError(f"File not found: {file_path}")
 
-    # Find the function body
-    module = cst.parse_module(content)
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-    if finder.found_node is None:
+    # Use tree-sitter symbols to find the target symbol's range
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    symbols = find_nested_definitions(file_path)
+    target_sym = find_symbol_by_path(symbols, selector.symbol_path)
+    if target_sym is None:
         raise ValueError(f"Symbol not found: {'.'.join(selector.symbol_path)}")
 
-    # Extract just the function body and analyze calls
-    func_node = finder.found_node
-    # Build a mini-module wrapping the function so MetadataWrapper works
-    wrapper_module = cst.Module(body=[func_node])
-    try:
-        # Re-parse the function code so MetadataWrapper can process it
-        func_code = wrapper_module.code
-        reparsed = cst.parse_module(func_code)
-        mw = cst.metadata.MetadataWrapper(reparsed)
-        collector = _CalleeCollector()
-        mw.visit(collector)
-        return collector.callees
-    except Exception:
-        return []
+    # Use scope resolver to find all call references in the file
+    project_root = project_path if project_path else _find_project_root(file_path)
+    resolver = _rust.PyScopeResolver(project_root)
+    resolver.index_file(file_path, content)
+    
+    refs = resolver.references_in_file(file_path)
+    
+    callees: list[Callee] = []
+    seen: set[tuple[str, int]] = set()
+
+    for qn, line, col, kind in refs:
+        if kind == "call" and target_sym.line_start <= line <= target_sym.line_end:
+            # deduplicate by (QN, line) to match old _CalleeCollector._seen behavior
+            # (which was by name, but now we have line info too)
+            name = qn.rsplit('.', 1)[-1]
+            if (qn, line) not in seen:
+                seen.add((qn, line))
+                callees.append(Callee(
+                    name=name,
+                    qualified_name=qn,
+                    file_path=None,  # Not easily resolvable to file here
+                    line=line,
+                ))
+
+    return callees
 
 
 def generate_graph(
@@ -6471,98 +6171,6 @@ def _get_all_exported_names(content: str) -> set[str]:
                                 except Exception:
                                     pass
     return names
-
-
-class _BulkReferenceFinder(cst.CSTVisitor):
-    """Single-pass visitor that discovers which symbols from a candidate set
-    are referenced in a file.
-
-    For each Name/Attribute node, resolves its qualified name and checks
-    whether it matches any of the candidate symbols.  Optionally also
-    treats string literals containing the symbol name as references.
-
-    Records which candidates were seen, keyed by (defining_file, symbol_name).
-    """
-
-    METADATA_DEPENDENCIES = (
-        cst.metadata.QualifiedNameProvider,
-        cst.metadata.PositionProvider,
-    )
-
-    def __init__(
-        self,
-        file_path: str,
-        is_definition_file: bool,
-        # candidate_qns: maps qualified-name -> (defining_file, symbol_name)
-        candidate_qns: dict[str, tuple[str, str]],
-        # For each (file, name) that is a definition in *this* file,
-        # record the definition line so we can exclude self-references.
-        local_def_lines: dict[str, int],
-        # candidate_names_by_key: maps symbol_name -> set of candidate keys
-        # Used for string-based reference detection.
-        candidate_names_by_key: dict[str, set[tuple[str, str]]] | None = None,
-        # String patterns that count as references: maps pattern -> set of keys
-        string_patterns: dict[str, set[tuple[str, str]]] | None = None,
-    ):
-        self.file_path = file_path
-        self.is_definition_file = is_definition_file
-        self.candidate_qns = candidate_qns
-        self.local_def_lines = local_def_lines
-        self.candidate_names_by_key = candidate_names_by_key
-        self.string_patterns = string_patterns
-        # Set of (defining_file, symbol_name) that are referenced
-        self.referenced: set[tuple[str, str]] = set()
-
-    def _check_node(self, node: cst.CSTNode) -> None:
-        """Resolve the QN of *node* and mark matching candidates as referenced."""
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-        except KeyError:
-            return
-        for qn in qnames:
-            key = self.candidate_qns.get(qn.name)
-            if key is None:
-                continue
-            # If this name appears at the definition line in the
-            # defining file, skip it (it's the definition itself).
-            def_file, sym_name = key
-            if (str(Path(self.file_path).resolve()) == def_file
-                    and sym_name in self.local_def_lines):
-                try:
-                    pos = self.get_metadata(cst.metadata.PositionProvider, node)
-                    if pos.start.line == self.local_def_lines[sym_name]:
-                        continue
-                except KeyError:
-                    pass
-            self.referenced.add(key)
-
-    def visit_Name(self, node: cst.Name) -> None:
-        self._check_node(node)
-
-    def visit_Attribute(self, node: cst.Attribute) -> None:
-        # Catches module.symbol references like ast_commands.cmd_copy_to
-        self._check_node(node)
-
-    def _check_string(self, value: str) -> None:
-        """Check if a string literal contains any candidate symbol name."""
-        if not self.string_patterns:
-            return
-        for pattern, keys in self.string_patterns.items():
-            if pattern in value:
-                self.referenced.update(keys)
-
-    def visit_SimpleString(self, node: cst.SimpleString) -> None:
-        if self.string_patterns:
-            try:
-                val = node.evaluated_value
-                if isinstance(val, str):
-                    self._check_string(val)
-            except Exception:
-                pass
-
-    def visit_FormattedStringText(self, node: cst.FormattedStringText) -> None:
-        if self.string_patterns:
-            self._check_string(node.value)
 
 
 def _has_noqa_deadcode(source: str, line: int) -> bool:
