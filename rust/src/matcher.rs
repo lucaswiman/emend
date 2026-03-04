@@ -189,6 +189,24 @@ fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenera
     Ok(ComprehensionGenerator { target, iter, ifs })
 }
 
+/// Deserialize an optional list of pattern nodes from a Python dict under `key`.
+///
+/// Returns an empty `Vec` if `key` is absent; otherwise deserializes each item
+/// in the list via `deserialize_pattern`.
+fn deserialize_optional_pattern_list(d: &Bound<PyDict>, key: &str) -> PyResult<Vec<PatternNode>> {
+    match d.get_item(key)? {
+        None => Ok(Vec::new()),
+        Some(list_obj) => {
+            let list = list_obj.downcast::<PyList>()?;
+            let mut result = Vec::new();
+            for item in list.iter() {
+                result.push(deserialize_pattern(&item)?);
+            }
+            Ok(result)
+        }
+    }
+}
+
 fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
     let d = obj.downcast::<PyDict>()?;
     let type_str: String = d
@@ -325,16 +343,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                     _ => params.push(ParamPattern::Any),
                 }
             }
-            let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
-                let decs_list = decs_obj.downcast::<PyList>()?;
-                let mut decs = Vec::new();
-                for item in decs_list.iter() {
-                    decs.push(deserialize_pattern(&item)?);
-                }
-                decs
-            } else {
-                Vec::new()
-            };
+            let decorators = deserialize_optional_pattern_list(d, "decorators")?;
 
             Ok(PatternNode::FuncDef {
                 name: Box::new(name),
@@ -358,16 +367,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 bases.push(deserialize_pattern(&item)?);
             }
 
-            let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
-                let decs_list = decs_obj.downcast::<PyList>()?;
-                let mut decs = Vec::new();
-                for item in decs_list.iter() {
-                    decs.push(deserialize_pattern(&item)?);
-                }
-                decs
-            } else {
-                Vec::new()
-            };
+            let decorators = deserialize_optional_pattern_list(d, "decorators")?;
 
             Ok(PatternNode::ClassDef {
                 name: Box::new(name),
@@ -871,6 +871,40 @@ fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bo
     false
 }
 
+/// Match a single `ArgPattern` against a single call-argument node.
+///
+/// Returns `true` if the pattern matches the node, `false` otherwise.
+fn match_arg_pattern(pattern: &ArgPattern, node: Node, source: &[u8]) -> bool {
+    match pattern {
+        ArgPattern::Pattern(pnode) => matches_node(node, source, pnode),
+        ArgPattern::Star(pnode) => {
+            if node.kind() != "list_splat" {
+                return false;
+            }
+            let mut cursor = node.walk();
+            let inner = node.children(&mut cursor).find(|n| n.is_named());
+            if let Some(inner_node) = inner {
+                matches_node(inner_node, source, pnode)
+            } else {
+                false
+            }
+        }
+        ArgPattern::DoubleStar(pnode) => {
+            if node.kind() != "dictionary_splat" {
+                return false;
+            }
+            let mut cursor = node.walk();
+            let inner = node.children(&mut cursor).find(|n| n.is_named());
+            if let Some(inner_node) = inner {
+                matches_node(inner_node, source, pnode)
+            } else {
+                false
+            }
+        }
+        ArgPattern::Ellipsis => true,
+    }
+}
+
 /// Check if a list of arg patterns matches a list of call arg nodes.
 fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], exact: bool) -> bool {
     let has_ellipsis = arg_patterns.iter().any(|a| matches!(a, ArgPattern::Ellipsis));
@@ -887,41 +921,8 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
             if i >= call_args.len() {
                 return false;
             }
-            match pattern {
-                ArgPattern::Pattern(pnode) => {
-                    if !matches_node(call_args[i], source, pnode) {
-                        return false;
-                    }
-                }
-                ArgPattern::Star(pnode) => {
-                    if call_args[i].kind() != "list_splat" {
-                        return false;
-                    }
-                    let mut cursor = call_args[i].walk();
-                    let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
-                    if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                ArgPattern::DoubleStar(pnode) => {
-                    if call_args[i].kind() != "dictionary_splat" {
-                        return false;
-                    }
-                    let mut cursor = call_args[i].walk();
-                    let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
-                    if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                _ => return false,
+            if !match_arg_pattern(pattern, call_args[i], source) {
+                return false;
             }
         }
         return true;
@@ -952,41 +953,8 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
     'outer: for start in 0..=(call_args.len() - non_ellipsis.len()) {
         for (j, pattern) in non_ellipsis.iter().enumerate() {
             let node = call_args[start + j];
-            match pattern {
-                ArgPattern::Pattern(pnode) => {
-                    if !matches_node(node, source, pnode) {
-                        continue 'outer;
-                    }
-                }
-                ArgPattern::Star(pnode) => {
-                    if node.kind() != "list_splat" {
-                        continue 'outer;
-                    }
-                    let mut cursor = node.walk();
-                    let inner = node.children(&mut cursor).find(|n| n.is_named());
-                    if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
-                            continue 'outer;
-                        }
-                    } else {
-                        continue 'outer;
-                    }
-                }
-                ArgPattern::DoubleStar(pnode) => {
-                    if node.kind() != "dictionary_splat" {
-                        continue 'outer;
-                    }
-                    let mut cursor = node.walk();
-                    let inner = node.children(&mut cursor).find(|n| n.is_named());
-                    if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
-                            continue 'outer;
-                        }
-                    } else {
-                        continue 'outer;
-                    }
-                }
-                _ => continue 'outer,
+            if !match_arg_pattern(pattern, node, source) {
+                continue 'outer;
             }
         }
         return true;
