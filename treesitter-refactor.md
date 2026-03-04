@@ -987,9 +987,9 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 **1,610 lines**, 163 `cst.*` usages, 212 `m.*` matcher usages.
 
-#### Near-term: Remove LibCST from `_index_batch` entirely
+#### Near-term: Remove LibCST from `_index_batch` entirely (COMPLETED)
 
-- [ ] **Remove `parse_cache` dependency from `_index_batch`**.
+- [x] **Remove `parse_cache` dependency from `_index_batch`**.
 - [x] **Remove `_extract_all_exports(module)`**.
 - [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
 

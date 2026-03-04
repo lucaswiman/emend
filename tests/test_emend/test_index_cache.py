@@ -30,7 +30,7 @@ class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
     def test_cold_cache_indexes_file(self, tmp_path):
-        """First run writes parse, qn, symbol, import, and ref entries."""
+        """First run writes qn, symbol, import, and ref entries (no parse_cache)."""
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
@@ -39,7 +39,7 @@ class TestIndexBatchCacheHit:
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
-        assert parse_n == 1
+        assert parse_n == 0  # LibCST parse_cache is no longer populated by indexing
         assert qn_n == 1
         assert skipped == 0
         # SOURCE has one function "hello" — should have at least 1 symbol
@@ -72,10 +72,10 @@ class TestIndexBatchCacheHit:
         batch = [(str(tmp_path / "a.py"), SOURCE)]
 
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_cold = _db_row_count(db_path, "parse_cache")
+        rows_after_cold = _db_row_count(db_path, "qn_index")
 
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_warm = _db_row_count(db_path, "parse_cache")
+        rows_after_warm = _db_row_count(db_path, "qn_index")
 
         assert rows_after_cold == rows_after_warm == 1
 
@@ -128,7 +128,6 @@ class TestWarmCachesSkipped:
         stats = warm_caches(str(proj), type_engine=None)
 
         assert stats["skipped"] == 0
-        assert stats["parse_cached"] == 2
         assert stats["qn_cached"] == 2
 
     def test_warm_run_all_skipped(self, tmp_path):
@@ -140,7 +139,6 @@ class TestWarmCachesSkipped:
 
         stats = warm_caches(str(proj), type_engine=None)  # warm
         assert stats["skipped"] == 2
-        assert stats["parse_cached"] == 0
         assert stats["qn_cached"] == 0
 
     def test_warm_run_is_fast(self, tmp_path):

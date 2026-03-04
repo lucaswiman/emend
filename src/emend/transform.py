@@ -403,18 +403,19 @@ def _extract_noqa_lines(source: str) -> set[int]:
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
-    Runs in a subprocess.  Parses a batch of files, resolves qualified
-    names, collects symbol definitions, import relationships, and
-    reference entries, then writes directly to the SQLite disk cache.
+    Runs in a subprocess.  Resolves qualified names, collects symbol
+    definitions, import relationships, and reference entries, then
+    writes directly to the SQLite disk cache.
 
     Files whose content hash is already present in all cache tables are
-    skipped without parsing (cache-hit fast path).
+    skipped (cache-hit fast path).
 
     Args:
         args: (db_path, source_root, project_root, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count).
+        (0, qn_count, skipped_count, sym_count, import_count, ref_count).
+        Note: First return value is now always 0 (was parse_count).
     """
     import pickle
     import sqlite3
@@ -423,7 +424,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     from emend import emend_core as _rust
 
     db_path, source_root, project_root, file_batch = args
-    parse_rows: list[tuple[bytes, bytes]] = []
     qn_rows: list[tuple[bytes, bytes]] = []
     sym_rows: list[tuple] = []
     import_rows: list[tuple[bytes, str, str]] = []
@@ -443,7 +443,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     all_hashes = [h for h, _, _ in file_hashes]
 
     # Pre-check which hashes are already present in cache tables.
-    cached_parse: set[bytes] = set()
     cached_qn: set[bytes] = set()
     cached_sym: set[bytes] = set()
     cached_import: set[bytes] = set()
@@ -454,7 +453,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         conn_check.execute("PRAGMA synchronous=NORMAL")
         placeholders = ",".join("?" * len(all_hashes))
         for table, target_set in [
-            ("parse_cache", cached_parse),
             ("qn_index", cached_qn),
         ]:
             try:
@@ -490,33 +488,19 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     skipped = 0
     for content_hash, py_file, content in file_hashes:
-        need_parse = content_hash not in cached_parse
         need_qn = content_hash not in cached_qn
         need_sym = content_hash not in cached_sym
         need_import = content_hash not in cached_import
         need_ref = content_hash not in cached_ref
-        # Skip if the core caches (parse + QN) are populated.
+        # Skip if the core QN cache is populated.
         # The derived tables (symbol_index, import_graph, reference_index)
         # may legitimately have zero rows for a given file (e.g., a file
         # with only assignments has no symbols, a file with no imports has
         # no import_graph rows).  We re-derive them only when the core
-        # caches need updating.
-        if not need_parse and not need_qn:
+        # QN cache needs updating.
+        if not need_qn:
             skipped += 1
             continue
-
-        # LibCST parse is only needed for the parse_cache (other commands
-        # still use it).  QN, reference, and symbol indexing now use
-        # tree-sitter via the Rust scope resolver and emend_core.
-        if need_parse:
-            try:
-                module = cst.parse_module(content)
-                parse_blob = zlib.compress(
-                    pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
-                )
-                parse_rows.append((content_hash, parse_blob))
-            except Exception:
-                pass
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
@@ -616,17 +600,13 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
-    has_data = parse_rows or qn_rows or sym_rows or import_rows or ref_rows
+    has_data = qn_rows or sym_rows or import_rows or ref_rows
     if has_data:
         try:
             conn = sqlite3.connect(db_path, timeout=30)
             # Ensure schema exists (idempotent; normally pre-created by
             # warm_caches, but needed when _index_batch is called directly).
             _init_cache_schema(conn)
-            if parse_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", parse_rows
-                )
             if qn_rows:
                 conn.executemany(
                     "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
@@ -678,7 +658,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             pass
 
-    return (len(parse_rows), len(qn_rows), skipped,
+    return (0, len(qn_rows), skipped,
             len(sym_rows), len(import_rows), len(ref_rows))
 
 
@@ -1265,7 +1245,7 @@ def warm_caches(
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
     stats: dict[str, int | str] = {
-        "files": len(file_contents), "parse_cached": 0, "qn_cached": 0,
+        "files": len(file_contents), "qn_cached": 0,
         "skipped": 0, "sym_cached": 0, "import_cached": 0, "ref_cached": 0,
         "type_cached": 0, "type_engine": "",
     }
@@ -1298,10 +1278,9 @@ def warm_caches(
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
-        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n) in enumerate(
+        for batch_idx, (_, qn_n, skip_n, sym_n, import_n, ref_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
-            stats["parse_cached"] += parse_n
             stats["qn_cached"] += qn_n
             stats["skipped"] += skip_n
             stats["sym_cached"] += sym_n
@@ -1314,9 +1293,9 @@ def warm_caches(
                     callback("index", py_file)
 
     logger.info(
-        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d)",
+        "warm_caches: indexed %d files in %.3fs (qn=%d, sym=%d, import=%d, ref=%d)",
         stats["files"], time.monotonic() - t0,
-        stats["parse_cached"], stats["qn_cached"],
+        stats["qn_cached"],
         stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
     )
 
