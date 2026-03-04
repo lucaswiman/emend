@@ -836,10 +836,12 @@ fn match_generators(patterns: &[ComprehensionGenerator], nodes: &[Node], source:
 
 /// Check if a list of patterns matches a list of nodes, supporting Ellipsis.
 fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bool {
-    let has_ellipsis = patterns.iter().any(|p| matches!(p, PatternNode::Ellipsis));
-    if has_ellipsis && patterns.len() == 1 {
-        return true;
-    }
+    // Single pass: separate ellipsis from non-ellipsis patterns.
+    let non_ellipsis: Vec<&PatternNode> = patterns
+        .iter()
+        .filter(|p| !matches!(p, PatternNode::Ellipsis))
+        .collect();
+    let has_ellipsis = non_ellipsis.len() < patterns.len();
     if !has_ellipsis {
         if nodes.len() != patterns.len() {
             return false;
@@ -852,10 +854,6 @@ fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bo
         return true;
     }
     // Subsequence matching for mixed ellipsis
-    let non_ellipsis: Vec<&PatternNode> = patterns
-        .iter()
-        .filter(|p| !matches!(p, PatternNode::Ellipsis))
-        .collect();
     if non_ellipsis.is_empty() {
         return true;
     }
@@ -937,10 +935,6 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
 
     // General case: collect non-Ellipsis patterns in order
     // (Note: Star/DoubleStar patterns are also included in the subsequence check)
-    if call_args.len() < arg_patterns.iter().filter(|a| !matches!(a, ArgPattern::Ellipsis)).count() {
-        return false;
-    }
-
     let non_ellipsis: Vec<&ArgPattern> = arg_patterns
         .iter()
         .filter(|a| !matches!(a, ArgPattern::Ellipsis))
@@ -948,6 +942,10 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
 
     if non_ellipsis.is_empty() {
         return true;
+    }
+
+    if call_args.len() < non_ellipsis.len() {
+        return false;
     }
 
     // Find a contiguous window matching all non-ellipsis patterns in order

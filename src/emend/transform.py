@@ -526,9 +526,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 scope_indexed = True
             except Exception:
                 pass
-                scope_indexed = True
-            except Exception:
-                pass
 
         if need_qn and scope_indexed:
             try:
@@ -2045,6 +2042,19 @@ def visit_project(
         )
         file_contents = filtered_contents
 
+    def _cache_qnames_for_file(py_file: str, content: str) -> None:
+        """Cache qualified names from the Rust scope resolver (thread-safe)."""
+        try:
+            resolver = _rust.PyScopeResolver(project_root)
+            resolver.index_file(py_file, content)
+            all_qnames = set(resolver.all_qnames_in_file(py_file))
+            content_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            _store_qnames(content_hash, all_qnames)
+        except Exception:
+            pass
+
     if metadata_providers and len(file_contents) > 1:
         # Parallel path: each MetadataWrapper is independent per file — no shared state
         def _visit_one(args: tuple[str, str]) -> tuple[str, cst.Module, object] | None:
@@ -2056,20 +2066,8 @@ def visit_project(
                 visitor = visitor_factory(py_file, is_def_file)
                 wrapper = cst.metadata.MetadataWrapper(module)
                 result_module = wrapper.visit(visitor)
-                # Cache QN data as a side-effect.
                 if _uses_qnp:
-                    try:
-                        # Use tree-sitter via Rust scope resolver (faster, no LibCST)
-                        # Create a local resolver for this thread.
-                        resolver = _rust.PyScopeResolver(project_root)
-                        resolver.index_file(py_file, content)
-                        all_qnames = set(resolver.all_qnames_in_file(py_file))
-                        content_hash = hashlib.md5(
-                            content.encode(), usedforsecurity=False
-                        ).digest()
-                        _store_qnames(content_hash, all_qnames)
-                    except Exception:
-                        pass
+                    _cache_qnames_for_file(py_file, content)
                 return (py_file, result_module, visitor)
             except Exception:
                 return None
@@ -2096,19 +2094,8 @@ def visit_project(
                 if metadata_providers:
                     wrapper = cst.metadata.MetadataWrapper(module)
                     result_module = wrapper.visit(visitor)
-                    # Cache QN data
                     if _uses_qnp:
-                        try:
-                            # Use tree-sitter via Rust scope resolver
-                            resolver = _rust.PyScopeResolver(project_root)
-                            resolver.index_file(py_file, content)
-                            all_qnames = set(resolver.all_qnames_in_file(py_file))
-                            content_hash = hashlib.md5(
-                                content.encode(), usedforsecurity=False
-                            ).digest()
-                            _store_qnames(content_hash, all_qnames)
-                        except Exception:
-                            pass
+                        _cache_qnames_for_file(py_file, content)
                 else:
                     result_module = module.visit(visitor)
                 logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
@@ -4117,6 +4104,29 @@ class ConstrainedPatternFinder(cst.CSTVisitor):
         return True  # No constraint
 
 
+def _build_ref_map(
+    file_path: str, project_root: str, content: str,
+) -> dict[tuple[int, int], tuple[str, str]]:
+    """Build a (line, col) -> (qn, kind) map using PyScopeResolver."""
+    resolver = _rust.PyScopeResolver(project_root)
+    resolver.index_file(file_path, content)
+    refs = resolver.references_in_file(file_path)
+    ref_map: dict[tuple[int, int], tuple[str, str]] = {}
+    for qn, line, col, kind in refs:
+        ref_map[(line, col)] = (qn, kind)
+    return ref_map
+
+
+def _root_name_node(node: cst.CSTNode) -> cst.CSTNode:
+    """Walk to the leftmost Name node (for dotted access like json.loads)."""
+    root = node
+    while isinstance(root, cst.Call):
+        root = root.func
+    while isinstance(root, cst.Attribute):
+        root = root.value
+    return root
+
+
 def _filter_matches_by_import(
     matches: list[PatternMatch],
     imported_from: str,
@@ -4132,24 +4142,11 @@ def _filter_matches_by_import(
     Name node in each match. If the QN starts with ``imported_from.``, the
     match is kept.
     """
-    resolver = _rust.PyScopeResolver(project_root)
-    resolver.index_file(file_path, content)
-    refs = resolver.references_in_file(file_path)
-    
-    # Map (line, col) -> qn
-    ref_map = {}
-    for qn, line, col, kind in refs:
-        ref_map[(line, col)] = (qn, kind)
+    ref_map = _build_ref_map(file_path, project_root, content)
 
     filtered = []
     for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node (for dotted access like json.loads)
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
+        root_name = _root_name_node(match.node)
 
         if not isinstance(root_name, cst.Name):
             continue
@@ -4390,21 +4387,14 @@ def find_pattern(
             # Scope not found -- no matches
             matches = []
 
-    # Post-filter by import origin if requested
-    if imported_from is not None:
-        if position_provider is None:
-             # Should not happen if needs_wrapper was correct, but safe fallback
-             pass
-        else:
-            project_root = _find_project_root(file_path)
+    # Post-filter by import origin or scope locality
+    if (imported_from is not None or scope_local) and position_provider:
+        project_root = _find_project_root(file_path)
+        if imported_from is not None:
             matches = _filter_matches_by_import(
                 matches, imported_from, file_path, project_root, source_code, position_provider
             )
-
-    # Post-filter by scope locality if requested
-    if scope_local:
-        if position_provider:
-            project_root = _find_project_root(file_path)
+        if scope_local:
             matches = _filter_matches_by_scope_local(
                 matches, file_path, project_root, source_code, position_provider
             )
@@ -4433,24 +4423,12 @@ def _filter_matches_by_scope_local(
     Uses PyScopeResolver to check if the root Name node in each match
     is a definition or a reference to a local name.
     """
-    resolver = _rust.PyScopeResolver(project_root)
-    resolver.index_file(file_path, content)
-    refs = resolver.references_in_file(file_path)
-    
-    # Map (line, col) -> (qn, kind)
-    ref_map = {}
-    for qn, line, col, kind in refs:
-        ref_map[(line, col)] = (qn, kind)
+    ref_map = _build_ref_map(file_path, project_root, content)
+    module_path = _file_to_module(file_path, project_root)
 
     filtered = []
     for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
+        root_name = _root_name_node(match.node)
 
         if not isinstance(root_name, cst.Name):
             # Non-name matches are kept (e.g., literals)
@@ -4477,11 +4455,8 @@ def _filter_matches_by_scope_local(
         # For other references, we check if the QN starts with the current module path.
         if kind == "definition":
             filtered.append(match)
-        else:
-            module_root = _find_project_root(file_path)
-            module_path = _file_to_module(file_path, module_root)
-            if qn == module_path or qn.startswith(module_path + "."):
-                filtered.append(match)
+        elif qn == module_path or qn.startswith(module_path + "."):
+            filtered.append(match)
 
     return filtered
 
@@ -5144,7 +5119,8 @@ class ScopedPatternReplacer(PatternReplacer):
 
 
 def remove_symbol(
-selector: ExtendedSelector, apply: bool = False) -> str:
+    selector: ExtendedSelector, apply: bool = False,
+) -> str:
     """Remove a symbol (function, class) from a file.
 
     Args:
@@ -5834,8 +5810,8 @@ def find_references(
 
     # scan_root: where to collect files (respects --project for scope limiting)
     # module_root: project root for computing dotted module names (always git root)
-    scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
+    scan_root = project_path if project_path else module_root
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
 
@@ -5941,10 +5917,8 @@ def find_callers(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callers")
 
-    # scan_root: where to collect files (respects --project for scope limiting)
-    # module_root: project root for computing dotted module names (always git root)
-    scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
+    scan_root = project_path if project_path else module_root
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
 

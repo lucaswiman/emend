@@ -1213,6 +1213,41 @@ def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, Met
     return temp_code, metavar_map
 
 
+def _compile_generators_to_ir(
+    for_in, metavar_map: dict[str, MetaVar],
+) -> list[dict] | None:
+    """Compile comprehension generators to Rust IR dicts."""
+    generators_ir: list[dict] = []
+    for gen in for_in:
+        target_ir = _cst_to_rust_ir(gen.target, metavar_map)
+        if target_ir is None:
+            return None
+        iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
+        if iter_ir is None:
+            return None
+        ifs_ir: list[dict] = []
+        for if_clause in gen.ifs:
+            if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
+            if if_ir is None:
+                return None
+            ifs_ir.append(if_ir)
+        generators_ir.append({"target": target_ir, "iter": iter_ir, "ifs": ifs_ir})
+    return generators_ir
+
+
+def _compile_decorators_to_ir(
+    decorators, metavar_map: dict[str, MetaVar],
+) -> list[dict] | None:
+    """Compile decorators to Rust IR dicts."""
+    decorators_ir: list[dict] = []
+    for dec in decorators:
+        dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
+        if dec_ir is None:
+            return None
+        decorators_ir.append(dec_ir)
+    return decorators_ir
+
+
 def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict | None:
     """Convert a LibCST node to a Rust IR dict.
 
@@ -1317,13 +1352,9 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         if name_ir is None:
             return None
 
-        # Decorators support
-        decorators_ir = []
-        for dec in node.decorators:
-            dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
-            if dec_ir is None:
-                return None
-            decorators_ir.append(dec_ir)
+        decorators_ir = _compile_decorators_to_ir(node.decorators, metavar_map)
+        if decorators_ir is None:
+            return None
 
         params = node.params
         param_patterns = []
@@ -1388,13 +1419,9 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         if name_ir is None:
             return None
 
-        # Decorators support
-        decorators_ir = []
-        for dec in node.decorators:
-            dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
-            if dec_ir is None:
-                return None
-            decorators_ir.append(dec_ir)
+        decorators_ir = _compile_decorators_to_ir(node.decorators, metavar_map)
+        if decorators_ir is None:
+            return None
 
         bases_ir = []
         for base_arg in node.bases:
@@ -1548,35 +1575,17 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         elt_ir = _cst_to_rust_ir(node.elt, metavar_map)
         if elt_ir is None:
             return None
-        
-        generators_ir = []
-        for gen in node.for_in:
-            target_ir = _cst_to_rust_ir(gen.target, metavar_map)
-            if target_ir is None:
-                return None
-            iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
-            if iter_ir is None:
-                return None
-            
-            ifs_ir = []
-            for if_clause in gen.ifs:
-                if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
-                if if_ir is None:
-                    return None
-                ifs_ir.append(if_ir)
-            
-            generators_ir.append({
-                "target": target_ir,
-                "iter": iter_ir,
-                "ifs": ifs_ir
-            })
-        
+
+        generators_ir = _compile_generators_to_ir(node.for_in, metavar_map)
+        if generators_ir is None:
+            return None
+
         kind = "list_comprehension"
         if isinstance(node, cst.SetComp):
             kind = "set_comprehension"
         elif isinstance(node, cst.GeneratorExp):
             kind = "generator_expression"
-            
+
         return {
             "type": "comprehension",
             "kind": kind,
@@ -1591,29 +1600,11 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         value_ir = _cst_to_rust_ir(node.value, metavar_map)
         if value_ir is None:
             return None
-        
-        generators_ir = []
-        for gen in node.for_in:
-            target_ir = _cst_to_rust_ir(gen.target, metavar_map)
-            if target_ir is None:
-                return None
-            iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
-            if iter_ir is None:
-                return None
-            
-            ifs_ir = []
-            for if_clause in gen.ifs:
-                if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
-                if if_ir is None:
-                    return None
-                ifs_ir.append(if_ir)
-            
-            generators_ir.append({
-                "target": target_ir,
-                "iter": iter_ir,
-                "ifs": ifs_ir
-            })
-            
+
+        generators_ir = _compile_generators_to_ir(node.for_in, metavar_map)
+        if generators_ir is None:
+            return None
+
         return {
             "type": "dict_comprehension",
             "key": key_ir,
