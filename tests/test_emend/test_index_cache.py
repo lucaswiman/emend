@@ -30,15 +30,16 @@ class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
     def test_cold_cache_indexes_file(self, tmp_path):
-        """First run writes qn, symbol, import, and ref entries."""
+        """First run writes parse, qn, symbol, import, and ref entries."""
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        _, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
+        assert parse_n == 1
         assert qn_n == 1
         assert skipped == 0
         # SOURCE has one function "hello" — should have at least 1 symbol
@@ -55,9 +56,10 @@ class TestIndexBatchCacheHit:
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         # Warm run — must skip
-        _, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
+        assert parse_n == 0
         assert qn_n == 0
         assert sym_n == 0
         assert skipped == 1
@@ -70,12 +72,42 @@ class TestIndexBatchCacheHit:
         batch = [(str(tmp_path / "a.py"), SOURCE)]
 
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_cold = _db_row_count(db_path, "qn_index")
+        rows_after_cold = _db_row_count(db_path, "parse_cache")
 
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_warm = _db_row_count(db_path, "qn_index")
+        rows_after_warm = _db_row_count(db_path, "parse_cache")
 
         assert rows_after_cold == rows_after_warm == 1
+
+    def test_partial_cache_only_missing_part_indexed(self, tmp_path):
+        """If only parse is cached (not qn), only qn is added on second run."""
+        import hashlib
+        import pickle
+        import zlib
+        import libcst as cst
+
+        from emend.transform import _index_batch
+
+        db_path = tmp_path / "parse.db"
+        content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
+
+        # Pre-populate parse_cache but NOT qn_index
+        module = cst.parse_module(SOURCE)
+        blob = zlib.compress(pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE parse_cache (hash BLOB PRIMARY KEY, data BLOB)")
+        conn.execute("INSERT INTO parse_cache VALUES (?, ?)", (content_hash, blob))
+        conn.commit()
+        conn.close()
+
+        batch = [(str(tmp_path / "a.py"), SOURCE)]
+        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+            (str(db_path), str(tmp_path), str(tmp_path), batch)
+        )
+
+        assert parse_n == 0  # already cached
+        assert qn_n == 1    # was missing, now added
+        assert skipped == 0  # not fully cached, so not counted as skipped
 
 
 class TestWarmCachesSkipped:
@@ -96,6 +128,7 @@ class TestWarmCachesSkipped:
         stats = warm_caches(str(proj), type_engine=None)
 
         assert stats["skipped"] == 0
+        assert stats["parse_cached"] == 2
         assert stats["qn_cached"] == 2
 
     def test_warm_run_all_skipped(self, tmp_path):
@@ -107,6 +140,7 @@ class TestWarmCachesSkipped:
 
         stats = warm_caches(str(proj), type_engine=None)  # warm
         assert stats["skipped"] == 2
+        assert stats["parse_cached"] == 0
         assert stats["qn_cached"] == 0
 
     def test_warm_run_is_fast(self, tmp_path):

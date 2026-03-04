@@ -989,9 +989,10 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 #### Near-term: Remove LibCST from `_index_batch` entirely (COMPLETED)
 
-- [x] **Remove `parse_cache` dependency from `_index_batch`**.
+- [x] **Stop relying on LibCST for metadata indexing**. (QN, symbol, and reference indexing now use Tree-sitter, bypassing slow MetadataWrapper).
 - [x] **Remove `_extract_all_exports(module)`**.
 - [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
+- [ ] **Optional: Remove `parse_cache` population**. (Deferred: keeping LibCST parse cache for refactoring performance until mutation commands are fully migrated).
 
 #### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`)
 
