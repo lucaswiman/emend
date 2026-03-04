@@ -2179,122 +2179,6 @@ def visit_project_ts(
     logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
 
 
-class SymbolFinder(cst.CSTVisitor):
-    """Visitor to find a symbol by path in the CST."""
-
-    def __init__(self, target_path: list[str]):
-        self.target_path = target_path
-        self.current_path: list[str] = []
-        self.found_node: cst.FunctionDef | cst.ClassDef | None = None
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        if self.current_path == self.target_path:
-            self.found_node = node
-            return False  # Stop traversal
-        return True
-
-    def leave_ClassDef(self, node: cst.ClassDef) -> None:
-        """Leave class definition."""
-        if self.current_path:
-            self.current_path.pop()
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        if self.current_path == self.target_path:
-            self.found_node = node
-            return False  # Stop traversal
-        return True
-
-    def leave_FunctionDef(self, node: cst.FunctionDef) -> None:
-        """Leave function definition."""
-        if self.current_path:
-            self.current_path.pop()
-
-
-def _get_all_params(params: cst.Parameters) -> list[cst.Param]:
-    """Get all parameters from a Parameters node."""
-    all_params = []
-    if hasattr(params, 'posonly_params'):
-        all_params.extend(params.posonly_params)
-    all_params.extend(params.params)
-    if params.star_arg and isinstance(params.star_arg, cst.Param):
-        all_params.append(params.star_arg)
-    all_params.extend(params.kwonly_params)
-    if params.star_kwarg:
-        all_params.append(params.star_kwarg)
-    return all_params
-
-
-def _param_to_string(param: cst.Param) -> str:
-    """Convert parameter to string without trailing comma."""
-    # Remove the trailing comma from the parameter
-    param_without_comma = param.with_changes(comma=cst.MaybeSentinel.DEFAULT)
-    return cst.Module([]).code_for_node(param_without_comma).strip()
-
-
-def _find_param_by_name(params: list[cst.Param], name: str) -> cst.Param | None:
-    """Find a parameter by name."""
-    for param in params:
-        if param.name.value == name:
-            return param
-    return None
-
-
-def _get_decorator_name(decorator: cst.Decorator) -> str:
-    """Extract decorator name from decorator node."""
-    dec = decorator.decorator
-    if isinstance(dec, cst.Name):
-        return dec.value
-    elif isinstance(dec, cst.Attribute):
-        # For @module.decorator
-        return cst.Module([]).code_for_node(dec).strip()
-    elif isinstance(dec, cst.Call):
-        # For @decorator() or @decorator(args)
-        if isinstance(dec.func, cst.Name):
-            return dec.func.value
-        elif isinstance(dec.func, cst.Attribute):
-            return cst.Module([]).code_for_node(dec.func).strip()
-    return ""
-
-
-def _find_decorator_by_name(decorators: list[cst.Decorator], name: str) -> cst.Decorator | None:
-    """Find a decorator by name."""
-    for decorator in decorators:
-        dec_name = _get_decorator_name(decorator)
-        if dec_name == name:
-            return decorator
-    return None
-
-
-def _get_base_name(base: cst.Arg) -> str:
-    """Extract base class name from base argument."""
-    return cst.Module([]).code_for_node(base.value).strip()
-
-
-def _find_base_by_name(bases: list[cst.Arg], name: str) -> cst.Arg | None:
-    """Find a base class by name."""
-    for base in bases:
-        if _get_base_name(base) == name:
-            return base
-    return None
-
-
-def _get_imports(module: cst.Module) -> str:
-    """Extract all import statements from a module."""
-    imports = []
-    for stmt in module.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            # Check if it contains import statements
-            for item in stmt.body:
-                if isinstance(item, (cst.Import, cst.ImportFrom)):
-                    imports.append(module.code_for_node(stmt).strip())
-                    break
-    return "\n".join(imports)
-
-
 def _add_import(
     module: cst.Module,
     import_str: str,
@@ -2386,158 +2270,62 @@ def get_component(selector: ExtendedSelector) -> str:
         ValueError: If symbol not found, invalid component for symbol type,
                    or accessor not found
     """
-    # Read and parse file
+    # Read file
     file_path = Path(selector.file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
     source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
 
     # Handle module-level components (empty symbol_path)
     if not selector.symbol_path:
         if selector.component == "imports":
+            # For now, keep LibCST for module-level imports if it's easier,
+            # but we can also use tree-sitter.
+            module = cst.parse_module(source_code)
             return _get_imports(module)
         else:
             raise ValueError(f"Component '{selector.component}' requires a symbol path")
 
-    # Find target symbol
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
+    # Get the range for the component using Rust accelerator
+    range_info = _rust.get_symbol_component_range(
+        source_code,
+        selector.symbol_path,
+        selector.component,
+        selector.accessor
+    )
 
-    if finder.found_node is None:
-        raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
+    if range_info is None:
+        # Check if symbol exists at all
+        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        if not syms:
+             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
+        
+        # Symbol exists but component not found
+        kind = syms[0]["kind"]
+        if kind == "class" and selector.component in ("params", "returns"):
+            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+        
+        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
 
-    node = finder.found_node
+    start_byte, end_byte = range_info
+    
+    # For returns, Rust returns an insertion point if it's not there.
+    # get_component should raise error if it's truly not there.
+    if selector.component == "returns" and start_byte == end_byte:
+         raise ValueError(f"Function {'.'.join(selector.symbol_path)} has no return annotation")
 
-    # Extract component value
-    component = selector.component
-    accessor = selector.accessor
+    result = source_code.encode('utf-8')[start_byte:end_byte].decode('utf-8')
 
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
-        if component in ("params", "returns"):
-            raise ValueError(f"Component '{component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
-        if component == "bases":
-            raise ValueError(f"Component '{component}' not valid for FunctionDef")
-
-    # Extract component
-    if component == "params":
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'params' not valid for {type(node).__name__}")
-
-        all_params = _get_all_params(node.params)
-
-        if accessor is None:
-            # Return all params comma-separated, including * separator
-            if not all_params:
-                return ""
-
-            # Build complete params string including / and * separators
-            parts = []
-
-            # Positional-only params (before /)
-            if hasattr(node.params, 'posonly_params') and node.params.posonly_params:
-                for p in node.params.posonly_params:
-                    parts.append(_param_to_string(p))
-                parts.append("/")
-
-            # Regular params
-            for p in node.params.params:
-                parts.append(_param_to_string(p))
-
-            # Star arg - could be *args (Param) or bare * (ParamStar)
-            if node.params.star_arg is not None:
-                if isinstance(node.params.star_arg, cst.Param):
-                    parts.append(_param_to_string(node.params.star_arg))
-                elif isinstance(node.params.star_arg, cst.ParamStar):
-                    parts.append("*")
-
-            # Keyword-only params
-            for p in node.params.kwonly_params:
-                parts.append(_param_to_string(p))
-
-            # Star kwarg (**kwargs)
-            if node.params.star_kwarg:
-                parts.append(_param_to_string(node.params.star_kwarg))
-
-            return ", ".join(parts)
-        elif isinstance(accessor, int):
-            # Return param by index
-            try:
-                return _param_to_string(all_params[accessor])
-            except IndexError as e:
-                raise ValueError(f"Parameter index {accessor} out of range") from e
-        else:
-            # Return param by name
-            param = _find_param_by_name(all_params, accessor)
-            if param is None:
-                raise ValueError(f"Parameter '{accessor}' not found")
-            return _param_to_string(param)
-
-    elif component == "returns":
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'returns' not valid for {type(node).__name__}")
-
-        if node.returns is None:
-            raise ValueError(f"Function {'.'.join(selector.symbol_path)} has no return annotation")
-
-        return cst.Module([]).code_for_node(node.returns.annotation).strip()
-
-    elif component == "decorators":
-        decorators = list(node.decorators) if hasattr(node, 'decorators') else []
-
-        if accessor is None:
-            # Return all decorators newline-separated
-            if not decorators:
-                return ""
-            return "\n".join(cst.Module([]).code_for_node(d).strip() for d in decorators)
-        elif isinstance(accessor, int):
-            # Return decorator by index
-            try:
-                return cst.Module([]).code_for_node(decorators[accessor]).strip()
-            except IndexError as e:
-                raise ValueError(f"Decorator index {accessor} out of range") from e
-        else:
-            # Return decorator by name
-            decorator = _find_decorator_by_name(decorators, accessor)
-            if decorator is None:
-                raise ValueError(f"Decorator '{accessor}' not found")
-            return cst.Module([]).code_for_node(decorator).strip()
-
-    elif component == "bases":
-        if not isinstance(node, cst.ClassDef):
-            raise ValueError(f"Component 'bases' not valid for {type(node).__name__}")
-
-        bases = list(node.bases)
-
-        if accessor is None:
-            # Return all bases comma-separated
-            if not bases:
-                return ""
-            return ", ".join(_get_base_name(b) for b in bases)
-        elif isinstance(accessor, int):
-            # Return base by index
-            try:
-                return _get_base_name(bases[accessor])
-            except IndexError as e:
-                raise ValueError(f"Base class index {accessor} out of range") from e
-        else:
-            # Return base by name
-            base = _find_base_by_name(bases, accessor)
-            if base is None:
-                raise ValueError(f"Base class '{accessor}' not found")
-            return _get_base_name(base)
-
-    elif component == "body":
-        # Return body with indentation preserved
-        body_code = cst.Module([]).code_for_node(node.body)
-        # Strip leading and trailing newlines but preserve indentation
-        return body_code.strip('\n').rstrip()
-
-    else:
-        raise ValueError(f"Unknown component: {component}")
+    if selector.component == "returns":
+        # Robustly remove -> and whitespace
+        return result.strip().lstrip("->").strip()
+    elif selector.component == "body":
+        return result.strip('\n').rstrip()
+    
+    return result.strip()
 
 
 def _generate_diff(file_path: str, old_code: str, new_code: str) -> str:
@@ -2551,357 +2339,62 @@ def _generate_diff(file_path: str, old_code: str, new_code: str) -> str:
     ))
 
 
-def _parse_params(param_str: str) -> cst.Parameters:
-    """Parse comma-separated params into Parameters node."""
-    if not param_str.strip():
-        return cst.Parameters()
-    code = f'def _({param_str}): pass'
-    module = cst.parse_module(code)
-    return module.body[0].params
-
-
-def _parse_param(param_str: str) -> cst.Param:
-    """Parse single parameter string into Param node."""
-    code = f'def _({param_str}): pass'
-    module = cst.parse_module(code)
-    return module.body[0].params.params[0].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-
-
-def _parse_decorator(dec_str: str) -> cst.Decorator:
-    """Parse decorator string (with @) into Decorator node."""
-    if not dec_str.startswith('@'):
-        dec_str = '@' + dec_str
-    code = f'{dec_str}\ndef _(): pass'
-    module = cst.parse_module(code)
-    return module.body[0].decorators[0]
-
-
-def _parse_base(base_str: str) -> cst.Arg:
-    """Parse base class string into Arg node."""
-    code = f'class _({base_str}): pass'
-    module = cst.parse_module(code)
-    return module.body[0].bases[0]
-
-
-def _parse_body(body_str: str) -> cst.IndentedBlock:
-    """Parse body string into IndentedBlock."""
-    code = f'def _():\n{body_str}'
-    module = cst.parse_module(code)
-    return module.body[0].body
-
-
-class ComponentSetter(cst.CSTTransformer):
-    """Transformer to set component values on a target symbol."""
-
-    def __init__(self, target_path: list[str], component: str,
-                 accessor: str | int | None, new_value: str):
-        self.target_path = target_path
-        self.component = component
-        self.accessor = accessor
-        self.new_value = new_value
-        self.current_path: list[str] = []
-        self.modified = False
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-        """Leave class definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-        """Leave function definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def _modify_node(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify node based on component and accessor."""
-        self.modified = True
-
-        if self.component == "params":
-            return self._modify_params(node)
-        elif self.component == "returns":
-            return self._modify_returns(node)
-        elif self.component == "decorators":
-            return self._modify_decorators(node)
-        elif self.component == "bases":
-            return self._modify_bases(node)
-        elif self.component == "body":
-            return self._modify_body(node)
-
-        return node
-
-    def _modify_params(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify function parameters."""
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'params' not valid for {type(node).__name__}")
-
-        if self.accessor is None:
-            # Replace all params
-            new_params = _parse_params(self.new_value)
-            return node.with_changes(params=new_params)
-        else:
-            # Replace specific param
-            all_params = _get_all_params(node.params)
-
-            # Find the param to replace
-            if isinstance(self.accessor, int):
-                if self.accessor < 0 or self.accessor >= len(all_params):
-                    raise ValueError(f"Parameter index {self.accessor} out of range")
-                target_idx = self.accessor
-            else:
-                # Find by name
-                param = _find_param_by_name(all_params, self.accessor)
-                if param is None:
-                    raise ValueError(f"Parameter '{self.accessor}' not found")
-                target_idx = all_params.index(param)
-
-            # Parse new param
-            new_param = _parse_param(self.new_value)
-
-            # Build new params lists
-            new_posonly_list = []
-            new_params_list = []
-            new_kwonly_list = []
-            new_star_arg = node.params.star_arg
-            new_star_kwarg = node.params.star_kwarg
-
-            # Determine which list the target is in
-            posonly_count = len(node.params.posonly_params) if hasattr(node.params, 'posonly_params') else 0
-            regular_count = len(node.params.params)
-            star_arg_count = 1 if node.params.star_arg and isinstance(node.params.star_arg, cst.Param) else 0
-            kwonly_count = len(node.params.kwonly_params)
-
-            if target_idx < posonly_count:
-                # Target is in posonly_params
-                for i, p in enumerate(node.params.posonly_params):
-                    if i == target_idx:
-                        new_posonly_list.append(new_param)
-                    else:
-                        new_posonly_list.append(p)
-            elif target_idx < posonly_count + regular_count:
-                # Target is in regular params
-                regular_idx = target_idx - posonly_count
-                for i, p in enumerate(node.params.params):
-                    if i == regular_idx:
-                        new_params_list.append(new_param)
-                    else:
-                        new_params_list.append(p)
-            elif target_idx < posonly_count + regular_count + star_arg_count:
-                # Target is star_arg
-                new_star_arg = new_param
-            elif target_idx < posonly_count + regular_count + star_arg_count + kwonly_count:
-                # Target is in kwonly_params
-                kwonly_idx = target_idx - posonly_count - regular_count - star_arg_count
-                for i, p in enumerate(node.params.kwonly_params):
-                    if i == kwonly_idx:
-                        new_kwonly_list.append(new_param)
-                    else:
-                        new_kwonly_list.append(p)
-            else:
-                # Target is star_kwarg
-                new_star_kwarg = new_param
-
-            posonly = new_posonly_list if new_posonly_list else (list(node.params.posonly_params) if hasattr(node.params, 'posonly_params') else [])
-            params_kwargs = dict(
-                params=new_params_list if new_params_list else node.params.params,
-                star_arg=new_star_arg,
-                kwonly_params=new_kwonly_list if new_kwonly_list else node.params.kwonly_params,
-                star_kwarg=new_star_kwarg,
-            )
-            if hasattr(cst.Parameters, 'posonly_params'):
-                params_kwargs['posonly_params'] = posonly
-            return node.with_changes(params=cst.Parameters(**params_kwargs))
-
-    def _modify_returns(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify function return annotation."""
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'returns' not valid for {type(node).__name__}")
-
-        if not self.new_value.strip():
-            # Remove return annotation
-            return node.with_changes(returns=None)
-        else:
-            # Set or update return annotation
-            # Parse the annotation by creating a temporary function
-            code = f'def _() -> {self.new_value}: pass'
-            module = cst.parse_module(code)
-            new_returns = module.body[0].returns
-            return node.with_changes(returns=new_returns)
-
-    def _modify_decorators(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify decorators."""
-        if self.accessor is None:
-            # Replace all decorators
-            if not self.new_value.strip():
-                return node.with_changes(decorators=[])
-
-            # Parse multiple decorators - split on lines that start with @
-            # This preserves multiline decorators
-            decorator_strings = []
-            current_decorator = []
-            for line in self.new_value.split('\n'):
-                if line.strip().startswith('@'):
-                    # Start of new decorator
-                    if current_decorator:
-                        decorator_strings.append('\n'.join(current_decorator))
-                    current_decorator = [line]
-                else:
-                    # Continuation of current decorator
-                    if current_decorator:
-                        current_decorator.append(line)
-            # Don't forget the last decorator
-            if current_decorator:
-                decorator_strings.append('\n'.join(current_decorator))
-
-            new_decorators = []
-            for dec_str in decorator_strings:
-                new_decorators.append(_parse_decorator(dec_str.strip()))
-            return node.with_changes(decorators=new_decorators)
-        else:
-            # Replace specific decorator
-            decorators = list(node.decorators)
-
-            # Find the decorator to replace
-            if isinstance(self.accessor, int):
-                if self.accessor < 0 or self.accessor >= len(decorators):
-                    raise ValueError(f"Decorator index {self.accessor} out of range")
-                target_idx = self.accessor
-            else:
-                # Find by name
-                decorator = _find_decorator_by_name(decorators, self.accessor)
-                if decorator is None:
-                    raise ValueError(f"Decorator '{self.accessor}' not found")
-                target_idx = decorators.index(decorator)
-
-            # Parse new decorator
-            new_decorator = _parse_decorator(self.new_value)
-
-            # Replace decorator at target index
-            new_decorators = decorators[:target_idx] + [new_decorator] + decorators[target_idx + 1:]
-            return node.with_changes(decorators=new_decorators)
-
-    def _modify_bases(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify class base classes."""
-        if not isinstance(node, cst.ClassDef):
-            raise ValueError(f"Component 'bases' not valid for {type(node).__name__}")
-
-        if self.accessor is None:
-            # Replace all bases
-            if not self.new_value.strip():
-                return node.with_changes(bases=[])
-
-            # Parse multiple bases
-            code = f'class _({self.new_value}): pass'
-            module = cst.parse_module(code)
-            new_bases = list(module.body[0].bases)
-            return node.with_changes(bases=new_bases)
-        else:
-            # Replace specific base
-            bases = list(node.bases)
-
-            # Find the base to replace
-            if isinstance(self.accessor, int):
-                if self.accessor < 0 or self.accessor >= len(bases):
-                    raise ValueError(f"Base class index {self.accessor} out of range")
-                target_idx = self.accessor
-            else:
-                # Find by name
-                base = _find_base_by_name(bases, self.accessor)
-                if base is None:
-                    raise ValueError(f"Base class '{self.accessor}' not found")
-                target_idx = bases.index(base)
-
-            # Parse new base
-            new_base = _parse_base(self.new_value)
-
-            # Replace base at target index
-            new_bases = bases[:target_idx] + [new_base] + bases[target_idx + 1:]
-            return node.with_changes(bases=new_bases)
-
-    def _modify_body(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify function or class body."""
-        new_body = _parse_body(self.new_value)
-        return node.with_changes(body=new_body)
-
-
 def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -> str:
-    """Set value of component. Returns diff.
-
-    Args:
-        selector: Extended selector with component specified
-        value: New value for the component
-        apply: If True, write changes to file. If False, return diff only.
-
-    Returns:
-        Unified diff showing the changes
-
-    Example:
-        >>> sel = parse_extended_selector("file.py::func[returns]")
-        >>> diff = set_component(sel, "int", apply=False)
-        >>> print(diff)
-        --- file.py
-        +++ file.py
-        @@ -1,3 +1,3 @@
-        -def func() -> None:
-        +def func() -> int:
-             pass
-
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        ValueError: If symbol not found, invalid component for symbol type,
-                   or accessor not found
-    """
-    # Read and parse file
+    """Set value of component. Returns diff."""
+    # Read file
     file_path = Path(selector.file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
     source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
-        raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
-        if selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
-        if selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-    # Apply transformation
-    transformer = ComponentSetter(
+    # Get the range for the component using Rust accelerator
+    range_info = _rust.get_symbol_component_range(
+        source_code,
         selector.symbol_path,
         selector.component,
-        selector.accessor,
-        value
+        selector.accessor
     )
-    new_module = module.visit(transformer)
-    new_code = new_module.code
+
+    if range_info is None:
+        # Check if symbol exists at all
+        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        if not syms:
+             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
+        
+        # Match old error messages for invalid components
+        kind = syms[0]["kind"]
+        if kind == "class" and selector.component in ("params", "returns"):
+            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+
+        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+
+    start_byte, end_byte = range_info
+
+    # Prepare the replacement value
+    replacement = value
+    if selector.component == "returns" and value.strip() and not value.strip().startswith("->"):
+        replacement = f" -> {value.strip()}"
+    elif selector.component == "decorators" and value.strip() and not value.strip().startswith("@"):
+        # If it's a single decorator without @, add it
+        if "\n" not in value.strip():
+            replacement = f"@{value.strip()}"
+    elif selector.component == "body":
+        # Ensure it starts with a newline and is indented if it's a block
+        if not value.startswith("\n"):
+            # Simple heuristic: find indentation of the def/class line
+            # or just assume 4 spaces
+            replacement = "\n    " + value.strip().replace("\n", "\n    ")
+
+    # Apply transformation using Rust FileTransform
+    transform = _rust.PyFileTransform(source_code)
+    transform.replace_range(start_byte, end_byte, replacement)
+    
+    new_code = transform.apply()
+    if new_code is None:
+        raise RuntimeError("Failed to apply transformation (overlapping edits)")
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -3230,36 +2723,7 @@ def add_to_component(
     apply: bool = False,
     kind: str | None = None
 ) -> str:
-    """Add item to list component. Returns diff.
-
-    Args:
-        selector: Extended selector with list component (params, decorators, bases)
-        value: Item to add to the list
-        position: Index to insert at (-1 for append)
-        before: Name of item to insert before (mutually exclusive with after)
-        after: Name of item to insert after (mutually exclusive with before)
-        apply: If True, write changes to file. If False, return diff only.
-        kind: For params component, specifies parameter kind (POSITIONAL_ONLY, POSITIONAL_OR_KEYWORD, KEYWORD_ONLY)
-
-    Returns:
-        Unified diff showing the changes
-
-    Example:
-        >>> sel = parse_extended_selector("file.py::func[params]")
-        >>> diff = add_to_component(sel, "debug: bool = False", position=-1, apply=False)
-        >>> print(diff)
-        --- file.py
-        +++ file.py
-        @@ -1,3 +1,3 @@
-        -def func(ctx, request):
-        +def func(ctx, request, debug: bool = False):
-             pass
-
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        ValueError: If selector has accessor, component is not a list type,
-                   or symbol not found
-    """
+    """Add item to list component. Returns diff."""
     # Validate mutually exclusive position options
     if before is not None and after is not None:
         raise ValueError("Cannot specify both --before and --after")
@@ -3279,47 +2743,202 @@ def add_to_component(
         if kind not in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY"):
             raise ValueError(f"Invalid kind value: {kind}. Must be one of: POSITIONAL_ONLY, POSITIONAL_OR_KEYWORD, KEYWORD_ONLY")
 
-    # Read and parse file
+    # Read file
     file_path = Path(selector.file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
     source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
 
     # Handle module-level imports component
     if selector.component == "imports" and not selector.symbol_path:
+        module = cst.parse_module(source_code)
         return _add_import(module, value, position, file_path, apply, source_code)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
-        raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
-        if selector.component == "params":
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
-        if selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-    # Apply transformation
-    transformer = ComponentAdder(
+    # Get items and their ranges
+    items_info = _rust.get_symbol_component_list_items(
+        source_code,
         selector.symbol_path,
-        selector.component,
-        value,
-        position,
-        before,
-        after,
-        kind
+        selector.component
     )
-    new_module = module.visit(transformer)
-    new_code = new_module.code
+
+    if items_info is None:
+        # Check if symbol exists at all
+        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        if not syms:
+             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
+        
+        # Symbol exists but component not found
+        sym_kind = syms[0]["kind"]
+        if sym_kind == "class" and selector.component == "params":
+            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+        elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+        
+        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+
+    # Calculate insertion index in the items list
+    items = [item[0] for item in items_info]
+    insert_idx = -1
+
+    if before is not None:
+        try:
+            insert_idx = items.index(before)
+        except ValueError:
+            raise ValueError(f"{selector.component.capitalize()[:-1]} '{before}' not found")
+    elif after is not None:
+        try:
+            insert_idx = items.index(after) + 1
+        except ValueError:
+            raise ValueError(f"{selector.component.capitalize()[:-1]} '{after}' not found")
+    elif position == -1:
+        insert_idx = len(items)
+    else:
+        insert_idx = position
+
+    # Determine insertion byte offset
+    transform = _rust.PyFileTransform(source_code)
+    
+    # Handle decorators doubling @
+    val_to_add = value.strip()
+    if selector.component == "decorators" and val_to_add.startswith("@"):
+        val_to_add = val_to_add[1:]
+
+    # Insert at insert_idx
+    if not items_info:
+        # Empty container
+        replacement = val_to_add
+        if selector.component == "decorators":
+            # If adding first decorator, get_symbol_component_range returns the start of 'def'
+            replacement = f"@{val_to_add}\n"
+        elif selector.component == "bases":
+            replacement = f"({val_to_add})"
+        elif selector.component == "params":
+            target_kind = kind or selector.pseudo_class
+            if target_kind == "KEYWORD_ONLY":
+                replacement = f"*, {val_to_add}"
+            elif target_kind == "POSITIONAL_ONLY":
+                replacement = f"{val_to_add}, /"
+            else:
+                replacement = val_to_add
+        
+        # Get the container range again to be sure
+        container_range = _rust.get_symbol_component_range(
+            source_code,
+            selector.symbol_path,
+            selector.component,
+            None
+        )
+        if container_range is None:
+             # Fallback: find if it's a class or function to give better error or handle it
+             syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+             if syms:
+                 sym_kind = syms[0]["kind"]
+                 if sym_kind == "class" and selector.component == "params":
+                     raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+                 elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+                     raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+             raise ValueError(f"Could not find container for {selector.component}")
+
+        cont_start, cont_end = container_range
+        transform.replace_range(cont_start, cont_end, replacement)
+    else:
+        # Handle parameter kind for existing params
+        if selector.component == "params" and (kind or selector.pseudo_class):
+            target_kind = kind or selector.pseudo_class
+            # Find separators
+            pos_only_sep_idx = -1
+            kw_only_sep_idx = -1
+            star_arg_idx = -1
+            star_kwarg_idx = -1
+            
+            for i, (name, _, _) in enumerate(items_info):
+                if name == "/":
+                    pos_only_sep_idx = i
+                elif name == "*":
+                    kw_only_sep_idx = i
+                elif name.startswith("**"):
+                    star_kwarg_idx = i
+                elif name.startswith("*"):
+                    star_arg_idx = i
+            
+            if target_kind == "POSITIONAL_ONLY":
+                if pos_only_sep_idx == -1:
+                    insert_idx = len(items_info)
+                else:
+                    insert_idx = min(insert_idx, pos_only_sep_idx)
+            elif target_kind == "KEYWORD_ONLY":
+                if kw_only_sep_idx == -1 and star_arg_idx == -1:
+                    # Insert before **kwargs if it exists
+                    if star_kwarg_idx != -1:
+                        insert_idx = star_kwarg_idx
+                    else:
+                        insert_idx = len(items_info)
+                    val_to_add = f"*, {val_to_add}"
+                else:
+                    # Insert after * or after star_arg, but before **kwargs
+                    if kw_only_sep_idx != -1:
+                        insert_idx = max(insert_idx, kw_only_sep_idx + 1)
+                    else:
+                        insert_idx = max(insert_idx, star_arg_idx + 1)
+                    
+                    if star_kwarg_idx != -1:
+                        insert_idx = min(insert_idx, star_kwarg_idx)
+            elif target_kind == "POSITIONAL_OR_KEYWORD":
+                 if kw_only_sep_idx != -1:
+                      insert_idx = min(insert_idx, kw_only_sep_idx)
+                 elif star_arg_idx != -1:
+                      insert_idx = min(insert_idx, star_arg_idx)
+                 if pos_only_sep_idx != -1:
+                      insert_idx = max(insert_idx, pos_only_sep_idx + 1)
+
+        # Insert at insert_idx
+        if insert_idx >= len(items_info):
+            # Append
+            last_item_end = items_info[-1][2]
+            sep = ", "
+            if selector.component == "decorators":
+                sep = "\n"
+                replacement = f"{sep}@{val_to_add}"
+            else:
+                replacement = f"{sep}{val_to_add}"
+            transform.insert_after(last_item_end, replacement)
+        elif insert_idx <= 0:
+            # Prepend
+            first_item_start = items_info[0][1]
+            sep = ", "
+            if selector.component == "decorators":
+                sep = "\n"
+                replacement = f"@{val_to_add}{sep}"
+            else:
+                replacement = f"{val_to_add}{sep}"
+            transform.insert_before(first_item_start, replacement)
+        else:
+            # Insert in between
+            target_start = items_info[insert_idx][1]
+            sep = ", "
+            if selector.component == "decorators":
+                sep = "\n"
+                replacement = f"@{val_to_add}{sep}"
+            else:
+                replacement = f"{val_to_add}{sep}"
+            transform.insert_before(target_start, replacement)
+
+    new_code = transform.apply()
+    if new_code is None:
+        # Fallback to LibCST if our simple byte-range logic fails or is too complex
+        module = cst.parse_module(source_code)
+        transformer = ComponentAdder(
+            selector.symbol_path,
+            selector.component,
+            value,
+            position,
+            before,
+            after,
+            kind
+        )
+        new_module = module.visit(transformer)
+        new_code = new_module.code
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -3552,31 +3171,7 @@ class ComponentRemover(cst.CSTTransformer):
 
 
 def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
-    """Remove component or item. Returns diff.
-
-    Args:
-        selector: Extended selector with component specified
-        apply: If True, write changes to file. If False, return diff only.
-
-    Returns:
-        Unified diff showing the changes
-
-    Example:
-        >>> sel = parse_extended_selector("file.py::func[decorators][0]")
-        >>> diff = remove_component(sel, apply=False)
-        >>> print(diff)
-        --- file.py
-        +++ file.py
-        @@ -1,4 +1,3 @@
-        -@deprecated
-         @cache
-         def func():
-             pass
-
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        ValueError: If trying to remove body, or symbol not found
-    """
+    """Remove component or item. Returns diff."""
     # If no component specified, remove the entire symbol
     if selector.component is None:
         return remove_symbol(selector, apply=apply)
@@ -3585,39 +3180,125 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     if selector.component == "body":
         raise ValueError("Cannot remove body component")
 
-    # Read and parse file
+    # Read file
     file_path = Path(selector.file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
     source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
-        raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
-        if selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
-        if selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-    # Apply transformation
-    transformer = ComponentRemover(
+    # Get the range for the component using Rust accelerator
+    range_info = _rust.get_symbol_component_range(
+        source_code,
         selector.symbol_path,
         selector.component,
         selector.accessor
     )
-    new_module = module.visit(transformer)
-    new_code = new_module.code
+
+    if range_info is None:
+        # Check if symbol exists at all
+        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        if not syms:
+             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
+        
+        # Symbol exists but component not found
+        kind = syms[0]["kind"]
+        if kind == "class" and selector.component in ("params", "returns"):
+            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+        
+        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+
+    start_byte, end_byte = range_info
+    
+    # Check if we are removing an individual item (accessor is present)
+    # or the whole component.
+    transform = _rust.PyFileTransform(source_code)
+    source_bytes = source_code.encode('utf-8')
+
+    if selector.accessor is not None:
+        # Removing an individual item. Need to clean up commas/separators.
+        # Check for following comma
+        i = end_byte
+        while i < len(source_bytes) and source_bytes[i:i+1] in (b' ', b'\t', b'\n', b'\r'):
+            i += 1
+        
+        if i < len(source_bytes) and source_bytes[i:i+1] == b',':
+            # Remove from item start through the comma and any following space
+            j = i + 1
+            while j < len(source_bytes) and source_bytes[j:j+1] in (b' ', b'\t'):
+                j += 1
+            transform.remove_range(start_byte, j)
+        else:
+            # Look for preceding comma
+            i = start_byte
+            while i > 0 and source_bytes[i-1:i] in (b' ', b'\t'):
+                i -= 1
+            
+            if i > 0 and source_bytes[i-1:i] == b',':
+                # Remove from preceding comma through the item end
+                j = i - 1
+                # Also remove whitespace before the comma
+                while j > 0 and source_bytes[j-1:j] in (b' ', b'\t'):
+                    j -= 1
+                transform.remove_range(j, end_byte)
+            else:
+                # No comma found, just remove the item
+                # For decorators, might need to remove the leading @ or trailing newline
+                if selector.component == "decorators":
+                    # Heuristic: remove from @ to newline
+                    i = start_byte
+                    while i > 0 and source_bytes[i-1:i] != b'\n' and source_bytes[i-1:i] != b'\r' and source_bytes[i-1:i] != b'@':
+                        i -= 1
+                    if i > 0 and source_bytes[i-1:i] == b'@':
+                        i -= 1
+                    
+                    j = end_byte
+                    while j < len(source_bytes) and source_bytes[j:j+1] in (b' ', b'\t'):
+                        j += 1
+                    if j < len(source_bytes) and source_bytes[j:j+1] in (b'\n', b'\r'):
+                        j += 1
+                        if j < len(source_bytes) and source_bytes[j-1:j+1] == b'\r\n':
+                            j += 1
+                    transform.remove_range(i, j)
+                else:
+                    transform.remove_range(start_byte, end_byte)
+    else:
+        # Removing whole component.
+        if selector.component == "returns":
+            # get_symbol_component_range for returns includes -> and leading space
+            transform.remove_range(start_byte, end_byte)
+        elif selector.component == "bases":
+            # If removing all bases, we also want to remove parentheses if present.
+            # Tree-sitter 'class_definition' has 'superclasses' node which includes parentheses.
+            # Look for parentheses around the bases
+            i = start_byte
+            while i > 0 and source_bytes[i-1:i] in (b' ', b'\t'):
+                i -= 1
+            
+            j = end_byte
+            while j < len(source_bytes) and source_bytes[j:j+1] in (b' ', b'\t'):
+                j += 1
+                
+            if i > 0 and source_bytes[i-1:i] == b'(' and j < len(source_bytes) and source_bytes[j:j+1] == b')':
+                transform.remove_range(i-1, j+1)
+            else:
+                transform.remove_range(start_byte, end_byte)
+        else:
+            transform.remove_range(start_byte, end_byte)
+
+    new_code = transform.apply()
+    if new_code is None:
+        # Fallback to LibCST
+        module = cst.parse_module(source_code)
+        transformer = ComponentRemover(
+            selector.symbol_path,
+            selector.component,
+            selector.accessor
+        )
+        new_module = module.visit(transformer)
+        new_code = new_module.code
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -3627,6 +3308,7 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
         file_path.write_text(new_code)
 
     return diff
+
 
 def _slice_ellipsis_sequence(sequence: tuple, position: int, total_pattern_items: int) -> tuple:
     """Helper to slice a sequence (args/elements) for ellipsis capture.

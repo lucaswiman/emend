@@ -291,6 +291,389 @@ fn matches_selector(current_path: &[String], selector_path: &Option<Vec<String>>
     }
 }
 
+/// Find the tree-sitter node for a given symbol path.
+pub fn find_node_by_path<'a>(
+    root: tree_sitter::Node<'a>,
+    source: &[u8],
+    target_path: &[String],
+) -> Option<tree_sitter::Node<'a>> {
+    fn recurse<'a>(
+        node: tree_sitter::Node<'a>,
+        source: &[u8],
+        current_path: &mut Vec<String>,
+        target_path: &[String],
+    ) -> Option<tree_sitter::Node<'a>> {
+        match node.kind() {
+            "function_definition" | "class_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(name_node, source);
+                    current_path.push(name.to_string());
+
+                    if current_path == target_path {
+                        return Some(node);
+                    }
+
+                    if target_path.starts_with(current_path) {
+                        if let Some(body) = node.child_by_field_name("body") {
+                            if let Some(found) = recurse(body, source, current_path, target_path) {
+                                return Some(found);
+                            }
+                        }
+                    }
+                    current_path.pop();
+                }
+            }
+            "decorated_definition" => {
+                if let Some(def) = node.child_by_field_name("definition") {
+                    if let Some(found) = recurse(def, source, current_path, target_path) {
+                        return Some(found);
+                    }
+                }
+            }
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if let Some(found) = recurse(child, source, current_path, target_path) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    recurse(root, source, &mut Vec::new(), target_path)
+}
+
+/// Get the byte ranges of all items in a list-like component.
+#[pyfunction]
+pub fn get_symbol_component_list_items(
+    py: Python,
+    source: &str,
+    target_path: Vec<String>,
+    component: &str,
+) -> PyResult<Option<Vec<(String, usize, usize)>>> {
+    let tree = match crate::pattern::parse_python(source) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+
+    let node = match find_node_by_path(root, source_bytes, &target_path) {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+
+    let mut items = Vec::new();
+
+    match component {
+        "params" => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for child in params.children(&mut cursor) {
+                    match child.kind() {
+                        "identifier" | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern" | "dictionary_splat_pattern" => {
+                            let name = match child.kind() {
+                                "identifier" => node_text(child, source_bytes).to_string(),
+                                "typed_parameter" => child.named_child(0).map(|n| node_text(n, source_bytes).to_string()).unwrap_or_else(|| "".to_string()),
+                                "default_parameter" | "typed_default_parameter" => child.child_by_field_name("name").map(|n| node_text(n, source_bytes).to_string()).unwrap_or_else(|| "".to_string()),
+                                "list_splat_pattern" => {
+                                     let inner = child.named_child(0).map(|n| node_text(n, source_bytes)).unwrap_or("");
+                                     if !inner.is_empty() {
+                                         format!("*{}", inner)
+                                     } else {
+                                         "*".to_string()
+                                     }
+                                },
+                                "dictionary_splat_pattern" => {
+                                     let inner = child.named_child(0).map(|n| node_text(n, source_bytes)).unwrap_or("");
+                                     format!("**{}", inner)
+                                },
+                                _ => "".to_string(),
+                            };
+                            items.push((name, child.start_byte(), child.end_byte()));
+                        }
+                        "positional_separator" => {
+                            items.push(("/".to_string(), child.start_byte(), child.end_byte()));
+                        }
+                        "keyword_separator" => {
+                            items.push(("*".to_string(), child.start_byte(), child.end_byte()));
+                        }
+                        _ => {}
+                    }
+                }
+                return Ok(Some(items));
+            } else {
+                return Ok(None);
+            }
+        }
+        "decorators" => {
+            let mut decorable = node;
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "decorated_definition" {
+                    decorable = parent;
+                }
+            }
+            let mut cursor = decorable.walk();
+            for child in decorable.children(&mut cursor) {
+                if child.kind() == "decorator" {
+                    let text = node_text(child, source_bytes).trim_start_matches('@').trim();
+                    let name = text.split('(').next().unwrap_or("").trim();
+                    items.push((name.to_string(), child.start_byte(), child.end_byte()));
+                }
+            }
+            return Ok(Some(items));
+        }
+        "bases" => {
+            if let Some(superclasses) = node.child_by_field_name("superclasses") {
+                let mut cursor = superclasses.walk();
+                for child in superclasses.children(&mut cursor) {
+                    if !matches!(child.kind(), "(" | ")" | ",") {
+                        items.push((node_text(child, source_bytes).to_string(), child.start_byte(), child.end_byte()));
+                    }
+                }
+                return Ok(Some(items));
+            } else if node.kind() == "class_definition" {
+                return Ok(Some(items)); // Return empty list for class without bases
+            } else {
+                return Ok(None);
+            }
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}
+
+/// Get the byte range of a component within a symbol node.
+#[pyfunction]
+pub fn get_symbol_component_range(
+    py: Python,
+    source: &str,
+    target_path: Vec<String>,
+    component: &str,
+    accessor: Option<PyObject>, // Could be int or str
+) -> PyResult<Option<(usize, usize)>> {
+    let tree = match crate::pattern::parse_python(source) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+
+    let node = match find_node_by_path(root, source_bytes, &target_path) {
+        Some(n) => n,
+        None => {
+            return Ok(None);
+        }
+    };
+
+    match component {
+        "params" => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                if let Some(acc) = accessor {
+                    let mut cursor = params.walk();
+                    let children: Vec<tree_sitter::Node> = params.children(&mut cursor).collect();
+                    let mut param_nodes = Vec::new();
+                    for child in children {
+                        match child.kind() {
+                            "identifier" | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern" | "dictionary_splat_pattern" => {
+                                param_nodes.push(child);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Ok(idx_val) = acc.extract::<isize>(py) {
+                        let idx = if idx_val < 0 {
+                            let abs_idx = idx_val.abs() as usize;
+                            if abs_idx <= param_nodes.len() {
+                                param_nodes.len() - abs_idx
+                            } else {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Parameter index {} out of range", idx_val)));
+                            }
+                        } else {
+                            idx_val as usize
+                        };
+
+                        if idx < param_nodes.len() {
+                            return Ok(Some((param_nodes[idx].start_byte(), param_nodes[idx].end_byte())));
+                        } else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Parameter index {} out of range", idx_val)));
+                        }
+                    } else if let Ok(name) = acc.extract::<String>(py) {
+                        for p in &param_nodes {
+                            let p_name = match p.kind() {
+                                "identifier" => node_text(*p, source_bytes),
+                                "typed_parameter" => p.named_child(0).map(|n| node_text(n, source_bytes)).unwrap_or(""),
+                                "default_parameter" | "typed_default_parameter" => p.child_by_field_name("name").map(|n| node_text(n, source_bytes)).unwrap_or(""),
+                                "list_splat_pattern" | "dictionary_splat_pattern" => p.named_child(0).map(|n| node_text(n, source_bytes)).unwrap_or(""),
+                                _ => "",
+                            };
+                            if p_name == name {
+                                return Ok(Some((p.start_byte(), p.end_byte())));
+                            }
+                        }
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Parameter '{}' not found", name)));
+                    }
+                }
+                // Return range inside parentheses
+                let start = params.start_byte() + 1;
+                let end = params.end_byte() - 1;
+                return Ok(Some((start, end)));
+            }
+        }
+        "returns" => {
+            if let Some(ret) = node.child_by_field_name("return_type") {
+                // Return type range includes ->. 
+                // We want to include the whitespace before -> if possible.
+                let mut start = ret.start_byte();
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "->" {
+                        start = child.start_byte();
+                        // Look for preceding whitespace
+                        let mut i = start;
+                        while i > 0 && (source_bytes[i-1] == b' ' || source_bytes[i-1] == b'\t') {
+                            i -= 1;
+                        }
+                        start = i;
+                        break;
+                    }
+                }
+                return Ok(Some((start, ret.end_byte())));
+            } else {
+                // If no return type, we might want to insert it after parameters
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    return Ok(Some((params.end_byte(), params.end_byte())));
+                }
+            }
+        }
+        "decorators" => {
+            let mut decorable = node;
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "decorated_definition" {
+                    decorable = parent;
+                }
+            }
+
+            let mut cursor = decorable.walk();
+            let decorators: Vec<tree_sitter::Node> = decorable
+                .children(&mut cursor)
+                .filter(|c| c.kind() == "decorator")
+                .collect();
+            
+            if let Some(acc) = accessor {
+                if decorators.is_empty() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("No decorators found"));
+                }
+                if let Ok(idx_val) = acc.extract::<isize>(py) {
+                    let idx = if idx_val < 0 {
+                        let abs_idx = idx_val.abs() as usize;
+                        if abs_idx <= decorators.len() {
+                            decorators.len() - abs_idx
+                        } else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Decorator index {} out of range", idx_val)));
+                        }
+                    } else {
+                        idx_val as usize
+                    };
+
+                    if idx < decorators.len() {
+                        return Ok(Some((decorators[idx].start_byte(), decorators[idx].end_byte())));
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Decorator index {} out of range", idx_val)));
+                    }
+                } else if let Ok(name) = acc.extract::<String>(py) {
+                    for d in &decorators {
+                        let text = node_text(*d, source_bytes).trim_start_matches('@').trim();
+                        let d_name = text.split('(').next().unwrap_or("").trim();
+                        if d_name == name {
+                            return Ok(Some((d.start_byte(), d.end_byte())));
+                        }
+                    }
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Decorator '{}' not found", name)));
+                }
+            }
+
+            if decorators.is_empty() {
+                // Position before the decorable node (which is the def/class)
+                return Ok(Some((decorable.start_byte(), decorable.start_byte())));
+            }
+
+            return Ok(Some((decorators[0].start_byte(), decorators.last().unwrap().end_byte())));
+        }
+        "bases" => {
+            if node.kind() == "class_definition" {
+                 if let Some(superclasses) = node.child_by_field_name("superclasses") {
+                     if let Some(acc) = accessor {
+                         let mut cursor = superclasses.walk();
+                         let bases: Vec<tree_sitter::Node> = superclasses
+                            .children(&mut cursor)
+                            .filter(|c| !matches!(c.kind(), "(" | ")" | ","))
+                            .collect();
+
+                         if let Ok(idx_val) = acc.extract::<isize>(py) {
+                             let idx = if idx_val < 0 {
+                                 let abs_idx = idx_val.abs() as usize;
+                                 if abs_idx <= bases.len() {
+                                     bases.len() - abs_idx
+                                 } else {
+                                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Base class index {} out of range", idx_val)));
+                                 }
+                             } else {
+                                 idx_val as usize
+                             };
+
+                             if idx < bases.len() {
+                                 return Ok(Some((bases[idx].start_byte(), bases[idx].end_byte())));
+                             } else {
+                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Base class index {} out of range", idx_val)));
+                             }
+                         } else if let Ok(name) = acc.extract::<String>(py) {
+                             for b in &bases {
+                                 if node_text(*b, source_bytes) == name {
+                                     return Ok(Some((b.start_byte(), b.end_byte())));
+                                 }
+                             }
+                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Base class '{}' not found", name)));
+                         }
+                     }
+                     // Inside parentheses
+                     return Ok(Some((superclasses.start_byte() + 1, superclasses.end_byte() - 1)));
+                 } else {
+                     // NO superclasses node. 
+                     // Position after the name.
+                     if let Some(name) = node.child_by_field_name("name") {
+                         return Ok(Some((name.end_byte(), name.end_byte())));
+                     }
+                 }
+            }
+        }
+        "body" => {
+            if let Some(body) = node.child_by_field_name("body") {
+                // Return range starting from the first non-comment/non-whitespace child if possible
+                let mut start = body.start_byte();
+                let mut cursor = body.walk();
+                if let Some(first_stmt) = body.children(&mut cursor).find(|c| !matches!(c.kind(), "comment")) {
+                    start = first_stmt.start_byte();
+                    // We want to include leading whitespace on the same line (indentation)
+                    let mut i = start;
+                    while i > 0 && source_bytes[i-1] != b'\n' && source_bytes[i-1] != b'\r' {
+                        i -= 1;
+                    }
+                    start = i;
+                }
+                return Ok(Some((start, body.end_byte())));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}
+
 /// Collect identifier names that are loaded (read) inside a node's subtree,
 /// skipping the left-hand side of assignment nodes.
 fn collect_loaded_names(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String>) {

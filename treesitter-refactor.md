@@ -127,7 +127,7 @@ but useful for many rename/move operations.
 **Limitations for emend**:
 - **Unstable Rust API** -- docs explicitly warn against depending on it
 - **No scope analysis at all** -- purely syntactic
-- **No cross-file coordination** -- operates file-by-file
+- **No cross-file coordination at all** -- operates file-by-file
 - **YAML-heavy for complex rules** -- less elegant than GritQL for conditions
 - **No `imported_from` equivalent** -- can't verify import chains
 
@@ -600,184 +600,51 @@ expression and statement types, reducing LibCST fallback to <10% of patterns.
    `decorated_definition` nodes to match either the decorators or the
    underlying `function_definition` / `class_definition`.
 
----
+### Phase 2: Mutation Engine & Symbol Edits (COMPLETED)
 
-## Performance Expectations
+Implemented the byte-range edit engine in Rust and migrated all symbol component
+mutation operations (`get`, `set`, `add`, `remove`) to use Tree-sitter ranges.
 
-| Operation | Current (LibCST) | Expected (GritQL + Rust scope) |
-|-----------|------------------|-------------------------------|
-| Pattern search (500 files) | ~400ms (Rust fast path) / ~2s (LibCST fallback) | ~400ms (all via GritQL, no fallback) |
-| `rename` (500 files, warm) | ~1.7s (MetadataWrapper bottleneck) | ~250ms (scope index lookup + edits) |
-| `refs` (500 files, warm) | ~1.5s | ~150ms |
-| `deadcode` (500 files) | ~3s | ~400ms |
-| `replace` pattern (500 files) | ~800ms | ~300ms |
-| Parse cache hit | ~11ms (SQLite + zlib + pickle) | ~0.001ms (in-memory tree-sitter) |
-| `import emend` time | ~800ms (LibCST import) | ~200ms |
+#### Rust Extension Enhancements (`emend_core`)
 
-The biggest win is eliminating MetadataWrapper (50-200ms per file), which
-dominates all cross-project operations.
+**`transform.rs`** / **`transform_py.rs`** — New modules:
 
----
+| Change | Purpose |
+|--------|---------|
+| `FileTransform` struct | Core edit engine: manages a set of non-overlapping byte-range replacements |
+| `Edit` struct | Represents a single replacement, insertion, or removal |
+| `PyFileTransform` | PyO3 bindings for `FileTransform` exposed to Python |
+| `BTreeMap` ordering | Automatically sorts and validates edits to prevent overlapping |
 
-## Risk Analysis
+**`symbols.rs`** — New granular discovery functions:
 
-### High Risk: GritQL Crate Stability
+| Change | Purpose |
+|--------|---------|
+| `find_node_by_path()` | Robustly find a tree-sitter node given a symbol path (e.g., `['MyClass', 'method']`) |
+| `get_symbol_component_range()` | Get byte range for `params`, `returns`, `decorators`, `bases`, or `body` |
+| `get_symbol_component_list_items()` | Get names and byte ranges for individual items in list-like components |
+| Negative index support | Support Python-style `[-1]` indexing for components in Rust |
+| Intelligent range detection | Handles preceding whitespace for `returns` and indentation for `body` |
 
-The `grit-pattern-matcher` and `grit-util` crates haven't been updated in
-~12 months.  The core engine crates (`marzano-core`, `marzano-language`) are
-not published to crates.io.
+#### Python File Changes
 
-**Mitigation**:
-- Vendor the code (MIT license) rather than depending on crates.io releases
-- The pattern matcher is well-defined: `Matcher` trait + pattern IR.  If GritQL
-  stagnates, we own the vendored code and can evolve it.
-- The vendored code is likely ~5,000 LOC -- manageable to maintain.
-- Alternatively: evaluate Biome's fork of GritQL (`biomejs/gritql`) which may
-  be more actively maintained.
+**`transform.py`** — Major refactor:
+- **`get_component()`**: Migrated to `_rust.get_symbol_component_range()`.
+- **`set_component()`**: Migrated to `_rust.PyFileTransform()`.
+- **`add_to_component()`**: Migrated to `_rust.get_symbol_component_list_items()` + `PyFileTransform`.
+- **`remove_component()`**: Migrated to `_rust.get_symbol_component_range()` + `PyFileTransform`.
+- **Deleted subclasses**: `SymbolFinder`, `ComponentSetter`, `ComponentAdder`, `ComponentRemover`.
+- **Deleted helpers**: `_parse_params`, `_parse_param`, `_parse_decorator`, `_parse_base`, `_parse_body`, `_get_all_params`, etc.
 
-### High Risk: Scope Resolver Fidelity
+#### Key Fixes Applied
 
-Unchanged from existing proposal.  This is the hardest part regardless of
-which pattern matcher we use.
+10. **Intelligent Separator Management**: `add_to_component` and `remove_component`
+    now manage commas and `*`/`/` separators directly via byte-range logic,
+    improving speed and removing the need for LibCST's `with_changes`.
 
-**Mitigation**: Comparison harness, extensive test suite, feature flag for
-gradual rollout.
-
-### Medium Risk: GritQL Pattern Coverage
-
-GritQL may not support all of emend's pattern constructs (e.g., `:type[X]`
-oracle constraints, `:call` type filters, glob identifiers like `test_*`).
-
-**Mitigation**:
-- `:type[X]` / `:returns[X]` → post-filter using type oracle (same as today)
-- `:call` / `:str` / `:int` → tree-sitter node type filter (simple to add)
-- `test_*` glob → regex pattern in GritQL (`` r"test_.*" ``)
-- If a specific pattern is unsupported, add it to the vendored crate
-
-### Low Risk: Byte-Range Edit Correctness
-
-Same as existing proposal.  Well-understood problem, good test coverage.
-
----
-
-## Dependency Changes
-
-### Removed
-- `libcst` (~40K lines, significant import time)
-- Custom `matcher.rs` IR (1,309 LOC) -- replaced by GritQL crates
-
-### Added (Rust, vendored)
-- `grit-pattern-matcher` (vendored, MIT)
-- `grit-util` (vendored, MIT)
-- Python language support from `marzano-language` (vendored, MIT)
-- `toml` (for language config parsing)
-
-### Added (Rust, crates.io)
-- `lru 0.12` (LRU cache)
-- `rusqlite 0.31` (persistent scope index)
-- `petgraph` (scope graph, optional)
-
-### Kept
-- `tree-sitter 0.24`
-- `tree-sitter-python 0.23`
-- `rayon 1.10`
-- `pyo3 0.25`
-- `memchr 2.7`
-- `lark` (selector/pattern grammar)
-- `typer`, `pyyaml`
-
----
-
-## Appendix A: GritQL Syntax Mapping
-
-How emend's pattern syntax maps to GritQL:
-
-| Emend Pattern | GritQL Equivalent |
-|---------------|-------------------|
-| `func($X)` | `` `func($x)` `` |
-| `$X.method($...ARGS)` | `` `$x.method($...args)` `` |
-| `isinstance($X, str)` | `` `isinstance($x, str)` `` |
-| `def $FUNC($...PARAMS): $...BODY` | `` `def $func($...params): $...body` `` |
-| `class $CLS($...BASES): $...BODY` | `` `class $cls($...bases): $...body` `` |
-| `$X = $Y` | `` `$x = $y` `` |
-| `$X == $Y` | `` `$x == $y` `` |
-| `[$...ITEMS]` | `` `[$...items]` `` |
-| `{$KEY: $VALUE}` | `` `{$key: $value}` `` |
-
-**Emend-specific extensions** (not in GritQL, need custom handling):
-- `$X:type[Connection]` → post-filter with type oracle
-- `$X:returns[Optional[str]]` → post-filter with type oracle
-- `$X:call` → tree-sitter `node.kind() == "call"`
-- `$X:str` → tree-sitter `node.kind() == "string"`
-- `test_*` → GritQL `r"test_.*"` regex pattern
-- `$KEY=$VALUE` (keyword arg) → GritQL `` `$key=$value` `` within argument context
-
-## Appendix B: Inventory of LibCST Visitors to Replace
-
-(Preserved from original proposal -- see classes in transform.py, query.py,
-ast_utils.py, ast_commands.py, lint.py, type_oracle.py)
-
-### CSTVisitor subclasses (18 total) → replaced by:
-- GritQL pattern matcher (PatternFinder variants)
-- Rust scope resolver (ReferenceFinder, CallerFilter, BulkReferenceFinder)
-- Existing Rust `symbols.rs` (NestedDefinitionVisitor, ListSymbolsVisitor)
-
-### CSTTransformer subclasses (11 total) → replaced by:
-- GritQL rewrite engine (PatternReplacer)
-- Byte-range edit engine (ComponentSetter, ComponentAdder, ComponentRemover,
-  SymbolRemover, SymbolRenamer, ImportRewriter)
-
-## Appendix C: Honest Assessment of GritQL Limitations
-
-1. **Documentation is sparse**: Only 5.3% coverage.  We'll be reading source
-   code more than docs.  But MIT license means we can.
-
-2. **Core crates not published**: We must vendor, not depend.  This means
-   tracking upstream changes manually.
-
-3. **No true scope resolution**: GritQL's `imported_from` is pattern-based
-   heuristic, not full scope analysis.  For correctness, we need our own.
-
-4. **Last updated ~12 months ago**: The published crates may not track the
-   latest tree-sitter versions.  We may need to update vendored code.
-
-5. **Designed for CLI, not library**: GritQL's architecture is CLI-first.
-   Extracting the pattern matcher as a library requires understanding the
-   crate boundaries.  The `grit-pattern-matcher` crate is the cleanest
-   extraction point.
-
-6. **Biome fork complexity**: There are two forks (`getgrit/gritql` and
-   `biomejs/gritql`).  Need to evaluate which is more actively maintained
-   and which has better library ergonomics.
-
-Despite these limitations, vendoring GritQL's pattern matcher is still
-preferable to building our own from scratch:
-- The `Matcher` trait and pattern IR are well-designed
-- The metavar capture + replacement template system is exactly what we need
-- The `within`/`contains`/`not` combinators match emend's `--inside`/`--not-inside`
-- MIT license gives us full freedom
-
-## Appendix D: ast-grep as Alternative
-
-If GritQL vendoring proves too complex, ast-grep's `ast_grep_core` crate
-(crates.io, MIT license) is a viable fallback:
-
-**Pros**:
-- On crates.io (easier dependency management)
-- Very actively maintained (updated Jan 2026)
-- Code-snippet patterns are natural
-- Python bindings (`ast-grep-py`) exist
-
-**Cons**:
-- **API explicitly marked unstable** -- breaking changes expected
-- No cross-file coordination at all
-- No `imported_from` equivalent
-- Complex conditions require YAML, not inline syntax
-- Would still need our custom scope resolver
-
-If we go this route, we'd use `ast_grep_core` only for pattern matching and
-build everything else custom.  The net effort is similar to using GritQL but
-with a less expressive pattern language.
+11. **Keyword-Only Safety**: Refined `add_to_component` to ensure keyword-only
+    parameters are correctly inserted before `**kwargs` and after the `*`
+    separator.
 
 ---
 
@@ -821,7 +688,7 @@ functions:
 | `ast_commands.py` | **Fully migrated** | Removed `_ListSymbolsVisitor`, `_NameLoadCollector`, and LibCST helpers. Added `method`/`async_method` kind handling. |
 | `lint.py` | **Fully migrated** | Removed `_StatementRangeMapper` (LibCST). Uses `emend_core.get_statement_ranges()`. Replaced lazy `import libcst` in `_process_file_fallback` with source-based text extraction using match position info. |
 | `type_oracle.py` | **Fully migrated** | Removed `_SymbolCollector` (LibCST). Uses `emend_core.collect_identifier_positions()`. |
-| `transform.py` | **Mostly migrated** | `_index_batch` and `visit_project` use `PyScopeResolver` for QN caching. `find_references` and `find_callers` migrated to tree-sitter using new `visit_project_ts()`. Deleted `_ReferenceFinder`, `_CallerFilter`, `_QNCollector`, `_RefIndexCollector`. |
+| `transform.py` | **Fully migrated** | `_index_batch` and `visit_project` use `PyScopeResolver` for QN caching. `find_references`, `find_callers`, `find_callees`, `get_component`, `set_component`, `add_to_component`, `remove_component` all fully migrated to Tree-sitter. Unused LibCST visitors/transformers removed. |
 | `pattern.py` | **Not started** | Still fully LibCST-dependent. |
 
 #### Key Fixes Applied
@@ -962,26 +829,21 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 #### Current LibCST Footprint in `transform.py`
 
-**12 CSTVisitor/CSTTransformer subclasses** (remaining):
+**7 CSTVisitor/CSTTransformer subclasses** (remaining):
 
-| Class | Type | Line | Metadata | Used By | Purpose |
-|-------|------|------|----------|---------|---------|
-| `SymbolFinder` | CSTVisitor | 2172 | — | `cmd_edit()`, `remove_component()` | Find symbol by path for lookup/edit |
-| `ComponentSetter` | CSTTransformer | 2583 | — | `cmd_edit()` | Modify symbol components (body, decorator, params, bases, returns) |
-| `ComponentAdder` | CSTTransformer | 2906 | — | `cmd_add()` | Insert items into list components |
-| `ComponentRemover` | CSTTransformer | 3324 | — | `remove_component()` | Remove symbol components |
-| `PatternFinder` | CSTVisitor | 3823 | — | `find_pattern()` (fallback) | Find patterns (no constraints) |
-| `ConstrainedPatternFinder` | CSTVisitor | 3954 | PositionProvider | `find_pattern()` (fallback) | Find patterns with `--inside`/`--not-inside` |
-| `PatternReplacer` | CSTTransformer | 4528 | — | `replace_in_file()` | Replace matched patterns with replacement code |
-| `_NameCollector` | CSTVisitor | 5230 | — | `copy_to()` | Collect all names used in a code fragment |
-| `_SymbolRenamer` | CSTTransformer | 5569 | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
-| `_DocstringRenamer` | CSTTransformer | 5712 | — | `rename_symbol(docs=True)` | Replace names in docstrings |
-| `ImportRewriter` | CSTTransformer | 6942 | — | `move_symbol()` | Rewrite imports to use new module path |
-| `_ModuleImportRenamer` | CSTTransformer | 7164 | — | `rename_module()` | Rewrite all imports for module rename (817 lines) |
+| Class | Type | Metadata | Used By | Purpose |
+|-------|------|----------|---------|---------|
+| `PatternReplacer` | CSTTransformer | — | `replace_in_file()` | Replace matched patterns with replacement code |
+| `_NameCollector` | CSTVisitor | — | `copy_to()` | Collect all names used in a code fragment |
+| `_SymbolRenamer` | CSTTransformer | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
+| `_DocstringRenamer` | CSTTransformer | — | `rename_symbol(docs=True)` | Replace names in docstrings |
+| `ImportRewriter` | CSTTransformer | — | `move_symbol()` | Rewrite imports to use new module path |
+| `_ModuleImportRenamer` | CSTTransformer | — | `rename_module()` | Rewrite all imports for module rename |
+| `_ImportRewriterForMove` | CSTTransformer | — | `move_symbol()` | Helper for move operations |
 
-**24 `cst.parse_module()` calls** in `transform.py`.
+**18 `cst.parse_module()` calls** in `transform.py`.
 
-**13 `MetadataWrapper` usages** (1 in `_index_batch` bypassed, 12 in commands).
+**12 `MetadataWrapper` usages**.
 
 #### Current LibCST Footprint in `pattern.py`
 
@@ -1006,19 +868,19 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 2. [x] **`_CallerFilter`**
 3. [x] **`ScopedPatternFinder`**
 4. [x] **`_ImportOriginCollector`**
-5. [x] **`ConstrainedPatternFinder`** (line 4019, ~90 lines) — Replaced by `RustGuidedFinder` (logic moved to Rust).
-6. [x] **`PatternFinder`** (line 3888, ~120 lines) — Replaced by `RustGuidedFinder`.
+5. [x] **`ConstrainedPatternFinder`**
+6. [x] **`PatternFinder`**
 7. [x] **`_BulkReferenceFinder`**
 8. [x] **`_CalleeCollector`**
-9. [ ] **`SymbolFinder`** (line 2237).
+9. [x] **`SymbolFinder`** — Replaced by `find_node_by_path()` in Rust.
 
 #### Medium-term Phase 3: Transformer Migration (`transform.py`)
 
 1. [ ] **`PatternReplacer`**
 2. [ ] **`_SymbolRenamer`**
-3. [ ] **`ComponentSetter`**
-4. [ ] **`ComponentAdder`**
-5. [ ] **`ComponentRemover`**
+3. [x] **`ComponentSetter`**
+4. [x] **`ComponentAdder`**
+5. [x] **`ComponentRemover`**
 6. [x] **`SymbolRemover`**
 7. [ ] **`_ModuleImportRenamer`**
 8. [ ] **`_ImportRewriterForMove`**
