@@ -1,7 +1,7 @@
 """Pattern parsing with metavariables."""
 from __future__ import annotations
-from dataclasses import dataclass
-from lark import Lark, Transformer, Token
+from dataclasses import dataclass, field
+from lark import Lark, Transformer, Token, Tree
 import importlib.resources
 import libcst as cst
 from libcst import matchers as m
@@ -19,6 +19,7 @@ class MetaVar:
 class Pattern:
     raw: str
     metavars: list[MetaVar]
+    tree: Tree | None = field(default=None, repr=False)
 
 
 class PatternTransformer(Transformer):
@@ -131,7 +132,8 @@ def parse_pattern(pattern_str: str) -> Pattern:
 
     return Pattern(
         raw=pattern_str,
-        metavars=transformer.metavars
+        metavars=transformer.metavars,
+        tree=tree,
     )
 
 
@@ -1637,6 +1639,424 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return None
 
 
+# ---------------------------------------------------------------------------
+# Lark → stdlib ast → Rust IR path (bypasses LibCST parsing)
+# ---------------------------------------------------------------------------
+
+import ast as _stdlib_ast
+
+
+def _ast_to_rust_ir(node: _stdlib_ast.AST, metavar_map: dict[str, MetaVar]) -> dict | None:
+    """Convert a stdlib ast node to a Rust IR dict.
+
+    Returns None if the node type is not yet supported by the Rust matcher.
+    This mirrors _cst_to_rust_ir but uses the stdlib ast module instead of LibCST.
+    """
+    if isinstance(node, _stdlib_ast.Name):
+        name = node.id
+        if name in metavar_map:
+            metavar = metavar_map[name]
+            # Type constraints not yet supported in Rust matcher — fall back
+            if metavar.type_constraint is not None:
+                return None
+            if metavar.ellipsis:
+                return {"type": "ellipsis"}
+            else:
+                return {"type": "any_expr"}
+        else:
+            if name == "None":
+                return {"type": "none"}
+            if name == "True":
+                return {"type": "bool", "value": True}
+            if name == "False":
+                return {"type": "bool", "value": False}
+            return {"type": "name", "value": name}
+
+    elif isinstance(node, _stdlib_ast.Constant):
+        v = node.value
+        if v is None:
+            return {"type": "none"}
+        if v is True:
+            return {"type": "bool", "value": True}
+        if v is False:
+            return {"type": "bool", "value": False}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "string", "value": repr(v)}
+        if isinstance(v, str):
+            return {"type": "string", "value": repr(v)}
+        if isinstance(v, bytes):
+            return {"type": "string", "value": repr(v)}
+        # Ellipsis literal, complex, etc.
+        return None
+
+    elif isinstance(node, _stdlib_ast.Call):
+        func_ir = _ast_to_rust_ir(node.func, metavar_map)
+        if func_ir is None:
+            return None
+
+        for kw in node.keywords:
+            if kw.arg is None:
+                # **kwargs spread — not supported
+                return None
+
+        args_ir = []
+        has_ellipsis = False
+        for arg in node.args:
+            # Check for starred arg (*arg)
+            if isinstance(arg, _stdlib_ast.Starred):
+                return None
+            # Check if this is an ellipsis metavar
+            if isinstance(arg, _stdlib_ast.Name) and arg.id in metavar_map:
+                metavar = metavar_map[arg.id]
+                if metavar.ellipsis:
+                    args_ir.append({"type": "ellipsis"})
+                    has_ellipsis = True
+                    continue
+            arg_ir = _ast_to_rust_ir(arg, metavar_map)
+            if arg_ir is None:
+                return None
+            args_ir.append(arg_ir)
+
+        # Keyword arguments: if the pattern has keyword args, fall back
+        if node.keywords:
+            return None
+
+        return {
+            "type": "call",
+            "func": func_ir,
+            "args": args_ir,
+            "exact_args": not has_ellipsis,
+        }
+
+    elif isinstance(node, _stdlib_ast.Attribute):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "attr", "value": value_ir, "attr": node.attr}
+
+    elif isinstance(node, _stdlib_ast.List):
+        if len(node.elts) == 0:
+            return {"type": "empty_list"}
+        elems_ir = []
+        for elt in node.elts:
+            if isinstance(elt, _stdlib_ast.Starred):
+                return None
+            e_ir = _ast_to_rust_ir(elt, metavar_map)
+            if e_ir is None:
+                return None
+            elems_ir.append(e_ir)
+        return {"type": "list", "elements": elems_ir}
+
+    elif isinstance(node, _stdlib_ast.Tuple):
+        elems_ir = []
+        for elt in node.elts:
+            if isinstance(elt, _stdlib_ast.Starred):
+                return None
+            e_ir = _ast_to_rust_ir(elt, metavar_map)
+            if e_ir is None:
+                return None
+            elems_ir.append(e_ir)
+        return {"type": "tuple", "elements": elems_ir}
+
+    elif isinstance(node, _stdlib_ast.Subscript):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        slice_node = node.slice
+        # dict[K, V] → slice is a Tuple; expand to multiple slices (mirrors LibCST behavior)
+        if isinstance(slice_node, _stdlib_ast.Tuple):
+            slices_ir = []
+            for elt in slice_node.elts:
+                if isinstance(elt, _stdlib_ast.Starred):
+                    return None
+                s_ir = _ast_to_rust_ir(elt, metavar_map)
+                if s_ir is None:
+                    return None
+                slices_ir.append(s_ir)
+            return {"type": "subscript", "value": value_ir, "slices": slices_ir}
+        slice_ir = _ast_to_rust_ir(slice_node, metavar_map)
+        if slice_ir is None:
+            return None
+        return {"type": "subscript", "value": value_ir, "slices": [slice_ir]}
+
+    elif isinstance(node, _stdlib_ast.BinOp):
+        left_ir = _ast_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        right_ir = _ast_to_rust_ir(node.right, metavar_map)
+        if right_ir is None:
+            return None
+        op_map = {
+            _stdlib_ast.Add: "+", _stdlib_ast.Sub: "-", _stdlib_ast.Mult: "*",
+            _stdlib_ast.Div: "/", _stdlib_ast.FloorDiv: "//", _stdlib_ast.Mod: "%",
+            _stdlib_ast.Pow: "**", _stdlib_ast.BitAnd: "&", _stdlib_ast.BitOr: "|",
+            _stdlib_ast.BitXor: "^", _stdlib_ast.LShift: "<<", _stdlib_ast.RShift: ">>",
+            _stdlib_ast.MatMult: "@",
+        }
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        return {"type": "binary_op", "left": left_ir, "op": op_str, "right": right_ir}
+
+    elif isinstance(node, _stdlib_ast.BoolOp):
+        if len(node.values) != 2:
+            # Only binary boolean ops supported
+            return None
+        left_ir = _ast_to_rust_ir(node.values[0], metavar_map)
+        if left_ir is None:
+            return None
+        right_ir = _ast_to_rust_ir(node.values[1], metavar_map)
+        if right_ir is None:
+            return None
+        op_map = {_stdlib_ast.And: "and", _stdlib_ast.Or: "or"}
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        return {"type": "binary_op", "left": left_ir, "op": op_str, "right": right_ir}
+
+    elif isinstance(node, _stdlib_ast.UnaryOp):
+        op_map = {
+            _stdlib_ast.USub: "-", _stdlib_ast.UAdd: "+",
+            _stdlib_ast.Invert: "~", _stdlib_ast.Not: "not",
+        }
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        operand_ir = _ast_to_rust_ir(node.operand, metavar_map)
+        if operand_ir is None:
+            return None
+        return {"type": "unary_op", "op": op_str, "operand": operand_ir}
+
+    elif isinstance(node, _stdlib_ast.Compare):
+        left_ir = _ast_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        comp_op_map = {
+            _stdlib_ast.Eq: "==", _stdlib_ast.NotEq: "!=",
+            _stdlib_ast.Lt: "<", _stdlib_ast.Gt: ">",
+            _stdlib_ast.LtE: "<=", _stdlib_ast.GtE: ">=",
+            _stdlib_ast.Is: "is", _stdlib_ast.IsNot: "is not",
+            _stdlib_ast.In: "in", _stdlib_ast.NotIn: "not in",
+        }
+        ops_ir = []
+        for op, comparator in zip(node.ops, node.comparators):
+            op_str = comp_op_map.get(type(op))
+            if op_str is None:
+                return None
+            comp_ir = _ast_to_rust_ir(comparator, metavar_map)
+            if comp_ir is None:
+                return None
+            ops_ir.append([op_str, comp_ir])
+        return {"type": "compare", "left": left_ir, "ops": ops_ir}
+
+    elif isinstance(node, _stdlib_ast.Assign):
+        if len(node.targets) != 1:
+            return None
+        target_ir = _ast_to_rust_ir(node.targets[0], metavar_map)
+        if target_ir is None:
+            return None
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "assign", "target": target_ir, "value": value_ir}
+
+    elif isinstance(node, _stdlib_ast.FunctionDef):
+        if node.decorator_list:
+            return None
+        name_ir = _ast_to_rust_ir(_stdlib_ast.Name(id=node.name, ctx=_stdlib_ast.Load()), metavar_map)
+        if name_ir is None:
+            return None
+
+        args = node.args
+        param_patterns = []
+        all_params = list(args.posonlyargs or []) + list(args.args) + list(args.kwonlyargs or [])
+
+        for p in all_params:
+            placeholder = p.arg
+            if placeholder in metavar_map:
+                metavar = metavar_map[placeholder]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                    continue
+                if p.annotation is not None:
+                    return None
+                param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "name", "value": placeholder})
+
+        if args.vararg is not None:
+            placeholder = args.vararg.arg
+            if placeholder in metavar_map:
+                metavar = metavar_map[placeholder]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+
+        if args.kwarg is not None:
+            placeholder = args.kwarg.arg
+            if placeholder in metavar_map:
+                metavar = metavar_map[placeholder]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+
+        return {"type": "funcdef", "name": name_ir, "params": param_patterns}
+
+    elif isinstance(node, _stdlib_ast.AsyncFunctionDef):
+        return None
+
+    elif isinstance(node, _stdlib_ast.ClassDef):
+        name_ir = _ast_to_rust_ir(_stdlib_ast.Name(id=node.name, ctx=_stdlib_ast.Load()), metavar_map)
+        if name_ir is None:
+            return None
+
+        bases_ir = []
+        for base in node.bases:
+            base_ir = _ast_to_rust_ir(base, metavar_map)
+            if base_ir is None:
+                return None
+            bases_ir.append(base_ir)
+
+        return {"type": "classdef", "name": name_ir, "bases": bases_ir}
+
+    elif isinstance(node, _stdlib_ast.Expr):
+        return _ast_to_rust_ir(node.value, metavar_map)
+
+    elif isinstance(node, _stdlib_ast.Module):
+        if node.body:
+            return _ast_to_rust_ir(node.body[0], metavar_map)
+        return None
+
+    elif isinstance(node, _stdlib_ast.JoinedStr):
+        return {"type": "string", "value": None}
+
+    else:
+        return None
+
+
+def _reconstruct_code_from_lark(tree: Tree, metavar_map: dict[str, MetaVar]) -> tuple[str, dict[str, MetaVar]]:
+    """Reconstruct the pattern code string from a Lark parse tree.
+
+    Replaces metavar tokens with valid Python identifier placeholders,
+    preserving the code_chunk text verbatim.
+
+    Returns (reconstructed_code, metavar_placeholder_map) where
+    metavar_placeholder_map maps placeholder identifier names to MetaVar objects.
+    """
+    parts: list[str] = []
+    placeholder_map: dict[str, MetaVar] = {}
+    mv_counter: dict[str, int] = {}
+
+    def visit(node):
+        if isinstance(node, Tree):
+            if node.data == "metavar":
+                has_ellipsis = False
+                name = None
+                for child in node.children:
+                    if isinstance(child, Token):
+                        if child.type == "ELLIPSIS":
+                            has_ellipsis = True
+                        elif child.type == "METAVAR_NAME":
+                            name = str(child)
+                        elif child.type == "UNDERSCORE":
+                            name = "_"
+                    elif isinstance(child, str) and child == "...":
+                        has_ellipsis = True
+
+                if name is None:
+                    name = "_"
+
+                count = mv_counter.get(name, 0)
+                mv_counter[name] = count + 1
+                placeholder = f"__META_{name}__" if count == 0 else f"__META_{name}_{count}__"
+
+                type_constraint = None
+                for child in node.children:
+                    if isinstance(child, Tree) and child.data == "type_constraint":
+                        for tc in child.children:
+                            if isinstance(tc, Token):
+                                constraint_raw = str(tc)
+                                type_constraint = constraint_raw[1:] if constraint_raw.startswith(":") else constraint_raw
+                    elif isinstance(child, Token) and child.type in ("SIMPLE_TYPE_CONSTRAINT", "ORACLE_TYPE_CONSTRAINT"):
+                        constraint_raw = str(child)
+                        type_constraint = constraint_raw[1:] if constraint_raw.startswith(":") else constraint_raw
+
+                mv = MetaVar(name=name, ellipsis=has_ellipsis, type_constraint=type_constraint)
+                placeholder_map[placeholder] = mv
+                parts.append(placeholder)
+
+            elif node.data == "code_chunk":
+                for child in node.children:
+                    if isinstance(child, Token):
+                        parts.append(str(child))
+                    elif isinstance(child, str):
+                        parts.append(child)
+
+            else:
+                for child in node.children:
+                    visit(child)
+
+        elif isinstance(node, Token):
+            pass
+
+    visit(tree)
+    return "".join(parts), placeholder_map
+
+
+def _lark_to_rust_ir(tree: Tree, metavar_map: dict[str, MetaVar]) -> dict | None:
+    """Convert a Lark pattern parse tree to a Rust IR dict.
+
+    This bypasses LibCST by using the stdlib ast module for Python expression
+    parsing. Returns None if the pattern is not yet supported.
+    """
+    try:
+        reconstructed, placeholder_map = _reconstruct_code_from_lark(tree, metavar_map)
+
+        is_except_header = _is_except_header(reconstructed)
+        is_compound_header = _is_compound_statement_header(reconstructed)
+        is_try = reconstructed.strip() == "try:"
+        parse_code = reconstructed
+
+        if is_try:
+            parse_code = "try:\n    pass\nexcept Exception:\n    pass"
+        elif is_except_header:
+            parse_code = "try:\n    pass\n" + reconstructed + "\n    pass"
+        elif is_compound_header:
+            parse_code = reconstructed + "\n    pass"
+
+        try:
+            parsed = _stdlib_ast.parse(parse_code, mode="eval")
+            root = parsed.body
+        except SyntaxError:
+            try:
+                parsed = _stdlib_ast.parse(parse_code, mode="exec")
+                if not parsed.body:
+                    return None
+                root = parsed.body[0]
+                if isinstance(root, _stdlib_ast.Expr):
+                    root = root.value
+                if is_try and isinstance(root, _stdlib_ast.Try):
+                    pass
+                elif is_except_header and isinstance(root, _stdlib_ast.Try):
+                    if root.handlers:
+                        return None
+            except SyntaxError:
+                return None
+
+        return _ast_to_rust_ir(root, placeholder_map)
+
+    except Exception:
+        return None
+
+
 def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
     """Compile a pattern string to Rust IR dict for the tree-sitter fast path.
 
@@ -1653,6 +2073,15 @@ def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
     """
     try:
         pattern = parse_pattern(pattern_str)
+
+        # Try the Lark → stdlib ast → Rust IR path first (no LibCST needed)
+        if pattern.tree is not None:
+            mv_by_name = {mv.name: mv for mv in pattern.metavars}
+            ir = _lark_to_rust_ir(pattern.tree, mv_by_name)
+            if ir is not None:
+                return ir
+
+        # Fall back to the LibCST path
         temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
 
         # Handle compound statement headers
