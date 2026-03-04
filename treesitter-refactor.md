@@ -945,6 +945,17 @@ Enabled fast-path for scoped searches. All 1,309 tests pass.
 
 9. **Fast-path for Scoped Search**: By moving `scope` handling to a post-filter, `find_pattern` can now use the Rust accelerator for queries like `emend search 'print($X)' --in file.py::MyClass.method`, which previously fell back to LibCST.
 
+### Phase 0.9: Rust-Guided Pattern Finding (COMPLETED)
+
+Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches where the pattern compiles to Rust IR, including those with `--inside`/`--not-inside` constraints.
+
+#### Python File Changes
+
+**`transform.py`**:
+- **`RustGuidedFinder`**: Added a new visitor that takes pre-calculated Rust match ranges and only extracts captures from those nodes. This avoids running the slow LibCST `m.matches()` on every node.
+- **`find_pattern()`**: Updated to try Rust matching first. If successful, it uses `RustGuidedFinder`. This effectively bypasses `PatternFinder` and `ConstrainedPatternFinder` logic (which remain only as fallbacks).
+- **Constraint Fast-Path**: `--inside` and `--not-inside` now use the Rust matcher's support for constraints, avoiding the need for `ConstrainedPatternFinder`'s ancestor stack tracking in Python.
+
 ---
 
 ### Remaining Work
@@ -959,8 +970,8 @@ Enabled fast-path for scoped searches. All 1,309 tests pass.
 | `ComponentSetter` | CSTTransformer | 2583 | — | `cmd_edit()` | Modify symbol components (body, decorator, params, bases, returns) |
 | `ComponentAdder` | CSTTransformer | 2906 | — | `cmd_add()` | Insert items into list components |
 | `ComponentRemover` | CSTTransformer | 3324 | — | `remove_component()` | Remove symbol components |
-| `PatternFinder` | CSTVisitor | 3823 | — | `find_pattern()` fast path | Find patterns (no constraints) |
-| `ConstrainedPatternFinder` | CSTVisitor | 3954 | PositionProvider | `find_pattern()` | Find patterns with `--inside`/`--not-inside` |
+| `PatternFinder` | CSTVisitor | 3823 | — | `find_pattern()` (fallback) | Find patterns (no constraints) |
+| `ConstrainedPatternFinder` | CSTVisitor | 3954 | PositionProvider | `find_pattern()` (fallback) | Find patterns with `--inside`/`--not-inside` |
 | `PatternReplacer` | CSTTransformer | 4528 | — | `replace_in_file()` | Replace matched patterns with replacement code |
 | `_NameCollector` | CSTVisitor | 5230 | — | `copy_to()` | Collect all names used in a code fragment |
 | `_SymbolRenamer` | CSTTransformer | 5569 | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
@@ -994,8 +1005,8 @@ Enabled fast-path for scoped searches. All 1,309 tests pass.
 2. [x] **`_CallerFilter`**
 3. [x] **`ScopedPatternFinder`**
 4. [x] **`_ImportOriginCollector`**
-5. [ ] **`ConstrainedPatternFinder`** (line 4019, ~90 lines).
-6. [ ] **`PatternFinder`** (line 3888, ~120 lines).
+5. [x] **`ConstrainedPatternFinder`** (line 4019, ~90 lines) — Replaced by `RustGuidedFinder` (logic moved to Rust).
+6. [x] **`PatternFinder`** (line 3888, ~120 lines) — Replaced by `RustGuidedFinder`.
 7. [x] **`_BulkReferenceFinder`**
 8. [x] **`_CalleeCollector`**
 9. [ ] **`SymbolFinder`** (line 2237).
