@@ -992,7 +992,7 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 - [x] **Stop relying on LibCST for metadata indexing**. (QN, symbol, and reference indexing now use Tree-sitter, bypassing slow MetadataWrapper).
 - [x] **Remove `_extract_all_exports(module)`**.
 - [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
-- [ ] **Optional: Remove `parse_cache` population**. (Deferred: keeping LibCST parse cache for refactoring performance until mutation commands are fully migrated).
+- [ ] **Optional: Remove `parse_cache` population**. (Deferred: the persistent LibCST parse cache must be maintained for refactoring performance until LibCST is completely excised from the project).
 
 #### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`)
 
@@ -1033,6 +1033,8 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 - [ ] **Migrate `_cached_parse()` call sites**.
 
 #### Long-term: Full LibCST Removal
+
+*Note: The `parse_cache` can only be removed once LibCST is totally excised from the project.*
 
 - [ ] Remove `_cached_parse()`, `_parse_cache`, and `parse_cache` SQLite table
 - [ ] Remove all CSTVisitor/CSTTransformer class definitions
