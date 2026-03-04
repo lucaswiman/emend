@@ -106,10 +106,6 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS parse_cache "
-        "(hash BLOB PRIMARY KEY, data BLOB)"
-    )
-    conn.execute(
         "CREATE TABLE IF NOT EXISTS qn_index "
         "(hash BLOB PRIMARY KEY, qnames BLOB)"
     )
@@ -254,48 +250,9 @@ def _get_disk_cache() -> sqlite3.Connection | None:
     return _disk_cache_conn
 
 
-def _disk_cache_get(key: bytes) -> cst.Module | None:
-    """Look up a parsed module in the disk cache."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return None
-    try:
-        import pickle
-        import zlib
-        row = conn.execute(
-            "SELECT data FROM parse_cache WHERE hash = ?", (key,)
-        ).fetchone()
-        if row is not None:
-            return pickle.loads(zlib.decompress(row[0]))
-    except Exception:
-        pass
-    return None
-
-
-def _disk_cache_put(key: bytes, module: cst.Module) -> None:
-    """Store a parsed module in the disk cache (best-effort)."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return
-    try:
-        import pickle
-        import zlib
-        data = zlib.compress(
-            pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
-        )
-        with _disk_cache_lock:
-            conn.execute(
-                "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", (key, data)
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
 def _cached_parse(source: str) -> cst.Module:
-    """Parse Python source into a LibCST Module, with two-tier caching.
+    """Parse Python source into a LibCST Module, with in-memory caching.
 
-    Checks in-memory cache first, then disk cache, then parses.
     Thread-safe for use with ThreadPoolExecutor.
     """
     key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
@@ -304,12 +261,10 @@ def _cached_parse(source: str) -> cst.Module:
         cached = _parse_cache.get(key)
     if cached is not None:
         return cached
-    # Tier 2: disk
-    module = _disk_cache_get(key)
-    if module is None:
-        # Parse from scratch and write to disk cache
-        module = cst.parse_module(source)
-        _disk_cache_put(key, module)
+
+    # Parse from scratch
+    module = cst.parse_module(source)
+
     # Store in memory cache
     with _parse_cache_lock:
         if len(_parse_cache) >= _PARSE_CACHE_MAX:
