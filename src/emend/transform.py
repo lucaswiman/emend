@@ -19,7 +19,15 @@ import io
 import json
 import time
 from .component_selector import ExtendedSelector, parse_extended_selector
-from .pattern import parse_pattern, compile_pattern_to_matcher, Pattern, is_oracle_type_constraint, parse_oracle_type_constraint
+from .pattern import (
+    parse_pattern,
+    compile_pattern_to_matcher,
+    compile_pattern_to_rust_ir,
+    compile_constraint_to_rust_ir,
+    Pattern,
+    is_oracle_type_constraint,
+    parse_oracle_type_constraint,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -3866,6 +3874,64 @@ class PatternFinder(cst.CSTVisitor):
         return True  # Continue visiting children
 
 
+class RustGuidedFinder(cst.CSTVisitor):
+    """Visitor that uses pre-calculated Rust match positions to extract captures.
+
+    This avoids running the slow LibCST m.matches() on every node.
+    """
+
+    def __init__(
+        self,
+        matcher: m.BaseMatcherNode,
+        ellipsis_info: dict,
+        position_provider: cst.metadata.PositionProvider,
+        rust_matches: set[tuple[int, int, int, int]],
+        metavar_names: set[str],
+    ):
+        self.matcher = matcher
+        self.ellipsis_info = ellipsis_info
+        self.position_provider = position_provider
+        # Set of (line, col, end_line, end_col)
+        self.rust_matches = rust_matches
+        self.metavar_names = metavar_names
+        self.matches: list[PatternMatch] = []
+
+    def on_visit(self, node: cst.CSTNode) -> bool:
+        try:
+            pos = self.position_provider[node]
+            # Rust uses 1-based line, 0-based column
+            # LibCST PositionProvider uses 1-based line, 0-based column
+            key = (pos.start.line, pos.start.column, pos.end.line, pos.end.column)
+
+            if key in self.rust_matches:
+                # This node corresponds to a Rust match.
+                # Extract captures using LibCST matcher.
+                # We can assume m.matches(node, self.matcher) is mostly True,
+                # but we call m.extract which returns None if no match.
+                captures = m.extract(node, self.matcher)
+
+                if captures is not None:
+                    # Validate repeated metavars
+                    if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
+                        return True
+
+                    # Handle ellipsis and partial dict captures
+                    _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
+
+                    self.matches.append(PatternMatch(
+                        node=node,
+                        captures=captures,
+                        line=pos.start.line,
+                        end_line=pos.end.line,
+                        col=pos.start.column,
+                        end_col=pos.end.column,
+                    ))
+        except (KeyError, AttributeError):
+            pass
+
+        return True
+
+
 def _parse_constraint(constraint: str) -> callable:
     """Parse a constraint string into a node checker function.
 
@@ -4164,7 +4230,7 @@ def find_pattern(
     where: str | None = None,
     scope_local: bool = False,
     source_override: str | None = None,
-    type_oracle: TypeOracle | None = None,
+    type_oracle: "TypeOracle | None" = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -4245,35 +4311,71 @@ def find_pattern(
         source_code = file.read_text()
     module = _cached_parse(source_code)
 
-    # Fast path: for basic pattern matching (no constraints, no import/scope filters),
-    # skip the expensive MetadataWrapper and compute line numbers from the source 
-    # text afterwards. Oracle type constraints need position info for TypeOracle lookups.
-    needs_wrapper = bool(inside or not_inside
-                         or imported_from is not None or scope_local
-                         or oracle_constraints)
+    # Try using Rust pattern matcher if available and applicable
+    rust_ir = compile_pattern_to_rust_ir(pattern)
+    rust_matches = None
+    
+    if rust_ir is not None:
+        # Compile constraints to Rust IR
+        inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
+        not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+        
+        # Only proceed if we have valid IR for all constraints present
+        if (inside is None or inside_ir is not None) and \
+           (not_inside is None or not_inside_ir is not None):
+            
+            raw_matches = _rust.find_pattern_in_files(
+                [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
+            )
+            # raw_matches is list of (file, line, col, end_line, end_col, text)
+            # Rust uses 1-based lines, 0-based columns
+            rust_matches = {
+                (m[1], m[2], m[3], m[4]) for m in raw_matches
+            }
 
-    if not needs_wrapper:
-        # Basic pattern matching without MetadataWrapper
-        finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
-        module.visit(finder)
-        # Compute line numbers from source text for each match
-        if finder.matches:
-            _assign_line_numbers_from_source(finder.matches, source_code, module)
-        matches = finder.matches
-    else:
-        # Full path: use MetadataWrapper for position info and post-filters
+    matches = []
+    position_provider = None
+
+    if rust_matches is not None:
+        # Use Rust-guided extraction (requires PositionProvider)
         wrapper = cst.MetadataWrapper(module)
         position_provider = wrapper.resolve(cst.metadata.PositionProvider)
-
-        # Find all matches - choose finder based on parameters
-        if inside or not_inside:
-            # Use constrained finder for inside/not_inside constraints
-            finder = ConstrainedPatternFinder(matcher, ellipsis_info, position_provider, inside, not_inside, metavar_names)
-        else:
-            # Use basic finder for unconstrained searching
-            finder = PatternFinder(matcher, ellipsis_info, position_provider, metavar_names)
+        
+        finder = RustGuidedFinder(
+            matcher, ellipsis_info, position_provider, rust_matches, metavar_names
+        )
         wrapper.visit(finder)
         matches = finder.matches
+    else:
+        # Fallback to LibCST visitors
+        needs_wrapper = bool(inside or not_inside
+                             or imported_from is not None or scope_local
+                             or oracle_constraints)
+
+        if not needs_wrapper:
+            # Basic pattern matching without MetadataWrapper
+            finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
+            module.visit(finder)
+            # Compute line numbers from source text for each match
+            if finder.matches:
+                _assign_line_numbers_from_source(finder.matches, source_code, module)
+            matches = finder.matches
+        else:
+            # Full path: use MetadataWrapper for position info and post-filters
+            wrapper = cst.MetadataWrapper(module)
+            position_provider = wrapper.resolve(cst.metadata.PositionProvider)
+
+            # Find all matches - choose finder based on parameters
+            if inside or not_inside:
+                # Use constrained finder for inside/not_inside constraints
+                finder = ConstrainedPatternFinder(
+                    matcher, ellipsis_info, position_provider, inside, not_inside, metavar_names
+                )
+            else:
+                # Use basic finder for unconstrained searching
+                finder = PatternFinder(matcher, ellipsis_info, position_provider, metavar_names)
+            wrapper.visit(finder)
+            matches = finder.matches
 
     # Post-filter by scope if requested
     if scope is not None:
@@ -4281,31 +4383,37 @@ def find_pattern(
         symbols = find_nested_definitions(file_path)
         target_sym = find_symbol_by_path(symbols, scope)
         if target_sym:
-            matches = [m for m in matches if target_sym.line_start <= m.line <= target_sym.line_end]
+            matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
         else:
             # Scope not found -- no matches
             matches = []
 
     # Post-filter by import origin if requested
     if imported_from is not None:
-        project_root = _find_project_root(file_path)
-        matches = _filter_matches_by_import(
-            matches, imported_from, file_path, project_root, source_code, position_provider
-        )
+        if position_provider is None:
+             # Should not happen if needs_wrapper was correct, but safe fallback
+             pass
+        else:
+            project_root = _find_project_root(file_path)
+            matches = _filter_matches_by_import(
+                matches, imported_from, file_path, project_root, source_code, position_provider
+            )
 
     # Post-filter by scope locality if requested
     if scope_local:
-        project_root = _find_project_root(file_path)
-        matches = _filter_matches_by_scope_local(
-            matches, file_path, project_root, source_code, position_provider
-        )
+        if position_provider:
+            project_root = _find_project_root(file_path)
+            matches = _filter_matches_by_scope_local(
+                matches, file_path, project_root, source_code, position_provider
+            )
 
     # Post-filter by TypeOracle type constraints
     if oracle_constraints and type_oracle is not None:
-        matches = _filter_matches_by_type_oracle(
-            matches, oracle_constraints, type_oracle,
-            file_path, position_provider,
-        )
+        if position_provider:
+            matches = _filter_matches_by_type_oracle(
+                matches, oracle_constraints, type_oracle,
+                file_path, position_provider,
+            )
 
     return matches
 
