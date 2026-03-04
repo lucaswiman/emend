@@ -2860,25 +2860,25 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+
+    source_code = file_path.read_text()
+    module = cst.parse_module(source_code)
 
     # Apply transformation
     transformer = ComponentSetter(
@@ -3278,20 +3278,20 @@ def add_to_component(
     if selector.component == "imports" and not selector.symbol_path:
         return _add_import(module, value, position, file_path, apply, source_code)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component == "params":
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
 
@@ -3577,25 +3577,25 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    source_code = file_path.read_text()
-    module = cst.parse_module(source_code)
+    # Use tree-sitter to validate symbol exists and determine its kind
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    ts_symbols = find_nested_definitions(str(file_path))
+    ts_sym = find_symbol_by_path(ts_symbols, selector.symbol_path)
 
-    # Validate that symbol exists first
-    finder = SymbolFinder(selector.symbol_path)
-    module.visit(finder)
-
-    if finder.found_node is None:
+    if ts_sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    node = finder.found_node
-
-    # Validate component for symbol type
-    if isinstance(node, cst.ClassDef):
+    # Validate component for symbol type (using tree-sitter kind)
+    is_class = ts_sym.kind == "class"
+    if is_class:
         if selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-    elif isinstance(node, cst.FunctionDef):
+    else:
         if selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+
+    source_code = file_path.read_text()
+    module = cst.parse_module(source_code)
 
     # Apply transformation
     transformer = ComponentRemover(
