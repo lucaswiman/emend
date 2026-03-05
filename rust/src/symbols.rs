@@ -8,71 +8,6 @@ use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
-
-/// Language-agnostic symbol extractor using tree-sitter queries.
-pub struct SymbolExtractor {
-    pub query: Query,
-}
-
-impl SymbolExtractor {
-    pub fn new(language: tree_sitter::Language, query_source: &str) -> Result<Self, String> {
-        let query = Query::new(&language, query_source).map_err(|e| e.to_string())?;
-        Ok(Self { query })
-    }
-
-    pub fn extract(&self, source: &[u8], tree: &tree_sitter::Tree) -> Vec<RustSymbol> {
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
-
-        let mut symbols = Vec::new();
-        let name_idx = self.query.capture_index_for_name("name").unwrap();
-        let params_idx = self.query.capture_index_for_name("params");
-        let return_type_idx = self.query.capture_index_for_name("return_type");
-        
-        while let Some(m) = matches.next() {
-            let mut name = String::new();
-            let mut kind = "variable".to_string();
-            let mut node = m.captures[0].node;
-            let mut signature = None;
-            let mut returns = None;
-
-            for cap in m.captures {
-                if cap.index == name_idx {
-                    name = node_text(cap.node, source).to_string();
-                } else if Some(cap.index) == params_idx {
-                    signature = Some(node_text(cap.node, source).to_string());
-                } else if Some(cap.index) == return_type_idx {
-                    returns = Some(node_text(cap.node, source).trim_start_matches("->").trim().to_string());
-                } else {
-                    kind = self.query.capture_names()[cap.index as usize].to_string();
-                    node = cap.node;
-                }
-            }
-
-            if !name.is_empty() {
-                symbols.push(RustSymbol {
-                    name,
-                    kind,
-                    signature,
-                    type_annotation: None,
-                    returns,
-                    line: node.start_position().row + 1,
-                    end_line: node.end_position().row + 1,
-                    col_offset: node.start_position().column,
-                    children: Vec::new(),
-                    path: Vec::new(),
-                    depth: 0,
-                    decorators: Vec::new(),
-                    decorator_line_start: None,
-                    param_names: Vec::new(),
-                });
-            }
-        }
-        symbols
-    }
-}
 
 /// Internal symbol representation (not a pyclass to avoid recursive Vec issues).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +17,7 @@ pub struct RustSymbol {
     pub signature: Option<String>,
     pub type_annotation: Option<String>,
     pub returns: Option<String>,
+    pub is_public: bool,
     pub line: usize,
     pub end_line: usize,
     pub col_offset: usize,
@@ -101,6 +37,7 @@ pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
     d.set_item("signature", sym.signature.as_deref())?;
     d.set_item("type_annotation", sym.type_annotation.as_deref())?;
     d.set_item("returns", sym.returns.as_deref())?;
+    d.set_item("is_public", sym.is_public)?;
     d.set_item("line", sym.line)?;
     d.set_item("end_line", sym.end_line)?;
     d.set_item("col_offset", sym.col_offset)?;
@@ -840,8 +777,8 @@ fn collect_from_body(
                                 signature: None,
                                 type_annotation: None,
                                 returns: None,
-                                line: start_line,
-                                end_line,
+                                is_public: true,
+                                line: start_line,                                end_line,
                                 col_offset,
                                 children,
                                 path: current_path,
@@ -927,8 +864,8 @@ fn collect_from_body(
                                             signature: None,
                                             type_annotation: None,
                                             returns: None,
-                                            line: 0,
-                                            end_line: 0,
+                                            is_public: true,
+                                            line: 0,                                            end_line: 0,
                                             col_offset: 0,
                                             children: vec![],
                                             path: vec![],
@@ -956,8 +893,8 @@ fn collect_from_body(
                         signature: Some(sig),
                         type_annotation: None,
                         returns,
-                        line: start_line,
-                        end_line,
+                        is_public: true,
+                        line: start_line,                        end_line,
                         col_offset,
                         children,
                         path: current_path,
@@ -1007,8 +944,8 @@ fn collect_from_body(
                         signature: None,
                         type_annotation: None,
                         returns: None,
-                        line: start_line,
-                        end_line,
+                        is_public: true,
+                        line: start_line,                        end_line,
                         col_offset,
                         children,
                         path: current_path,
@@ -1048,8 +985,8 @@ fn collect_from_body(
                                         signature: None,
                                         type_annotation,
                                         returns: None,
-                                        line: start_line,
-                                        end_line,
+                                        is_public: true,
+                                        line: start_line,                                        end_line,
                                         col_offset,
                                         children: vec![],
                                         path: current_path,

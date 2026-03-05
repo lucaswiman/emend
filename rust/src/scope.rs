@@ -80,7 +80,10 @@ pub struct Binding {
     pub column: usize,
     pub byte_offset: usize,
     pub signature: Option<String>,
+    pub type_annotation: Option<String>,
     pub returns: Option<String>,
+    pub is_async: bool,
+    pub created_scope: Option<ScopeId>,
 }
 
 
@@ -170,6 +173,7 @@ pub struct Location {
 #[derive(Debug, Clone)]
 pub struct FileScope {
     pub content_hash: [u8; 16],
+    pub module_path: String,
     pub scopes: Vec<Scope>,
     pub imports: HashMap<String, ImportBinding>,
     pub definitions: Vec<(QualifiedName, Location)>,
@@ -194,22 +198,31 @@ pub struct ImportBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageConfig {
+    pub language: LanguageSection,
+    pub scoping: ScopingSection,
+    pub bindings: BindingsSection,
+    pub imports: ImportsSection,
+    pub qualified_names: QualifiedNamesSection,
+    pub exports: ExportsSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageSection {
     pub name: String,
+    pub tree_sitter_grammar: String,
     pub file_extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopingSection {
     pub scope_creators: Vec<ScopeCreator>,
-    pub scope_rules: HashMap<ScopeKind, ScopeRule>,
-    pub import_resolution: String,
-    pub module_separator: String,
-    pub class_member_prefix: bool,
-    pub nested_function_prefix: bool,
-    pub locals_marker: String,
-    pub all_variable: Option<String>,
-    pub public_by_default: bool,
-    pub private_prefix: String,
+    pub rules: HashMap<ScopeKind, ScopeRule>,
+    pub declarations: DeclarationsSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeCreator {
+    #[serde(rename = "node")]
     pub node_type: String,
     pub kind: ScopeKind,
 }
@@ -218,6 +231,71 @@ pub struct ScopeCreator {
 pub struct ScopeRule {
     pub is_closure_boundary: bool,
     pub names_visible_to_inner: bool,
+    pub scoped_children: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclarationsSection {
+    pub global_keyword: Option<String>,
+    pub nonlocal_keyword: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindingsSection {
+    pub assignment: Vec<AssignmentRule>,
+    #[serde(rename = "loop")]
+    pub loop_rules: Vec<AssignmentRule>,
+    pub context_manager: Vec<AssignmentRule>,
+    pub exception: Vec<AssignmentRule>,
+    pub parameters: ParametersSection,
+    pub definitions: DefinitionsSection,
+    pub walrus: Vec<AssignmentRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentRule {
+    pub node: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParametersSection {
+    pub param_nodes: Vec<String>,
+    pub name_field: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefinitionsSection {
+    pub function_def: String,
+    pub class_def: String,
+    pub name_field: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportsSection {
+    pub import_statement: String,
+    pub import_from: String,
+    pub module_field: String,
+    pub name_field: String,
+    pub alias_field: String,
+    pub star_import: String,
+    pub resolution: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualifiedNamesSection {
+    pub module_separator: String,
+    pub class_member_prefix: bool,
+    pub nested_function_prefix: bool,
+    pub locals_marker: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportsSection {
+    pub all_variable: Option<String>,
+    pub public_by_default: bool,
+    pub private_prefix: String,
+    pub dunder_is_public: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +406,40 @@ pub struct ScopeResolver {
 }
 
 impl FileScope {
-    pub fn to_rust_symbols(&self) -> Vec<crate::symbols::RustSymbol> {
+    pub fn to_rust_symbols(&self, config: &LanguageConfig) -> Vec<crate::symbols::RustSymbol> {
         let mut result = Vec::new();
+        
+        // Map scope IDs to their qualified names for nesting references
+        let mut scope_qns: HashMap<ScopeId, String> = HashMap::new();
+        if !self.scopes.is_empty() {
+            // Find the root scope (usually the first one, Module)
+            for scope in &self.scopes {
+                if scope.parent.is_none() {
+                    scope_qns.insert(scope.id, self.module_path.clone());
+                }
+            }
+            
+            // Build QNs for all other scopes
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for scope in &self.scopes {
+                    if scope_qns.contains_key(&scope.id) { continue; }
+                    if let Some(parent_id) = scope.parent {
+                        if let Some(parent_qn) = scope_qns.get(&parent_id) {
+                            let parent = self.scopes.iter().find(|s| s.id == parent_id).unwrap();
+                            if let Some(name) = find_scope_name(parent, scope, BindingKind::FunctionDef)
+                                .or_else(|| find_scope_name(parent, scope, BindingKind::ClassDef))
+                            {
+                                scope_qns.insert(scope.id, format!("{}.{}", parent_qn, name));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for (qn, loc) in &self.definitions {
             // Find the binding in scopes to get more info (kind, params, etc)
             let mut kind = "variable".to_string();
@@ -337,30 +447,37 @@ impl FileScope {
             let mut end_line = loc.line + 1;
             let mut col_offset = loc.column;
             let mut signature = None;
+            let mut type_annotation = None;
             let mut returns = None;
+
+            let parts: Vec<&str> = qn.name.split('.').collect();
+            let last_name = parts.last().unwrap_or(&"");
 
             // Search for the definition in the scopes
             for scope in &self.scopes {
-                let parts: Vec<&str> = qn.name.split('.').collect();
-                let last_name = parts.last().unwrap_or(&"");
                 if let Some(binding) = scope.bindings.get(*last_name) {
                     if binding.byte_offset == loc.byte_offset {
-                        kind = match binding.kind {
-                            BindingKind::FunctionDef => "function".to_string(),
-                            BindingKind::ClassDef => "class".to_string(),
-                            BindingKind::Parameter => "parameter".to_string(),
+                        kind = match (binding.kind, binding.is_async, scope.kind) {
+                            (BindingKind::FunctionDef, true, ScopeKind::Class) => "async_method".to_string(),
+                            (BindingKind::FunctionDef, false, ScopeKind::Class) => "method".to_string(),
+                            (BindingKind::FunctionDef, true, _) => "async_function".to_string(),
+                            (BindingKind::FunctionDef, false, _) => "function".to_string(),
+                            (BindingKind::ClassDef, _, _) => "class".to_string(),
+                            (BindingKind::Parameter, _, _) => "parameter".to_string(),
                             _ => "variable".to_string(),
                         };
                         line = binding.line + 1;
                         col_offset = binding.column;
                         signature = binding.signature.clone();
+                        type_annotation = binding.type_annotation.clone();
                         returns = binding.returns.clone();
                         
-                        // Find the scope created by this definition to get its end line
-                        for s in &self.scopes {
-                            if s.parent == Some(scope.id) && s.start_byte > binding.byte_offset {
-                                end_line = s.end_line + 1; // 1-indexed
-                                break;
+                        // Use the created scope for accurate end line
+                        if let Some(sid) = binding.created_scope {
+                            if let Some(s) = self.scopes.iter().find(|s| s.id == sid) {
+                                end_line = s.end_line + 1;
+                                // For functions/classes, line should be the def line
+                                line = s.start_line + 1;
                             }
                         }
                         break;
@@ -368,12 +485,21 @@ impl FileScope {
                 }
             }
 
+            let mut is_public = config.exports.public_by_default;
+            if last_name.starts_with(&config.exports.private_prefix) {
+                is_public = false;
+            }
+            if config.exports.dunder_is_public && last_name.starts_with("__") && last_name.ends_with("__") {
+                is_public = true;
+            }
+
             result.push(crate::symbols::RustSymbol {
                 name: qn.name.clone(),
                 kind,
                 signature,
-                type_annotation: None,
+                type_annotation,
                 returns,
+                is_public,
                 line,
                 end_line,
                 col_offset,
@@ -385,6 +511,54 @@ impl FileScope {
                 param_names: Vec::new(),
             });
         }
+
+        // Add outer-scope references
+        for r in &self.references {
+            if r.kind == ReferenceKind::Read || r.kind == ReferenceKind::Call {
+                // Find enclosing scope to build the path
+                let mut enclosing_scope_id = self.scopes[0].id; // Default to Module
+                let mut best_size = usize::MAX;
+                for scope in &self.scopes {
+                    if r.byte_offset >= scope.start_byte && r.byte_offset <= scope.end_byte {
+                        let size = scope.end_byte - scope.start_byte;
+                        if size < best_size {
+                            best_size = size;
+                            enclosing_scope_id = scope.id;
+                        }
+                    }
+                }
+                
+                let enclosing_scope = self.scopes.iter().find(|s| s.id == enclosing_scope_id).unwrap();
+                let parts: Vec<&str> = r.qn.name.split('.').collect();
+                let last_name = parts.last().unwrap_or(&"");
+                
+                // Only include if it's NOT bound in the immediate scope
+                if !enclosing_scope.bindings.contains_key(*last_name) {
+                     let enclosing_qn = scope_qns.get(&enclosing_scope_id).cloned().unwrap_or(self.module_path.clone());
+                     let mut path: Vec<String> = enclosing_qn.split('.').map(|s| s.to_string()).collect();
+                     path.push(last_name.to_string());
+
+                     result.push(crate::symbols::RustSymbol {
+                        name: last_name.to_string(),
+                        kind: "reference".to_string(),
+                        signature: None,
+                        type_annotation: None,
+                        returns: None,
+                        is_public: true,
+                        line: r.line,
+                        end_line: r.line,
+                        col_offset: r.column,
+                        children: Vec::new(),
+                        path: path.clone(),
+                        depth: path.len() - 1,
+                        decorators: Vec::new(),
+                        decorator_line_start: None,
+                        param_names: Vec::new(),
+                    });
+                }
+            }
+        }
+
         result
     }
 }
@@ -403,7 +577,7 @@ impl ScopeResolver {
 
     pub fn get_symbols(&self, path: &Path) -> Vec<crate::symbols::RustSymbol> {
         if let Some(file_scope) = self.file_scopes.get(path) {
-            file_scope.to_rust_symbols()
+            file_scope.to_rust_symbols(&self.config)
         } else {
             Vec::new()
         }
@@ -419,7 +593,8 @@ impl ScopeResolver {
             }
         }
 
-        let file_scope = self.build_file_scope(path, source, tree, hash);
+        let module_path = derive_module_path(path, &self.project_root, &self.config.qualified_names.module_separator);
+        let file_scope = self.build_file_scope(path, source, tree, hash, module_path.clone());
 
         // Update QN index: remove old entries for this file, add new ones
         self.remove_file_from_qn_index(path);
@@ -434,7 +609,6 @@ impl ScopeResolver {
         self.file_qns.insert(path.to_path_buf(), qns_for_file);
 
         // Update import graph
-        let module_path = derive_module_path(path, &self.project_root, &self.config.module_separator);
         self.import_graph
             .module_to_file
             .insert(module_path.clone(), path.to_path_buf());
@@ -478,6 +652,7 @@ impl ScopeResolver {
         source: &str,
         tree: &tree_sitter::Tree,
         content_hash: [u8; 16],
+        module_path: String,
     ) -> FileScope {
         let mut ctx = BuildContext::new(source, path);
 
@@ -500,18 +675,13 @@ impl ScopeResolver {
         self.walk_node(&mut cursor, module_id, &mut ctx);
 
         // Second pass: resolve all identifier/attribute references to QNs.
-        let module_path = self
-            .import_graph
-            .file_to_module
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| derive_module_path(path, &self.project_root, &self.config.module_separator));
         let (references, all_qnames) = self.collect_file_references(
             tree, path, source, &module_path, &ctx.scopes, &ctx.scope_index, &ctx.imports,
         );
 
         FileScope {
             content_hash,
+            module_path,
             scopes: ctx.scopes,
             imports: ctx.imports,
             definitions: ctx.definitions,
@@ -577,7 +747,7 @@ impl ScopeResolver {
         let node_kind = node.kind();
 
         // Check if this node created a new scope in Pass 1.
-        let is_scope_creator = self.config.scope_creators.iter().any(|c| c.node_type == node_kind);
+        let is_scope_creator = self.config.scoping.scope_creators.iter().any(|c| c.node_type == node_kind);
         let scope_for_children = if is_scope_creator {
             self.find_scope_at_node(&node, scopes).unwrap_or(current_scope)
         } else {
@@ -589,17 +759,18 @@ impl ScopeResolver {
             || node_kind == "import_statement"
             || node_kind == "import_from_statement";
 
-        // Process identifier nodes (but not those that are part of an
+        // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
         if node_kind == "identifier" {
-            // Skip if parent is an attribute (we handle dotted access separately)
-            let parent = node.parent();
-            let is_attr_part = parent.map_or(false, |p| p.kind() == "attribute");
+            // Skip if it's the 'attribute' field of an 'attribute' node
+            let is_attr_name = node.parent().map_or(false, |p| {
+                p.kind() == "attribute" && p.child_by_field_name("attribute") == Some(node)
+            });
             // Skip Python keywords that tree-sitter reports as identifiers
             let name = node_text(node, source);
             let is_keyword = matches!(name, "True" | "False" | "None");
 
-            if !is_attr_part && !is_keyword {
+            if !is_attr_name && !is_keyword {
                 let kind = self.classify_reference(&node, in_import);
                 
                 if let Some(qn) = self.resolve_identifier(
@@ -729,47 +900,28 @@ impl ScopeResolver {
         let mut current = *node;
         while let Some(parent) = current.parent() {
             let pk = parent.kind();
+
+            // Check configured binding rules
+            let rules = [
+                &self.config.bindings.assignment,
+                &self.config.bindings.loop_rules,
+                &self.config.bindings.context_manager,
+                &self.config.bindings.exception,
+                &self.config.bindings.walrus,
+            ];
+
+            for rule_list in rules {
+                if let Some(rule) = rule_list.iter().find(|r| r.node == pk) {
+                    if let Some(target) = parent.child_by_field_name(&rule.target) {
+                        if target.byte_range().contains(&node.start_byte()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+
             match pk {
-                "assignment" | "augmented_assignment" | "annotated_assignment" => {
-                    if let Some(left) = parent.child_by_field_name("left") {
-                        if left.byte_range().contains(&node.start_byte()) {
-                            return true;
-                        }
-                    }
-                    return false; // it's in the value (right) side
-                }
-                "for_in_clause" | "for_statement" => {
-                    if let Some(left) = parent.child_by_field_name("left") {
-                        if left.byte_range().contains(&node.start_byte()) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                "as_pattern" | "as_pattern_target" | "with_statement" => {
-                    if pk == "with_statement" {
-                         // with_statement itself doesn't have a simple 'left'
-                         // it contains with_clause which contains as_pattern
-                         continue;
-                    }
-                    return true;
-                }
-                "named_expression" => {
-                    if let Some(name) = parent.child_by_field_name("name") {
-                        if name.id() == node.id() {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                "except_clause" => {
-                    if let Some(name) = parent.child_by_field_name("name") {
-                        if name.id() == node.id() {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
                 "function_definition" | "class_definition" | "call" | "attribute" => {
                     // These are boundaries where we know it's not a general write context
                     return false;
@@ -943,7 +1095,7 @@ impl ScopeResolver {
             }
 
             // Check closure boundary
-            if let Some(rule) = self.config.scope_rules.get(&scope.kind) {
+            if let Some(rule) = self.config.scoping.rules.get(&scope.kind) {
                 if rule.is_closure_boundary && !rule.names_visible_to_inner {
                     // Class scope in Python: stop searching
                     break;
@@ -967,7 +1119,7 @@ impl ScopeResolver {
         let mut parts = Vec::new();
         parts.push(name.to_string());
         let mut current = Some(scope_id);
-        let sep = &self.config.module_separator;
+        let sep = &self.config.qualified_names.module_separator;
 
         while let Some(sid) = current {
             let idx = match scope_index.get(&sid) {
@@ -981,18 +1133,17 @@ impl ScopeResolver {
                     parts.push(module_path.to_string());
                     break;
                 }
-                ScopeKind::Function if self.config.nested_function_prefix => {
+                ScopeKind::Function if self.config.qualified_names.nested_function_prefix => {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
                             if let Some(bname) = find_scope_name(parent, scope, BindingKind::FunctionDef) {
-                                parts.push(self.config.locals_marker.clone());
                                 parts.push(bname.to_string());
                             }
                         }
                     }
                 }
-                ScopeKind::Class if self.config.class_member_prefix => {
+                ScopeKind::Class if self.config.qualified_names.class_member_prefix => {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
@@ -1021,10 +1172,11 @@ impl ScopeResolver {
     ) {
         let node = cursor.node();
         let node_kind = node.kind();
+        // eprintln!("DEBUG: node_kind={}", node_kind);
 
         // Check if this node creates a new scope
         let scope_for_children =
-            if let Some(creator) = self.config.scope_creators.iter().find(|c| c.node_type == node_kind) {
+            if let Some(creator) = self.config.scoping.scope_creators.iter().find(|c| c.node_type == node_kind) {
                 if creator.kind == ScopeKind::Module {
                     current_scope
                 } else {
@@ -1047,12 +1199,34 @@ impl ScopeResolver {
                             let mut signature = None;
                             let mut returns = None;
 
+                            // Detect async: look for "async" keyword
+                            let is_async = {
+                                let mut c = node.walk();
+                                let mut found = false;
+                                if c.goto_first_child() {
+                                    loop {
+                                        if c.node().kind() == "async" {
+                                            found = true;
+                                            break;
+                                        }
+                                        if !c.goto_next_sibling() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                found
+                            };
+
                             if creator.kind == ScopeKind::Function {
                                 if let Some(params) = node.child_by_field_name("parameters") {
                                     signature = Some(ctx.text(params).to_string());
                                 }
                                 if let Some(ret) = node.child_by_field_name("return_type") {
                                     returns = Some(ctx.text(ret).trim_start_matches("->").trim().to_string());
+                                    // Append return type to signature for consistency with old behavior
+                                    if let Some(ref mut sig) = signature {
+                                        sig.push_str(&format!(" -> {}", returns.as_ref().unwrap()));
+                                    }
                                 }
                             }
 
@@ -1067,7 +1241,10 @@ impl ScopeResolver {
                                 column: name_node.start_position().column,
                                 byte_offset: name_node.start_byte(),
                                 signature,
+                                type_annotation: None,
                                 returns,
+                                is_async,
+                                created_scope: Some(scope_id),
                             };
 
                             ctx.add_binding(current_scope, binding);
@@ -1085,7 +1262,7 @@ impl ScopeResolver {
 
                     if creator.kind == ScopeKind::Function {
                         if let Some(params) = node.child_by_field_name("parameters") {
-                            Self::collect_parameters(ctx, &params, scope_id);
+                            self.collect_parameters(ctx, &params, scope_id);
                         }
                     }
 
@@ -1100,65 +1277,64 @@ impl ScopeResolver {
             Self::collect_import(ctx, &node);
         }
 
-        // Collect assignments
-        if node_kind == "assignment" || node_kind == "augmented_assignment" || node_kind == "annotated_assignment" {
-            if let Some(left) = node.child_by_field_name("left") {
-                self.collect_binding_targets(ctx, &left, scope_for_children, BindingKind::Assignment);
-            }
-        }
+        // Collect assignments and other bindings
+        let binding_rules = [
+            (&self.config.bindings.assignment, BindingKind::Assignment),
+            (&self.config.bindings.loop_rules, BindingKind::LoopVariable),
+            (&self.config.bindings.context_manager, BindingKind::ContextManager),
+            (&self.config.bindings.exception, BindingKind::ExceptionHandler),
+            (&self.config.bindings.walrus, BindingKind::Walrus),
+        ];
 
-        // Collect for loop variables
-        if node_kind == "for_in_clause" || node_kind == "for_statement" {
-            if let Some(left) = node.child_by_field_name("left") {
-                self.collect_binding_targets(ctx, &left, scope_for_children, BindingKind::Assignment);
-            }
-        }
-
-        // Collect with statement variables
-        if node_kind == "as_pattern" || node_kind == "as_pattern_target" || node_kind == "with_statement" {
-             // In `with ... as x`, `x` is the target.
-             if node_kind == "with_statement" {
-                 // Tree-sitter python with_statement has with_clause children
-                 // but let's check for as_pattern recursively via walk_node
-             } else {
-                 self.collect_binding_targets(ctx, &node, scope_for_children, BindingKind::Assignment);
-             }
-        }
-
-        // Collect walrus operator variables
-        if node_kind == "named_expression" {
-            if let Some(name) = node.child_by_field_name("name") {
-                self.collect_binding_targets(ctx, &name, scope_for_children, BindingKind::Assignment);
-            }
-        }
-
-        // Collect exception handler variables
-        if node_kind == "except_clause" {
-            if let Some(name) = node.child_by_field_name("name") {
-                self.collect_binding_targets(ctx, &name, scope_for_children, BindingKind::Assignment);
+        for (rule_list, kind) in binding_rules {
+            if let Some(rule) = rule_list.iter().find(|r| r.node == node_kind) {
+                if let Some(target) = node.child_by_field_name(&rule.target) {
+                    let type_annotation = node.child_by_field_name("type").map(|n| ctx.text(n).to_string());
+                    self.collect_binding_targets(ctx, &target, scope_for_children, kind, type_annotation);
+                }
             }
         }
 
         // Collect global/nonlocal declarations
-        if node_kind == "global_statement" || node_kind == "nonlocal_statement" {
-            let kind = if node_kind == "global_statement" {
-                BindingKind::Global
-            } else {
-                BindingKind::Nonlocal
-            };
-            for_each_child_of_kind(&node, "identifier", |child| {
-                let name = ctx.text(child);
-                let binding = Binding {
-                    name: name.to_string(),
-                    kind,
-                    line: child.start_position().row,
-                    column: child.start_position().column,
-                    byte_offset: child.start_byte(),
-                    signature: None,
-                    returns: None,
-                };
-                ctx.add_binding(scope_for_children, binding);
-            });
+        if let Some(ref global_kw) = self.config.scoping.declarations.global_keyword {
+            if node_kind == *global_kw {
+                for_each_child_of_kind(&node, "identifier", |child| {
+                    let name = ctx.text(child);
+                    let binding = Binding {
+                        name: name.to_string(),
+                        kind: BindingKind::Global,
+                        line: child.start_position().row,
+                        column: child.start_position().column,
+                        byte_offset: child.start_byte(),
+                        signature: None,
+                        type_annotation: None,
+                        returns: None,
+                        is_async: false,
+                        created_scope: None,
+                    };
+                    ctx.add_binding(scope_for_children, binding);
+                });
+            }
+        }
+        if let Some(ref nonlocal_kw) = self.config.scoping.declarations.nonlocal_keyword {
+            if node_kind == *nonlocal_kw {
+                for_each_child_of_kind(&node, "identifier", |child| {
+                    let name = ctx.text(child);
+                    let binding = Binding {
+                        name: name.to_string(),
+                        kind: BindingKind::Nonlocal,
+                        line: child.start_position().row,
+                        column: child.start_position().column,
+                        byte_offset: child.start_byte(),
+                        signature: None,
+                        type_annotation: None,
+                        returns: None,
+                        is_async: false,
+                        created_scope: None,
+                    };
+                    ctx.add_binding(scope_for_children, binding);
+                });
+            }
         }
 
         // Recurse into children
@@ -1180,27 +1356,50 @@ impl ScopeResolver {
         node: &tree_sitter::Node,
         scope_id: ScopeId,
         kind: BindingKind,
+        type_annotation: Option<String>,
     ) {
         match node.kind() {
             "identifier" => {
-                let name = ctx.text(*node);
+                let name = ctx.text(*node).to_string();
+
                 let binding = Binding {
-                    name: name.to_string(),
+                    name: name.clone(),
                     kind,
                     line: node.start_position().row,
                     column: node.start_position().column,
                     byte_offset: node.start_byte(),
                     signature: None,
+                    type_annotation,
                     returns: None,
+                    is_async: false,
+                    created_scope: None,
                 };
+                
+                let is_new = if let Some(scope) = ctx.scope(scope_id) {
+                    !scope.bindings.contains_key(&binding.name)
+                } else {
+                    false
+                };
+                
                 ctx.add_binding_if_absent(scope_id, binding);
+                
+                if is_new {
+                    let qn = self.compute_qn(&ctx.scopes, &ctx.scope_index, ctx.file_path, scope_id, &name);
+                    let loc = Location {
+                        file: ctx.file_path.to_path_buf(),
+                        line: node.start_position().row,
+                        column: node.start_position().column,
+                        byte_offset: node.start_byte(),
+                    };
+                    ctx.definitions.push((qn, loc));
+                }
             }
             "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern"
             | "as_pattern" | "as_pattern_target" => {
                 for_each_child(node, |child| {
                     let ck = child.kind();
                     if ck != "," && ck != "(" && ck != ")" && ck != "[" && ck != "]" && ck != "as" {
-                        self.collect_binding_targets(ctx, &child, scope_id, kind);
+                        self.collect_binding_targets(ctx, &child, scope_id, kind, None);
                     }
                 });
             }
@@ -1210,6 +1409,7 @@ impl ScopeResolver {
 
     /// Collect function parameters as bindings.
     fn collect_parameters(
+        &self,
         ctx: &mut BuildContext,
         params_node: &tree_sitter::Node,
         scope_id: ScopeId,
@@ -1220,28 +1420,31 @@ impl ScopeResolver {
         }
         loop {
             let child = cursor.node();
-            let name = match child.kind() {
-                "identifier" => Some(ctx.text(child)),
-                "default_parameter" | "typed_parameter" | "typed_default_parameter" => {
-                    child.child_by_field_name("name").map(|n| ctx.text(n))
-                }
-                "list_splat_pattern" | "dictionary_splat_pattern" => {
-                    find_first_child_of_kind(&child, "identifier").map(|n| ctx.text(n))
-                }
-                _ => None,
-            };
+            let ck = child.kind();
 
-            if let Some(name) = name {
-                let binding = Binding {
-                    name: name.to_string(),
-                    kind: BindingKind::Parameter,
-                    line: child.start_position().row,
-                    column: child.start_position().column,
-                    byte_offset: child.start_byte(),
-                    signature: None,
-                    returns: None,
+            if self.config.bindings.parameters.param_nodes.contains(&ck.to_string()) {
+                let name_node = if ck == "identifier" {
+                    Some(child)
+                } else {
+                    child.child_by_field_name(&self.config.bindings.parameters.name_field)
                 };
-                ctx.add_binding(scope_id, binding);
+
+                if let Some(n) = name_node {
+                    let name = ctx.text(n);
+                    let binding = Binding {
+                        name: name.to_string(),
+                        kind: BindingKind::Parameter,
+                        line: n.start_position().row,
+                        column: n.start_position().column,
+                        byte_offset: n.start_byte(),
+                        signature: None,
+                        type_annotation: None,
+                        returns: None,
+                        is_async: false,
+                        created_scope: None,
+                    };
+                    ctx.add_binding(scope_id, binding);
+                }
             }
 
             if !cursor.goto_next_sibling() {
@@ -1345,7 +1548,7 @@ impl ScopeResolver {
         let mut parts = Vec::new();
         parts.push(name.to_string());
         let mut current = Some(scope_id);
-        let sep = &self.config.module_separator;
+        let sep = &self.config.qualified_names.module_separator;
 
         while let Some(sid) = current {
             let idx = match scope_index.get(&sid) {
@@ -1365,18 +1568,17 @@ impl ScopeResolver {
                     parts.push(module_path);
                     break;
                 }
-                ScopeKind::Function if self.config.nested_function_prefix => {
+                ScopeKind::Function if self.config.qualified_names.nested_function_prefix => {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
                             if let Some(bname) = find_scope_name(parent, scope, BindingKind::FunctionDef) {
-                                parts.push(self.config.locals_marker.clone());
                                 parts.push(bname.to_string());
                             }
                         }
                     }
                 }
-                ScopeKind::Class if self.config.class_member_prefix => {
+                ScopeKind::Class if self.config.qualified_names.class_member_prefix => {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
@@ -1453,26 +1655,6 @@ fn for_each_child_of_kind(
             f(child);
         }
     });
-}
-
-/// Find the first child of a node that matches a specific kind.
-fn find_first_child_of_kind<'a>(
-    node: &tree_sitter::Node<'a>,
-    kind: &str,
-) -> Option<tree_sitter::Node<'a>> {
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
 }
 
 /// Find the binding name in `parent` that defines `scope` (by byte range overlap).
@@ -1576,32 +1758,88 @@ impl LanguageConfig {
 
     pub fn python_default() -> Self {
         LanguageConfig {
-            name: "python".to_string(),
-            file_extensions: vec!["py".to_string(), "pyi".to_string()],
-            scope_creators: vec![
-                ScopeCreator { node_type: "module".to_string(), kind: ScopeKind::Module },
-                ScopeCreator { node_type: "function_definition".to_string(), kind: ScopeKind::Function },
-                ScopeCreator { node_type: "class_definition".to_string(), kind: ScopeKind::Class },
-                ScopeCreator { node_type: "lambda".to_string(), kind: ScopeKind::Function },
-                ScopeCreator { node_type: "list_comprehension".to_string(), kind: ScopeKind::Comprehension },
-                ScopeCreator { node_type: "set_comprehension".to_string(), kind: ScopeKind::Comprehension },
-                ScopeCreator { node_type: "dictionary_comprehension".to_string(), kind: ScopeKind::Comprehension },
-                ScopeCreator { node_type: "generator_expression".to_string(), kind: ScopeKind::Comprehension },
-            ],
-            scope_rules: HashMap::from([
-                (ScopeKind::Module, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true }),
-                (ScopeKind::Function, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true }),
-                (ScopeKind::Class, ScopeRule { is_closure_boundary: true, names_visible_to_inner: false }),
-                (ScopeKind::Comprehension, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true }),
-            ]),
-            import_resolution: "python".to_string(),
-            module_separator: ".".to_string(),
-            class_member_prefix: true,
-            nested_function_prefix: true,
-            locals_marker: "<locals>".to_string(),
-            all_variable: Some("__all__".to_string()),
-            public_by_default: true,
-            private_prefix: "_".to_string(),
+            language: LanguageSection {
+                name: "python".to_string(),
+                tree_sitter_grammar: "tree-sitter-python".to_string(),
+                file_extensions: vec!["py".to_string(), "pyi".to_string()],
+            },
+            scoping: ScopingSection {
+                scope_creators: vec![
+                    ScopeCreator { node_type: "module".to_string(), kind: ScopeKind::Module },
+                    ScopeCreator { node_type: "function_definition".to_string(), kind: ScopeKind::Function },
+                    ScopeCreator { node_type: "class_definition".to_string(), kind: ScopeKind::Class },
+                    ScopeCreator { node_type: "lambda".to_string(), kind: ScopeKind::Function },
+                    ScopeCreator { node_type: "list_comprehension".to_string(), kind: ScopeKind::Comprehension },
+                    ScopeCreator { node_type: "set_comprehension".to_string(), kind: ScopeKind::Comprehension },
+                    ScopeCreator { node_type: "dictionary_comprehension".to_string(), kind: ScopeKind::Comprehension },
+                    ScopeCreator { node_type: "generator_expression".to_string(), kind: ScopeKind::Comprehension },
+                ],
+                rules: HashMap::from([
+                    (ScopeKind::Module, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, scoped_children: None }),
+                    (ScopeKind::Function, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, scoped_children: None }),
+                    (ScopeKind::Class, ScopeRule { is_closure_boundary: true, names_visible_to_inner: false, scoped_children: None }),
+                    (ScopeKind::Comprehension, ScopeRule { 
+                        is_closure_boundary: false, 
+                        names_visible_to_inner: true, 
+                        scoped_children: Some(vec!["for_in_clause.left".to_string()]) 
+                    }),
+                ]),
+                declarations: DeclarationsSection {
+                    global_keyword: Some("global_statement".to_string()),
+                    nonlocal_keyword: Some("nonlocal_statement".to_string()),
+                },
+            },
+            bindings: BindingsSection {
+                assignment: vec![
+                    AssignmentRule { node: "assignment".to_string(), target: "left".to_string() },
+                    AssignmentRule { node: "augmented_assignment".to_string(), target: "left".to_string() },
+                    AssignmentRule { node: "annotated_assignment".to_string(), target: "left".to_string() },
+                ],
+                loop_rules: vec![
+                    AssignmentRule { node: "for_statement".to_string(), target: "left".to_string() },
+                    AssignmentRule { node: "for_in_clause".to_string(), target: "left".to_string() },
+                ],
+                context_manager: vec![AssignmentRule { node: "with_clause".to_string(), target: "alias".to_string() }],
+                exception: vec![AssignmentRule { node: "except_clause".to_string(), target: "name".to_string() }],
+                parameters: ParametersSection {
+                    param_nodes: vec![
+                        "identifier".to_string(),
+                        "default_parameter".to_string(),
+                        "typed_parameter".to_string(),
+                        "typed_default_parameter".to_string(),
+                        "list_splat_pattern".to_string(),
+                        "dictionary_splat_pattern".to_string(),
+                    ],
+                    name_field: "name".to_string(),
+                },
+                definitions: DefinitionsSection {
+                    function_def: "function_definition".to_string(),
+                    class_def: "class_definition".to_string(),
+                    name_field: "name".to_string(),
+                },
+                walrus: vec![AssignmentRule { node: "named_expression".to_string(), target: "name".to_string() }],
+            },
+            imports: ImportsSection {
+                import_statement: "import_statement".to_string(),
+                import_from: "import_from_statement".to_string(),
+                module_field: "module_name".to_string(),
+                name_field: "name".to_string(),
+                alias_field: "alias".to_string(),
+                star_import: "wildcard_import".to_string(),
+                resolution: "python".to_string(),
+            },
+            qualified_names: QualifiedNamesSection {
+                module_separator: ".".to_string(),
+                class_member_prefix: true,
+                nested_function_prefix: true,
+                locals_marker: "<locals>".to_string(),
+            },
+            exports: ExportsSection {
+                all_variable: Some("__all__".to_string()),
+                public_by_default: true,
+                private_prefix: "_".to_string(),
+                dunder_is_public: true,
+            },
         }
     }
 }
@@ -1721,7 +1959,7 @@ class MyClass:
             .expect("Should have a class scope");
 
         let config = LanguageConfig::python_default();
-        let rule = config.scope_rules.get(&ScopeKind::Class).unwrap();
+        let rule = config.scoping.rules.get(&ScopeKind::Class).unwrap();
         assert!(rule.is_closure_boundary);
         assert!(!rule.names_visible_to_inner);
 
@@ -1842,6 +2080,37 @@ class Bar:
             .filter(|r| r.kind == super::ReferenceKind::Import)
             .collect();
         assert!(!import_refs.is_empty(), "Should have import references");
+    }
+
+    #[test]
+    fn test_type_annotation_and_no_locals() {
+        let source = r#"
+x: int = 1
+
+def foo(a: str) -> bool:
+    y: float = 2.0
+    return True
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let symbols = resolver.get_symbols(&path);
+        
+        // x should have type_annotation: int
+        let x_sym = symbols.iter().find(|s| s.name.contains("x")).expect("Missing x");
+        assert_eq!(x_sym.type_annotation, Some("int".to_string()));
+
+        // y should have type_annotation: float
+        let y_sym = symbols.iter().find(|s| s.name.contains("y")).expect("Missing y");
+        assert_eq!(y_sym.type_annotation, Some("float".to_string()));
+        
+        // y's QN should not contain <locals>
+        // It should be test.foo.y
+        assert_eq!(y_sym.name, "test.foo.y");
+        assert!(!y_sym.name.contains("<locals>"));
     }
 
     #[test]

@@ -1017,8 +1017,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return {"type": "list", "elements": elems_ir}
 
     elif isinstance(node, cst.FunctionDef):
-        if node.asynchronous is not None:
-            return None
         name_ir = _cst_to_rust_ir(node.name, metavar_map)
         if name_ir is None:
             return None
@@ -1077,7 +1075,8 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             "type": "funcdef",
             "name": name_ir,
             "params": param_patterns,
-            "decorators": decorators_ir
+            "decorators": decorators_ir,
+            "is_async": node.asynchronous is not None,
         }
 
     elif isinstance(node, cst.ClassDef):
@@ -1431,7 +1430,13 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
         }
 
     if constraint == "async def":
-        return None
+        return {
+            "type": "funcdef",
+            "name": {"type": "any_expr"},
+            "params": [{"type": "ellipsis"}],
+            "decorators": [{"type": "ellipsis"}],
+            "is_async": True,
+        }
 
     if constraint == "class":
         return {
@@ -1441,7 +1446,7 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
             "decorators": [{"type": "ellipsis"}],
         }
 
-    for keyword in ("def", "class"):
+    for keyword in ("async def", "def", "class"):
         if constraint.startswith(keyword + " "):
             name_pattern = constraint[len(keyword) + 1:].strip()
             name_pattern = name_pattern.rstrip(":").strip()
@@ -1449,12 +1454,22 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
                 name_ir = {"type": "name_glob", "value": name_pattern}
             else:
                 name_ir = {"type": "name", "value": name_pattern}
+            
             if keyword == "def":
                 return {
                     "type": "funcdef",
                     "name": name_ir,
                     "params": [{"type": "ellipsis"}],
                     "decorators": [{"type": "ellipsis"}],
+                    "is_async": False,
+                }
+            elif keyword == "async def":
+                return {
+                    "type": "funcdef",
+                    "name": name_ir,
+                    "params": [{"type": "ellipsis"}],
+                    "decorators": [{"type": "ellipsis"}],
+                    "is_async": True,
                 }
             else:
                 return {
@@ -1470,5 +1485,4 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
         if ir is not None:
             return ir
 
-    ir = compile_pattern_to_rust_ir(constraint)
-    return ir
+    return None

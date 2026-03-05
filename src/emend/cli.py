@@ -573,18 +573,40 @@ def search(
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
                 files, _ = resolve_files(file_for_summary)
                 from emend import emend_core
-                file_strs = [str(fp) for fp in files]
-                batch_results = emend_core.collect_symbols_batch(
-                    file_strs, max_depth=tree_depth, selector=selector_for_summary,
-                )
-                for file_path_str, symbol_dicts in batch_results:
-                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
-                    print(f"\nModule: {file_path_str}")
-                    if symbols:
-                        if flat_output:
-                            ast_commands._print_symbol_flat(symbols)
-                        else:
-                            ast_commands._print_symbol_tree(symbols, indent=1)
+                from emend.transform import _find_python_source_root
+                
+                # Single resolver for batch
+                proj_root = _find_python_source_root(file_path_obj.parent if file_path_obj.is_file() else file_path_obj)
+                resolver = emend_core.PyScopeResolver(str(proj_root))
+                
+                for fp in files:
+                    file_str = str(fp)
+                    try:
+                        source = fp.read_text()
+                        resolver.index_file(file_str, source)
+                        
+                        symbol_dicts = resolver.get_symbols(file_str)
+                        
+                        # Derive module path
+                        rel_path = fp.relative_to(proj_root)
+                        parts = list(rel_path.parts)
+                        if parts and parts[0] == "src":
+                            parts.pop(0)
+                        if parts:
+                            parts[-1] = parts[-1].replace(".py", "").replace(".pyi", "")
+                        if parts and parts[-1] == "__init__":
+                            parts.pop()
+                        module_path = ".".join(parts)
+
+                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path)
+                        print(f"\nModule: {file_str}")
+                        if symbols:
+                            if flat_output:
+                                ast_commands._print_symbol_flat(symbols, max_depth=tree_depth)
+                            else:
+                                ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
+                    except Exception as e:
+                        logging.getLogger("emend.cli").warning("Failed to index %s: %s", file_str, e)
             else:
                 if not file_path_obj.exists():
                     raise FileNotFoundError(f"No such file or directory: {file_for_summary!r}")
@@ -594,9 +616,9 @@ def search(
                 print(f"\nModule: {file_for_summary}")
                 if symbols:
                     if flat_output:
-                        ast_commands._print_symbol_flat(symbols)
+                        ast_commands._print_symbol_flat(symbols, max_depth=tree_depth)
                     else:
-                        ast_commands._print_symbol_tree(symbols, indent=1)
+                        ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
             return
 
         # ---- PATTERN MODE ----

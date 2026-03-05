@@ -13,12 +13,13 @@ a common execution model:
 - **Structured edits** — component-level surgery on symbol metadata (parameters,
   return types, decorators, bases, body) addressed via a selector grammar.
 - **Pattern transforms** — code-pattern search and replace using metavariable
-  capture syntax (``$X``, ``$...ARGS``) compiled to LibCST matchers.
+  capture syntax (``$X``, ``$...ARGS``) compiled to a unified structural matcher.
 
-Both systems parse source files into a concrete syntax tree (CST) that preserves
-all formatting whitespace and comments.  Transformations produce a new CST from
-which the modified source is rendered, ensuring that untouched code is reproduced
-character-for-character.
+Both systems parse source files into a concrete syntax tree (CST) using
+`Tree-sitter <https://tree-sitter.github.io>`_ via a Rust backend.
+Transformations produce a sequence of byte-range edits that are applied to the
+original source, ensuring that untouched code is reproduced character-for-character
+while maintaining high performance.
 
 Two-layer architecture
 -----------------------
@@ -28,61 +29,52 @@ Rust layer: ``emend_core``
 
 The ``emend_core`` extension is a `PyO3 <https://pyo3.rs>`_ / `maturin
 <https://www.maturin.rs>`_ Rust crate compiled directly into the emend wheel.
-It handles everything that benefits from raw throughput and parallelism:
+It handles all performance-critical AST analysis and manipulation:
 
-- **File discovery** — parallel directory walk via ``rayon`` (skips
-  ``.git``, ``__pycache__``, ``.venv``, etc.).
-- **Content pre-filtering** — reads all candidate files in parallel with
-  ``rayon``, discarding any file that does not contain the literal tokens
-  that must be present for a pattern to match.  This eliminates most files
-  before the CST layer is invoked.
-- **Pattern fast-path** — a subset of emend's pattern language compiles to a
-  tree-sitter IR.  When a query uses only features the Rust engine supports and
-  no scope constraints are needed, ``find_pattern_in_files`` / ``find_multi_patterns_in_files``
-  perform the full match in Rust (parallel, GIL-free), returning ``(file, line,
-  col, text)`` tuples directly to Python.
-- **Symbol batch collection** — ``collect_symbols_batch`` extracts the symbol
-  tree for a list of files in a single parallel pass, feeding the ``search``
-  command's summary mode.
-- **Callee extraction** — ``collect_callees`` performs a single tree-sitter
-  traversal to enumerate function call edges for the ``graph`` command.
-- **Import analysis** — ``extract_imports`` and ``files_importing_module``
-  support the ``--imported-from`` filter and module-rename import rewriting.
+- **File discovery** — parallel directory walk via ``rayon``.
+- **Unified Scope Resolver** — a multi-language-capable engine that builds
+  scope trees and resolves qualified names.  Scoping and binding rules are
+  driven by a language configuration file (e.g., ``languages/python.toml``).
+- **Structural Matcher** — a generic matcher that executes structural queries
+  and captures metavariables directly on the Tree-sitter AST.
+- **Mutation Engine** — ``PyFileTransform`` manages a set of non-overlapping
+  byte-range replacements, providing the foundation for all code edits.
+- **Symbol collection** — extracts definition trees with rich metadata
+  (signatures, return types, visibility) for the ``search --output summary``
+  command.
+- **Reference analysis** — resolves all identifiers and attributes to
+  qualified names, supporting ``refs``, ``rename``, and ``deadcode``.
 
-The Rust module is registered with ``#[pymodule(gil_used = false)]``, which
-tells PyO3 that none of its functions acquire the GIL.  On **free-threaded
-Python** (``3.13t``, ``3.14t``) this means multiple emend operations can run
-truly concurrently across OS threads with no lock contention.
+Python layer: CLI and Orchestration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Rust dependencies:
+The Python layer provides the user-facing CLI and orchestrates complex
+refactoring workflows:
 
-- `pyo3 <https://pyo3.rs>`_ 0.25 — Python/Rust FFI
-- `tree-sitter <https://tree-sitter.github.io>`_ 0.24 + ``tree-sitter-python`` 0.23 — incremental parsing for the Rust pattern fast-path
-- `rayon <https://github.com/rayon-rs/rayon>`_ 1.10 — data-parallel iterators (file I/O, pattern scanning)
-- `memchr <https://github.com/BurntSushi/memchr>`_ 2.7 — fast literal-string pre-filter
+- **CLI Entry Point** — command definitions and argument parsing using `Typer`.
+- **Query Parsing** — Lark grammars for the selector and pattern languages.
+- **Transform Orchestration** — higher-level refactoring logic (e.g., ``move``,
+  ``copy-to``) that combines primitives like symbol extraction and byte-range
+  edits.
+- **Type Oracle integration** — adapters for external type inference engines
+  (Pyright, Pyrefly) that provide optional semantic metadata.
 
-Python layer: LibCST
-~~~~~~~~~~~~~~~~~~~~
+LibCST is maintained as a legacy fallback for a small subset of complex
+pattern matching features during the transition to the full Tree-sitter backend.
 
-Complex or scope-aware operations that require full semantic analysis are
-handled in Python using `LibCST <https://github.com/Instagram/LibCST>`_:
+Language Configuration
+----------------------
 
-- **Scope-aware rename / find-references** — uses LibCST's ``QualifiedNameProvider``
-  and ``PositionProvider`` to resolve qualified names before renaming, ensuring
-  that shadowed locals and identically named symbols in other modules are not
-  accidentally rewritten.
-- **Pattern matching with scope constraints** (``--where``, ``--inside``,
-  ``--not-inside``, ``--imported-from``, ``--scope-local``) — tree-sitter
-  cannot reason about Python scoping rules; LibCST matchers + metadata
-  providers are used instead.
-- **Component-level edits** (``edit``, ``add``) — parameter lists, return
-  annotations, decorator lists, and base classes are round-tripped through
-  LibCST to guarantee syntactically valid output.
-- **Cross-file operations** (``rename``, ``move``, ``refs``) — ``visit_project()``
-  iterates all project files through a ``MetadataWrapper`` that provides
-  qualified-name resolution.
+emend's scoping and binding logic is language-agnostic and data-driven. Each
+supported language is defined by a TOML configuration file that specifies:
 
-LibCST is also used for all *mutations* — the Rust layer is read-only.
+- **Scope Creators** — AST node types that create new lexical scopes (functions,
+  classes, comprehensions).
+- **Binding Rules** — rules for how names are introduced (assignments, loop
+  variables, parameters).
+- **Import Resolution** — strategies for resolving cross-file qualified names.
+- **Visibility Rules** — language-specific conventions for public vs. private
+  API detection.
 
 Caching and indexing
 --------------------

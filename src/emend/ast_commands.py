@@ -100,7 +100,7 @@ def cmd_copy_to(
 
 
 # ---------------------------------------------------------------------------
-# list-symbols reimplementation using LibCST
+# list-symbols reimplementation using ScopeResolver
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -116,8 +116,15 @@ class TreeSymbol:
     path: list[str] = field(default_factory=list)
 
 
-def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0):
-    """Print symbols in tree format with full Python keywords."""
+def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0, max_depth: int | None = None, current_display_depth: int = 1):
+    """Print symbols in tree format with full Python keywords.
+    
+    current_display_depth starts at 1 for top-level symbols.
+    max_depth is the limit on current_display_depth.
+    """
+    if max_depth is not None and current_display_depth > max_depth:
+        return
+
     KIND_KEYWORD = {
         "function": "def",
         "async_function": "async def",
@@ -139,7 +146,11 @@ def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0):
             line_suffix = ""
 
         if sym.kind in ("function", "async_function", "method", "async_method"):
-            print(f"{prefix}{kind_keyword} {sym.name}{sym.signature or '()'}{line_suffix}")
+            # Ensure signature starts with (
+            sig = sym.signature or "()"
+            if not sig.startswith("("):
+                sig = f"({sig})"
+            print(f"{prefix}{kind_keyword} {sym.name}{sig}{line_suffix}")
         elif sym.kind == "class":
             print(f"{prefix}{kind_keyword} {sym.name}{line_suffix}")
         elif sym.kind == "variable":
@@ -149,11 +160,14 @@ def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0):
             print(f"{prefix}{kind_keyword} {sym.name}")
 
         if sym.children:
-            _print_symbol_tree(sym.children, indent + 1)
+            _print_symbol_tree(sym.children, indent + 1, max_depth, current_display_depth + 1)
 
 
-def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
+def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_depth: int | None = None, current_display_depth: int = 1):
     """Print symbols in flat format with full paths and full Python keywords."""
+    if max_depth is not None and current_display_depth > max_depth:
+        return
+
     KIND_KEYWORD = {
         "function": "def",
         "async_function": "async def",
@@ -175,24 +189,40 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
             line_suffix = ""
 
         if sym.kind in ("function", "async_function", "method", "async_method"):
-            print(f"{kind_keyword} {full_path}{sym.signature or '()'}{line_suffix}")
+            # Ensure signature starts with (
+            sig = sym.signature or "()"
+            if not sig.startswith("("):
+                sig = f"({sig})"
+            print(f"{kind_keyword} {full_path}{sig}{line_suffix}")
         elif sym.kind == "class":
             print(f"{kind_keyword} {full_path}{line_suffix}")
         # Skip variables and references in flat mode
 
-        _print_symbol_flat(sym.children, full_path)
+        _print_symbol_flat(sym.children, full_path, max_depth, current_display_depth + 1)
 
 
-def dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
+def dicts_to_tree_symbols(dicts: list[dict], module_path: str) -> list[TreeSymbol]:
     """Build a TreeSymbol hierarchy from flat definitions with paths."""
     root_symbols = []
     symbol_map = {} # path_tuple -> TreeSymbol
+    
+    mod_parts = tuple(module_path.split('.'))
 
     # First pass: create all symbols
     for d in dicts:
-        path = tuple(d.get("path", [d["name"]]))
+        full_path = tuple(d.get("path", [d["name"]]))
+        
+        # Strip module path from the beginning if it matches
+        if full_path[:len(mod_parts)] == mod_parts:
+            path = full_path[len(mod_parts):]
+        else:
+            path = full_path
+            
+        if not path:
+            continue
+            
         sym = TreeSymbol(
-            name=d["name"].split(".")[-1],
+            name=path[-1],
             kind=d["kind"],
             signature=d.get("signature"),
             type_annotation=d.get("type_annotation"),
@@ -205,7 +235,11 @@ def dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
         symbol_map[path] = sym
 
     # Second pass: build parent-child links
-    for path, sym in symbol_map.items():
+    # Sort paths by length so parents are processed or at least we know where children go
+    sorted_paths = sorted(symbol_map.keys(), key=len)
+    
+    for path in sorted_paths:
+        sym = symbol_map[path]
         if len(path) == 1:
             root_symbols.append(sym)
         else:
@@ -239,7 +273,48 @@ def collect_symbols(
     result_dicts = resolver.get_symbols(file)
     
     if result_dicts:
-        # TODO: apply max_depth and selector filtering if needed
-        # (ScopeResolver currently returns flat definitions, but we can re-nest them or update resolver to return tree)
-        return dicts_to_tree_symbols(result_dicts)
+        # Get module path to correctly strip it from symbol paths
+        from emend.transform import _find_python_source_root
+        root = _find_python_source_root(Path(file).parent)
+        
+        # Crude module path derivation (matches derive_module_path in Rust)
+        try:
+            rel_path = Path(file).relative_to(root)
+            parts = list(rel_path.parts)
+            if parts and parts[0] == "src":
+                parts.pop(0)
+            if parts:
+                parts[-1] = parts[-1].replace(".py", "").replace(".pyi", "")
+            if parts and parts[-1] == "__init__":
+                parts.pop()
+            module_path = ".".join(parts)
+        except ValueError:
+            # Not under root, use filename
+            module_path = Path(file).stem
+
+        symbols = dicts_to_tree_symbols(result_dicts, module_path)
+        
+        # Filter by selector if provided
+        if selector:
+            selector_parts = selector.split('.')
+            
+            def find_selected(syms, target_parts):
+                result = []
+                for s in syms:
+                    if s.name == target_parts[0]:
+                        if len(target_parts) == 1:
+                            # Found the target, include it and all its children
+                            result.append(s)
+                        else:
+                            # Recurse into children to find the next part
+                            selected_children = find_selected(s.children, target_parts[1:])
+                            if selected_children:
+                                # Keep this ancestor but only with the selected children
+                                s.children = selected_children
+                                result.append(s)
+                return result
+            
+            symbols = find_selected(symbols, selector_parts)
+
+        return symbols
     return []

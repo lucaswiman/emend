@@ -63,6 +63,7 @@ pub enum PatternNode {
         name: Box<PatternNode>,
         params: Vec<ParamPattern>,
         decorators: Vec<PatternNode>,
+        is_async: Option<bool>,
     },
     /// Class definition (compound statement pattern).
     ClassDef {
@@ -353,10 +354,16 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 Vec::new()
             };
 
+            let is_async = d
+                .get_item("is_async")?
+                .map(|obj| obj.extract::<bool>().ok())
+                .flatten();
+
             Ok(PatternNode::FuncDef {
                 name: Box::new(name),
                 params,
                 decorators,
+                is_async,
             })
         }
 
@@ -1212,6 +1219,7 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
             name,
             params,
             decorators,
+            is_async,
         } => {
             let (actual_decs, func_node) = if node.kind() == "decorated_definition" {
                 let mut cursor = node.walk();
@@ -1232,6 +1240,15 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
 
             if func_node.kind() != "function_definition" {
                 return None;
+            }
+
+            // Check async
+            if let Some(expected_async) = is_async {
+                let mut cursor = func_node.walk();
+                let actual_async = func_node.children(&mut cursor).any(|n| n.kind() == "async");
+                if actual_async != *expected_async {
+                    return None;
+                }
             }
 
             if !match_sequence(decorators, &actual_decs, source) {
