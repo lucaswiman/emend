@@ -72,6 +72,8 @@ pub enum PatternNode {
     },
     /// Integer literal.
     Integer(String),
+    /// Float literal.
+    Float(String),
     /// String literal (`None` = any string).
     StringLiteral(Option<String>),
     /// Empty list `[]`.
@@ -386,6 +388,18 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 })?
                 .extract()?;
             Ok(PatternNode::Integer(value))
+        }
+
+        "float" => {
+            let value: String = d
+                .get_item("value")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Float pattern missing 'value'",
+                    )
+                })?
+                .extract()?;
+            Ok(PatternNode::Float(value))
         }
 
         "string" => {
@@ -780,7 +794,7 @@ fn match_fstring(parts: &[FStringPart], node: Node, source: &[u8]) -> bool {
                 let mut c = actual.walk();
                 let inner = actual.children(&mut c).find(|n| n.is_named());
                 if let Some(inner_node) = inner {
-                    if !matches_node(inner_node, source, pnode) {
+                    if matches_node(inner_node, source, pnode).is_none() {
                         return false;
                     }
                 } else {
@@ -805,8 +819,8 @@ fn match_generator(pattern: &ComprehensionGenerator, node: Node, source: &[u8]) 
         Some(n) => n,
         None => return false,
     };
-    if !matches_node(target_node, source, &pattern.target)
-        || !matches_node(iter_node, source, &pattern.iter)
+    if matches_node(target_node, source, &pattern.target).is_none()
+        || matches_node(iter_node, source, &pattern.iter).is_none()
     {
         return false;
     }
@@ -845,7 +859,7 @@ fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bo
             return false;
         }
         for (i, p) in patterns.iter().enumerate() {
-            if !matches_node(nodes[i], source, p) {
+            if matches_node(nodes[i], source, p).is_none() {
                 return false;
             }
         }
@@ -864,7 +878,7 @@ fn match_sequence(patterns: &[PatternNode], nodes: &[Node], source: &[u8]) -> bo
     }
     'outer: for start in 0..=(nodes.len() - non_ellipsis.len()) {
         for (j, pnode) in non_ellipsis.iter().enumerate() {
-            if !matches_node(nodes[start + j], source, pnode) {
+            if matches_node(nodes[start + j], source, pnode).is_none() {
                 continue 'outer;
             }
         }
@@ -891,7 +905,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
             }
             match pattern {
                 ArgPattern::Pattern(pnode) => {
-                    if !matches_node(call_args[i], source, pnode) {
+                    if matches_node(call_args[i], source, pnode).is_none() {
                         return false;
                     }
                 }
@@ -902,7 +916,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
                     let mut cursor = call_args[i].walk();
                     let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
                     if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
+                        if matches_node(inner_node, source, pnode).is_none() {
                             return false;
                         }
                     } else {
@@ -916,7 +930,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
                     let mut cursor = call_args[i].walk();
                     let inner = call_args[i].children(&mut cursor).find(|n| n.is_named());
                     if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
+                        if matches_node(inner_node, source, pnode).is_none() {
                             return false;
                         }
                     } else {
@@ -956,7 +970,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
             let node = call_args[start + j];
             match pattern {
                 ArgPattern::Pattern(pnode) => {
-                    if !matches_node(node, source, pnode) {
+                    if matches_node(node, source, pnode).is_none() {
                         continue 'outer;
                     }
                 }
@@ -967,7 +981,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
                     let mut cursor = node.walk();
                     let inner = node.children(&mut cursor).find(|n| n.is_named());
                     if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
+                        if matches_node(inner_node, source, pnode).is_none() {
                             continue 'outer;
                         }
                     } else {
@@ -981,7 +995,7 @@ fn match_args(arg_patterns: &[ArgPattern], call_args: &[Node], source: &[u8], ex
                     let mut cursor = node.walk();
                     let inner = node.children(&mut cursor).find(|n| n.is_named());
                     if let Some(inner_node) = inner {
-                        if !matches_node(inner_node, source, pnode) {
+                        if matches_node(inner_node, source, pnode).is_none() {
                             continue 'outer;
                         }
                     } else {
@@ -1002,11 +1016,12 @@ fn param_has_default(param: Node, source: &[u8], dv: &PatternNode) -> bool {
         return false;
     }
     if let Some(value_node) = param.child_by_field_name("value") {
-        matches_node(value_node, source, dv)
+        matches_node(value_node, source, dv).is_some()
     } else {
         false
     }
 }
+
 
 /// Check whether a list of param patterns matches a list of function parameter nodes.
 fn match_params(param_patterns: &[ParamPattern], params: &[Node], source: &[u8]) -> bool {
@@ -1061,17 +1076,28 @@ fn match_params(param_patterns: &[ParamPattern], params: &[Node], source: &[u8])
 // ---------------------------------------------------------------------------
 
 /// Match a tree-sitter node against a pattern node.
-fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
+/// Returns Some(node) if it matches, where 'node' is the node to use for
+/// positional information (usually the node itself, but may be a child
+/// like expression_list for tuples to match LibCST's positions).
+fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Option<Node<'a>> {
     match pattern {
-        PatternNode::AnyExpr => true,
-        PatternNode::Ellipsis => true, // Ellipsis in node position: always match
+        PatternNode::AnyExpr => Some(node),
+        PatternNode::Ellipsis => Some(node), // Ellipsis in node position: always match
 
         PatternNode::Name(s) => {
-            node.kind() == "identifier" && node_text(node, source) == s.as_str()
+            if node.kind() == "identifier" && node_text(node, source) == s.as_str() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::NameGlob(g) => {
-            node.kind() == "identifier" && glob_matches(g, node_text(node, source))
+            if node.kind() == "identifier" && glob_matches(g, node_text(node, source)) {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::Call {
@@ -1080,37 +1106,51 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             exact_args,
         } => {
             if node.kind() != "call" {
-                return false;
+                return None;
             }
             let func_node = match node.child_by_field_name("function") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(func_node, source, func) {
-                return false;
+            if matches_node(func_node, source, func).is_none() {
+                return None;
             }
             match node.child_by_field_name("arguments") {
                 Some(arg_list) => {
                     let call_args = collect_call_args(arg_list);
-                    match_args(args, &call_args, source, *exact_args)
+                    if match_args(args, &call_args, source, *exact_args) {
+                        Some(node)
+                    } else {
+                        None
+                    }
                 }
-                None => args.is_empty(),
+                None => {
+                    if args.is_empty() {
+                        Some(node)
+                    } else {
+                        None
+                    }
+                }
             }
         }
 
         PatternNode::Attr { value, attr } => {
             if node.kind() != "attribute" {
-                return false;
+                return None;
             }
             let obj_node = match node.child_by_field_name("object") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let attr_node = match node.child_by_field_name("attribute") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            matches_node(obj_node, source, value) && node_text(attr_node, source) == attr.as_str()
+            if matches_node(obj_node, source, value).is_some() && node_text(attr_node, source) == attr.as_str() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::FuncDef {
@@ -1131,26 +1171,31 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             };
 
             if func_node.kind() != "function_definition" {
-                return false;
+                return None;
             }
 
             if !match_sequence(decorators, &actual_decs, source) {
-                return false;
+                return None;
             }
 
             let name_node = match func_node.child_by_field_name("name") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(name_node, source, name) {
-                return false;
+            if matches_node(name_node, source, name).is_none() {
+                return None;
             }
+
             let params_node = match func_node.child_by_field_name("parameters") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            let param_nodes = collect_params(params_node);
-            match_params(params, &param_nodes, source)
+            let actual_params = collect_params(params_node);
+            if match_params(params, &actual_params, source) {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::ClassDef {
@@ -1171,33 +1216,34 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             };
 
             if class_node.kind() != "class_definition" {
-                return false;
+                return None;
             }
 
             if !match_sequence(decorators, &actual_decs, source) {
-                return false;
+                return None;
             }
 
             let name_node = match class_node.child_by_field_name("name") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(name_node, source, name) {
-                return false;
+            if matches_node(name_node, source, name).is_none() {
+                return None;
             }
+
             if bases.is_empty() {
-                return true; // No base constraint
+                return Some(node); // No base constraint
             }
             // Check whether the class has any Ellipsis-only bases constraint
             let has_ellipsis = bases.iter().any(|b| matches!(b, PatternNode::Ellipsis));
             if has_ellipsis && bases.len() == 1 {
-                return true; // [Ellipsis] → any bases ok
+                return Some(node); // [Ellipsis] → any bases ok
             }
 
             // Get superclasses from the `superclasses` field
             let superclasses = match class_node.child_by_field_name("superclasses") {
                 Some(n) => n,
-                None => return false, // Pattern requires bases but none found
+                None => return None, // Pattern requires bases but none found
             };
             let base_nodes: Vec<Node> = {
                 let mut cursor = superclasses.walk();
@@ -1207,33 +1253,56 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                     .collect()
             };
 
-            match_sequence(bases, &base_nodes, source)
+            if match_sequence(bases, &base_nodes, source) {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::Integer(v) => {
-            node.kind() == "integer" && node_text(node, source) == v.as_str()
+            if node.kind() == "integer" && node_text(node, source) == v.as_str() {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::Float(v) => {
+            if node.kind() == "float" && node_text(node, source) == v.as_str() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::StringLiteral(v) => {
             if node.kind() != "string" && node.kind() != "concatenated_string" {
-                return false;
+                return None;
             }
             match v {
-                None => true,
-                Some(expected) => node_text(node, source) == expected.as_str(),
+                None => Some(node),
+                Some(expected) => {
+                    if node_text(node, source) == expected.as_str() {
+                        Some(node)
+                    } else {
+                        None
+                    }
+                }
             }
         }
 
         PatternNode::EmptyList => {
-            node.kind() == "list" && node.named_child_count() == 0
+            if node.kind() == "list" && node.named_child_count() == 0 {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::List(elems) => {
             if node.kind() != "list" {
-                return false;
-            }
-            if elems.is_empty() {
-                return node.named_child_count() == 0;
+                return None;
             }
             let list_elems: Vec<Node> = {
                 let mut cursor = node.walk();
@@ -1241,15 +1310,11 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                     .filter(|n| n.is_named())
                     .collect()
             };
-            if list_elems.len() != elems.len() {
-                return false;
+            if match_sequence(elems, &list_elems, source) {
+                Some(node)
+            } else {
+                None
             }
-            for (i, ep) in elems.iter().enumerate() {
-                if !matches_node(list_elems[i], source, ep) {
-                    return false;
-                }
-            }
-            true
         }
 
         PatternNode::Subscript { value, slices } => {
@@ -1263,15 +1328,15 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 let mut cursor = node.walk();
                 let children: Vec<Node> = node.named_children(&mut cursor).collect();
                 if children.is_empty() {
-                    return false;
+                    return None;
                 }
                 // First child is the name (identifier)
-                if !matches_node(children[0], source, value) {
-                    return false;
+                if matches_node(children[0], source, value).is_none() {
+                    return None;
                 }
                 // Second child is type_parameter containing the type args
                 if children.len() < 2 || children[1].kind() != "type_parameter" {
-                    return slices.is_empty();
+                    return if slices.is_empty() { Some(node) } else { None };
                 }
                 let type_param = children[1];
                 // Collect the type children inside type_parameter
@@ -1279,224 +1344,153 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 let mut tp_cursor = type_param.walk();
                 let actual_slices: Vec<Node> = type_param.named_children(&mut tp_cursor)
                     .filter(|n| n.kind() == "type")
+                    .map(|n| if n.named_child_count() == 1 { n.named_child(0).unwrap() } else { n })
                     .collect();
-                // Check for ellipsis in slices (variadic match)
-                let has_ellipsis = slices.iter().any(|s| matches!(s, PatternNode::Ellipsis));
-                if has_ellipsis && slices.len() == 1 {
-                    return true;
-                }
-                if !has_ellipsis {
-                    if actual_slices.len() != slices.len() {
-                        return false;
-                    }
-                    for (i, slice_pattern) in slices.iter().enumerate() {
-                        // Type nodes wrap the actual expression, so match on
-                        // the child of the type node
-                        let inner = if actual_slices[i].named_child_count() == 1 {
-                            actual_slices[i].named_child(0).unwrap()
-                        } else {
-                            actual_slices[i]
-                        };
-                        if !matches_node(inner, source, slice_pattern) {
-                            return false;
-                        }
-                    }
-                    return true;
-                }
-                // subsequence matching with ellipsis
-                let non_ellipsis: Vec<&PatternNode> = slices.iter()
-                    .filter(|s| !matches!(s, PatternNode::Ellipsis))
-                    .collect();
-                if non_ellipsis.is_empty() {
-                    return true;
-                }
-                if actual_slices.len() < non_ellipsis.len() {
-                    return false;
-                }
-                'gen_sub: for start in 0..=(actual_slices.len() - non_ellipsis.len()) {
-                    for (j, pnode) in non_ellipsis.iter().enumerate() {
-                        let inner = if actual_slices[start + j].named_child_count() == 1 {
-                            actual_slices[start + j].named_child(0).unwrap()
-                        } else {
-                            actual_slices[start + j]
-                        };
-                        if !matches_node(inner, source, pnode) {
-                            continue 'gen_sub;
-                        }
-                    }
-                    return true;
-                }
-                return false;
-            }
 
-            if node.kind() != "subscript" {
-                return false;
-            }
-            let value_node = match node.child_by_field_name("value") {
-                Some(n) => n,
-                None => return false,
-            };
-            if !matches_node(value_node, source, value) {
-                return false;
-            }
-            // Get all subscript fields (multiple: true in grammar)
-            let mut cursor = node.walk();
-            let actual_slices: Vec<Node> = node.children_by_field_name("subscript", &mut cursor)
-                .collect();
-            // Check for ellipsis in slices (variadic match)
-            let has_ellipsis = slices.iter().any(|s| matches!(s, PatternNode::Ellipsis));
-            if has_ellipsis && slices.len() == 1 {
-                return true; // Single ellipsis matches any slices
-            }
-            if !has_ellipsis {
-                if actual_slices.len() != slices.len() {
-                    return false;
+                if match_sequence(slices, &actual_slices, source) {
+                    Some(node)
+                } else {
+                    None
                 }
-                for (i, slice_pattern) in slices.iter().enumerate() {
-                    if !matches_node(actual_slices[i], source, slice_pattern) {
-                        return false;
-                    }
+            } else if node.kind() == "subscript" {
+                let value_node = match node.child_by_field_name("value") {
+                    Some(n) => n,
+                    None => return None,
+                };
+                if matches_node(value_node, source, value).is_none() {
+                    return None;
                 }
-                return true;
-            }
-            // Has ellipsis mixed with other patterns: subsequence matching
-            let non_ellipsis: Vec<&PatternNode> = slices.iter()
-                .filter(|s| !matches!(s, PatternNode::Ellipsis))
-                .collect();
-            if non_ellipsis.is_empty() {
-                return true;
-            }
-            if actual_slices.len() < non_ellipsis.len() {
-                return false;
-            }
-            'outer_sub: for start in 0..=(actual_slices.len() - non_ellipsis.len()) {
-                for (j, pnode) in non_ellipsis.iter().enumerate() {
-                    if !matches_node(actual_slices[start + j], source, pnode) {
-                        continue 'outer_sub;
-                    }
+                // Get all subscript fields (multiple: true in grammar)
+                let mut cursor = node.walk();
+                let actual_slices: Vec<Node> = node.children_by_field_name("subscript", &mut cursor)
+                    .collect();
+                
+                if match_sequence(slices, &actual_slices, source) {
+                    Some(node)
+                } else {
+                    None
                 }
-                return true;
+            } else {
+                None
             }
-            false
         }
 
         PatternNode::Tuple(elems) => {
             if node.kind() != "tuple" && node.kind() != "expression_list" {
-                return false;
+                return None;
             }
-            let tuple_elems: Vec<Node> = {
+            let mut tuple_elems: Vec<Node> = {
                 let mut cursor = node.walk();
                 node.children(&mut cursor)
                     .filter(|n| n.is_named())
                     .collect()
             };
-            let has_ellipsis = elems.iter().any(|e| matches!(e, PatternNode::Ellipsis));
-            if has_ellipsis && elems.len() == 1 {
-                return true;
+            
+            // In tree-sitter Python, a 'tuple' node usually has one child: 'expression_list'.
+            // If so, we want to match against the children of THAT list.
+            let mut pos_node = node;
+            if node.kind() == "tuple" && tuple_elems.len() == 1 && tuple_elems[0].kind() == "expression_list" {
+                pos_node = tuple_elems[0];
+                let mut cursor = pos_node.walk();
+                tuple_elems = pos_node.children(&mut cursor)
+                    .filter(|n| n.is_named())
+                    .collect();
             }
-            if !has_ellipsis {
-                if tuple_elems.len() != elems.len() {
-                    return false;
-                }
-                for (i, ep) in elems.iter().enumerate() {
-                    if !matches_node(tuple_elems[i], source, ep) {
-                        return false;
-                    }
-                }
-                return true;
+            
+            if match_sequence(elems, &tuple_elems, source) {
+                Some(pos_node)
+            } else {
+                None
             }
-            // subsequence matching
-            let non_ellipsis: Vec<&PatternNode> = elems.iter()
-                .filter(|e| !matches!(e, PatternNode::Ellipsis))
-                .collect();
-            if non_ellipsis.is_empty() {
-                return true;
-            }
-            if tuple_elems.len() < non_ellipsis.len() {
-                return false;
-            }
-            'outer_tup: for start in 0..=(tuple_elems.len() - non_ellipsis.len()) {
-                for (j, pnode) in non_ellipsis.iter().enumerate() {
-                    if !matches_node(tuple_elems[start + j], source, pnode) {
-                        continue 'outer_tup;
-                    }
-                }
-                return true;
-            }
-            false
         }
 
         PatternNode::BinaryOp { left, op, right } => {
             if node.kind() != "binary_operator" && node.kind() != "boolean_operator" {
-                return false;
+                return None;
             }
             let left_node = match node.child_by_field_name("left") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let right_node = match node.child_by_field_name("right") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let op_node = match node.child_by_field_name("operator") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            node_text(op_node, source) == op.as_str()
-                && matches_node(left_node, source, left)
-                && matches_node(right_node, source, right)
+            if node_text(op_node, source) == op.as_str()
+                && matches_node(left_node, source, left).is_some()
+                && matches_node(right_node, source, right).is_some() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::KeywordArg { key, value } => {
             if node.kind() != "keyword_argument" {
-                return false;
+                return None;
             }
             let name_node = match node.child_by_field_name("name") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let value_node = match node.child_by_field_name("value") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            node_text(name_node, source) == key.as_str()
-                && matches_node(value_node, source, value)
+            if node_text(name_node, source) == key.as_str()
+                && matches_node(value_node, source, value).is_some() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::Assign { target, value } => {
             if node.kind() != "assignment" {
-                return false;
+                return None;
             }
             let left_node = match node.child_by_field_name("left") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let right_node = match node.child_by_field_name("right") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            matches_node(left_node, source, target) && matches_node(right_node, source, value)
+            if matches_node(left_node, source, target).is_some() && matches_node(right_node, source, value).is_some() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::AugAssign { target, op, value } => {
             if node.kind() != "augmented_assignment" {
-                return false;
+                return None;
             }
             let left_node = match node.child_by_field_name("left") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let op_node = match node.child_by_field_name("operator") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let right_node = match node.child_by_field_name("right") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            node_text(op_node, source) == op.as_str()
-                && matches_node(left_node, source, target)
-                && matches_node(right_node, source, value)
+            if node_text(op_node, source) == op.as_str()
+                && matches_node(left_node, source, target).is_some()
+                && matches_node(right_node, source, value).is_some() {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::AnnAssign {
@@ -1505,31 +1499,37 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             value,
         } => {
             if node.kind() != "annotated_assignment" {
-                return false;
+                return None;
             }
             let left_node = match node.child_by_field_name("left") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let type_node = match node.child_by_field_name("type") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(left_node, source, target)
-                || !matches_node(type_node, source, annotation)
+            if matches_node(left_node, source, target).is_none()
+                || matches_node(type_node, source, annotation).is_none()
             {
-                return false;
+                return None;
             }
             match (value, node.child_by_field_name("value")) {
-                (Some(p), Some(n)) => matches_node(n, source, p),
-                (None, None) => true,
-                _ => false,
+                (Some(p), Some(n)) => {
+                    if matches_node(n, source, p).is_some() {
+                        Some(node)
+                    } else {
+                        None
+                    }
+                }
+                (None, None) => Some(node),
+                _ => None,
             }
         }
 
         PatternNode::Compare { left, ops } => {
             if node.kind() != "comparison_operator" {
-                return false;
+                return None;
             }
             // tree-sitter comparison: children are [left, op1, comp1, op2, comp2, ...]
             let mut cursor = node.walk();
@@ -1538,10 +1538,10 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 .collect();
             // First named child is the left operand
             if children.is_empty() {
-                return false;
+                return None;
             }
-            if !matches_node(children[0], source, left) {
-                return false;
+            if matches_node(children[0], source, left).is_none() {
+                return None;
             }
             // Remaining children come in pairs: (operator, comparator)
             // unnamed children are operators, named children are comparators
@@ -1560,44 +1560,57 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                         // Next named child should be comparator
                         for j in (i+1)..named_children.len() {
                             if named_children[j].is_named() {
-                                return matches_node(named_children[j], source, &ops[0].1);
+                                if matches_node(named_children[j], source, &ops[0].1).is_some() {
+                                    return Some(node);
+                                } else {
+                                    return None;
+                                }
                             }
                         }
                     }
                 }
-                return found_op;
+                if found_op { return Some(node); }
             }
             // Multi-comparison not yet supported in fast path
-            false
+            None
         }
 
         PatternNode::UnaryOp { op, operand } => {
             if node.kind() != "unary_operator" && node.kind() != "not_operator" {
-                return false;
+                return None;
             }
             // For "not" operator: tree-sitter uses "not_operator" kind
             if node.kind() == "not_operator" {
                 if op != "not" {
-                    return false;
+                    return None;
                 }
                 let arg_node = match node.child_by_field_name("argument") {
                     Some(n) => n,
-                    None => return false,
+                    None => return None,
                 };
-                return matches_node(arg_node, source, operand);
+                if matches_node(arg_node, source, operand).is_some() {
+                    return Some(node);
+                } else {
+                    return None;
+                }
             }
             // For other unary operators (-x, ~x, +x)
             let op_node = match node.child_by_field_name("operator") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let arg_node = match node.child_by_field_name("argument") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            node_text(op_node, source) == op.as_str()
-                && matches_node(arg_node, source, operand)
+            if node_text(op_node, source) == op.as_str()
+                && matches_node(arg_node, source, operand).is_some() {
+                Some(node)
+            } else {
+                None
+            }
         }
+
 
         PatternNode::Comprehension {
             kind,
@@ -1605,14 +1618,14 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             generators,
         } => {
             if node.kind() != kind.as_str() {
-                return false;
+                return None;
             }
             let body_node = match node.child_by_field_name("body") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(body_node, source, elt) {
-                return false;
+            if matches_node(body_node, source, elt).is_none() {
+                return None;
             }
             // Collect generators
             let mut cursor = node.walk();
@@ -1620,7 +1633,11 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 .children(&mut cursor)
                 .filter(|n| n.kind() == "for_in_clause")
                 .collect();
-            match_generators(generators, &gen_nodes, source)
+            if match_generators(generators, &gen_nodes, source) {
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::DictComprehension {
@@ -1629,18 +1646,18 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
             generators,
         } => {
             if node.kind() != "dictionary_comprehension" {
-                return false;
+                return None;
             }
             let key_node = match node.child_by_field_name("key") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
             let value_node = match node.child_by_field_name("value") {
                 Some(n) => n,
-                None => return false,
+                None => return None,
             };
-            if !matches_node(key_node, source, key) || !matches_node(value_node, source, value) {
-                return false;
+            if matches_node(key_node, source, key).is_none() || matches_node(value_node, source, value).is_none() {
+                return None;
             }
             // Collect generators
             let mut cursor = node.walk();
@@ -1648,26 +1665,47 @@ fn matches_node(node: Node, source: &[u8], pattern: &PatternNode) -> bool {
                 .children(&mut cursor)
                 .filter(|n| n.kind() == "for_in_clause")
                 .collect();
-            match_generators(generators, &gen_nodes, source)
+            if match_generators(generators, &gen_nodes, source) {
+                Some(node)
+            } else {
+                None
+            }
         }
 
-        PatternNode::FString { parts } => match_fstring(parts, node, source),
+        PatternNode::FString { parts } => {
+            if match_fstring(parts, node, source) {
+                Some(node)
+            } else {
+                None
+            }
+        }
 
-        PatternNode::TypeConstraint { kind } => match kind.as_str() {
-            "int" => node.kind() == "integer",
-            "str" => node.kind() == "string" || node.kind() == "concatenated_string",
-            "call" => node.kind() == "call",
-            _ => false,
-        },
+        PatternNode::TypeConstraint { kind } => {
+            let matched = match kind.as_str() {
+                "int" => node.kind() == "integer",
+                "str" => node.kind() == "string" || node.kind() == "concatenated_string",
+                "call" => node.kind() == "call",
+                "float" => node.kind() == "float",
+                _ => false,
+            };
+            if matched { Some(node) } else { None }
+        }
 
-        PatternNode::NoneLiteral => node.kind() == "none",
+        PatternNode::NoneLiteral => {
+            if node.kind() == "none" {
+                Some(node)
+            } else {
+                None
+            }
+        }
 
         PatternNode::BoolLiteral(v) => {
-            if *v {
+            let matched = if *v {
                 node.kind() == "true"
             } else {
                 node.kind() == "false"
-            }
+            };
+            if matched { Some(node) } else { None }
         }
     }
 }
@@ -1703,7 +1741,7 @@ fn walk_with_ancestors<'a, F>(
 fn any_ancestor_matches(ancestors: &[Node], source: &[u8], pattern: &PatternNode) -> bool {
     ancestors
         .iter()
-        .any(|anc| matches_node(*anc, source, pattern))
+        .any(|anc| matches_node(*anc, source, pattern).is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,9 +1768,10 @@ fn find_pattern_in_tree(
         source_bytes,
         &mut ancestors,
         &mut |node, ancs| {
-            if !matches_node(node, source_bytes, pattern) {
-                return;
-            }
+            let matched_node = match matches_node(node, source_bytes, pattern) {
+                Some(n) => n,
+                None => return,
+            };
             if let Some(inside_pat) = inside {
                 if !any_ancestor_matches(ancs, source_bytes, inside_pat) {
                     return;
@@ -1744,12 +1783,11 @@ fn find_pattern_in_tree(
                 }
             }
 
-            let start = node.start_position();
-            let end = node.end_position();
-            let text =
-                std::str::from_utf8(&source_bytes[node.start_byte()..node.end_byte()])
-                    .unwrap_or("")
-                    .to_string();
+            let start = matched_node.start_position();
+            let end = matched_node.end_position();
+            let text = std::str::from_utf8(&source_bytes[matched_node.start_byte()..matched_node.end_byte()])
+                .unwrap_or("")
+                .to_string();
 
             results.push((
                 file_path.to_string(),

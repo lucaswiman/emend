@@ -3569,13 +3569,13 @@ class RustGuidedFinder(cst.CSTVisitor):
         matcher: m.BaseMatcherNode,
         ellipsis_info: dict,
         position_provider: cst.metadata.PositionProvider,
-        rust_matches: set[tuple[int, int, int, int]],
+        rust_matches: dict[tuple[int, int, int, int], str],
         metavar_names: set[str],
     ):
         self.matcher = matcher
         self.ellipsis_info = ellipsis_info
         self.position_provider = position_provider
-        # Set of (line, col, end_line, end_col)
+        # Dict of (line, col, end_line, end_col) -> matched_text
         self.rust_matches = rust_matches
         self.metavar_names = metavar_names
         self.matches: list[PatternMatch] = []
@@ -3587,7 +3587,19 @@ class RustGuidedFinder(cst.CSTVisitor):
             # LibCST PositionProvider uses 1-based line, 0-based column
             key = (pos.start.line, pos.start.column, pos.end.line, pos.end.column)
 
+            matched_text = None
             if key in self.rust_matches:
+                matched_text = self.rust_matches[key]
+            elif isinstance(node, cst.Tuple):
+                # LibCST Tuple nodes often exclude parentheses from their position,
+                # whereas Tree-sitter 'tuple' nodes include them.
+                # Try adjusting the key by 1 column on each side.
+                alt_key = (pos.start.line, pos.start.column - 1, pos.end.line, pos.end.column + 1)
+                if alt_key in self.rust_matches:
+                    matched_text = self.rust_matches[alt_key]
+                    key = alt_key
+
+            if matched_text is not None:
                 # This node corresponds to a Rust match.
                 # Extract captures using LibCST matcher.
                 # We can assume m.matches(node, self.matcher) is mostly True,
@@ -3605,10 +3617,11 @@ class RustGuidedFinder(cst.CSTVisitor):
                     self.matches.append(PatternMatch(
                         node=node,
                         captures=captures,
-                        line=pos.start.line,
-                        end_line=pos.end.line,
-                        col=pos.start.column,
-                        end_col=pos.end.column,
+                        matched_text=matched_text,
+                        line=key[0],
+                        col=key[1],
+                        end_line=key[2],
+                        end_col=key[3],
                     ))
         except (KeyError, AttributeError):
             pass
@@ -3996,7 +4009,7 @@ def find_pattern(
     module = _cached_parse(source_code)
 
     # Try using Rust pattern matcher if available and applicable
-    rust_ir = compile_pattern_to_rust_ir(pattern)
+    rust_ir = compile_pattern_to_rust_ir(pattern_str)
     rust_matches = None
     
     if rust_ir is not None:
@@ -4014,7 +4027,7 @@ def find_pattern(
             # raw_matches is list of (file, line, col, end_line, end_col, text)
             # Rust uses 1-based lines, 0-based columns
             rust_matches = {
-                (m[1], m[2], m[3], m[4]) for m in raw_matches
+                (m[1], m[2], m[3], m[4]): m[5] for m in raw_matches
             }
 
     matches = []
@@ -4268,561 +4281,6 @@ def _filter_matches_by_type_oracle(
         "Type oracle filtering: %d/%d matches passed", len(filtered), len(matches),
     )
     return filtered
-
-
-class PatternReplacer(cst.CSTTransformer):
-    """Transformer to replace pattern matches with replacement template."""
-
-    def __init__(self, matcher: m.BaseMatcherNode, pattern: Pattern, replacement_str: str, ellipsis_info: dict | None = None):
-        self.matcher = matcher
-        self.pattern = pattern
-        self.replacement_str = replacement_str
-        self.ellipsis_info = ellipsis_info or {}
-        self.modified = False
-        self.replacement_count = 0
-
-    def _do_replacement(self, node: cst.CSTNode) -> cst.CSTNode | None:
-        """Try to replace node if it matches pattern. Returns replacement or None."""
-        # Try to match this node
-        if m.matches(node, self.matcher):
-            # Extract captures
-            captures = m.extract(node, self.matcher)
-
-            # Handle ellipsis and partial dict captures
-            _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
-
-            # Build replacement by substituting metavars
-            replacement_code = self.replacement_str
-
-            # First pass: resolve ${NAME.content} references (string
-            # interpolation).  These extract the inner content of a string
-            # literal, stripping the surrounding quotes.  If any reference
-            # cannot be resolved (e.g. the captured node is not a string
-            # literal), skip the entire replacement to avoid producing
-            # nonsense output.
-            content_failed = False
-            for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
-                ref_name = ref_match.group(1)
-                captured = captures.get(ref_name)
-                if (
-                    captured is None
-                    or isinstance(captured, tuple)
-                    or (content := _extract_string_content(captured)) is None
-                ):
-                    content_failed = True
-                    break
-                replacement_code = replacement_code.replace(
-                    ref_match.group(0), content
-                )
-            if content_failed:
-                return None
-
-            # Second pass: substitute regular metavar references ($NAME,
-            # $...NAME).
-            for name, captured_node in captures.items():
-                # Handle ellipsis captures (tuples of args/elements)
-                if isinstance(captured_node, tuple):
-                    # Convert each item to code and join with commas
-                    if len(captured_node) == 0:
-                        code = ""
-                    else:
-                        # Unwrap based on type: Arg.value, Element.value, or whole DictElement
-                        item_codes = []
-                        for item in captured_node:
-                            if isinstance(item, cst.Arg):
-                                # Preserve full Arg node (keyword=, *, **) but strip trailing comma
-                                clean_arg = item.with_changes(comma=cst.MaybeSentinel.DEFAULT)
-                                item_codes.append(cst.Module([]).code_for_node(clean_arg))
-                            elif isinstance(item, cst.Element):
-                                item_codes.append(cst.Module([]).code_for_node(item.value))
-                            elif isinstance(item, cst.DictElement):
-                                # For dict elements, include key: value
-                                key_code = cst.Module([]).code_for_node(item.key)
-                                value_code = cst.Module([]).code_for_node(item.value)
-                                item_codes.append(f"{key_code}: {value_code}")
-                            else:
-                                item_codes.append(cst.Module([]).code_for_node(item))
-                        code = ", ".join(item_codes)
-                    # Replace $...NAME with the comma-separated items
-                    replacement_code = replacement_code.replace(f"$...{name}", code)
-                else:
-                    # Convert captured node to code string
-                    code = cst.Module([]).code_for_node(captured_node)
-                    # Replace metavar in replacement string
-                    replacement_code = replacement_code.replace(f"${name}", code)
-
-            # Clean up comma artifacts from empty ellipsis substitutions
-            replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
-            replacement_code = re.sub(r'(\[)\s*,\s*', r'\1', replacement_code)
-            replacement_code = re.sub(r',\s*,', ',', replacement_code)
-
-            # Try to parse replacement - first as expression, then as statement
-            try:
-                new_node = cst.parse_expression(replacement_code)
-                self.modified = True
-                self.replacement_count += 1
-                return new_node
-            except Exception:
-                # Try parsing as statement
-                try:
-                    temp_module = cst.parse_module(replacement_code)
-                    if temp_module.body:
-                        # Return the statement (or expression statement)
-                        stmt = temp_module.body[0]
-                        # If it's a SimpleStatementLine with a single statement, extract it
-                        if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1:
-                            self.modified = True
-                            self.replacement_count += 1
-                            return stmt.body[0]
-                        else:
-                            self.modified = True
-                            self.replacement_count += 1
-                            return stmt
-                except Exception:
-                    # If replacement doesn't parse, return None
-                    return None
-
-        return None
-
-    def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
-        """Replace Call nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Name(self, original_node: cst.Name, updated_node: cst.Name) -> cst.BaseExpression:
-        """Replace Name nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Float(self, original_node: cst.Float, updated_node: cst.Float) -> cst.BaseExpression:
-        """Replace Float nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.BaseExpression:
-        """Replace Attribute nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_BinaryOperation(self, original_node: cst.BinaryOperation, updated_node: cst.BinaryOperation) -> cst.BaseExpression:
-        """Replace BinaryOperation nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Comparison(self, original_node: cst.Comparison, updated_node: cst.Comparison) -> cst.BaseExpression:
-        """Replace Comparison nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_BooleanOperation(self, original_node: cst.BooleanOperation, updated_node: cst.BooleanOperation) -> cst.BaseExpression:
-        """Replace BooleanOperation nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_UnaryOperation(self, original_node: cst.UnaryOperation, updated_node: cst.UnaryOperation) -> cst.BaseExpression:
-        """Replace UnaryOperation nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Subscript(self, original_node: cst.Subscript, updated_node: cst.Subscript) -> cst.BaseExpression:
-        """Replace Subscript nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_IfExp(self, original_node: cst.IfExp, updated_node: cst.IfExp) -> cst.BaseExpression:
-        """Replace IfExp (ternary) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Await(self, original_node: cst.Await, updated_node: cst.Await) -> cst.BaseExpression:
-        """Replace Await nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Tuple(self, original_node: cst.Tuple, updated_node: cst.Tuple) -> cst.BaseExpression:
-        """Replace Tuple nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_List(self, original_node: cst.List, updated_node: cst.List) -> cst.BaseExpression:
-        """Replace List nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Set(self, original_node: cst.Set, updated_node: cst.Set) -> cst.BaseExpression:
-        """Replace Set nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Dict(self, original_node: cst.Dict, updated_node: cst.Dict) -> cst.BaseExpression:
-        """Replace Dict nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Lambda(self, original_node: cst.Lambda, updated_node: cst.Lambda) -> cst.BaseExpression:
-        """Replace Lambda nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_NamedExpr(self, original_node: cst.NamedExpr, updated_node: cst.NamedExpr) -> cst.BaseExpression:
-        """Replace NamedExpr (walrus operator) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.BaseSmallStatement:
-        """Replace Assign nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_AugAssign(self, original_node: cst.AugAssign, updated_node: cst.AugAssign) -> cst.BaseSmallStatement:
-        """Replace AugAssign (augmented assignment) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Return(self, original_node: cst.Return, updated_node: cst.Return) -> cst.BaseSmallStatement:
-        """Replace Return statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Assert(self, original_node: cst.Assert, updated_node: cst.Assert) -> cst.BaseSmallStatement:
-        """Replace Assert statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Raise(self, original_node: cst.Raise, updated_node: cst.Raise) -> cst.BaseSmallStatement:
-        """Replace Raise statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Del(self, original_node: cst.Del, updated_node: cst.Del) -> cst.BaseSmallStatement:
-        """Replace Del statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        if replacement is not None:
-            # If replacement is already a statement, return it
-            if isinstance(replacement, cst.BaseSmallStatement):
-                return replacement
-            # If replacement is an expression, wrap it in Expr
-            elif isinstance(replacement, cst.BaseExpression):
-                return cst.Expr(value=replacement)
-        return updated_node
-
-    def leave_Global(self, original_node: cst.Global, updated_node: cst.Global) -> cst.BaseSmallStatement:
-        """Replace Global statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Nonlocal(self, original_node: cst.Nonlocal, updated_node: cst.Nonlocal) -> cst.BaseSmallStatement:
-        """Replace Nonlocal statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_ImportFrom(self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom) -> cst.BaseSmallStatement:
-        """Replace ImportFrom statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Import(self, original_node: cst.Import, updated_node: cst.Import) -> cst.BaseSmallStatement:
-        """Replace Import statement nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_ListComp(self, original_node: cst.ListComp, updated_node: cst.ListComp) -> cst.BaseExpression:
-        """Replace ListComp (list comprehension) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_SetComp(self, original_node: cst.SetComp, updated_node: cst.SetComp) -> cst.BaseExpression:
-        """Replace SetComp (set comprehension) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_DictComp(self, original_node: cst.DictComp, updated_node: cst.DictComp) -> cst.BaseExpression:
-        """Replace DictComp (dict comprehension) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_GeneratorExp(self, original_node: cst.GeneratorExp, updated_node: cst.GeneratorExp) -> cst.BaseExpression:
-        """Replace GeneratorExp (generator expression) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_FormattedString(self, original_node: cst.FormattedString, updated_node: cst.FormattedString) -> cst.BaseExpression:
-        """Replace FormattedString (f-string) nodes that match the pattern."""
-        replacement = self._do_replacement(updated_node)
-        return replacement if replacement is not None else updated_node
-
-    def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.BaseSmallStatement:
-        """Replace Expr statement nodes when the inner expression matches."""
-        # Check if the inner value matches
-        replacement = self._do_replacement(updated_node.value)
-        if replacement is not None:
-            # If replacement is a statement, return it directly
-            if isinstance(replacement, cst.BaseSmallStatement):
-                return replacement
-            # If replacement is an expression, wrap it in Expr
-            elif isinstance(replacement, cst.BaseExpression):
-                return updated_node.with_changes(value=replacement)
-        return updated_node
-
-
-class _PositionFilteredReplacer(PatternReplacer):
-    """Replacer that only modifies nodes at pre-approved line positions.
-
-    Used when ``find_pattern`` has already determined which positions satisfy
-    oracle type constraints (or other post-filters).  The replacer uses
-    ``PositionProvider`` metadata to check ``original_node`` positions in each
-    ``leave_*`` method before delegating to the parent replacer.
-
-    Note: overriding ``on_visit``/``on_leave`` would disable LibCST's specific
-    ``leave_*`` dispatch, so we override each ``leave_*`` method individually
-    via ``_make_position_filtered_leave``.
-    """
-
-    METADATA_DEPENDENCIES = (cst.metadata.PositionProvider,)
-
-    def __init__(
-        self,
-        matcher: m.BaseMatcherNode,
-        pattern: Pattern,
-        replacement_str: str,
-        ellipsis_info: dict | None = None,
-        allowed_lines: set[int] | None = None,
-    ):
-        super().__init__(matcher, pattern, replacement_str, ellipsis_info)
-        self.allowed_lines: set[int] = allowed_lines or set()
-
-    def _position_allowed(self, original_node: cst.CSTNode) -> bool:
-        try:
-            pos = self.get_metadata(cst.metadata.PositionProvider, original_node)
-            return pos.start.line in self.allowed_lines
-        except KeyError:
-            return False
-
-
-def _make_position_filtered_leave(base_method):
-    """Create a leave_* override that checks position before delegating."""
-    def leave_method(self, original_node, updated_node):
-        if not self._position_allowed(original_node):
-            return updated_node
-        return base_method(self, original_node, updated_node)
-    return leave_method
-
-
-# Dynamically override every leave_* method from PatternReplacer so that each
-# checks position before delegating to the parent implementation.
-for _name in list(vars(PatternReplacer)):
-    if _name.startswith("leave_"):
-        _base = getattr(PatternReplacer, _name)
-        setattr(_PositionFilteredReplacer, _name, _make_position_filtered_leave(_base))
-
-
-class ConstrainedPatternReplacer(PatternReplacer):
-    """Transformer to replace pattern matches with inside/not_inside constraints.
-
-    Tracks ancestors using visit_* methods to push onto stack and leave_* methods to pop.
-    """
-
-    # Use same keyword checkers as ConstrainedPatternFinder
-    KEYWORD_CHECKERS = {
-        "def": lambda node: isinstance(node, cst.FunctionDef),
-        "async def": lambda node: isinstance(node, cst.FunctionDef) and node.asynchronous is not None,
-        "class": lambda node: isinstance(node, cst.ClassDef),
-        "for": lambda node: isinstance(node, (cst.For, cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)),
-        "while": lambda node: isinstance(node, cst.While),
-        "with": lambda node: isinstance(node, cst.With),
-        "try": lambda node: isinstance(node, (cst.Try, cst.TryStar)),
-        "if": lambda node: isinstance(node, (cst.If, cst.IfExp)),
-    }
-
-    def __init__(
-        self,
-        matcher: m.BaseMatcherNode,
-        pattern: Pattern,
-        replacement_str: str,
-        ellipsis_info: dict | None = None,
-        inside: str | None = None,
-        not_inside: str | None = None,
-    ):
-        super().__init__(matcher, pattern, replacement_str, ellipsis_info)
-        self.inside = inside
-        self.not_inside = not_inside
-        self.ancestor_stack: list[cst.CSTNode] = []
-
-        # Parse constraints into checker functions
-        self._inside_checker = _parse_constraint(inside) if inside else None
-        self._not_inside_checker = _parse_constraint(not_inside) if not_inside else None
-
-    def _satisfies_constraint(self) -> bool:
-        """Check if current context satisfies the inside/not_inside constraint."""
-        if self._inside_checker:
-            # Must be inside at least one matching ancestor
-            return any(self._inside_checker(ancestor) for ancestor in self.ancestor_stack)
-
-        if self._not_inside_checker:
-            # Must NOT be inside any matching ancestor
-            return not any(self._not_inside_checker(ancestor) for ancestor in self.ancestor_stack)
-
-        return True  # No constraint
-
-    def _do_replacement(self, node: cst.CSTNode) -> cst.CSTNode | None:
-        """Override to check constraint before performing replacement."""
-        # Only perform replacement if constraint is satisfied
-        if self._satisfies_constraint():
-            return super()._do_replacement(node)
-        return None
-
-    # Override visit/leave for all node types that might be constraints
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_For(self, node: cst.For) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_For(self, original_node: cst.For, updated_node: cst.For) -> cst.For:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_While(self, node: cst.While) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_While(self, original_node: cst.While, updated_node: cst.While) -> cst.While:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_With(self, node: cst.With) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_With(self, original_node: cst.With, updated_node: cst.With) -> cst.With:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_Try(self, node: cst.Try) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_Try(self, original_node: cst.Try, updated_node: cst.Try) -> cst.Try:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_TryStar(self, node: cst.TryStar) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_TryStar(self, original_node: cst.TryStar, updated_node: cst.TryStar) -> cst.TryStar:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_If(self, node: cst.If) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_If(self, original_node: cst.If, updated_node: cst.If) -> cst.If:
-        self.ancestor_stack.pop()
-        return updated_node
-
-    def visit_IfExp(self, node: cst.IfExp) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_IfExp(self, original_node: cst.IfExp, updated_node: cst.IfExp) -> cst.BaseExpression:
-        result = super().leave_IfExp(original_node, updated_node)
-        self.ancestor_stack.pop()
-        return result
-
-    # Comprehensions (for "for" constraint)
-    def visit_ListComp(self, node: cst.ListComp) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_ListComp(self, original_node: cst.ListComp, updated_node: cst.ListComp) -> cst.BaseExpression:
-        result = super().leave_ListComp(original_node, updated_node)
-        self.ancestor_stack.pop()
-        return result
-
-    def visit_SetComp(self, node: cst.SetComp) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_SetComp(self, original_node: cst.SetComp, updated_node: cst.SetComp) -> cst.BaseExpression:
-        result = super().leave_SetComp(original_node, updated_node)
-        self.ancestor_stack.pop()
-        return result
-
-    def visit_DictComp(self, node: cst.DictComp) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_DictComp(self, original_node: cst.DictComp, updated_node: cst.DictComp) -> cst.BaseExpression:
-        result = super().leave_DictComp(original_node, updated_node)
-        self.ancestor_stack.pop()
-        return result
-
-    def visit_GeneratorExp(self, node: cst.GeneratorExp) -> bool:
-        self.ancestor_stack.append(node)
-        return True
-
-    def leave_GeneratorExp(self, original_node: cst.GeneratorExp, updated_node: cst.GeneratorExp) -> cst.BaseExpression:
-        result = super().leave_GeneratorExp(original_node, updated_node)
-        self.ancestor_stack.pop()
-        return result
-
-
-class ScopedPatternReplacer(PatternReplacer):
-    """Transformer to replace pattern matches only within a specific scope."""
-
-    def __init__(self, matcher: m.BaseMatcherNode, pattern: Pattern, replacement_str: str, scope: list[str], ellipsis_info: dict | None = None):
-        super().__init__(matcher, pattern, replacement_str, ellipsis_info)
-        self.scope = scope
-        self.current_path: list[str] = []
-
-    def _is_in_scope(self) -> bool:
-        """Check if we're currently inside the target scope."""
-        if len(self.current_path) < len(self.scope):
-            return False
-        return self.current_path[:len(self.scope)] == self.scope
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-        """Leave class definition."""
-        self.current_path.pop()
-        return updated_node
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-        """Leave function definition."""
-        self.current_path.pop()
-        return updated_node
-
-    def _do_replacement(self, node: cst.CSTNode) -> cst.CSTNode | None:
-        """Try to replace node if it matches pattern and we're in scope. Returns replacement or None."""
-        if not self._is_in_scope():
-            return None
-        return super()._do_replacement(node)
-
 
 
 def remove_symbol(
@@ -5151,6 +4609,98 @@ def copy_symbol(
     return diff
 
 
+def _is_valid_replacement(code: str) -> bool:
+    """Verify if the given code string parses as a valid Python expression or statement.
+
+    This ensures that replacements don't produce syntactically invalid code.
+    """
+    try:
+        cst.parse_expression(code)
+        return True
+    except Exception:
+        try:
+            temp_module = cst.parse_module(code)
+            # Return True if it contains at least one statement or is an empty valid module
+            return bool(temp_module.body) or code.strip() == ""
+        except Exception:
+            return False
+
+
+def _substitute_metavars(
+    replacement_str: str,
+    captures: dict[str, cst.CSTNode | tuple[cst.CSTNode, ...]],
+) -> str | None:
+    """Substitute metavars in replacement string with captured code.
+
+    Returns substituted string, or None if replacement cannot be resolved
+    (e.g. ${NAME.content} on a non-string).
+    """
+    replacement_code = replacement_str
+
+    # First pass: resolve ${NAME.content} references (string
+    # interpolation).  These extract the inner content of a string
+    # literal, stripping the surrounding quotes.  If any reference
+    # cannot be resolved (e.g. the captured node is not a string
+    # literal), skip the entire replacement to avoid producing
+    # nonsense output.
+    content_failed = False
+    for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
+        ref_name = ref_match.group(1)
+        captured = captures.get(ref_name)
+        if (
+            captured is None
+            or isinstance(captured, tuple)
+            or (content := _extract_string_content(captured)) is None
+        ):
+            content_failed = True
+            break
+        replacement_code = replacement_code.replace(
+            ref_match.group(0), content
+        )
+    if content_failed:
+        return None
+
+    # Second pass: substitute regular metavar references ($NAME, $...NAME).
+    for name, captured_node in captures.items():
+        # Handle ellipsis captures (tuples of args/elements)
+        if isinstance(captured_node, tuple):
+            # Convert each item to code and join with commas
+            if len(captured_node) == 0:
+                code = ""
+            else:
+                # Unwrap based on type: Arg.value, Element.value, or whole DictElement
+                item_codes = []
+                for item in captured_node:
+                    if isinstance(item, cst.Arg):
+                        # Preserve full Arg node (keyword=, *, **) but strip trailing comma
+                        clean_arg = item.with_changes(comma=cst.MaybeSentinel.DEFAULT)
+                        item_codes.append(cst.Module([]).code_for_node(clean_arg))
+                    elif isinstance(item, cst.Element):
+                        item_codes.append(cst.Module([]).code_for_node(item.value))
+                    elif isinstance(item, cst.DictElement):
+                        # For dict elements, include key: value
+                        key_code = cst.Module([]).code_for_node(item.key)
+                        value_code = cst.Module([]).code_for_node(item.value)
+                        item_codes.append(f"{key_code}: {value_code}")
+                    else:
+                        item_codes.append(cst.Module([]).code_for_node(item))
+                code = ", ".join(item_codes)
+            # Replace $...NAME with the comma-separated items
+            replacement_code = replacement_code.replace(f"$...{name}", code)
+        else:
+            # Convert captured node to code string
+            code = cst.Module([]).code_for_node(captured_node)
+            # Replace metavar in replacement string
+            replacement_code = replacement_code.replace(f"${name}", code)
+
+    # Clean up comma artifacts from empty ellipsis substitutions
+    replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
+    replacement_code = re.sub(r'(\[)\s*,\s*', r'\1', replacement_code)
+    replacement_code = re.sub(r',\s*,', ',', replacement_code)
+
+    return replacement_code
+
+
 def replace_pattern(
     pattern_str: str,
     replacement_str: str,
@@ -5183,27 +4733,6 @@ def replace_pattern(
 
     Returns:
         Tuple of (diff, count) where diff is a unified diff and count is number of replacements
-
-    Example:
-        >>> diff, count = replace_pattern("print($X)", "logger.info($X)", "file.py")
-        >>> print(diff)
-        --- file.py
-        +++ file.py
-        @@ -1,2 +1,2 @@
-        -print('hello')
-        +logger.info('hello')
-
-        # Scoped replacement within a function:
-        >>> diff, count = replace_pattern("old_name", "new_name", "file.py", scope=["my_func"])
-
-        # Replace only inside functions:
-        >>> diff, count = replace_pattern("print($X)", "logger.info($X)", "file.py", inside="def")
-
-        # Type-aware replacement:
-        >>> diff, count = replace_pattern(
-        ...     "$X:type[Connection].close()", "$X.shutdown()",
-        ...     "file.py", type_oracle=oracle,
-        ... )
     """
     # Handle --where as alias for --inside
     if where is not None:
@@ -5214,61 +4743,84 @@ def replace_pattern(
     # Validate inside/not_inside constraints
     if inside and not_inside:
         raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
-    # Parse pattern and compile to matcher
-    pattern = parse_pattern(pattern_str)
-    matcher, ellipsis_info = compile_pattern_to_matcher(pattern)
 
-    # Detect oracle type constraints
-    oracle_constraints: dict[str, tuple[str, str]] = {}
-    for mv in pattern.metavars:
-        if is_oracle_type_constraint(mv.type_constraint):
-            oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
-
-    # Read and parse file
+    # Read file
     file = Path(file_path)
     if not file.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     source_code = file.read_text()
-    module = cst.parse_module(source_code)
 
-    # When oracle constraints are present, delegate matching to find_pattern
-    # which handles the type post-filtering, then use a position-filtered
-    # replacer to only replace at verified positions.
-    if oracle_constraints and type_oracle is not None:
-        matches = find_pattern(
-            pattern_str, file_path, scope=scope,
-            inside=inside, not_inside=not_inside,
-            type_oracle=type_oracle,
-            source_override=source_code,
-        )
-        if not matches:
-            return "", 0
-        allowed_lines = {match.line for match in matches if match.line is not None}
-        replacer = _PositionFilteredReplacer(
-            matcher, pattern, replacement_str, ellipsis_info,
-            allowed_lines=allowed_lines,
-        )
-        wrapper = cst.MetadataWrapper(module)
-        new_module = wrapper.visit(replacer)
-    elif inside or not_inside:
-        # Use constrained replacer for inside/not_inside constraints
-        replacer = ConstrainedPatternReplacer(matcher, pattern, replacement_str, ellipsis_info, inside, not_inside)
-        new_module = module.visit(replacer)
-    elif scope is not None:
-        # Use scoped replacer for scope-based replacements
-        replacer = ScopedPatternReplacer(matcher, pattern, replacement_str, scope, ellipsis_info)
-        new_module = module.visit(replacer)
-    else:
-        # Use basic replacer for unconstrained replacements
-        replacer = PatternReplacer(matcher, pattern, replacement_str, ellipsis_info)
-        new_module = module.visit(replacer)
+    # Find all matches using find_pattern (already migrated to tree-sitter fast paths)
+    matches = find_pattern(
+        pattern_str, file_path, scope=scope,
+        inside=inside, not_inside=not_inside, where=where,
+        type_oracle=type_oracle,
+        source_override=source_code,
+    )
 
-    # If no modifications, return empty diff and zero count
-    if not replacer.modified:
+    if not matches:
         return "", 0
 
-    new_code = new_module.code
+    # Build a newline offset table for the source
+    line_starts = [0]
+    for i, ch in enumerate(source_code):
+        if ch == '\n':
+            line_starts.append(i + 1)
+
+    # Use Rust transformation engine for byte-range replacements
+    transform = _rust.PyFileTransform(source_code)
+    replacement_count = 0
+    accepted_ranges: list[tuple[int, int]] = []
+
+    for match in matches:
+        if match.line is None or match.col is None or match.end_line is None or match.end_col is None:
+            continue
+
+        # Convert line/col to byte offsets
+        start_offset = line_starts[match.line - 1] + match.col
+        
+        if match.matched_text is not None:
+            # If we have the exact matched text from Rust (potentially adjusted range),
+            # use its length to determine the end offset.
+            end_offset = start_offset + len(match.matched_text)
+        else:
+            end_offset = line_starts[match.end_line - 1] + match.end_col
+
+        # Filter out matches that are contained within a previously accepted match
+        # Since find_pattern returns matches in top-down DFS order, the first match
+        # of a nested set is the outermost one.
+        is_contained = False
+        for a_start, a_end in accepted_ranges:
+            if start_offset >= a_start and end_offset <= a_end:
+                is_contained = True
+                break
+        if is_contained:
+            continue
+
+        # Build replacement by substituting metavars
+        replacement_code = _substitute_metavars(replacement_str, match.captures)
+        if replacement_code is None:
+            continue
+
+        # Verify replacement parses as valid Python
+        if not _is_valid_replacement(replacement_code):
+            continue
+
+        # Apply replacement to the transform
+        transform.replace_range(start_offset, end_offset, replacement_code)
+        accepted_ranges.append((start_offset, end_offset))
+        replacement_count += 1
+
+    if replacement_count == 0:
+        return "", 0
+
+    # Apply all edits
+    new_code = transform.apply()
+    if new_code is None:
+        # This should not happen due to the is_contained filter above
+        logger.error("Overlapping edits detected in replace_pattern")
+        return "", 0
 
     # Generate diff
     diff = _generate_diff(file_path, source_code, new_code)
@@ -5277,7 +4829,8 @@ def replace_pattern(
     if apply:
         file.write_text(new_code)
 
-    return diff, replacer.replacement_count
+    return diff, replacement_count
+
 
 
 # Cross-project semantic primitives

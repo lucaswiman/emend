@@ -1622,7 +1622,7 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         }
 
     elif isinstance(node, cst.Float):
-        return {"type": "string", "value": node.value}
+        return {"type": "float", "value": node.value}
 
     elif isinstance(node, cst.ConcatenatedString):
         return {"type": "string", "value": None}

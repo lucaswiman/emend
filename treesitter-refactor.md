@@ -428,7 +428,7 @@ Rust code change, but the scoping rules themselves are data-driven.
 | `search` (pattern mode) | LibCST matchers + Rust fast path | GritQL pattern matcher (all patterns) |
 | `search` (symbol mode) | `_SymbolCollector` (LibCST) | `symbols.rs` (existing Rust) |
 | `search --output summary` | `_ListSymbolsVisitor` → already Rust | No change |
-| `replace` | `PatternReplacer` (LibCST CSTTransformer) | GritQL rewrite (`=>`) + byte-range edits |
+| `replace` | `PatternReplacer` (LibCST CSTTransformer) | find_pattern() + PyFileTransform (Rust) |
 | `edit` | `ComponentSetter` (LibCST CSTTransformer) | tree-sitter node lookup + byte-range edits |
 | `add` | `ComponentAdder` (LibCST CSTTransformer) | tree-sitter node lookup + byte-range insert |
 | `refs` | `_ReferenceFinder` + MetadataWrapper | Scope resolver `find_references()` |
@@ -876,7 +876,7 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 #### Medium-term Phase 3: Transformer Migration (`transform.py`)
 
-1. [ ] **`PatternReplacer`**
+1. [x] **`PatternReplacer`**
 2. [ ] **`_SymbolRenamer`**
 3. [x] **`ComponentSetter`**
 4. [x] **`ComponentAdder`**

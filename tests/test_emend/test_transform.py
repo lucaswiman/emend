@@ -500,6 +500,43 @@ class TestReplacePattern:
         assert "point = (y, x)" in content
         assert "coords = (b, a)" in content
 
+    def test_replace_float_substring_regression(self, tmp_path):
+        """Verify float patterns do not match substrings of larger floats."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "pi = 3.14\n"
+            "approx_pi = 3.14159\n"
+            "radius = 3.14\n"
+        )
+
+        diff, count = replace_pattern("3.14", "math.pi", str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert count == 2
+        assert "pi = math.pi" in content
+        assert "approx_pi = 3.14159" in content
+        assert "radius = math.pi" in content
+
+    def test_replace_tuple_coordinate_regression(self, tmp_path):
+        """Verify tuple patterns correctly handle coordinate alignment (parentheses)."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "point = (x, y)\n"
+        )
+
+        # If coordinates are misaligned (include parens when LibCST expects them excluded),
+        # this might produce point = ((y, x))
+        diff, count = replace_pattern("($A, $B)", "($B, $A)", str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert count == 1
+        assert "point = (y, x)" in content
+        assert "point = ((y, x))" not in content
+
     def test_find_list_pattern(self, tmp_path):
         """Find list patterns."""
         from emend.transform import find_pattern
