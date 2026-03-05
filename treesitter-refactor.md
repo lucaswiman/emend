@@ -505,6 +505,38 @@ All using the same scope resolver infrastructure, parameterized by config.
 
 ---
 
+## Proposed Simplification: Unifying Transforms
+
+To address the concern of "bespoke Rust code" accumulating in `symbols.rs` and `matcher.rs`, we propose unifying the symbol extraction and transformation logic around standard Tree-sitter patterns and configuration.
+
+### 1. Replace `symbols.rs` Manual Walking with Tree-sitter Queries (`.scm`)
+
+The current `symbols.rs` implementation manually iterates over tree nodes and hardcodes checks for node types like `"function_definition"`, `"decorator"`, etc. This is fragile and specific to Python.
+
+**Proposal**: Use standard Tree-sitter Query files (`symbols.scm`, `tags.scm`) to define what constitutes a symbol, a definition, or a reference.
+- **Benefit**: Adding a new language (e.g., TypeScript) only requires adding a `.scm` file, not writing new Rust code.
+- **Implementation**: The `ScopeResolver` or a new `SymbolExtractor` should load these queries at runtime based on the language.
+
+### 2. Drive Scope Resolution via TOML Configuration
+
+Currently, `scope.rs` uses `LanguageConfig::python_default()`, effectively hardcoding the Python configuration.
+
+**Proposal**:
+- Ensure `ScopeResolver` loads `languages/<lang>.toml` at runtime.
+- Move all "what is a function", "what binds a name" logic into the TOML config (or `.scm` queries referenced by the config).
+- **Goal**: The Rust code should know *nothing* about "def" or "class" keywords, only "scope creator nodes" defined in config.
+
+### 3. Unify Symbol Collection and Scope Resolution
+
+Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (used for `find-references`) are separate.
+
+**Proposal**:
+- Make `ScopeResolver` the single source of truth for definitions.
+- `search --output summary` should query the `ScopeResolver` (or the underlying scope graph) to list symbols, rather than re-parsing and re-walking the tree in `symbols.rs`.
+- This eliminates the duplicated logic for finding functions/classes.
+
+---
+
 ## Migration Strategy
 
 ### Phase 0: Vendor GritQL Crates + Build Integration Layer (Week 1-2)
@@ -863,6 +895,13 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 1. [x] **Expand Rust IR coverage in `_cst_to_rust_ir()`**
 2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).
 3. [ ] **Remove LibCST matcher dependency** once 100% of patterns go through Rust.
+
+#### Phase 0.95: Simplification & Unification (Prioritized)
+
+1. [ ] **Replace `symbols.rs` manual walking with Tree-sitter Queries (`queries/<lang>/symbols.scm`)**.
+2. [ ] **Unify `search --output summary` to use `ScopeResolver` logic** (eliminating duplicate symbol finding).
+3. [ ] **Implement runtime TOML config loading** for `ScopeResolver` (replacing `python_default()`).
+4. [ ] **Move Python-specific scoping rules** from Rust code into `languages/python.toml`.
 
 #### Medium-term Phase 2: Read-Only Visitor Migration (`transform.py`)
 
