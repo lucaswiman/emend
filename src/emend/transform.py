@@ -611,7 +611,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
         if need_ref and scope_indexed:
             try:
-                for qn_str, line, col, kind in scope_resolver.references_in_file(py_file):
+                for qn_str, line, col, offset, kind in scope_resolver.references_in_file(py_file):
                     ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
             except Exception:
                 pass
@@ -2251,6 +2251,18 @@ def _add_import(
     return diff
 
 
+def _get_imports(module: cst.Module) -> str:
+    """Extract all top-level import statements as a single string."""
+    imports = []
+    for stmt in module.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for part in stmt.body:
+                if isinstance(part, (cst.Import, cst.ImportFrom)):
+                    imports.append(module.code_for_node(stmt))
+                    break
+    return "".join(imports)
+
+
 def get_component(selector: ExtendedSelector) -> str:
     """Get value of component.
 
@@ -3831,9 +3843,9 @@ def _filter_matches_by_import(
     resolver.index_file(file_path, content)
     refs = resolver.references_in_file(file_path)
     
-    # Map (line, col) -> qn
+    # Map (line, col) -> (qn, kind)
     ref_map = {}
-    for qn, line, col, kind in refs:
+    for qn, line, col, offset, kind in refs:
         ref_map[(line, col)] = (qn, kind)
 
     filtered = []
@@ -4134,7 +4146,7 @@ def _filter_matches_by_scope_local(
     
     # Map (line, col) -> (qn, kind)
     ref_map = {}
-    for qn, line, col, kind in refs:
+    for qn, line, col, offset, kind in refs:
         ref_map[(line, col)] = (qn, kind)
 
     filtered = []
@@ -4847,77 +4859,6 @@ class Reference:
     is_write: bool
 
 
-class _SymbolRenamer(cst.CSTTransformer):
-    """Scope-aware rename of symbol occurrences in a single file.
-
-    Uses QualifiedNameProvider to only rename Name nodes whose qualified
-    name matches the target symbol. For import aliases (which have empty
-    QN in LibCST), tracks the parent ImportFrom module path instead.
-    """
-
-    METADATA_DEPENDENCIES = (cst.metadata.QualifiedNameProvider,)
-
-    def __init__(self, old_name: str, new_name: str, target_qns: set[str],
-                 target_module: str | None = None):
-        self.old_name = old_name
-        self.new_name = new_name
-        self.target_qns = target_qns
-        self.target_module = target_module
-        self.changed = False
-        self._current_import_module: str | None = None
-
-    def _matches_target(self, node: cst.CSTNode) -> bool:
-        try:
-            qnames = self.get_metadata(cst.metadata.QualifiedNameProvider, node)
-            return any(qn.name in self.target_qns for qn in qnames)
-        except KeyError:
-            return False
-
-    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
-        if node.module is not None:
-            self._current_import_module = cst.Module([]).code_for_node(node.module).strip()
-        return True
-
-    def leave_ImportFrom(
-        self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-    ) -> cst.ImportFrom:
-        self._current_import_module = None
-        return updated_node
-
-    def leave_Name(self, original_node: cst.Name, updated_node: cst.Name) -> cst.Name:
-        if updated_node.value == self.old_name and self._matches_target(original_node):
-            self.changed = True
-            return updated_node.with_changes(value=self.new_name)
-        return updated_node
-
-    def leave_ImportAlias(
-        self, original_node: cst.ImportAlias, updated_node: cst.ImportAlias
-    ) -> cst.ImportAlias:
-        if (isinstance(updated_node.name, cst.Name)
-                and updated_node.name.value == self.old_name
-                and self._current_import_module is not None
-                and self.target_module is not None
-                and self._current_import_module == self.target_module):
-            self.changed = True
-            return updated_node.with_changes(
-                name=updated_node.name.with_changes(value=self.new_name)
-            )
-        return updated_node
-
-
-def _compute_target_qns(symbol_name: str, target_module: str,
-                        is_definition_file: bool) -> set[str]:
-    """Compute the set of qualified names to match for a target symbol.
-
-    In the definition file, the QN is the bare symbol name (LOCAL).
-    In other files, the QN is target_module.symbol_name (IMPORT).
-    """
-    if is_definition_file:
-        return {symbol_name}
-    else:
-        return {f"{target_module}.{symbol_name}"}
-
-
 class _DocstringRenamer(cst.CSTTransformer):
     """Replace old_name with new_name inside docstrings only.
 
@@ -5119,7 +5060,7 @@ def find_references(
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            for qn, line, col, kind in resolver.references_in_file(py_file):
+            for qn, line, col, offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns:
                     is_def = kind == "definition"
                     is_imp = kind == "import"
@@ -5196,7 +5137,7 @@ def find_callers(
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            for qn, line, col, kind in resolver.references_in_file(py_file):
+            for qn, line, col, offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns and kind == "call":
                     yield Reference(
                         file_path=py_file,
@@ -5251,7 +5192,7 @@ def find_callees(
     callees: list[Callee] = []
     seen: set[tuple[str, int]] = set()
 
-    for qn, line, col, kind in refs:
+    for qn, line, col, offset, kind in refs:
         if kind == "call" and target_sym.line_start <= line <= target_sym.line_end:
             # deduplicate by (QN, line) to match old _CalleeCollector._seen behavior
             # (which was by name, but now we have line info too)
@@ -5836,34 +5777,7 @@ def find_dead_code(
 
 
 
-def _rename_symbol_in_file(
-    content: str, old_name: str, new_name: str,
-    target_qns: set[str] | None = None,
-    target_module: str | None = None,
-) -> str | None:
-    """Rename occurrences of old_name to new_name in a single file.
-
-    When target_qns is provided, uses scope-aware renaming via
-    QualifiedNameProvider. Falls back to name-based renaming otherwise.
-
-    Returns the new content if changes were made, None otherwise.
-    """
-    try:
-        module = cst.parse_module(content)
-        if target_qns is not None:
-            wrapper = cst.metadata.MetadataWrapper(module)
-            renamer = _SymbolRenamer(old_name, new_name, target_qns, target_module)
-            new_module = wrapper.visit(renamer)
-        else:
-            # Fallback: name-based renaming (no scope analysis)
-            renamer = _SymbolRenamer(old_name, new_name, {old_name})
-            new_module = module.visit(renamer)
-        if renamer.changed:
-            return new_module.code
-        return None
-    except Exception:
-        return None
-
+# visit_project_ts yields (py_file, content, resolver)
 
 def rename_symbol(
     selector: ExtendedSelector,
@@ -5876,7 +5790,7 @@ def rename_symbol(
 ) -> dict[str, str]:
     """Rename a symbol across the entire project.
 
-    Uses LibCST QualifiedNameProvider for scope-aware renaming:
+    Uses Tree-sitter and PyScopeResolver for scope-aware renaming:
     only renames references that actually refer to the target symbol,
     not coincidental same-named symbols in other scopes or files.
 
@@ -5906,34 +5820,41 @@ def rename_symbol(
     resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
 
-    def factory(py_file: str, is_def_file: bool):
-        target_qns = _compute_target_qns(symbol_name, target_module, is_def_file)
-        return _SymbolRenamer(symbol_name, new_name, target_qns, target_module)
+    # Use fully qualified name for matching
+    target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name
 
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
 
-    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
-
     diffs = {}
-    for py_file, result_module, renamer in visit_project(
+    for py_file, content, resolver in visit_project_ts(
         name_hint=symbol_name,
-        visitor_factory=factory,
         project_path=scan_root,
-        metadata_providers=_SymbolRenamer.METADATA_DEPENDENCIES,
         target_file=resolved_target,
         candidate_files=candidates,
-        target_qnames=all_target_qns,
+        target_qnames={target_qn},
     ):
-        if not renamer.changed:
+        references = resolver.references_in_file(py_file)
+        transform = _rust.PyFileTransform(content)
+        changed = False
+
+        for qn, line, col, offset, kind in references:
+            if qn == target_qn:
+                # Check if the text at the position matches symbol_name
+                # (to avoid renaming aliases or coincidental names in attributes)
+                if content[offset:offset+len(symbol_name)] == symbol_name:
+                    transform.replace_range(offset, offset + len(symbol_name), new_name)
+                    changed = True
+
+        if not changed:
             continue
 
-        content = Path(py_file).read_text()
-        new_content = result_module.code
+        new_content = transform.apply()
+        if new_content is None:
+            continue
 
         # Apply docstring renaming if requested -- but only in files where
-        # the scope-aware code rename found changes (proving the file refers
-        # to the target symbol, not a coincidental same-named symbol).
+        # the scope-aware code rename found changes.
         if docs:
             docs_result = _rename_in_docstrings(new_content, symbol_name, new_name)
             if docs_result is not None:

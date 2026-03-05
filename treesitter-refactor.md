@@ -812,6 +812,8 @@ Enabled fast-path for scoped searches. All 1,309 tests pass.
 
 9. **Fast-path for Scoped Search**: By moving `scope` handling to a post-filter, `find_pattern` can now use the Rust accelerator for queries like `emend search 'print($X)' --in file.py::MyClass.method`, which previously fell back to LibCST.
 
+12. **Correct Scope for Definitions**: Fixed `walk_references` in Rust to ensure that the name of a class or function is resolved in the outer scope, not the nested scope it creates. This ensures that `class A` is correctly identified as a definition of `module.A` rather than `module.A.A`.
+
 ### Phase 0.9: Rust-Guided Pattern Finding (COMPLETED)
 
 Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches where the pattern compiles to Rust IR, including those with `--inside`/`--not-inside` constraints.
@@ -877,7 +879,7 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 #### Medium-term Phase 3: Transformer Migration (`transform.py`)
 
 1. [x] **`PatternReplacer`**
-2. [ ] **`_SymbolRenamer`**
+2. [x] **`_SymbolRenamer`**
 3. [x] **`ComponentSetter`**
 4. [x] **`ComponentAdder`**
 5. [x] **`ComponentRemover`**

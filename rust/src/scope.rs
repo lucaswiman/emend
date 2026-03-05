@@ -470,6 +470,7 @@ impl ScopeResolver {
         self.walk_references(
             &mut root.walk(), file_path, source_bytes,
             module_path, scopes, scope_index, imports,
+            ScopeId(0), // Start with Module scope
             false, // not in import
             &mut refs, &mut qn_set,
         );
@@ -488,12 +489,21 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
         imports: &HashMap<String, ImportBinding>,
+        current_scope: ScopeId,
         in_import: bool,
         refs: &mut Vec<Reference>,
         qn_set: &mut std::collections::HashSet<String>,
     ) {
         let node = cursor.node();
         let node_kind = node.kind();
+
+        // Check if this node created a new scope in Pass 1.
+        let is_scope_creator = self.config.scope_creators.iter().any(|c| c.node_type == node_kind);
+        let scope_for_children = if is_scope_creator {
+            self.find_scope_at_node(&node, scopes).unwrap_or(current_scope)
+        } else {
+            current_scope
+        };
 
         // Track whether we're inside an import statement.
         let child_in_import = in_import
@@ -512,9 +522,11 @@ impl ScopeResolver {
 
             if !is_attr_part && !is_keyword {
                 let kind = self.classify_reference(&node, in_import);
+                
                 if let Some(qn) = self.resolve_identifier(
                     name, node.start_byte(), module_path,
                     scopes, scope_index, imports,
+                    current_scope,
                 ) {
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
@@ -538,6 +550,7 @@ impl ScopeResolver {
                 if let Some(qn) = self.resolve_dotted_name(
                     &full_name, node.start_byte(), module_path,
                     scopes, scope_index, imports,
+                    current_scope,
                 ) {
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
@@ -556,9 +569,29 @@ impl ScopeResolver {
         // Recurse into children.
         if cursor.goto_first_child() {
             loop {
+                let child = cursor.node();
+                let next_scope = if is_scope_creator {
+                    // Switch to new scope only for children that are truly "inside".
+                    match node_kind {
+                        "class_definition" => {
+                            if child.kind() == "block" { scope_for_children } else { current_scope }
+                        }
+                        "function_definition" | "lambda" => {
+                            if matches!(child.kind(), "block" | "parameters" | "expression" | "body") {
+                                scope_for_children
+                            } else {
+                                current_scope
+                            }
+                        }
+                        _ => scope_for_children // comprehensions etc.
+                    }
+                } else {
+                    current_scope
+                };
+
                 self.walk_references(
                     cursor, file_path, source, module_path,
-                    scopes, scope_index, imports, child_in_import,
+                    scopes, scope_index, imports, next_scope, child_in_import,
                     refs, qn_set,
                 );
                 if !cursor.goto_next_sibling() {
@@ -702,15 +735,13 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
         imports: &HashMap<String, ImportBinding>,
+        scope_id: ScopeId,
     ) -> Option<String> {
         // 1. Look up in scope tree (innermost first)
-        let enclosing = self.find_enclosing_scope(byte_offset, scopes);
-        if let Some(scope_id) = enclosing {
-            if let Some(qn) = self.resolve_in_scope_chain(
-                name, scope_id, module_path, scopes, scope_index,
-            ) {
-                return Some(qn);
-            }
+        if let Some(qn) = self.resolve_in_scope_chain(
+            name, scope_id, module_path, scopes, scope_index,
+        ) {
+            return Some(qn);
         }
 
         // 2. Check imports
@@ -744,10 +775,11 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
         imports: &HashMap<String, ImportBinding>,
+        scope_id: ScopeId,
     ) -> Option<String> {
         let parts: Vec<&str> = dotted.splitn(2, '.').collect();
         if parts.len() < 2 {
-            return self.resolve_identifier(dotted, byte_offset, module_path, scopes, scope_index, imports);
+            return self.resolve_identifier(dotted, byte_offset, module_path, scopes, scope_index, imports, scope_id);
         }
         let root = parts[0];
         let rest = parts[1];
@@ -767,13 +799,10 @@ impl ScopeResolver {
         }
 
         // Check local bindings for root
-        let enclosing = self.find_enclosing_scope(byte_offset, scopes);
-        if let Some(scope_id) = enclosing {
-            if let Some(root_qn) = self.resolve_in_scope_chain(
-                root, scope_id, module_path, scopes, scope_index,
-            ) {
-                return Some(format!("{}.{}", root_qn, rest));
-            }
+        if let Some(root_qn) = self.resolve_in_scope_chain(
+            root, scope_id, module_path, scopes, scope_index,
+        ) {
+            return Some(format!("{}.{}", root_qn, rest));
         }
 
         None
@@ -1279,6 +1308,19 @@ impl ScopeResolver {
                 }
             }
         }
+    }
+
+    /// Find the scope created for a specific node in Pass 1.
+    fn find_scope_at_node(&self, node: &tree_sitter::Node, scopes: &[Scope]) -> Option<ScopeId> {
+        let start = node.start_byte();
+        let end = node.end_byte();
+        // Innermost scopes are towards the end of the vec
+        for scope in scopes.iter().rev() {
+            if scope.start_byte == start && scope.end_byte == end {
+                return Some(scope.id);
+            }
+        }
+        None
     }
 }
 
