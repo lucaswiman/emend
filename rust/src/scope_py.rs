@@ -142,4 +142,15 @@ impl PyScopeResolver {
     fn file_count(&self) -> usize {
         self.inner.file_scopes.len()
     }
+
+    /// Returns all symbols defined in a file as a list of dicts.
+    fn get_symbols(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {
+        let path = std::path::PathBuf::from(path);
+        let symbols = self.inner.get_symbols(&path);
+        let mut result = Vec::with_capacity(symbols.len());
+        for sym in symbols {
+            result.push(crate::symbols::symbol_to_pydict(py, &sym)?);
+        }
+        Ok(result)
+    }
 }

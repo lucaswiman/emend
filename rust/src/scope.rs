@@ -17,6 +17,7 @@
 //! The resolver is incremental: re-indexing a file only updates that file's
 //! scope tree and binding table, then patches the QN index.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,8 @@ use crate::symbols::node_text;
 // ---------------------------------------------------------------------------
 
 /// The kind of scope a tree-sitter node creates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScopeKind {
     Module,
     Function,
@@ -64,10 +66,12 @@ pub struct Scope {
     pub parent: Option<ScopeId>,
     pub start_byte: usize,
     pub end_byte: usize,
+    pub start_line: usize,
+    pub end_line: usize,
     pub bindings: HashMap<String, Binding>,
 }
 
-/// A name binding (definition site).
+/// A name binding in a specific scope.
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub name: String,
@@ -75,7 +79,10 @@ pub struct Binding {
     pub line: usize,
     pub column: usize,
     pub byte_offset: usize,
+    pub signature: Option<String>,
+    pub returns: Option<String>,
 }
+
 
 /// How a name was introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +192,7 @@ pub struct ImportBinding {
 // Language config (loaded from TOML)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageConfig {
     pub name: String,
     pub file_extensions: Vec<String>,
@@ -201,13 +208,13 @@ pub struct LanguageConfig {
     pub private_prefix: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeCreator {
     pub node_type: String,
     pub kind: ScopeKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeRule {
     pub is_closure_boundary: bool,
     pub names_visible_to_inner: bool,
@@ -320,6 +327,68 @@ pub struct ScopeResolver {
     pub project_root: PathBuf,
 }
 
+impl FileScope {
+    pub fn to_rust_symbols(&self) -> Vec<crate::symbols::RustSymbol> {
+        let mut result = Vec::new();
+        for (qn, loc) in &self.definitions {
+            // Find the binding in scopes to get more info (kind, params, etc)
+            let mut kind = "variable".to_string();
+            let mut line = loc.line + 1;
+            let mut end_line = loc.line + 1;
+            let mut col_offset = loc.column;
+            let mut signature = None;
+            let mut returns = None;
+
+            // Search for the definition in the scopes
+            for scope in &self.scopes {
+                let parts: Vec<&str> = qn.name.split('.').collect();
+                let last_name = parts.last().unwrap_or(&"");
+                if let Some(binding) = scope.bindings.get(*last_name) {
+                    if binding.byte_offset == loc.byte_offset {
+                        kind = match binding.kind {
+                            BindingKind::FunctionDef => "function".to_string(),
+                            BindingKind::ClassDef => "class".to_string(),
+                            BindingKind::Parameter => "parameter".to_string(),
+                            _ => "variable".to_string(),
+                        };
+                        line = binding.line + 1;
+                        col_offset = binding.column;
+                        signature = binding.signature.clone();
+                        returns = binding.returns.clone();
+                        
+                        // Find the scope created by this definition to get its end line
+                        for s in &self.scopes {
+                            if s.parent == Some(scope.id) && s.start_byte > binding.byte_offset {
+                                end_line = s.end_line + 1; // 1-indexed
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            result.push(crate::symbols::RustSymbol {
+                name: qn.name.clone(),
+                kind,
+                signature,
+                type_annotation: None,
+                returns,
+                line,
+                end_line,
+                col_offset,
+                children: Vec::new(),
+                path: qn.name.split('.').map(|s| s.to_string()).collect(),
+                depth: qn.name.split('.').count() - 1,
+                decorators: Vec::new(),
+                decorator_line_start: None,
+                param_names: Vec::new(),
+            });
+        }
+        result
+    }
+}
+
 impl ScopeResolver {
     pub fn new(config: LanguageConfig, project_root: PathBuf) -> Self {
         Self {
@@ -329,6 +398,14 @@ impl ScopeResolver {
             qn_index: HashMap::new(),
             file_qns: HashMap::new(),
             project_root,
+        }
+    }
+
+    pub fn get_symbols(&self, path: &Path) -> Vec<crate::symbols::RustSymbol> {
+        if let Some(file_scope) = self.file_scopes.get(path) {
+            file_scope.to_rust_symbols()
+        } else {
+            Vec::new()
         }
     }
 
@@ -413,6 +490,8 @@ impl ScopeResolver {
             parent: None,
             start_byte: root_node.start_byte(),
             end_byte: root_node.end_byte(),
+            start_line: root_node.start_position().row,
+            end_line: root_node.end_position().row,
             bindings: HashMap::new(),
         });
 
@@ -730,7 +809,7 @@ impl ScopeResolver {
     fn resolve_identifier(
         &self,
         name: &str,
-        byte_offset: usize,
+        _byte_offset: usize,
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
@@ -770,7 +849,7 @@ impl ScopeResolver {
     fn resolve_dotted_name(
         &self,
         dotted: &str,
-        byte_offset: usize,
+        _byte_offset: usize,
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
@@ -779,7 +858,7 @@ impl ScopeResolver {
     ) -> Option<String> {
         let parts: Vec<&str> = dotted.splitn(2, '.').collect();
         if parts.len() < 2 {
-            return self.resolve_identifier(dotted, byte_offset, module_path, scopes, scope_index, imports, scope_id);
+            return self.resolve_identifier(dotted, _byte_offset, module_path, scopes, scope_index, imports, scope_id);
         }
         let root = parts[0];
         let rest = parts[1];
@@ -956,6 +1035,8 @@ impl ScopeResolver {
                         parent: Some(current_scope),
                         start_byte: node.start_byte(),
                         end_byte: node.end_byte(),
+                        start_line: node.start_position().row,
+                        end_line: node.end_position().row,
                         bindings: HashMap::new(),
                     });
 
@@ -963,6 +1044,18 @@ impl ScopeResolver {
                     if creator.kind == ScopeKind::Function || creator.kind == ScopeKind::Class {
                         if let Some(name_node) = node.child_by_field_name("name") {
                             let name = ctx.text(name_node).to_string();
+                            let mut signature = None;
+                            let mut returns = None;
+
+                            if creator.kind == ScopeKind::Function {
+                                if let Some(params) = node.child_by_field_name("parameters") {
+                                    signature = Some(ctx.text(params).to_string());
+                                }
+                                if let Some(ret) = node.child_by_field_name("return_type") {
+                                    returns = Some(ctx.text(ret).trim_start_matches("->").trim().to_string());
+                                }
+                            }
+
                             let binding = Binding {
                                 name: name.clone(),
                                 kind: if creator.kind == ScopeKind::Function {
@@ -973,6 +1066,8 @@ impl ScopeResolver {
                                 line: name_node.start_position().row,
                                 column: name_node.start_position().column,
                                 byte_offset: name_node.start_byte(),
+                                signature,
+                                returns,
                             };
 
                             ctx.add_binding(current_scope, binding);
@@ -1059,6 +1154,8 @@ impl ScopeResolver {
                     line: child.start_position().row,
                     column: child.start_position().column,
                     byte_offset: child.start_byte(),
+                    signature: None,
+                    returns: None,
                 };
                 ctx.add_binding(scope_for_children, binding);
             });
@@ -1093,6 +1190,8 @@ impl ScopeResolver {
                     line: node.start_position().row,
                     column: node.start_position().column,
                     byte_offset: node.start_byte(),
+                    signature: None,
+                    returns: None,
                 };
                 ctx.add_binding_if_absent(scope_id, binding);
             }
@@ -1139,6 +1238,8 @@ impl ScopeResolver {
                     line: child.start_position().row,
                     column: child.start_position().column,
                     byte_offset: child.start_byte(),
+                    signature: None,
+                    returns: None,
                 };
                 ctx.add_binding(scope_id, binding);
             }
@@ -1470,8 +1571,7 @@ fn derive_module_path(file_path: &Path, project_root: &Path, separator: &str) ->
 
 impl LanguageConfig {
     pub fn from_toml(toml_str: &str) -> Result<Self, String> {
-        let _ = toml_str;
-        Ok(Self::python_default())
+        toml::from_str(toml_str).map_err(|e| e.to_string())
     }
 
     pub fn python_default() -> Self {

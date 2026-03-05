@@ -6,29 +6,96 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Query, QueryCursor};
+
+/// Language-agnostic symbol extractor using tree-sitter queries.
+pub struct SymbolExtractor {
+    pub query: Query,
+}
+
+impl SymbolExtractor {
+    pub fn new(language: tree_sitter::Language, query_source: &str) -> Result<Self, String> {
+        let query = Query::new(&language, query_source).map_err(|e| e.to_string())?;
+        Ok(Self { query })
+    }
+
+    pub fn extract(&self, source: &[u8], tree: &tree_sitter::Tree) -> Vec<RustSymbol> {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+
+        let mut symbols = Vec::new();
+        let name_idx = self.query.capture_index_for_name("name").unwrap();
+        let params_idx = self.query.capture_index_for_name("params");
+        let return_type_idx = self.query.capture_index_for_name("return_type");
+        
+        while let Some(m) = matches.next() {
+            let mut name = String::new();
+            let mut kind = "variable".to_string();
+            let mut node = m.captures[0].node;
+            let mut signature = None;
+            let mut returns = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source).to_string();
+                } else if Some(cap.index) == params_idx {
+                    signature = Some(node_text(cap.node, source).to_string());
+                } else if Some(cap.index) == return_type_idx {
+                    returns = Some(node_text(cap.node, source).trim_start_matches("->").trim().to_string());
+                } else {
+                    kind = self.query.capture_names()[cap.index as usize].to_string();
+                    node = cap.node;
+                }
+            }
+
+            if !name.is_empty() {
+                symbols.push(RustSymbol {
+                    name,
+                    kind,
+                    signature,
+                    type_annotation: None,
+                    returns,
+                    line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    col_offset: node.start_position().column,
+                    children: Vec::new(),
+                    path: Vec::new(),
+                    depth: 0,
+                    decorators: Vec::new(),
+                    decorator_line_start: None,
+                    param_names: Vec::new(),
+                });
+            }
+        }
+        symbols
+    }
+}
 
 /// Internal symbol representation (not a pyclass to avoid recursive Vec issues).
-struct RustSymbol {
-    name: String,
-    kind: String, // "function", "async_function", "method", "async_method", "class", "variable", "reference"
-    signature: Option<String>,
-    type_annotation: Option<String>,
-    returns: Option<String>,
-    line: usize,
-    end_line: usize,
-    col_offset: usize,
-    children: Vec<RustSymbol>,
-    path: Vec<String>,
-    depth: usize,
-    decorators: Vec<String>,
-    decorator_line_start: Option<usize>,
-    param_names: Vec<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustSymbol {
+    pub name: String,
+    pub kind: String, // "function", "async_function", "method", "async_method", "class", "variable", "reference"
+    pub signature: Option<String>,
+    pub type_annotation: Option<String>,
+    pub returns: Option<String>,
+    pub line: usize,
+    pub end_line: usize,
+    pub col_offset: usize,
+    pub children: Vec<RustSymbol>,
+    pub path: Vec<String>,
+    pub depth: usize,
+    pub decorators: Vec<String>,
+    pub decorator_line_start: Option<usize>,
+    pub param_names: Vec<String>,
 }
 
 /// Convert a RustSymbol tree to a Python dict (recursively).
-fn symbol_to_pydict(py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
-    let d = PyDict::new(py);
+pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
+    let d = PyDict::new(_py);
     d.set_item("name", &sym.name)?;
     d.set_item("kind", &sym.kind)?;
     d.set_item("signature", sym.signature.as_deref())?;
@@ -39,20 +106,20 @@ fn symbol_to_pydict(py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
     d.set_item("col_offset", sym.col_offset)?;
     d.set_item("depth", sym.depth)?;
 
-    let path_list = PyList::new(py, sym.path.iter().map(|s| s.as_str()))?;
+    let path_list = PyList::new(_py, sym.path.iter().map(|s| s.as_str()))?;
     d.set_item("path", path_list)?;
 
-    let dec_list = PyList::new(py, sym.decorators.iter().map(|s| s.as_str()))?;
+    let dec_list = PyList::new(_py, sym.decorators.iter().map(|s| s.as_str()))?;
     d.set_item("decorators", dec_list)?;
 
     d.set_item("decorator_line_start", sym.decorator_line_start)?;
 
-    let param_list = PyList::new(py, sym.param_names.iter().map(|s| s.as_str()))?;
+    let param_list = PyList::new(_py, sym.param_names.iter().map(|s| s.as_str()))?;
     d.set_item("param_names", param_list)?;
 
-    let children_list = PyList::empty(py);
+    let children_list = PyList::empty(_py);
     for child in &sym.children {
-        children_list.append(symbol_to_pydict(py, child)?)?;
+        children_list.append(symbol_to_pydict(_py, child)?)?;
     }
     d.set_item("children", children_list)?;
 
@@ -348,7 +415,7 @@ pub fn find_node_by_path<'a>(
 /// Get the byte ranges of all items in a list-like component.
 #[pyfunction]
 pub fn get_symbol_component_list_items(
-    py: Python,
+    _py: Python,
     source: &str,
     target_path: Vec<String>,
     component: &str,
@@ -449,7 +516,7 @@ pub fn get_symbol_component_list_items(
 /// Get the byte range of a component within a symbol node.
 #[pyfunction]
 pub fn get_symbol_component_range(
-    py: Python,
+    _py: Python,
     source: &str,
     target_path: Vec<String>,
     component: &str,
@@ -485,7 +552,7 @@ pub fn get_symbol_component_range(
                         }
                     }
 
-                    if let Ok(idx_val) = acc.extract::<isize>(py) {
+                    if let Ok(idx_val) = acc.extract::<isize>(_py) {
                         let idx = if idx_val < 0 {
                             let abs_idx = idx_val.abs() as usize;
                             if abs_idx <= param_nodes.len() {
@@ -502,7 +569,7 @@ pub fn get_symbol_component_range(
                         } else {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Parameter index {} out of range", idx_val)));
                         }
-                    } else if let Ok(name) = acc.extract::<String>(py) {
+                    } else if let Ok(name) = acc.extract::<String>(_py) {
                         for p in &param_nodes {
                             let p_name = match p.kind() {
                                 "identifier" => node_text(*p, source_bytes),
@@ -568,7 +635,7 @@ pub fn get_symbol_component_range(
                 if decorators.is_empty() {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("No decorators found"));
                 }
-                if let Ok(idx_val) = acc.extract::<isize>(py) {
+                if let Ok(idx_val) = acc.extract::<isize>(_py) {
                     let idx = if idx_val < 0 {
                         let abs_idx = idx_val.abs() as usize;
                         if abs_idx <= decorators.len() {
@@ -585,7 +652,7 @@ pub fn get_symbol_component_range(
                     } else {
                         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Decorator index {} out of range", idx_val)));
                     }
-                } else if let Ok(name) = acc.extract::<String>(py) {
+                } else if let Ok(name) = acc.extract::<String>(_py) {
                     for d in &decorators {
                         let text = node_text(*d, source_bytes).trim_start_matches('@').trim();
                         let d_name = text.split('(').next().unwrap_or("").trim();
@@ -614,7 +681,7 @@ pub fn get_symbol_component_range(
                             .filter(|c| !matches!(c.kind(), "(" | ")" | ","))
                             .collect();
 
-                         if let Ok(idx_val) = acc.extract::<isize>(py) {
+                         if let Ok(idx_val) = acc.extract::<isize>(_py) {
                              let idx = if idx_val < 0 {
                                  let abs_idx = idx_val.abs() as usize;
                                  if abs_idx <= bases.len() {
@@ -631,7 +698,7 @@ pub fn get_symbol_component_range(
                              } else {
                                  return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Base class index {} out of range", idx_val)));
                              }
-                         } else if let Ok(name) = acc.extract::<String>(py) {
+                         } else if let Ok(name) = acc.extract::<String>(_py) {
                              for b in &bases {
                                  if node_text(*b, source_bytes) == name {
                                      return Ok(Some((b.start_byte(), b.end_byte())));

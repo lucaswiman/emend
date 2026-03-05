@@ -184,21 +184,39 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = ""):
 
 
 def dicts_to_tree_symbols(dicts: list[dict]) -> list[TreeSymbol]:
-    """Convert Rust collect_symbols_batch dicts to TreeSymbol objects."""
-    return [
-        TreeSymbol(
-            name=d["name"],
+    """Build a TreeSymbol hierarchy from flat definitions with paths."""
+    root_symbols = []
+    symbol_map = {} # path_tuple -> TreeSymbol
+
+    # First pass: create all symbols
+    for d in dicts:
+        path = tuple(d.get("path", [d["name"]]))
+        sym = TreeSymbol(
+            name=d["name"].split(".")[-1],
             kind=d["kind"],
             signature=d.get("signature"),
             type_annotation=d.get("type_annotation"),
-            children=dicts_to_tree_symbols(d.get("children", [])),
-            depth=d["depth"],
+            children=[],
+            depth=len(path) - 1,
             line=d.get("line") or None,
             end_line=d.get("end_line") or None,
-            path=d.get("path", []),
+            path=list(path),
         )
-        for d in dicts
-    ]
+        symbol_map[path] = sym
+
+    # Second pass: build parent-child links
+    for path, sym in symbol_map.items():
+        if len(path) == 1:
+            root_symbols.append(sym)
+        else:
+            parent_path = path[:-1]
+            if parent_path in symbol_map:
+                symbol_map[parent_path].children.append(sym)
+            else:
+                # Parent not in definitions (e.g. from an import)
+                root_symbols.append(sym)
+
+    return root_symbols
 
 
 def collect_symbols(
@@ -206,11 +224,22 @@ def collect_symbols(
     tree_depth: int | None = None,
     selector: Optional[str] = None,
 ) -> list[TreeSymbol]:
-    """Collect symbols from a file using the bundled Rust extension."""
+    """Collect symbols from a file using the unified PyScopeResolver."""
     from emend import emend_core
-    result_dicts = emend_core.collect_symbols_batch(
-        [file], max_depth=tree_depth, selector=selector,
-    )
+    from pathlib import Path
+    
+    # Initialize resolver for the file's project root
+    resolver = emend_core.PyScopeResolver(str(Path(file).parent))
+    
+    # Read and index the file
+    source = Path(file).read_text()
+    resolver.index_file(file, source)
+    
+    # Get symbols from the unified resolver
+    result_dicts = resolver.get_symbols(file)
+    
     if result_dicts:
-        return dicts_to_tree_symbols(result_dicts[0][1])
+        # TODO: apply max_depth and selector filtering if needed
+        # (ScopeResolver currently returns flat definitions, but we can re-nest them or update resolver to return tree)
+        return dicts_to_tree_symbols(result_dicts)
     return []
