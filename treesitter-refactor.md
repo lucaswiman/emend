@@ -593,6 +593,27 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 5. **Test** basic TypeScript operations: `search`, `refs`, `rename`
 6. **Add tree-sitter-typescript** grammar dependency
 
+### Phase 0.95: Simplification & Unification (COMPLETED)
+
+Unified the symbol extraction backend and moved language-specific logic into configuration and standard queries.
+
+#### Rust Extension Enhancements (`emend_core`)
+
+| Change | Purpose |
+|--------|---------|
+| `SymbolExtractor` struct | Generic runner for Tree-sitter Queries (`.scm`) to extract symbols. |
+| `LanguageConfig` Serde | Enabled TOML-based configuration for scoping rules, avoiding hardcoded Rust. |
+| `ScopeResolver::get_symbols()` | Single source of truth for definitions, shared by name resolution and summary output. |
+| `Binding` / `Scope` fields | Captured `signature`, `returns`, `start_line`, and `end_line` for rich symbol metadata. |
+| `streaming-iterator` integration | Correctly handled high-performance Tree-sitter query results. |
+
+#### Python File Changes
+
+| File | Status | Changes |
+|------|--------|---------|
+| `ast_commands.py` | **Updated** | `collect_symbols` now queries `PyScopeResolver` instead of separate `symbols.rs` logic. |
+| `rust/queries/python/symbols.scm` | **New** | Declarative definition of Python symbols using standard TS query syntax. |
+
 ### Phase 1: Pattern Engine Expansion (COMPLETED)
 
 Expanded the Rust structural matcher and Python IR to handle nearly all Python
@@ -896,12 +917,12 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).
 3. [ ] **Remove LibCST matcher dependency** once 100% of patterns go through Rust.
 
-#### Phase 0.95: Simplification & Unification (Prioritized)
+#### Phase 0.95: Simplification & Unification (COMPLETED)
 
-1. [ ] **Replace `symbols.rs` manual walking with Tree-sitter Queries (`queries/<lang>/symbols.scm`)**.
-2. [ ] **Unify `search --output summary` to use `ScopeResolver` logic** (eliminating duplicate symbol finding).
-3. [ ] **Implement runtime TOML config loading** for `ScopeResolver` (replacing `python_default()`).
-4. [ ] **Move Python-specific scoping rules** from Rust code into `languages/python.toml`.
+1. [x] **Replace `symbols.rs` manual walking with Tree-sitter Queries (`queries/<lang>/symbols.scm`)**.
+2. [x] **Unify `search --output summary` to use `ScopeResolver` logic** (eliminating duplicate symbol finding).
+3. [x] **Implement runtime TOML config loading** for `ScopeResolver` (replacing `python_default()`).
+4. [x] **Move Python-specific scoping rules** from Rust code into `languages/python.toml`.
 
 #### Medium-term Phase 2: Read-Only Visitor Migration (`transform.py`)
 
