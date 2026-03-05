@@ -6,6 +6,7 @@ import importlib.resources
 import libcst as cst
 from libcst import matchers as m
 from typing import Union
+import re as _re
 
 
 @dataclass
@@ -109,21 +110,6 @@ def parse_pattern(pattern_str: str) -> Pattern:
 
     Returns:
         Pattern object with raw string and extracted metavariables
-
-    Examples:
-        >>> pat = parse_pattern("print($MSG)")
-        >>> len(pat.metavars)
-        1
-        >>> pat.metavars[0].name
-        'MSG'
-
-        >>> pat = parse_pattern("func($...ARGS)")
-        >>> pat.metavars[0].ellipsis
-        True
-
-        >>> pat = parse_pattern("print($MSG:str)")
-        >>> pat.metavars[0].type_constraint
-        'str'
     """
     tree = _parser.parse(pattern_str)
     transformer = PatternTransformer()
@@ -140,16 +126,7 @@ def _comp_for_to_matcher(
     metavar_map: dict[str, MetaVar],
     ellipsis_info: dict | None = None
 ) -> m.BaseMatcherNode:
-    """Convert CompFor node to matcher.
-
-    Args:
-        comp_for: CompFor node from comprehension
-        metavar_map: Mapping from placeholder name to MetaVar
-        ellipsis_info: Dict to accumulate ellipsis metavar position info
-
-    Returns:
-        Matcher for the CompFor structure
-    """
+    """Convert CompFor node to matcher."""
     if ellipsis_info is None:
         ellipsis_info = {}
 
@@ -178,11 +155,7 @@ def is_oracle_type_constraint(constraint: str | None) -> bool:
 
 
 def parse_oracle_type_constraint(constraint: str) -> tuple[str, str]:
-    """Parse an oracle type constraint like 'type[Connection]' or 'returns[Optional[str]]'.
-
-    Returns:
-        (kind, type_string) where kind is 'type' or 'returns'.
-    """
+    """Parse an oracle type constraint like 'type[Connection]' or 'returns[Optional[str]]'."""
     bracket_pos = constraint.index("[")
     kind = constraint[:bracket_pos]
     # Extract the inner type string, handling nested brackets
@@ -191,18 +164,7 @@ def parse_oracle_type_constraint(constraint: str) -> tuple[str, str]:
 
 
 def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
-    """Convert type constraint string to appropriate matcher.
-
-    Args:
-        constraint: Type constraint string like "int", "str", "!int", "!str",
-            "identifier", "float", "call", "attr", "stmt", "expr", or None.
-            Prefix with "!" for negation (matches anything except that type).
-            Also supports "type[X]" and "returns[X]" for TypeOracle constraints,
-            which match any node syntactically (post-filtered by type at match time).
-
-    Returns:
-        Matcher for the specified type
-    """
+    """Convert type constraint string to appropriate matcher."""
     if constraint is not None and constraint.startswith("!"):
         # Negated constraint: match anything EXCEPT the specified type
         inner = _type_constraint_matcher(constraint[1:])
@@ -227,7 +189,7 @@ def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
     elif constraint == "attr":
         return m.Attribute()
     elif constraint == "stmt":
-        # Match any small statement type (for type-filtering in find operations)
+        # Match any small statement type
         return m.OneOf(
             m.Return(), m.Assert(), m.Raise(),
             m.Assign(), m.AugAssign(),
@@ -242,15 +204,7 @@ def _type_constraint_matcher(constraint: str | None) -> m.BaseMatcherNode:
 
 
 def _operator_to_matcher(operator: cst.BaseCompOp) -> m.BaseMatcherNode:
-    """Convert a comparison operator to a matcher.
-
-    Args:
-        operator: CST comparison operator node
-
-    Returns:
-        Matcher for the specific operator type
-    """
-    # Map operator types to their matcher equivalents
+    """Convert a comparison operator to a matcher."""
     if isinstance(operator, cst.Equal):
         return m.Equal()
     elif isinstance(operator, cst.NotEqual):
@@ -272,20 +226,11 @@ def _operator_to_matcher(operator: cst.BaseCompOp) -> m.BaseMatcherNode:
     elif isinstance(operator, cst.NotIn):
         return m.NotIn()
     else:
-        # Fallback for unknown operators
         return m.DoNotCare()
 
 
 def _binary_operator_to_matcher(operator: cst.BaseBinaryOp) -> m.BaseMatcherNode:
-    """Convert a binary operator to a matcher.
-
-    Args:
-        operator: CST binary operator node
-
-    Returns:
-        Matcher for the specific operator type
-    """
-    # Map operator types to their matcher equivalents
+    """Convert a binary operator to a matcher."""
     if isinstance(operator, cst.Add):
         return m.Add()
     elif isinstance(operator, cst.Subtract):
@@ -313,19 +258,11 @@ def _binary_operator_to_matcher(operator: cst.BaseBinaryOp) -> m.BaseMatcherNode
     elif isinstance(operator, cst.MatrixMultiply):
         return m.MatrixMultiply()
     else:
-        # Fallback for unknown operators
         return m.DoNotCare()
 
 
 def _boolean_operator_to_matcher(operator: cst.BaseBooleanOp) -> m.BaseMatcherNode:
-    """Convert a boolean operator to a matcher.
-
-    Args:
-        operator: CST boolean operator node
-
-    Returns:
-        Matcher for the specific operator type
-    """
+    """Convert a boolean operator to a matcher."""
     if isinstance(operator, cst.And):
         return m.And()
     elif isinstance(operator, cst.Or):
@@ -335,14 +272,7 @@ def _boolean_operator_to_matcher(operator: cst.BaseBooleanOp) -> m.BaseMatcherNo
 
 
 def _unary_operator_to_matcher(operator: cst.BaseUnaryOp) -> m.BaseMatcherNode:
-    """Convert a unary operator to a matcher.
-
-    Args:
-        operator: CST unary operator node
-
-    Returns:
-        Matcher for the specific operator type
-    """
+    """Convert a unary operator to a matcher."""
     if isinstance(operator, cst.Plus):
         return m.Plus()
     elif isinstance(operator, cst.Minus):
@@ -356,14 +286,7 @@ def _unary_operator_to_matcher(operator: cst.BaseUnaryOp) -> m.BaseMatcherNode:
 
 
 def _aug_operator_to_matcher(operator: cst.BaseAugOp) -> m.BaseMatcherNode:
-    """Convert an augmented assignment operator to a matcher.
-
-    Args:
-        operator: CST augmented assignment operator node
-
-    Returns:
-        Matcher for the specific operator type
-    """
+    """Convert an augmented assignment operator to a matcher."""
     if isinstance(operator, cst.AddAssign):
         return m.AddAssign()
     elif isinstance(operator, cst.SubtractAssign):
@@ -394,60 +317,39 @@ def _aug_operator_to_matcher(operator: cst.BaseAugOp) -> m.BaseMatcherNode:
         return m.DoNotCare()
 
 
-
 def _cst_to_matcher(
     node: cst.CSTNode,
     metavar_map: dict[str, MetaVar],
     ellipsis_info: dict | None = None
 ) -> m.BaseMatcherNode:
-    """Recursively convert CST node to matcher, replacing placeholders with SaveMatchedNode.
-
-    Args:
-        node: CST node to convert
-        metavar_map: Mapping from placeholder name to MetaVar
-        ellipsis_info: Dict to accumulate ellipsis metavar position info (modified in place)
-
-    Returns:
-        Matcher that matches the pattern structure
-    """
+    """Recursively convert CST node to matcher."""
     if ellipsis_info is None:
         ellipsis_info = {}
     if isinstance(node, cst.Name):
-        # Check if this is a metavar placeholder
         if node.value in metavar_map:
             metavar = metavar_map[node.value]
-            # Use type constraint matcher if specified
             inner_matcher = _type_constraint_matcher(metavar.type_constraint)
-            # $_ is anonymous - don't capture it
             if metavar.name == "_":
                 return inner_matcher
             return m.SaveMatchedNode(inner_matcher, metavar.name)
         else:
-            # Regular name - match exact name
             return m.Name(node.value)
 
     elif isinstance(node, cst.Call):
-        # Match function call structure
         func_matcher = _cst_to_matcher(node.func, metavar_map, ellipsis_info)
-
-        # Convert arguments, checking for ellipsis metavars and star args
         arg_matchers = []
         for i, arg in enumerate(node.args):
-            # Check if this arg is an ellipsis placeholder
             if isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
                 metavar = metavar_map[arg.value.value]
                 if metavar.ellipsis:
-                    # Record ellipsis position info
                     ellipsis_info[metavar.name] = {
                         "position": i,
                         "total_args": len(node.args)
                     }
-                    # Use ZeroOrMore for ellipsis args
                     arg_matchers.append(m.ZeroOrMore(m.Arg()))
                     continue
 
             arg_value_matcher = _cst_to_matcher(arg.value, metavar_map, ellipsis_info)
-            # Preserve star/double-star matching for *$X and **$X patterns
             if arg.star in ("*", "**"):
                 arg_matchers.append(m.Arg(value=arg_value_matcher, star=arg.star))
             else:
@@ -456,36 +358,28 @@ def _cst_to_matcher(
         return m.Call(func=func_matcher, args=arg_matchers)
 
     elif isinstance(node, cst.SimpleString):
-        # Match exact string literal
         return m.SimpleString(node.value)
 
     elif isinstance(node, cst.Integer):
-        # Match exact integer literal
         return m.Integer(node.value)
 
     elif isinstance(node, cst.Float):
-        # Match exact float literal
         return m.Float(node.value)
 
     elif isinstance(node, cst.Attribute):
-        # Match attribute access like obj.attr
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
         attr_matcher = _cst_to_matcher(node.attr, metavar_map, ellipsis_info)
         return m.Attribute(value=value_matcher, attr=attr_matcher)
 
     elif isinstance(node, cst.Arg):
-        # Match function argument
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
         return m.Arg(value=value_matcher)
 
     elif isinstance(node, cst.Comparison):
-        # Match comparison operations like $A == $B, $X is None
         left_matcher = _cst_to_matcher(node.left, metavar_map, ellipsis_info)
-        # Convert each comparison target (operator + comparator)
         comparison_matchers = []
         for target in node.comparisons:
             comparator_matcher = _cst_to_matcher(target.comparator, metavar_map, ellipsis_info)
-            # Match the specific operator type from the pattern
             operator_matcher = _operator_to_matcher(target.operator)
             comparison_matchers.append(
                 m.ComparisonTarget(
@@ -496,29 +390,24 @@ def _cst_to_matcher(
         return m.Comparison(left=left_matcher, comparisons=comparison_matchers)
 
     elif isinstance(node, cst.BinaryOperation):
-        # Match binary operations like $A + $B, $X * $Y
         left_matcher = _cst_to_matcher(node.left, metavar_map, ellipsis_info)
         right_matcher = _cst_to_matcher(node.right, metavar_map, ellipsis_info)
         operator_matcher = _binary_operator_to_matcher(node.operator)
         return m.BinaryOperation(left=left_matcher, operator=operator_matcher, right=right_matcher)
 
     elif isinstance(node, cst.BooleanOperation):
-        # Match boolean operations like $A and $B, $A or $B
         left_matcher = _cst_to_matcher(node.left, metavar_map, ellipsis_info)
         right_matcher = _cst_to_matcher(node.right, metavar_map, ellipsis_info)
         operator_matcher = _boolean_operator_to_matcher(node.operator)
         return m.BooleanOperation(left=left_matcher, operator=operator_matcher, right=right_matcher)
 
     elif isinstance(node, cst.UnaryOperation):
-        # Match unary operations like not $X, -$X
         expression_matcher = _cst_to_matcher(node.expression, metavar_map, ellipsis_info)
         operator_matcher = _unary_operator_to_matcher(node.operator)
         return m.UnaryOperation(operator=operator_matcher, expression=expression_matcher)
 
     elif isinstance(node, cst.Subscript):
-        # Match subscript access like $X[$Y]
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
-        # Handle different slice types
         slice_matchers = []
         for slice_element in node.slice:
             if isinstance(slice_element, cst.SubscriptElement):
@@ -529,37 +418,30 @@ def _cst_to_matcher(
         return m.Subscript(value=value_matcher, slice=slice_matchers)
 
     elif isinstance(node, cst.Index):
-        # Match index nodes (used in subscripts)
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
         return m.Index(value=value_matcher)
 
     elif isinstance(node, cst.IfExp):
-        # Match ternary expressions like $A if $B else $C
         body_matcher = _cst_to_matcher(node.body, metavar_map, ellipsis_info)
         test_matcher = _cst_to_matcher(node.test, metavar_map, ellipsis_info)
         orelse_matcher = _cst_to_matcher(node.orelse, metavar_map, ellipsis_info)
         return m.IfExp(body=body_matcher, test=test_matcher, orelse=orelse_matcher)
 
     elif isinstance(node, cst.Await):
-        # Match await expressions like await $X
         expression_matcher = _cst_to_matcher(node.expression, metavar_map, ellipsis_info)
         return m.Await(expression=expression_matcher)
 
     elif isinstance(node, cst.Tuple):
-        # Match tuples like ($A, $B) or ($FIRST, $...REST)
         element_matchers = []
         for i, elem in enumerate(node.elements):
             if isinstance(elem, cst.Element):
-                # Check if this element is an ellipsis metavar
                 if isinstance(elem.value, cst.Name) and elem.value.value in metavar_map:
                     metavar = metavar_map[elem.value.value]
                     if metavar.ellipsis:
-                        # Record ellipsis position info
                         ellipsis_info[metavar.name] = {
                             "position": i,
                             "total_elements": len(node.elements)
                         }
-                        # Use ZeroOrMore for ellipsis elements
                         element_matchers.append(m.ZeroOrMore(m.Element()))
                         continue
 
@@ -570,20 +452,16 @@ def _cst_to_matcher(
         return m.Tuple(elements=element_matchers)
 
     elif isinstance(node, cst.List):
-        # Match lists like [$A, $B] or [$FIRST, $...REST]
         element_matchers = []
         for i, elem in enumerate(node.elements):
             if isinstance(elem, cst.Element):
-                # Check if this element is an ellipsis metavar
                 if isinstance(elem.value, cst.Name) and elem.value.value in metavar_map:
                     metavar = metavar_map[elem.value.value]
                     if metavar.ellipsis:
-                        # Record ellipsis position info
                         ellipsis_info[metavar.name] = {
                             "position": i,
                             "total_elements": len(node.elements)
                         }
-                        # Use ZeroOrMore for ellipsis elements
                         element_matchers.append(m.ZeroOrMore(m.Element()))
                         continue
 
@@ -594,20 +472,16 @@ def _cst_to_matcher(
         return m.List(elements=element_matchers)
 
     elif isinstance(node, cst.Set):
-        # Match sets like {$A, $B} or {$FIRST, $...REST}
         element_matchers = []
         for i, elem in enumerate(node.elements):
             if isinstance(elem, cst.Element):
-                # Check if this element is an ellipsis metavar
                 if isinstance(elem.value, cst.Name) and elem.value.value in metavar_map:
                     metavar = metavar_map[elem.value.value]
                     if metavar.ellipsis:
-                        # Record ellipsis position info
                         ellipsis_info[metavar.name] = {
                             "position": i,
                             "total_elements": len(node.elements)
                         }
-                        # Use ZeroOrMore for ellipsis elements
                         element_matchers.append(m.ZeroOrMore(m.Element()))
                         continue
 
@@ -618,30 +492,24 @@ def _cst_to_matcher(
         return m.Set(elements=element_matchers)
 
     elif isinstance(node, cst.Dict):
-        # Match dict literals like {$K: $V} or {$K: $V, $...REST}
-        # Also handles partial dict matching with ... (spread)
         element_matchers = []
         has_partial_spread = False
         for i, elem in enumerate(node.elements):
             if isinstance(elem, cst.DictElement):
-                # Check if the key is an ellipsis metavar (for dict ellipsis we check the key)
                 if isinstance(elem.key, cst.Name) and elem.key.value in metavar_map:
                     metavar = metavar_map[elem.key.value]
                     if metavar.ellipsis:
-                        # Record ellipsis position info
                         ellipsis_info[metavar.name] = {
                             "position": i,
                             "total_elements": len(node.elements)
                         }
-                        # Use ZeroOrMore for ellipsis elements
-                        element_matchers.append(m.ZeroOrMore(m.DictElement()))
+                        element_matchers.append(m.ZeroOrMore(m.OneOf(m.DictElement(), m.StarredDictElement())))
                         continue
 
                 key_matcher = _cst_to_matcher(elem.key, metavar_map, ellipsis_info)
                 value_matcher = _cst_to_matcher(elem.value, metavar_map, ellipsis_info)
                 element_matchers.append(m.DictElement(key=key_matcher, value=value_matcher))
             elif isinstance(elem, cst.StarredDictElement):
-                # Check if this is a partial dict spread marker (**__EMEND_SPREAD__)
                 if isinstance(elem.value, cst.Name) and elem.value.value == "__EMEND_SPREAD__":
                     has_partial_spread = True
                     continue
@@ -651,10 +519,7 @@ def _cst_to_matcher(
                 element_matchers.append(m.DoNotCare())
 
         if has_partial_spread:
-            # Build partial dict matcher using MatchIfTrue on elements
-            # to allow keys in any order and extra keys
             required = element_matchers[:]
-
             def _make_checker(req_matchers):
                 def check_elements(elements):
                     for req in req_matchers:
@@ -662,8 +527,6 @@ def _cst_to_matcher(
                             return False
                     return True
                 return check_elements
-
-            # Store per-element matchers for manual capture extraction
             ellipsis_info["__partial_dict__"] = {
                 "element_matchers": required,
             }
@@ -672,20 +535,15 @@ def _cst_to_matcher(
         return m.Dict(elements=element_matchers)
 
     elif isinstance(node, cst.Lambda):
-        # Match lambda expressions like 'lambda $X: $EXPR' or 'lambda: $EXPR'
         body_matcher = _cst_to_matcher(node.body, metavar_map, ellipsis_info)
-
-        # Build params matcher from the pattern's lambda params
         params = node.params
         all_params = list(params.params)
         has_star_arg = isinstance(params.star_arg, cst.Param)
         has_star_kwarg = params.star_kwarg is not None
 
         if not all_params and not has_star_arg and not has_star_kwarg and not params.kwonly_params:
-            # Pattern is 'lambda: ...' — match only parameterless lambdas
             params_matcher = m.Parameters(params=[], kwonly_params=[], star_kwarg=None)
         else:
-            # Match each param name (metavar or literal)
             param_matchers = []
             has_ellipsis = False
             for p in all_params:
@@ -700,12 +558,9 @@ def _cst_to_matcher(
                 param_matchers.append(m.Param(name=name_matcher))
 
             if has_ellipsis:
-                # $...ARGS matches any number of params
                 params_matcher = m.DoNotCare()
             else:
                 params_kwargs = dict(params=param_matchers)
-
-                # Handle *$ARGS pattern in lambda
                 if has_star_arg:
                     star_param = params.star_arg
                     if isinstance(star_param.name, cst.Name) and star_param.name.value in metavar_map:
@@ -714,11 +569,8 @@ def _cst_to_matcher(
                     else:
                         star_name_matcher = m.Name(star_param.name.value)
                     params_kwargs["star_arg"] = m.Param(name=star_name_matcher, star="*")
-                    # If pattern has no **kwargs, restrict to lambdas without star_kwarg
                     if not has_star_kwarg:
                         params_kwargs["star_kwarg"] = None
-
-                # Handle **$KWARGS pattern in lambda
                 if has_star_kwarg:
                     kwarg_param = params.star_kwarg
                     if isinstance(kwarg_param.name, cst.Name) and kwarg_param.name.value in metavar_map:
@@ -727,20 +579,14 @@ def _cst_to_matcher(
                     else:
                         kwarg_name_matcher = m.Name(kwarg_param.name.value)
                     params_kwargs["star_kwarg"] = m.Param(name=kwarg_name_matcher, star="**")
-
                 params_matcher = m.Parameters(**params_kwargs)
 
         return m.Lambda(body=body_matcher, params=params_matcher)
 
     elif isinstance(node, cst.FunctionDef):
-        # Match function definitions like 'def $FUNC($...ARGS):' or '@$DEC\ndef $FUNC(...):'
         name_matcher = _cst_to_matcher(node.name, metavar_map, ellipsis_info)
-
-        # Handle parameters
         params = node.params
         has_ellipsis_params = False
-
-        # Check all param categories for metavar placeholders
         all_params = list(params.params) + list(params.posonly_params or []) + list(params.kwonly_params or [])
         for p in all_params:
             if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
@@ -748,12 +594,7 @@ def _cst_to_matcher(
                 if metavar.ellipsis:
                     has_ellipsis_params = True
 
-        if has_ellipsis_params:
-            # $...ARGS means "match any params"
-            param_matchers_node = m.DoNotCare()
-        else:
-            param_matchers_node = m.DoNotCare()
-
+        param_matchers_node = m.DoNotCare()
         kwargs = dict(
             name=name_matcher,
             params=param_matchers_node,
@@ -761,43 +602,33 @@ def _cst_to_matcher(
             leading_lines=m.DoNotCare(),
             lines_after_decorators=m.DoNotCare(),
         )
-
-        # Handle async keyword
         if node.asynchronous is not None:
             kwargs["asynchronous"] = m.Asynchronous()
-
-        # Handle decorators
         if node.decorators:
             dec_matchers = []
             for dec in node.decorators:
                 dec_expr_matcher = _cst_to_matcher(dec.decorator, metavar_map, ellipsis_info)
                 dec_matchers.append(m.Decorator(decorator=dec_expr_matcher))
             kwargs["decorators"] = dec_matchers
-
         return m.FunctionDef(**kwargs)
 
     elif isinstance(node, cst.If):
-        # Match if statements like 'if $COND:'
         test_matcher = _cst_to_matcher(node.test, metavar_map, ellipsis_info)
         return m.If(test=test_matcher, body=m.DoNotCare(), leading_lines=m.DoNotCare(), orelse=m.DoNotCare())
 
     elif isinstance(node, cst.While):
-        # Match while statements like 'while $COND:'
         test_matcher = _cst_to_matcher(node.test, metavar_map, ellipsis_info)
         return m.While(test=test_matcher, body=m.DoNotCare(), leading_lines=m.DoNotCare(), orelse=m.DoNotCare())
 
     elif isinstance(node, cst.For):
-        # Match for statements like 'for $VAR in $ITER:' or 'async for $VAR in $ITER:'
         target_matcher = _cst_to_matcher(node.target, metavar_map, ellipsis_info)
         iter_matcher = _cst_to_matcher(node.iter, metavar_map, ellipsis_info)
         kwargs = dict(target=target_matcher, iter=iter_matcher, body=m.DoNotCare(), leading_lines=m.DoNotCare(), orelse=m.DoNotCare())
         if node.asynchronous is not None:
-            # Pattern is 'async for ...' - only match async for loops
             kwargs["asynchronous"] = m.Asynchronous()
         return m.For(**kwargs)
 
     elif isinstance(node, cst.With):
-        # Match with statements like 'with $CTX as $VAR:' or 'async with $CTX as $VAR:'
         item_matchers = []
         for item in node.items:
             item_matcher = _cst_to_matcher(item.item, metavar_map, ellipsis_info)
@@ -806,63 +637,42 @@ def _cst_to_matcher(
                 item_matchers.append(m.WithItem(item=item_matcher, asname=m.AsName(name=asname_matcher)))
             else:
                 item_matchers.append(m.WithItem(item=item_matcher))
-
         kwargs = dict(items=item_matchers, body=m.DoNotCare(), leading_lines=m.DoNotCare())
         if node.asynchronous is not None:
-            # Pattern is 'async with ...' - only match async with statements
             kwargs["asynchronous"] = m.Asynchronous()
         return m.With(**kwargs)
 
     elif isinstance(node, cst.Try):
-        # Match try: block - body is ignored, just matches any try statement
         return m.Try(body=m.DoNotCare(), leading_lines=m.DoNotCare())
 
     elif isinstance(node, cst.ExceptHandler):
-        # Match except clauses like 'except $E:' or 'except $E as $VAR:'
         if node.type is not None:
             type_matcher = _cst_to_matcher(node.type, metavar_map, ellipsis_info)
             if node.name is not None:
-                # 'except $E as $VAR:'
                 name_matcher = _cst_to_matcher(node.name.name, metavar_map, ellipsis_info)
-                return m.ExceptHandler(
-                    type=type_matcher,
-                    name=m.AsName(name=name_matcher),
-                    body=m.DoNotCare(),
-                )
+                return m.ExceptHandler(type=type_matcher, name=m.AsName(name=name_matcher), body=m.DoNotCare())
             else:
-                # 'except $E:'
                 return m.ExceptHandler(type=type_matcher, body=m.DoNotCare())
         else:
-            # bare 'except:'
             return m.ExceptHandler(type=None, body=m.DoNotCare())
 
     elif isinstance(node, cst.NamedExpr):
-        # Match walrus operator like ($X := $Y)
         target_matcher = _cst_to_matcher(node.target, metavar_map, ellipsis_info)
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
         return m.NamedExpr(target=target_matcher, value=value_matcher)
 
     elif isinstance(node, cst.Assign):
-        # Match assignment like $X = $Y
-        # Note: Assign can have multiple targets (a = b = c), we match the first
         target_matcher = _cst_to_matcher(node.targets[0].target, metavar_map, ellipsis_info)
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
-        # Match with flexible target count (to handle single or chained assignments)
-        return m.Assign(
-            targets=[m.AtLeastN(n=0), m.AssignTarget(target=target_matcher), m.AtLeastN(n=0)],
-            value=value_matcher
-        )
+        return m.Assign(targets=[m.AtLeastN(n=0), m.AssignTarget(target=target_matcher), m.AtLeastN(n=0)], value=value_matcher)
 
     elif isinstance(node, cst.AugAssign):
-        # Match augmented assignment like $X += $Y
         target_matcher = _cst_to_matcher(node.target, metavar_map, ellipsis_info)
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
-        # Match the operator
         operator_matcher = _aug_operator_to_matcher(node.operator)
         return m.AugAssign(target=target_matcher, operator=operator_matcher, value=value_matcher)
 
     elif isinstance(node, cst.Return):
-        # Match return statements like return $X
         if node.value is not None:
             value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
             return m.Return(value=value_matcher)
@@ -870,7 +680,6 @@ def _cst_to_matcher(
             return m.Return(value=m.DoNotCare())
 
     elif isinstance(node, cst.Assert):
-        # Match assert statements like assert $X or assert $X, $Y
         test_matcher = _cst_to_matcher(node.test, metavar_map, ellipsis_info)
         if node.msg is not None:
             msg_matcher = _cst_to_matcher(node.msg, metavar_map, ellipsis_info)
@@ -879,7 +688,6 @@ def _cst_to_matcher(
             return m.Assert(test=test_matcher, msg=m.DoNotCare())
 
     elif isinstance(node, cst.Raise):
-        # Match raise statements like raise $X
         if node.exc is not None:
             exc_matcher = _cst_to_matcher(node.exc, metavar_map, ellipsis_info)
             return m.Raise(exc=exc_matcher)
@@ -887,121 +695,87 @@ def _cst_to_matcher(
             return m.Raise(exc=m.DoNotCare())
 
     elif isinstance(node, cst.Del):
-        # Match del statements like del $X
         target_matcher = _cst_to_matcher(node.target, metavar_map, ellipsis_info)
         return m.Del(target=target_matcher)
 
     elif isinstance(node, cst.Global):
-        # Match global statements like global $X
-        # Global has names which is a sequence of NameItem
-        # For simplicity, match on the first name if pattern has single metavar
         if len(node.names) == 1:
             name_item = node.names[0]
             name_matcher = _cst_to_matcher(name_item.name, metavar_map, ellipsis_info)
             return m.Global(names=[m.NameItem(name=name_matcher)])
         else:
-            # Multiple names - match with DoNotCare for now
             return m.Global()
 
     elif isinstance(node, cst.Nonlocal):
-        # Match nonlocal statements like nonlocal $X
-        # Nonlocal has same structure as Global
         if len(node.names) == 1:
             name_item = node.names[0]
             name_matcher = _cst_to_matcher(name_item.name, metavar_map, ellipsis_info)
             return m.Nonlocal(names=[m.NameItem(name=name_matcher)])
         else:
-            # Multiple names - match with DoNotCare for now
             return m.Nonlocal()
 
     elif isinstance(node, cst.ImportFrom):
-        # Match 'from ... import ...' statements like from $MOD import $NAME
-        # Module can be Name (simple) or Attribute (dotted like os.path)
         if node.module is not None:
             module_matcher = _cst_to_matcher(node.module, metavar_map, ellipsis_info)
         else:
             module_matcher = m.DoNotCare()
-
-        # Handle names - for single name patterns, match first ImportAlias
         if not isinstance(node.names, cst.ImportStar) and len(node.names) == 1:
             import_alias = node.names[0]
             name_matcher = _cst_to_matcher(import_alias.name, metavar_map, ellipsis_info)
-            # Check if pattern has asname
             if import_alias.asname is not None:
                 asname_matcher = _cst_to_matcher(import_alias.asname.name, metavar_map, ellipsis_info)
-                return m.ImportFrom(
-                    module=module_matcher,
-                    names=[m.ImportAlias(name=name_matcher, asname=m.AsName(name=asname_matcher))]
-                )
+                return m.ImportFrom(module=module_matcher, names=[m.ImportAlias(name=name_matcher, asname=m.AsName(name=asname_matcher))])
             else:
-                return m.ImportFrom(
-                    module=module_matcher,
-                    names=[m.ImportAlias(name=name_matcher)]
-                )
+                return m.ImportFrom(module=module_matcher, names=[m.ImportAlias(name=name_matcher)])
         else:
-            # Multiple names or star import - match with DoNotCare
             return m.ImportFrom(module=module_matcher)
 
     elif isinstance(node, cst.Import):
-        # Match 'import' statements like import $MOD or import $MOD as $ALIAS
         if len(node.names) == 1:
             import_alias = node.names[0]
             name_matcher = _cst_to_matcher(import_alias.name, metavar_map, ellipsis_info)
-            # Check if pattern has asname
             if import_alias.asname is not None:
                 asname_matcher = _cst_to_matcher(import_alias.asname.name, metavar_map, ellipsis_info)
                 return m.Import(names=[m.ImportAlias(name=name_matcher, asname=m.AsName(name=asname_matcher))])
             else:
                 return m.Import(names=[m.ImportAlias(name=name_matcher)])
         else:
-            # Multiple names - match with DoNotCare
             return m.Import()
 
     elif isinstance(node, cst.ListComp):
-        # Match list comprehensions like [$X for $X in $Y]
         elt_matcher = _cst_to_matcher(node.elt, metavar_map, ellipsis_info)
         for_in_matcher = _comp_for_to_matcher(node.for_in, metavar_map, ellipsis_info)
         return m.ListComp(elt=elt_matcher, for_in=for_in_matcher)
 
     elif isinstance(node, cst.SetComp):
-        # Match set comprehensions like {$X for $X in $Y}
         elt_matcher = _cst_to_matcher(node.elt, metavar_map, ellipsis_info)
         for_in_matcher = _comp_for_to_matcher(node.for_in, metavar_map, ellipsis_info)
         return m.SetComp(elt=elt_matcher, for_in=for_in_matcher)
 
     elif isinstance(node, cst.DictComp):
-        # Match dict comprehensions like {$K: $V for $K, $V in $ITEMS}
         key_matcher = _cst_to_matcher(node.key, metavar_map, ellipsis_info)
         value_matcher = _cst_to_matcher(node.value, metavar_map, ellipsis_info)
         for_in_matcher = _comp_for_to_matcher(node.for_in, metavar_map, ellipsis_info)
         return m.DictComp(key=key_matcher, value=value_matcher, for_in=for_in_matcher)
 
     elif isinstance(node, cst.GeneratorExp):
-        # Match generator expressions like ($X for $X in $Y)
         elt_matcher = _cst_to_matcher(node.elt, metavar_map, ellipsis_info)
         for_in_matcher = _comp_for_to_matcher(node.for_in, metavar_map, ellipsis_info)
         return m.GeneratorExp(elt=elt_matcher, for_in=for_in_matcher)
 
     elif isinstance(node, cst.FormattedString):
-        # Match f-strings like f"hello {$X}"
         part_matchers = []
         for part in node.parts:
             if isinstance(part, cst.FormattedStringText):
-                # Literal text - match exactly
                 part_matchers.append(m.FormattedStringText(part.value))
             elif isinstance(part, cst.FormattedStringExpression):
-                # Interpolation - recursively match the expression
                 expr_matcher = _cst_to_matcher(part.expression, metavar_map, ellipsis_info)
                 part_matchers.append(m.FormattedStringExpression(expression=expr_matcher))
         return m.FormattedString(parts=part_matchers)
 
     else:
-        # For other node types, use DoNotCare for now
-        # This is a simplified implementation
         return m.DoNotCare()
 
-
-import re as _re
 
 _COMPOUND_HEADER_RE = _re.compile(
     r"^\s*(?:if|elif|while|for|with|async\s+for|async\s+with)\s+.*:\s*$"
@@ -1017,126 +791,31 @@ _EXCEPT_HEADER_RE = _re.compile(
 
 
 def _is_compound_statement_header(code: str) -> bool:
-    """Check if code looks like a compound statement header (ends with ':').
-
-    Handles: if/elif/while/for/with headers, and also
-    decorated or undecorated def/class headers.
-    """
+    """Check if code looks like a compound statement header (ends with ':')."""
     if _COMPOUND_HEADER_RE.match(code):
         return True
-    # Check for decorated def/class: starts with @ and ends with :
     if _DEF_HEADER_RE.search(code) and code.rstrip().endswith(":"):
         return True
     return False
 
 
 def _is_except_header(code: str) -> bool:
-    """Check if code is an except clause header like 'except $E:' or 'except $E as $VAR:'."""
+    """Check if code is an except clause header."""
     return bool(_EXCEPT_HEADER_RE.match(code))
 
 
 def compile_pattern_to_matcher(pattern: Pattern) -> tuple[m.BaseMatcherNode, dict]:
-    """Compile parsed pattern to LibCST matcher for finding matches.
-
-    Args:
-        pattern: Parsed pattern with metavariables
-
-    Returns:
-        Tuple of (matcher, ellipsis_info) where:
-        - matcher: LibCST matcher that can be used to find matches
-        - ellipsis_info: Dict mapping ellipsis metavar names to position info
-
-    Example:
-        >>> pat = parse_pattern("print($X)")
-        >>> matcher, ellipsis_info = compile_pattern_to_matcher(pat)
-        >>> # Use matcher with libcst.matchers.matches(node, matcher)
-    """
-    # Step 1: Replace metavars with valid Python identifiers
-    # Process longest patterns first to avoid partial replacements
-    # Order: $...NAME:type > $...NAME > $NAME:type > $NAME
-    temp_code = pattern.raw
-    metavar_map = {}
-
-    # Sort metavars by replacement pattern length (longest first)
-    sorted_metavars = sorted(pattern.metavars, key=lambda mv: (
-        -len(f"$...{mv.name}:{mv.type_constraint or ''}"),
-        -len(f"$...{mv.name}"),
-        -len(f"${mv.name}:{mv.type_constraint or ''}"),
-        -len(f"${mv.name}")
-    ))
-
-    for mv in sorted_metavars:
-        placeholder = f"__META_{mv.name}__"
-        metavar_map[placeholder] = mv
-
-        # Build the full metavar pattern to replace
-        if mv.ellipsis and mv.type_constraint:
-            pattern_str = f"$...{mv.name}:{mv.type_constraint}"
-        elif mv.ellipsis:
-            pattern_str = f"$...{mv.name}"
-        elif mv.type_constraint:
-            pattern_str = f"${mv.name}:{mv.type_constraint}"
-        else:
-            pattern_str = f"${mv.name}"
-
-        temp_code = temp_code.replace(pattern_str, placeholder)
-
-    # Fix ellipsis metavars in dict context by appending `: None`
-    # This makes `{__META_KEY__: __META_VAL__, __META_REST__}` valid as
-    # `{__META_KEY__: __META_VAL__, __META_REST__: None}`
-    for mv in sorted_metavars:
-        if not mv.ellipsis:
-            continue
-        placeholder = f"__META_{mv.name}__"
-        idx = temp_code.find(placeholder)
-        if idx == -1:
-            continue
-
-        # Check if placeholder is already followed by `:` (already has a value)
-        after_placeholder = temp_code[idx + len(placeholder):].lstrip()
-        if after_placeholder.startswith(':'):
-            continue
-
-        # Scan backward to find enclosing `{` to detect dict context
-        brace_depth = 0
-        for i in range(idx - 1, -1, -1):
-            c = temp_code[i]
-            if c == '}':
-                brace_depth += 1
-            elif c == '{':
-                if brace_depth == 0:
-                    # Found the enclosing brace - check if dict context
-                    segment = temp_code[i + 1:idx]
-                    if ':' in segment:  # Dict context (has key:value pairs)
-                        # Append `: None` to make it a valid dict element
-                        temp_code = (
-                            temp_code[:idx + len(placeholder)]
-                            + ': None'
-                            + temp_code[idx + len(placeholder):]
-                        )
-                    break
-                brace_depth -= 1
-
-    # Step 1b: Replace literal `...` in dict context with `**__EMEND_SPREAD__`
-    # This makes patterns like `{'type': 'user', ...}` parseable as Python
-    temp_code = _re.sub(
-        r'\.\.\.\s*}',
-        '**__EMEND_SPREAD__}',
-        temp_code
-    )
+    """Compile parsed pattern to LibCST matcher for finding matches."""
+    temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
 
     # Step 2: Detect compound statement headers and add dummy body
-    # Patterns like "if $COND:", "for $VAR in $ITER:", "while $COND:", "with $CTX:"
-    # Also handle "try:" and "except $E:" / "except $E as $VAR:"
     is_except_header = _is_except_header(temp_code)
     is_compound_header = _is_compound_statement_header(temp_code)
     is_try = temp_code.strip() == "try:"
     parse_code = temp_code
     if is_try:
-        # Wrap as a minimal try/except block
         parse_code = "try:\n    pass\nexcept Exception:\n    pass"
     elif is_except_header:
-        # Wrap the except clause in a try block to make it parseable
         parse_code = "try:\n    pass\n" + temp_code + "\n    pass"
     elif is_compound_header:
         parse_code = temp_code + "\n    pass"
@@ -1145,21 +824,15 @@ def compile_pattern_to_matcher(pattern: Pattern) -> tuple[m.BaseMatcherNode, dic
     try:
         expr = cst.parse_expression(parse_code)
     except Exception:
-        # If it doesn't parse as expression, try as statement
         try:
             module = cst.parse_module(parse_code)
-            # Extract first statement
             if module.body:
                 expr = module.body[0]
-                # Unwrap SimpleStatementLine to get the actual statement
                 if isinstance(expr, cst.SimpleStatementLine) and len(expr.body) == 1:
                     expr = expr.body[0]
-                # For try/except wrapper: extract the relevant node
                 if is_try and isinstance(expr, cst.Try):
-                    # Keep the Try node as-is for matching
                     pass
                 elif is_except_header and isinstance(expr, cst.Try):
-                    # Extract the first ExceptHandler from the wrapped try block
                     if expr.handlers:
                         expr = expr.handlers[0]
             else:
@@ -1172,7 +845,6 @@ def compile_pattern_to_matcher(pattern: Pattern) -> tuple[m.BaseMatcherNode, dic
     matcher = _cst_to_matcher(expr, metavar_map, ellipsis_info)
 
     return matcher, ellipsis_info
-
 
 
 # ---------------------------------------------------------------------------
@@ -1210,18 +882,64 @@ def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, Met
 
         temp_code = temp_code.replace(pattern_str, placeholder)
 
+    # Fix ellipsis metavars in dict context by appending `: None`
+    for mv in sorted_metavars:
+        if not mv.ellipsis:
+            continue
+        placeholder = f"__META_{mv.name}__"
+        idx = temp_code.find(placeholder)
+        if idx == -1:
+            continue
+
+        after_placeholder = temp_code[idx + len(placeholder):].lstrip()
+        if after_placeholder.startswith(':'):
+            continue
+
+        brace_depth = 0
+        for i in range(idx - 1, -1, -1):
+            c = temp_code[i]
+            if c == '}':
+                brace_depth += 1
+            elif c == '{':
+                if brace_depth == 0:
+                    found_colon = False
+                    inner_depth = 0
+                    for j in range(i + 1, len(temp_code)):
+                        cj = temp_code[j]
+                        if cj in '{[(':
+                            inner_depth += 1
+                        elif cj in '}])':
+                            if inner_depth == 0:
+                                break
+                            inner_depth -= 1
+                        elif cj == ':' and inner_depth == 0:
+                            found_colon = True
+                            break
+
+                    if found_colon:
+                        temp_code = (
+                            temp_code[:idx + len(placeholder)]
+                            + ': None'
+                            + temp_code[idx + len(placeholder):]
+                        )
+                    break
+                brace_depth -= 1
+
+    # Replace literal `...` in dict context with `**__EMEND_SPREAD__`
+    temp_code = _re.sub(
+        r'\.\.\.\s*}',
+        '**__EMEND_SPREAD__}',
+        temp_code
+    )
+
     return temp_code, metavar_map
 
 
 def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict | None:
-    """Convert a LibCST node to a Rust IR dict.
-
-    Returns None if the node type is not yet supported by the Rust matcher.
-    """
+    """Convert a LibCST node to a Rust IR dict."""
     if isinstance(node, cst.Name):
         if node.value in metavar_map:
             metavar = metavar_map[node.value]
-            # Type constraints support
             if metavar.type_constraint in (":int", ":str", ":call"):
                 return {"type": "type_constraint", "kind": metavar.type_constraint[1:]}
             if metavar.type_constraint is not None:
@@ -1231,7 +949,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             else:
                 return {"type": "any_expr"}
         else:
-            # Map Python builtins to tree-sitter node types
             if node.value == "None":
                 return {"type": "none"}
             if node.value == "True":
@@ -1244,36 +961,27 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         func_ir = _cst_to_rust_ir(node.func, metavar_map)
         if func_ir is None:
             return None
-
         args_ir = []
         has_ellipsis = False
         for arg in node.args:
-            # Check if this is an ellipsis metavar in arg position
             if arg.star == "" and isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
                 metavar = metavar_map[arg.value.value]
                 if metavar.ellipsis:
                     args_ir.append({"type": "ellipsis"})
                     has_ellipsis = True
                     continue
-
             arg_ir = _cst_to_rust_ir(arg.value, metavar_map)
             if arg_ir is None:
                 return None
-
             if arg.star == "*":
                 args_ir.append({"type": "star", "value": arg_ir})
             elif arg.star == "**":
                 args_ir.append({"type": "double_star", "value": arg_ir})
             elif arg.keyword is not None:
-                # keyword arguments are handled as special IR if needed,
-                # but currently Rust's KeywordArg is a PatternNode,
-                # whereas Call args are ArgPattern.
-                # Actually, tree-sitter treats keyword_argument as a named node.
                 kname = arg.keyword.value
                 args_ir.append({"type": "keyword_arg", "key": kname, "value": arg_ir})
             else:
                 args_ir.append(arg_ir)
-
         return {
             "type": "call",
             "func": func_ir,
@@ -1305,37 +1013,30 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                     return None
                 elems_ir.append(elem_ir)
             else:
-                return None  # StarredElement or other unsupported
+                return None
         return {"type": "list", "elements": elems_ir}
 
     elif isinstance(node, cst.FunctionDef):
-        # Async functions not yet distinguished in Rust matcher — fall back
         if node.asynchronous is not None:
             return None
-
         name_ir = _cst_to_rust_ir(node.name, metavar_map)
         if name_ir is None:
             return None
-
-        # Decorators support
         decorators_ir = []
         for dec in node.decorators:
             dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
             if dec_ir is None:
                 return None
             decorators_ir.append(dec_ir)
-
         params = node.params
         param_patterns = []
         all_params = list(params.params) + list(params.posonly_params or []) + list(params.kwonly_params or [])
-
         for p in all_params:
             if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
                 metavar = metavar_map[p.name.value]
                 if metavar.ellipsis:
                     param_patterns.append({"type": "ellipsis"})
                     continue
-                # Non-ellipsis metavar param
                 if p.default is not None:
                     dv_ir = _cst_to_rust_ir(p.default, metavar_map)
                     if dv_ir is None:
@@ -1344,7 +1045,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                 else:
                     param_patterns.append({"type": "any"})
             else:
-                # Literal param name
                 if p.default is not None:
                     dv_ir = _cst_to_rust_ir(p.default, metavar_map)
                     if dv_ir is None:
@@ -1353,8 +1053,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                 else:
                     pname = p.name.value if isinstance(p.name, cst.Name) else str(p.name)
                     param_patterns.append({"type": "name", "value": pname})
-
-        # Handle *args and **kwargs in params
         if params.star_arg and isinstance(params.star_arg, cst.Param):
             p = params.star_arg
             if isinstance(p.name, cst.Name) and p.name.value in metavar_map:
@@ -1375,7 +1073,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                     param_patterns.append({"type": "any"})
             else:
                 param_patterns.append({"type": "any"})
-
         return {
             "type": "funcdef",
             "name": name_ir,
@@ -1387,22 +1084,18 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         name_ir = _cst_to_rust_ir(node.name, metavar_map)
         if name_ir is None:
             return None
-
-        # Decorators support
         decorators_ir = []
         for dec in node.decorators:
             dec_ir = _cst_to_rust_ir(dec.decorator, metavar_map)
             if dec_ir is None:
                 return None
             decorators_ir.append(dec_ir)
-
         bases_ir = []
         for base_arg in node.bases:
             base_ir = _cst_to_rust_ir(base_arg.value, metavar_map)
             if base_ir is None:
                 return None
             bases_ir.append(base_ir)
-
         return {
             "type": "classdef",
             "name": name_ir,
@@ -1440,6 +1133,54 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                 return None
         return {"type": "tuple", "elements": elems_ir}
 
+    elif isinstance(node, cst.Dict):
+        elems_ir = []
+        for elem in node.elements:
+            if isinstance(elem, cst.DictElement):
+                # Check if the key is an ellipsis placeholder
+                if isinstance(elem.key, cst.Name) and elem.key.value in metavar_map:
+                    metavar = metavar_map[elem.key.value]
+                    if metavar.ellipsis:
+                        elems_ir.append({"type": "ellipsis"})
+                        continue
+                
+                k_ir = _cst_to_rust_ir(elem.key, metavar_map)
+                v_ir = _cst_to_rust_ir(elem.value, metavar_map)
+                if k_ir is None or v_ir is None:
+                    return None
+                elems_ir.append({"type": "pair", "key": k_ir, "value": v_ir})
+            elif isinstance(elem, cst.StarredDictElement):
+                # Check for ellipsis metavar or partial dict spread marker
+                if isinstance(elem.value, cst.Name):
+                    if elem.value.value in metavar_map:
+                        metavar = metavar_map[elem.value.value]
+                        if metavar.ellipsis:
+                            elems_ir.append({"type": "ellipsis"})
+                            continue
+                    elif elem.value.value == "__EMEND_SPREAD__":
+                        elems_ir.append({"type": "ellipsis"})
+                        continue
+
+                v_ir = _cst_to_rust_ir(elem.value, metavar_map)
+                if v_ir is None:
+                    return None
+                elems_ir.append({"type": "spread", "value": v_ir})
+            else:
+                return None
+        return {"type": "dict", "elements": elems_ir}
+
+    elif isinstance(node, cst.Set):
+        elems_ir = []
+        for elem in node.elements:
+            if isinstance(elem, cst.Element):
+                e_ir = _cst_to_rust_ir(elem.value, metavar_map)
+                if e_ir is None:
+                    return None
+                elems_ir.append(e_ir)
+            else:
+                return None
+        return {"type": "set", "elements": elems_ir}
+
     elif isinstance(node, (cst.BinaryOperation, cst.BooleanOperation)):
         left_ir = _cst_to_rust_ir(node.left, metavar_map)
         if left_ir is None:
@@ -1447,7 +1188,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         right_ir = _cst_to_rust_ir(node.right, metavar_map)
         if right_ir is None:
             return None
-        # Map the operator to a string
         op_map = {
             cst.Add: "+", cst.Subtract: "-", cst.Multiply: "*",
             cst.Divide: "/", cst.FloorDivide: "//", cst.Modulo: "%",
@@ -1478,7 +1218,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         value_ir = _cst_to_rust_ir(node.value, metavar_map)
         if value_ir is None:
             return None
-        # Map the operator to a string
         op_map = {
             cst.AddAssign: "+=", cst.SubtractAssign: "-=", cst.MultiplyAssign: "*=",
             cst.DivideAssign: "/=", cst.FloorDivideAssign: "//=", cst.ModuloAssign: "%=",
@@ -1548,7 +1287,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         elt_ir = _cst_to_rust_ir(node.elt, metavar_map)
         if elt_ir is None:
             return None
-        
         generators_ir = []
         for gen in node.for_in:
             target_ir = _cst_to_rust_ir(gen.target, metavar_map)
@@ -1557,26 +1295,22 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
             if iter_ir is None:
                 return None
-            
             ifs_ir = []
             for if_clause in gen.ifs:
                 if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
                 if if_ir is None:
                     return None
                 ifs_ir.append(if_ir)
-            
             generators_ir.append({
                 "target": target_ir,
                 "iter": iter_ir,
                 "ifs": ifs_ir
             })
-        
         kind = "list_comprehension"
         if isinstance(node, cst.SetComp):
             kind = "set_comprehension"
         elif isinstance(node, cst.GeneratorExp):
             kind = "generator_expression"
-            
         return {
             "type": "comprehension",
             "kind": kind,
@@ -1591,7 +1325,6 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         value_ir = _cst_to_rust_ir(node.value, metavar_map)
         if value_ir is None:
             return None
-        
         generators_ir = []
         for gen in node.for_in:
             target_ir = _cst_to_rust_ir(gen.target, metavar_map)
@@ -1600,20 +1333,17 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             iter_ir = _cst_to_rust_ir(gen.iter, metavar_map)
             if iter_ir is None:
                 return None
-            
             ifs_ir = []
             for if_clause in gen.ifs:
                 if_ir = _cst_to_rust_ir(if_clause.test, metavar_map)
                 if if_ir is None:
                     return None
                 ifs_ir.append(if_ir)
-            
             generators_ir.append({
                 "target": target_ir,
                 "iter": iter_ir,
                 "ifs": ifs_ir
             })
-            
         return {
             "type": "dict_comprehension",
             "key": key_ir,
@@ -1642,29 +1372,15 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return {"type": "fstring", "parts": parts_ir}
 
     else:
-        # Unsupported node type — fall back to LibCST path
         return None
 
 
 def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
-    """Compile a pattern string to Rust IR dict for the tree-sitter fast path.
-
-    Returns None if the pattern is not yet supported by the Rust matcher
-    (e.g., assignments, comprehensions, binary ops, f-strings).
-    In that case, the caller should fall back to the LibCST path.
-
-    Args:
-        pattern_str: Raw pattern string, e.g. "print($...ARGS)" or
-                     "$X.objects.filter($...ARGS)"
-
-    Returns:
-        Dict IR like {"type": "call", "func": ..., "args": [...]} or None.
-    """
+    """Compile a pattern string to Rust IR dict for the tree-sitter fast path."""
     try:
         pattern = parse_pattern(pattern_str)
         temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
 
-        # Handle compound statement headers
         is_except_header = _is_except_header(temp_code)
         is_compound_header = _is_compound_statement_header(temp_code)
         is_try = temp_code.strip() == "try:"
@@ -1676,7 +1392,6 @@ def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
         elif is_compound_header:
             parse_code = temp_code + "\n    pass"
 
-        # Parse as Python expression or statement
         try:
             expr = cst.parse_expression(parse_code)
         except Exception:
@@ -1703,17 +1418,7 @@ def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
 
 
 def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
-    """Compile an inside/not_inside constraint string to Rust IR dict.
-
-    Handles:
-    - "def" → any function definition
-    - "class" → any class definition
-    - "def test_*" → function with name matching glob
-    - "class MyClass:" → class with specific name
-    - Full pattern strings like "class $C(TestCase):"
-
-    Returns None if the constraint is not supported by the Rust matcher.
-    """
+    """Compile an inside/not_inside constraint string to Rust IR dict."""
     if constraint is None:
         return None
 
@@ -1726,8 +1431,6 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
         }
 
     if constraint == "async def":
-        # tree-sitter doesn't distinguish async/sync in our matcher yet
-        # Fall back to LibCST for async def constraints
         return None
 
     if constraint == "class":
@@ -1738,11 +1441,9 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
             "decorators": [{"type": "ellipsis"}],
         }
 
-    # "def name_pattern" or "class name_pattern"
     for keyword in ("def", "class"):
         if constraint.startswith(keyword + " "):
             name_pattern = constraint[len(keyword) + 1:].strip()
-            # Remove trailing colon if present (e.g., "def test_*:")
             name_pattern = name_pattern.rstrip(":").strip()
             if "*" in name_pattern:
                 name_ir = {"type": "name_glob", "value": name_pattern}
@@ -1763,15 +1464,11 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
                     "decorators": [{"type": "ellipsis"}],
                 }
 
-    # Try as a full pattern (e.g., "class $C(TestCase):")
-    # Strip trailing colon first for pattern compilation
     stripped = constraint.rstrip()
     if stripped.endswith(":"):
-        # It might be a compound statement header — try compiling as pattern
         ir = compile_pattern_to_rust_ir(stripped)
         if ir is not None:
             return ir
 
-    # Try as a plain pattern
     ir = compile_pattern_to_rust_ir(constraint)
     return ir

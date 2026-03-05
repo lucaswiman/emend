@@ -149,6 +149,21 @@ pub enum PatternNode {
     TypeConstraint {
         kind: String,
     },
+    /// Dictionary literal: `{"a": 1, **extras}`.
+    Dict(Vec<DictElementPattern>),
+    /// Set literal: `{a, b, *c}`.
+    Set(Vec<PatternNode>),
+}
+
+/// Part of a dictionary literal.
+#[derive(Debug, Clone)]
+pub enum DictElementPattern {
+    /// `key: value`
+    Pair { key: PatternNode, value: PatternNode },
+    /// `**value`
+    Spread(PatternNode),
+    /// `$...REST` — matches zero or more items.
+    Ellipsis,
 }
 
 /// Part of an f-string.
@@ -682,6 +697,46 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             Ok(PatternNode::BoolLiteral(value))
         }
 
+        "dict" => {
+            let elems_obj = d.get_item("elements")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Dict pattern missing 'elements'")
+            })?;
+            let elems_list = elems_obj.downcast::<PyList>()?;
+            let mut elements = Vec::new();
+            for item in elems_list.iter() {
+                let item_d = item.downcast::<PyDict>()?;
+                let item_type: String = item_d
+                    .get_item("type")?
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Dict element missing 'type'")
+                    })?
+                    .extract()?;
+                if item_type == "pair" {
+                    let key = deserialize_pattern(&item_d.get_item("key")?.unwrap())?;
+                    let value = deserialize_pattern(&item_d.get_item("value")?.unwrap())?;
+                    elements.push(DictElementPattern::Pair { key, value });
+                } else if item_type == "spread" {
+                    let value = deserialize_pattern(&item_d.get_item("value")?.unwrap())?;
+                    elements.push(DictElementPattern::Spread(value));
+                } else if item_type == "ellipsis" {
+                    elements.push(DictElementPattern::Ellipsis);
+                }
+            }
+            Ok(PatternNode::Dict(elements))
+        }
+
+        "set" => {
+            let elems_obj = d.get_item("elements")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Set pattern missing 'elements'")
+            })?;
+            let elems_list = elems_obj.downcast::<PyList>()?;
+            let mut elements = Vec::new();
+            for item in elems_list.iter() {
+                elements.push(deserialize_pattern(&item)?);
+            }
+            Ok(PatternNode::Set(elements))
+        }
+
         other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Unknown pattern type: {}",
             other
@@ -1163,6 +1218,11 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
                 let decs: Vec<Node> = node
                     .children(&mut cursor)
                     .filter(|n| n.kind() == "decorator")
+                    .map(|n| {
+                        // A 'decorator' node contains '@' and then the expression.
+                        // We want to match against the expression.
+                        n.named_child(0).unwrap_or(n)
+                    })
                     .collect();
                 let def = node.child_by_field_name("definition").unwrap_or(node);
                 (decs, def)
@@ -1208,6 +1268,11 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
                 let decs: Vec<Node> = node
                     .children(&mut cursor)
                     .filter(|n| n.kind() == "decorator")
+                    .map(|n| {
+                        // A 'decorator' node contains '@' and then the expression.
+                        // We want to match against the expression.
+                        n.named_child(0).unwrap_or(n)
+                    })
                     .collect();
                 let def = node.child_by_field_name("definition").unwrap_or(node);
                 (decs, def)
@@ -1543,36 +1608,46 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
             if matches_node(children[0], source, left).is_none() {
                 return None;
             }
-            // Remaining children come in pairs: (operator, comparator)
-            // unnamed children are operators, named children are comparators
-            let named_children: Vec<Node> = node.children(&mut node.walk())
-                .collect();
-            // Just check we have at least the right structure
-            // For simple cases (single comparison), this is straightforward
-            if ops.len() == 1 {
-                // Find the operator text and comparator
+
+            // In tree-sitter Python, all children are returned by node.children().
+            // We need to find the operators (unnamed) and comparators (named).
+            let mut current_child_idx = 1;
+            for (expected_op, expected_comp) in ops {
+                // Find next operator (usually unnamed)
                 let mut found_op = false;
-                for i in 0..named_children.len() {
-                    let child = named_children[i];
-                    let text = node_text(child, source);
-                    if text == ops[0].0 {
-                        found_op = true;
-                        // Next named child should be comparator
-                        for j in (i+1)..named_children.len() {
-                            if named_children[j].is_named() {
-                                if matches_node(named_children[j], source, &ops[0].1).is_some() {
-                                    return Some(node);
-                                } else {
-                                    return None;
-                                }
-                            }
+                while current_child_idx < children.len() {
+                    let child = children[current_child_idx];
+                    if !child.is_named() {
+                        if node_text(child, source) == expected_op.as_str() {
+                            found_op = true;
+                            current_child_idx += 1;
+                            break;
+                        }
+                    } else if child.kind() == "comparison_operator" {
+                         // Nested comparison? Should not happen in tree-sitter's flat comparison_operator
+                    }
+                    current_child_idx += 1;
+                }
+                if !found_op { return None; }
+
+                // Find next comparator (named)
+                let mut found_comp = false;
+                while current_child_idx < children.len() {
+                    let child = children[current_child_idx];
+                    if child.is_named() {
+                        if matches_node(child, source, expected_comp).is_some() {
+                            found_comp = true;
+                            current_child_idx += 1;
+                            break;
+                        } else {
+                            return None;
                         }
                     }
+                    current_child_idx += 1;
                 }
-                if found_op { return Some(node); }
+                if !found_comp { return None; }
             }
-            // Multi-comparison not yet supported in fast path
-            None
+            Some(node)
         }
 
         PatternNode::UnaryOp { op, operand } => {
@@ -1707,6 +1782,123 @@ fn matches_node<'a>(node: Node<'a>, source: &[u8], pattern: &PatternNode) -> Opt
             };
             if matched { Some(node) } else { None }
         }
+
+        PatternNode::Dict(elements) => {
+            if node.kind() != "dictionary" {
+                return None;
+            }
+            // Collect dictionary elements (pairs or splats)
+            let mut cursor = node.walk();
+            let actual_elements: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+
+            if match_dict_elements(elements, &actual_elements, source) {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::Set(elements) => {
+            if node.kind() != "set" {
+                return None;
+            }
+            let actual_elements: Vec<Node> = {
+                let mut cursor = node.walk();
+                node.children(&mut cursor)
+                    .filter(|n| n.is_named())
+                    .collect()
+            };
+            if match_sequence(elements, &actual_elements, source) {
+                Some(node)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Check if a list of dict element patterns matches a list of dictionary nodes.
+fn match_dict_elements(
+    patterns: &[DictElementPattern],
+    nodes: &[Node],
+    source: &[u8],
+) -> bool {
+    let has_ellipsis = patterns.iter().any(|p| matches!(p, DictElementPattern::Ellipsis));
+
+    if !has_ellipsis {
+        if nodes.len() != patterns.len() {
+            return false;
+        }
+        for (i, p) in patterns.iter().enumerate() {
+            if !match_dict_element(p, nodes[i], source) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Has ellipsis: unordered inclusion matching (all non-ellipsis patterns must match at least one element)
+    let non_ellipsis: Vec<&DictElementPattern> = patterns
+        .iter()
+        .filter(|p| !matches!(p, DictElementPattern::Ellipsis))
+        .collect();
+
+    if non_ellipsis.is_empty() {
+        return true;
+    }
+
+    // Keep track of which nodes are already matched to handle multiple patterns correctly
+    let mut matched_nodes = vec![false; nodes.len()];
+    
+    for pat in non_ellipsis {
+        let mut found = false;
+        for (i, node) in nodes.iter().enumerate() {
+            if !matched_nodes[i] && match_dict_element(pat, *node, source) {
+                matched_nodes[i] = true;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a single dict element pattern matches a dictionary element node.
+fn match_dict_element(pattern: &DictElementPattern, node: Node, source: &[u8]) -> bool {
+    match pattern {
+        DictElementPattern::Pair { key, value } => {
+            if node.kind() != "pair" {
+                return false;
+            }
+            let key_node = match node.child_by_field_name("key") {
+                Some(n) => n,
+                None => return false,
+            };
+            let value_node = match node.child_by_field_name("value") {
+                Some(n) => n,
+                None => return false,
+            };
+            matches_node(key_node, source, key).is_some() && matches_node(value_node, source, value).is_some()
+        }
+        DictElementPattern::Spread(value) => {
+            if node.kind() != "dictionary_splat" {
+                return false;
+            }
+            // dictionary_splat has one named child: the expression
+            let mut cursor = node.walk();
+            let inner = node.children(&mut cursor).find(|n| n.is_named());
+            if let Some(inner_node) = inner {
+                matches_node(inner_node, source, value).is_some()
+            } else {
+                false
+            }
+        }
+        DictElementPattern::Ellipsis => true,
     }
 }
 

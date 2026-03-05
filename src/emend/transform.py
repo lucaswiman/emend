@@ -3602,6 +3602,18 @@ class RustGuidedFinder(cst.CSTVisitor):
             matched_text = None
             if key in self.rust_matches:
                 matched_text = self.rust_matches[key]
+            elif isinstance(node, (cst.FunctionDef, cst.ClassDef)) and node.decorators:
+                # LibCST FunctionDef/ClassDef positions often exclude decorators,
+                # whereas Tree-sitter 'decorated_definition' nodes include them.
+                # Try finding a match that starts at the first decorator.
+                try:
+                    first_dec_pos = self.position_provider[node.decorators[0]]
+                    full_key = (first_dec_pos.start.line, first_dec_pos.start.column, pos.end.line, pos.end.column)
+                    if full_key in self.rust_matches:
+                        matched_text = self.rust_matches[full_key]
+                        key = full_key
+                except (KeyError, AttributeError):
+                    pass
             elif isinstance(node, cst.Tuple):
                 # LibCST Tuple nodes often exclude parentheses from their position,
                 # whereas Tree-sitter 'tuple' nodes include them.
