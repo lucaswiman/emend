@@ -91,4 +91,4 @@ The command surface was unified to reduce cognitive overhead:
 See [`TODOS.md`](TODOS.md) and [`ideas/FUTURE_WORK.md`](ideas/FUTURE_WORK.md). Short summary:
 
 - `$X:stmt` type constraint is parsed by the grammar but not fully implemented.
-- Cross-file name resolution uses the Rust `PyScopeResolver` with per-file scope trees; a project-wide scope graph would improve resolution of re-exports and dynamic imports.
+- `graph`, `callers`, and `refs` use per-file `QualifiedNameProvider`; switching to `FullRepoManager` + `FullyQualifiedNameProvider` would improve cross-file name resolution
