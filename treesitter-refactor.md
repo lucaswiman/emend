@@ -1442,22 +1442,26 @@ The `collect_import()` function (`scope.rs:1553`) and
 `"import_statement"`, `"import_from_statement"`, `"dotted_name"`,
 `"aliased_import"`, `"wildcard_import"`, and `"module_name"`.
 
-- [ ] **Use `ImportsSection` from config** instead of hardcoded strings:
+- [x] **Use `ImportsSection` from config** instead of hardcoded strings:
   - Replace `"import_statement"` with `config.imports.import_statement`
   - Replace `"import_from_statement"` with `config.imports.import_from`
   - Replace `"module_name"` field access with `config.imports.module_field`
   - Replace `"wildcard_import"` with `config.imports.star_import`
   - Replace `"alias"` field access with `config.imports.alias_field`
-- [ ] **Generalize `collect_import()` to use config fields** for
-  `dotted_name` / `aliased_import` child node types.  Add a
-  `child_node_types` field to `ImportsSection`:
+  - Added `#[serde(default)]` to `import_from`, `alias_field`, `star_import`
+    so non-Python configs can omit them without deserialization errors.
+- [x] **Generalize `collect_import()` to use config fields** for
+  `dotted_name` / `aliased_import` child node types.  Added three
+  `Option<String>` fields to `ImportsSection` (instead of a list):
   ```toml
   [imports]
-  # Node types that can appear as imported names
-  name_node_types = ["dotted_name", "identifier", "aliased_import"]
-  alias_node_type = "aliased_import"
+  dotted_name = "dotted_name"      # module path nodes
+  aliased_import = "aliased_import" # alias wrapper nodes
+  identifier = "identifier"         # plain name nodes
   ```
-- [ ] **Generalize `walk_references()` import handling** — same approach,
+  Changed `collect_import()` from a static function to an `&self` instance
+  method that reads all node types from `self.config.imports`.
+- [x] **Generalize `walk_references()` import handling** — same approach,
   replace hardcoded node type strings with config lookups.
 
 ##### 3b. Generalize `symbols.rs` node type checks
@@ -1529,7 +1533,7 @@ The `collect_import()` function (`scope.rs:1553`) and
   handles `import { X } from 'module'` correctly.
 - [ ] Rust unit tests: verify `collect_symbols_impl()` with TypeScript
   config finds functions and classes.
-- [ ] Python integration: `make test` still passes (Python config
+- [x] Python integration: `make test` still passes (Python config
   produces identical behavior).
 
 ---
@@ -1542,9 +1546,11 @@ for other languages) so they work end-to-end.
 ##### 4a. TypeScript
 
 - [ ] **Complete `languages/typescript/config.toml`** — verify all
-  sections match actual `tree-sitter-typescript` node types.  Currently
-  missing: `[imports.alias_field]`, `[imports.star_import]`,
-  `[symbols]`, `[pattern_matching]` sections.
+  sections match actual `tree-sitter-typescript` node types.  Fixed:
+  `import_from`, `alias_field`, `star_import` now have `#[serde(default)]`
+  so they can be omitted; `locals_marker` added to `[qualified_names]`.
+  Still missing: `[symbols]`, `[pattern_matching]` sections, and correct
+  TS-specific import node types (`named_imports`, `import_clause`, etc.).
 - [ ] **Create `languages/typescript/symbols.scm`** — tree-sitter query
   for extracting function declarations, class declarations, variable
   declarations, method definitions, arrow functions.
