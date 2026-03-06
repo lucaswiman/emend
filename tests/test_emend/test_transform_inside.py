@@ -1,7 +1,6 @@
 """Tests for --inside/--not-inside structural constraints (Phase 2c)."""
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern
 
@@ -23,7 +22,7 @@ def test_find_inside_def_keyword(tmp_path):
     # Should only match prints inside functions, not module level
     assert len(matches) == 2
     # Verify captured strings are the ones inside functions
-    captured_values = {cst.Module([]).code_for_node(match.captures["X"]) for match in matches}
+    captured_values = {match.captures["X"] for match in matches}
     assert captured_values == {"'inside func'", "'inside method'"}
 
 
@@ -43,7 +42,7 @@ def test_find_inside_class_keyword(tmp_path):
     # Should match y=2 and z=3 (inside class), not x=1 or w=4
     assert len(matches) == 2
     # Verify the matched variable names are y and z
-    captured_names = {cst.Module([]).code_for_node(match.captures["NAME"]) for match in matches}
+    captured_names = {match.captures["NAME"] for match in matches}
     assert captured_names == {"y", "z"}
 
 
@@ -61,7 +60,7 @@ def test_find_not_inside_if(tmp_path):
     # Should only match prints outside if blocks
     assert len(matches) == 2
     for match in matches:
-        node_code = cst.Module([]).code_for_node(match.captures["X"])
+        node_code = match.captures["X"]
         assert node_code in ["'before'", "'after'"]
 
 
@@ -79,7 +78,7 @@ def test_find_inside_for_keyword(tmp_path):
     matches = find_pattern("$NAME = $VALUE", str(test_file), inside="for")
     # Should only match y=2 inside the for loop
     assert len(matches) == 1
-    node_code = cst.Module([]).code_for_node(matches[0].captures["NAME"])
+    node_code = matches[0].captures["NAME"]
     assert node_code == "y"
 
 
@@ -97,7 +96,7 @@ def test_find_inside_async_def_keyword(tmp_path):
     matches = find_pattern("$NAME = $VALUE", str(test_file), inside="async def")
     # Should only match inside async functions
     assert len(matches) == 1
-    node_code = cst.Module([]).code_for_node(matches[0].captures["NAME"])
+    node_code = matches[0].captures["NAME"]
     assert node_code == "result"
 
 
@@ -147,7 +146,7 @@ def test_find_inside_with_keyword(tmp_path):
 
     matches = find_pattern("$NAME = $VALUE", str(test_file), inside="with")
     assert len(matches) == 1
-    node_code = cst.Module([]).code_for_node(matches[0].captures["NAME"])
+    node_code = matches[0].captures["NAME"]
     assert node_code == "y"
 
 
@@ -196,7 +195,7 @@ def test_find_inside_nested_structures(tmp_path):
     # Should find print inside for loop (which is also inside method and class)
     matches = find_pattern("print($X)", str(test_file), inside="for")
     assert len(matches) == 1
-    node_code = cst.Module([]).code_for_node(matches[0].captures["X"])
+    node_code = matches[0].captures["X"]
     assert node_code == "i"
 
 

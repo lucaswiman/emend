@@ -1,14 +1,13 @@
 """Tests for ellipsis support in collection patterns (Phase 2b)."""
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern
 
 
 def _node_to_code(node):
     """Helper to convert CST node to code string."""
-    return cst.Module([]).code_for_node(node)
+    return node
 
 
 def test_find_list_ellipsis_only(tmp_path):

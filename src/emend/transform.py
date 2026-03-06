@@ -9,7 +9,6 @@ import ast
 import difflib
 import hashlib
 import logging
-import threading
 from dataclasses import dataclass
 import re
 import sys
@@ -27,9 +26,12 @@ from .pattern import (
 )
 
 if TYPE_CHECKING:
+    import sqlite3
     from .type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA_VERSION = "4"
 
 
 # ---------------------------------------------------------------------------
@@ -205,24 +207,17 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Module parse cache: avoids re-parsing the same source text
+# Disk cache connection (lazy singleton)
 # ---------------------------------------------------------------------------
-# Two-tier cache:
-#   1. In-memory dict (fast, lost on exit)
-#   2. On-disk SQLite DB at .emend/cache/parse.db (persists across runs)
-# Key: md5 of source text.  Value: compressed-pickled LibCST Module.
-_parse_cache: dict[bytes, cst.Module] = {}
-_parse_cache_lock = threading.Lock()
-_PARSE_CACHE_MAX = 256
+import threading as _threading
 
-# Disk cache (SQLite) — lazily initialized on first use.
 _disk_cache_conn: sqlite3.Connection | None = None
-_disk_cache_lock = threading.Lock()
+_disk_cache_lock = _threading.Lock()
 _disk_cache_checked = False
 
 
 def _get_disk_cache() -> sqlite3.Connection | None:
-    """Return a thread-safe SQLite connection for the parse cache, or None."""
+    """Return a thread-safe SQLite connection for the cache DB, or None."""
     global _disk_cache_conn, _disk_cache_checked
     if _disk_cache_checked:
         return _disk_cache_conn
@@ -235,83 +230,16 @@ def _get_disk_cache() -> sqlite3.Connection | None:
             root = _find_project_root(".")
             cache_dir = _cache_db_dir(root)
             cache_dir.mkdir(parents=True, exist_ok=True)
-            # Ensure ignore files exist so cache DB is never checked in
             _ensure_cache_ignore_files(root)
             db_path = cache_dir / "parse.db"
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
             _init_cache_schema(conn)
             _disk_cache_conn = conn
-            logger.debug("disk parse cache opened at %s", db_path)
+            logger.debug("disk cache opened at %s", db_path)
         except Exception as exc:
-            logger.debug("disk parse cache unavailable: %s", exc)
+            logger.debug("disk cache unavailable: %s", exc)
             _disk_cache_conn = None
     return _disk_cache_conn
-
-
-def _disk_cache_get(key: bytes) -> cst.Module | None:
-    """Look up a parsed module in the disk cache."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return None
-    try:
-        import pickle
-        import zlib
-        row = conn.execute(
-            "SELECT data FROM parse_cache WHERE hash = ?", (key,)
-        ).fetchone()
-        if row is not None:
-            return pickle.loads(zlib.decompress(row[0]))
-    except Exception:
-        pass
-    return None
-
-
-def _disk_cache_put(key: bytes, module: cst.Module) -> None:
-    """Store a parsed module in the disk cache (best-effort)."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return
-    try:
-        import pickle
-        import zlib
-        data = zlib.compress(
-            pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
-        )
-        with _disk_cache_lock:
-            conn.execute(
-                "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", (key, data)
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def _cached_parse(source: str) -> cst.Module:
-    """Parse Python source into a LibCST Module, with two-tier caching.
-
-    Checks in-memory cache first, then disk cache, then parses.
-    Thread-safe for use with ThreadPoolExecutor.
-    """
-    key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
-    # Tier 1: in-memory
-    with _parse_cache_lock:
-        cached = _parse_cache.get(key)
-    if cached is not None:
-        return cached
-    # Tier 2: disk
-    module = _disk_cache_get(key)
-    if module is None:
-        # Parse from scratch and write to disk cache
-        module = cst.parse_module(source)
-        _disk_cache_put(key, module)
-    # Store in memory cache
-    with _parse_cache_lock:
-        if len(_parse_cache) >= _PARSE_CACHE_MAX:
-            keys_to_evict = list(_parse_cache.keys())[:_PARSE_CACHE_MAX // 4]
-            for k in keys_to_evict:
-                del _parse_cache[k]
-        _parse_cache[key] = module
-    return module
 
 
 # ---------------------------------------------------------------------------
@@ -498,18 +426,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         if not need_parse and not need_qn:
             skipped += 1
             continue
-
-        # LibCST parse is needed for the parse_cache until refactoring
-        # commands are fully migrated to tree-sitter.
-        if need_parse:
-            try:
-                module = cst.parse_module(content)
-                parse_blob = zlib.compress(
-                    pickle.dumps(module, protocol=pickle.HIGHEST_PROTOCOL), level=1
-                )
-                parse_rows.append((content_hash, parse_blob))
-            except Exception:
-                pass
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
@@ -2008,16 +1924,79 @@ def visit_project_ts(
     logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
 
 
-def _get_imports(module: cst.Module) -> str:
+def _get_imports(source_code: str) -> str:
     """Extract all top-level import statements as a single string."""
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return ""
+    lines = source_code.splitlines(keepends=True)
     imports = []
-    for stmt in module.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for part in stmt.body:
-                if isinstance(part, (cst.Import, cst.ImportFrom)):
-                    imports.append(module.code_for_node(stmt))
-                    break
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            start = stmt.lineno - 1
+            end = stmt.end_lineno
+            imports.append("".join(lines[start:end]))
     return "".join(imports)
+
+
+def _add_import_text(
+    import_str: str,
+    position: int,
+    file_path: Path,
+    apply: bool,
+    source_code: str
+) -> str:
+    """Add an import statement to a file using text manipulation.
+
+    Args:
+        import_str: Import statement to add (e.g., "import os")
+        position: 0 for prepend, -1 for append
+        file_path: Path to the file
+        apply: Whether to apply changes
+        source_code: Original source code
+
+    Returns:
+        Unified diff showing changes
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        raise ValueError(f"Cannot parse {file_path}")
+
+    lines = source_code.splitlines(keepends=True)
+    import_line = import_str.rstrip('\n') + '\n'
+
+    # Find import line ranges
+    first_import_line = None
+    last_import_line = None
+    last_future_line = None
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            if first_import_line is None:
+                first_import_line = stmt.lineno
+            last_import_line = stmt.end_lineno
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == '__future__':
+                last_future_line = stmt.end_lineno
+
+    if position == 0:
+        # Prepend: insert after __future__ imports
+        insert_at = (last_future_line or 0)
+        lines.insert(insert_at, import_line)
+    else:
+        # Append: insert after the last import
+        if last_import_line is not None:
+            lines.insert(last_import_line, import_line)
+        else:
+            lines.insert(0, import_line)
+
+    new_code = "".join(lines)
+    diff = _generate_diff(str(file_path), source_code, new_code)
+
+    if apply:
+        file_path.write_text(new_code)
+
+    return diff
 
 
 def get_component(selector: ExtendedSelector) -> str:
@@ -2049,10 +2028,7 @@ def get_component(selector: ExtendedSelector) -> str:
     # Handle module-level components (empty symbol_path)
     if not selector.symbol_path:
         if selector.component == "imports":
-            # For now, keep LibCST for module-level imports if it's easier,
-            # but we can also use tree-sitter.
-            module = cst.parse_module(source_code)
-            return _get_imports(module)
+            return _get_imports(source_code)
         else:
             raise ValueError(f"Component '{selector.component}' requires a symbol path")
 
@@ -2175,314 +2151,6 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     return diff
 
 
-class ComponentAdder(cst.CSTTransformer):
-    """Transformer to add items to list components."""
-
-    def __init__(self, target_path: list[str], component: str, new_value: str, position: int, before: str | None = None, after: str | None = None, kind: str | None = None):
-        self.target_path = target_path
-        self.component = component
-        self.new_value = new_value
-        self.position = position
-        self.before = before
-        self.after = after
-        self.kind = kind
-        self.current_path: list[str] = []
-        self.modified = False
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-        """Leave class definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-        """Leave function definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def _modify_node(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify node based on component."""
-        self.modified = True
-
-        if self.component == "params":
-            return self._add_param(node)
-        elif self.component == "decorators":
-            return self._add_decorator(node)
-        elif self.component == "bases":
-            return self._add_base(node)
-
-        return node
-
-    def _find_param_index(self, node: cst.FunctionDef, name: str) -> int | None:
-        """Find index of parameter by name. Returns None if not found."""
-        # Check posonly params first
-        posonly_count = 0
-        if hasattr(node.params, 'posonly_params'):
-            for i, param in enumerate(node.params.posonly_params):
-                if param.name.value == name:
-                    return i
-            posonly_count = len(node.params.posonly_params)
-            if posonly_count > 0:
-                posonly_count += 1  # Account for / separator
-
-        for i, param in enumerate(node.params.params):
-            if param.name.value == name:
-                return posonly_count + i
-        # Also check kwonly params
-        kwonly_offset = posonly_count + len(node.params.params)
-        if isinstance(node.params.star_arg, (cst.Param, cst.ParamStar)):
-            kwonly_offset += 1  # Account for * or *args
-        for i, param in enumerate(node.params.kwonly_params):
-            if param.name.value == name:
-                return kwonly_offset + i
-        return None
-
-    def _find_decorator_index(self, node: cst.FunctionDef | cst.ClassDef, name: str) -> int | None:
-        """Find index of decorator by name. Returns None if not found."""
-        for i, decorator in enumerate(node.decorators):
-            # Extract decorator name (handle both @name and @name(...))
-            if isinstance(decorator.decorator, cst.Name):
-                dec_name = decorator.decorator.value
-            elif isinstance(decorator.decorator, cst.Call):
-                if isinstance(decorator.decorator.func, cst.Name):
-                    dec_name = decorator.decorator.func.value
-                elif isinstance(decorator.decorator.func, cst.Attribute):
-                    dec_name = decorator.decorator.func.attr.value
-                else:
-                    continue
-            elif isinstance(decorator.decorator, cst.Attribute):
-                dec_name = decorator.decorator.attr.value
-            else:
-                continue
-
-            if dec_name == name:
-                return i
-        return None
-
-    def _find_base_index(self, node: cst.ClassDef, name: str) -> int | None:
-        """Find index of base class by name. Returns None if not found."""
-        for i, arg in enumerate(node.bases):
-            # Extract base name (handle both Name and Attribute)
-            if isinstance(arg.value, cst.Name):
-                base_name = arg.value.value
-            elif isinstance(arg.value, cst.Attribute):
-                base_name = arg.value.attr.value
-            elif isinstance(arg.value, cst.Subscript):
-                # Handle Generic[T] style
-                if isinstance(arg.value.value, cst.Name):
-                    base_name = arg.value.value.value
-                else:
-                    continue
-            else:
-                continue
-
-            if base_name == name:
-                return i
-        return None
-
-    def _add_param(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Add parameter to function at specified position.
-
-        Handles insertion into both regular params and keyword-only params,
-        and auto-inserts a * separator when adding keyword-only params to a
-        function that doesn't have one.
-
-        The position parameter is a "logical" index counting all params including
-        separators:
-        - For `def f(a, *, b, c)`, the logical positions are:
-          - 0: a (regular)
-          - 1: * (separator)
-          - 2: b (kwonly)
-          - 3: c (kwonly)
-        """
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'params' not valid for {type(node).__name__}")
-
-        # Parse new param
-        new_param = _parse_param(self.new_value)
-
-        # Calculate counts for each section
-        regular_count = len(node.params.params)
-        # Check if there's actually a star (not MaybeSentinel.DEFAULT)
-        has_star = isinstance(node.params.star_arg, (cst.Param, cst.ParamStar))
-        star_is_args = has_star and isinstance(node.params.star_arg, cst.Param)
-        kwonly_count = len(node.params.kwonly_params)
-        has_kwargs = node.params.star_kwarg is not None
-
-        # Calculate logical boundaries:
-        # Position in logical list = [regular params] [* or *args] [kwonly params] [**kwargs]
-        # star_logical_idx: index of * in logical list (or None if no star)
-        # kwonly_start_logical: first kwonly index in logical list
-        star_logical_idx = regular_count if has_star else None
-        kwonly_start_logical = regular_count + (1 if has_star else 0)
-        kwargs_logical_idx = kwonly_start_logical + kwonly_count if has_kwargs else None
-
-        # Normalize position
-        if self.before is not None:
-            # Insert before named parameter
-            idx = self._find_param_index(node, self.before)
-            if idx is None:
-                raise ValueError(f"Parameter '{self.before}' not found")
-            insert_pos = idx
-        elif self.after is not None:
-            # Insert after named parameter
-            idx = self._find_param_index(node, self.after)
-            if idx is None:
-                raise ValueError(f"Parameter '{self.after}' not found")
-            insert_pos = idx + 1
-        elif self.position == -1:
-            # Append: add to kwonly if has_star, else to regular
-            if has_star:
-                # Append to end of kwonly (before **kwargs if present)
-                insert_pos = kwonly_start_logical + kwonly_count
-            else:
-                insert_pos = regular_count
-
-            # Override with kind if specified
-            if self.kind:
-                if self.kind == "KEYWORD_ONLY":
-                    # Add to keyword-only section
-                    if has_star:
-                        # Append to end of kwonly
-                        insert_pos = kwonly_start_logical + kwonly_count
-                    else:
-                        # Need to add * separator, insert param after it
-                        insert_pos = regular_count + 1
-                elif self.kind in ("POSITIONAL_OR_KEYWORD", "POSITIONAL_ONLY"):
-                    # Add to regular params section
-                    insert_pos = regular_count
-                else:
-                    raise ValueError(f"Invalid kind value: {self.kind}. Must be one of: POSITIONAL_ONLY, POSITIONAL_OR_KEYWORD, KEYWORD_ONLY")
-        else:
-            insert_pos = self.position
-
-        # Start with copies of existing params
-        new_params = list(node.params.params)
-        new_star_arg = node.params.star_arg
-        new_kwonly = list(node.params.kwonly_params)
-        new_star_kwarg = node.params.star_kwarg
-
-        # Determine which section to modify based on logical position
-        if insert_pos <= regular_count:
-            # Insert into regular params
-            new_params.insert(insert_pos, new_param)
-        elif has_star and insert_pos > star_logical_idx:
-            # Insert into kwonly params (position is after *)
-            # Convert logical position to kwonly index
-            kwonly_idx = insert_pos - kwonly_start_logical
-            if kwonly_idx < 0:
-                kwonly_idx = 0
-            if kwonly_idx > len(new_kwonly):
-                kwonly_idx = len(new_kwonly)
-            new_kwonly.insert(kwonly_idx, new_param)
-        elif not has_star and insert_pos > regular_count:
-            # No star yet but position is beyond regular params
-            # This means user wants keyword-only - auto-insert *
-            new_star_arg = cst.ParamStar()
-            kwonly_idx = insert_pos - regular_count - 1  # -1 for the * we're inserting
-            if kwonly_idx < 0:
-                kwonly_idx = 0
-            new_kwonly.insert(kwonly_idx, new_param)
-        else:
-            # Fallback: append to kwonly if star exists, else to regular
-            if has_star:
-                new_kwonly.append(new_param)
-            else:
-                new_params.append(new_param)
-
-        params_kwargs = dict(
-            params=new_params,
-            star_arg=new_star_arg,
-            kwonly_params=new_kwonly,
-            star_kwarg=new_star_kwarg,
-        )
-        if hasattr(node.params, 'posonly_params'):
-            params_kwargs['posonly_params'] = list(node.params.posonly_params)
-        return node.with_changes(params=cst.Parameters(**params_kwargs))
-
-    def _add_decorator(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Add decorator to function or class."""
-        # Parse new decorator
-        new_decorator = _parse_decorator(self.new_value)
-
-        # Get current decorators
-        decorators = list(node.decorators)
-
-        # Calculate insertion position
-        if self.before is not None:
-            # Insert before named decorator
-            idx = self._find_decorator_index(node, self.before)
-            if idx is None:
-                raise ValueError(f"Decorator '{self.before}' not found")
-            insert_pos = idx
-        elif self.after is not None:
-            # Insert after named decorator
-            idx = self._find_decorator_index(node, self.after)
-            if idx is None:
-                raise ValueError(f"Decorator '{self.after}' not found")
-            insert_pos = idx + 1
-        elif self.position == -1:
-            insert_pos = len(decorators)
-        else:
-            insert_pos = self.position
-
-        # Insert at position
-        decorators.insert(insert_pos, new_decorator)
-
-        return node.with_changes(decorators=decorators)
-
-    def _add_base(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Add base class to class."""
-        if not isinstance(node, cst.ClassDef):
-            raise ValueError(f"Component 'bases' not valid for {type(node).__name__}")
-
-        # Parse new base
-        new_base = _parse_base(self.new_value)
-
-        # Get current bases
-        bases = list(node.bases)
-
-        # Calculate insertion position
-        if self.before is not None:
-            # Insert before named base
-            idx = self._find_base_index(node, self.before)
-            if idx is None:
-                raise ValueError(f"Base class '{self.before}' not found")
-            insert_pos = idx
-        elif self.after is not None:
-            # Insert after named base
-            idx = self._find_base_index(node, self.after)
-            if idx is None:
-                raise ValueError(f"Base class '{self.after}' not found")
-            insert_pos = idx + 1
-        elif self.position == -1:
-            insert_pos = len(bases)
-        else:
-            insert_pos = self.position
-
-        # Insert at position
-        bases.insert(insert_pos, new_base)
-
-        return node.with_changes(bases=bases)
-
-
 def add_to_component(
     selector: ExtendedSelector,
     value: str,
@@ -2521,8 +2189,7 @@ def add_to_component(
 
     # Handle module-level imports component
     if selector.component == "imports" and not selector.symbol_path:
-        module = cst.parse_module(source_code)
-        return _add_import(module, value, position, file_path, apply, source_code)
+        return _add_import_text(value, position, file_path, apply, source_code)
 
     # Get items and their ranges
     items_info = _rust.get_symbol_component_list_items(
@@ -2695,19 +2362,10 @@ def add_to_component(
 
     new_code = transform.apply()
     if new_code is None:
-        # Fallback to LibCST if our simple byte-range logic fails or is too complex
-        module = cst.parse_module(source_code)
-        transformer = ComponentAdder(
-            selector.symbol_path,
-            selector.component,
-            value,
-            position,
-            before,
-            after,
-            kind
+        raise ValueError(
+            f"Failed to add to component '{selector.component}' in "
+            f"{'.'.join(selector.symbol_path)}: overlapping byte ranges"
         )
-        new_module = module.visit(transformer)
-        new_code = new_module.code
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -2717,226 +2375,6 @@ def add_to_component(
         file_path.write_text(new_code)
 
     return diff
-
-
-class ComponentRemover(cst.CSTTransformer):
-    """Transformer to remove items from components."""
-
-    def __init__(self, target_path: list[str], component: str, accessor: str | int | None):
-        self.target_path = target_path
-        self.component = component
-        self.accessor = accessor
-        self.current_path: list[str] = []
-        self.modified = False
-
-    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
-        """Visit class definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-        """Leave class definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-        """Visit function definition."""
-        self.current_path.append(node.name.value)
-        return True
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-        """Leave function definition, possibly modifying it."""
-        if self.current_path == self.target_path:
-            updated_node = self._modify_node(updated_node)
-
-        if self.current_path:
-            self.current_path.pop()
-        return updated_node
-
-    def _modify_node(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Modify node based on component."""
-        self.modified = True
-
-        if self.component == "params":
-            return self._remove_params(node)
-        elif self.component == "returns":
-            return self._remove_returns(node)
-        elif self.component == "decorators":
-            return self._remove_decorators(node)
-        elif self.component == "bases":
-            return self._remove_bases(node)
-
-        return node
-
-    def _remove_params(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Remove parameter(s) from function."""
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'params' not valid for {type(node).__name__}")
-
-        if self.accessor is None:
-            # Remove all params
-            return node.with_changes(params=cst.Parameters())
-
-        # Get all current params
-        all_params = _get_all_params(node.params)
-
-        # Find the param to remove
-        if isinstance(self.accessor, int):
-            if self.accessor < 0:
-                # Support negative indexing
-                target_idx = len(all_params) + self.accessor
-            else:
-                target_idx = self.accessor
-            if target_idx < 0 or target_idx >= len(all_params):
-                raise ValueError(f"Parameter index {self.accessor} out of range")
-        else:
-            # Find by name
-            param = _find_param_by_name(all_params, self.accessor)
-            if param is None:
-                raise ValueError(f"Parameter '{self.accessor}' not found")
-            target_idx = all_params.index(param)
-
-        # Rebuild params without the target
-        new_posonly_list = None
-        new_params_list = []
-        new_kwonly_list = []
-        new_star_arg = node.params.star_arg
-        new_star_kwarg = node.params.star_kwarg
-
-        # Determine which list the target is in
-        posonly_count = len(node.params.posonly_params) if hasattr(node.params, 'posonly_params') else 0
-        regular_count = len(node.params.params)
-        star_arg_count = 1 if node.params.star_arg and isinstance(node.params.star_arg, cst.Param) else 0
-        kwonly_count = len(node.params.kwonly_params)
-
-        if target_idx < posonly_count:
-            # Target is in posonly_params
-            new_posonly_list = [p for i, p in enumerate(node.params.posonly_params) if i != target_idx]
-            if new_posonly_list:
-                new_posonly_list[-1] = new_posonly_list[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-            new_params_list = list(node.params.params)
-        elif target_idx < posonly_count + regular_count:
-            # Target is in regular params - remove trailing comma from last param
-            regular_idx = target_idx - posonly_count
-            new_params_list = [p for i, p in enumerate(node.params.params) if i != regular_idx]
-            # Remove trailing comma from the last param if it exists
-            if new_params_list:
-                new_params_list[-1] = new_params_list[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-        elif target_idx < posonly_count + regular_count + star_arg_count:
-            # Target is star_arg
-            new_star_arg = cst.MaybeSentinel.DEFAULT
-            new_params_list = list(node.params.params)
-        elif target_idx < posonly_count + regular_count + star_arg_count + kwonly_count:
-            # Target is in kwonly_params
-            kwonly_idx = target_idx - posonly_count - regular_count - star_arg_count
-            new_kwonly_list = [p for i, p in enumerate(node.params.kwonly_params) if i != kwonly_idx]
-            new_params_list = list(node.params.params)
-            # Remove trailing comma from the last kwonly param if it exists
-            if new_kwonly_list:
-                new_kwonly_list[-1] = new_kwonly_list[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-        else:
-            # Target is star_kwarg
-            new_star_kwarg = None
-            new_params_list = list(node.params.params)
-            new_kwonly_list = list(node.params.kwonly_params)
-
-        posonly = new_posonly_list if new_posonly_list is not None else (list(node.params.posonly_params) if hasattr(node.params, 'posonly_params') else [])
-        params_kwargs = dict(
-            params=new_params_list,
-            star_arg=new_star_arg,
-            kwonly_params=new_kwonly_list,
-            star_kwarg=new_star_kwarg,
-        )
-        if hasattr(cst.Parameters, 'posonly_params'):
-            params_kwargs['posonly_params'] = posonly
-        return node.with_changes(params=cst.Parameters(**params_kwargs))
-
-    def _remove_returns(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Remove return annotation from function."""
-        if not isinstance(node, cst.FunctionDef):
-            raise ValueError(f"Component 'returns' not valid for {type(node).__name__}")
-
-        # Remove return annotation
-        return node.with_changes(returns=None)
-
-    def _remove_decorators(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Remove decorator(s) from function or class."""
-        if self.accessor is None:
-            # Remove all decorators
-            return node.with_changes(decorators=[])
-
-        # Get current decorators
-        decorators = list(node.decorators)
-
-        # Find the decorator to remove
-        if isinstance(self.accessor, int):
-            if self.accessor < 0:
-                # Support negative indexing
-                target_idx = len(decorators) + self.accessor
-            else:
-                target_idx = self.accessor
-            if target_idx < 0 or target_idx >= len(decorators):
-                raise ValueError(f"Decorator index {self.accessor} out of range")
-        else:
-            # Find by name
-            decorator = _find_decorator_by_name(decorators, self.accessor)
-            if decorator is None:
-                raise ValueError(f"Decorator '{self.accessor}' not found")
-            target_idx = decorators.index(decorator)
-
-        # Remove decorator at target index
-        new_decorators = decorators[:target_idx] + decorators[target_idx + 1:]
-        return node.with_changes(decorators=new_decorators)
-
-    def _remove_bases(self, node: cst.FunctionDef | cst.ClassDef) -> cst.FunctionDef | cst.ClassDef:
-        """Remove base class(es) from class."""
-        if not isinstance(node, cst.ClassDef):
-            raise ValueError(f"Component 'bases' not valid for {type(node).__name__}")
-
-        if self.accessor is None:
-            # Remove all bases - also need to remove the parentheses
-            # by setting lpar and rpar to default (which removes them when there are no bases)
-            return node.with_changes(
-                bases=[],
-                lpar=cst.MaybeSentinel.DEFAULT,
-                rpar=cst.MaybeSentinel.DEFAULT
-            )
-
-        # Get current bases
-        bases = list(node.bases)
-
-        # Find the base to remove
-        if isinstance(self.accessor, int):
-            if self.accessor < 0:
-                # Support negative indexing
-                target_idx = len(bases) + self.accessor
-            else:
-                target_idx = self.accessor
-            if target_idx < 0 or target_idx >= len(bases):
-                raise ValueError(f"Base class index {self.accessor} out of range")
-        else:
-            # Find by name
-            base = _find_base_by_name(bases, self.accessor)
-            if base is None:
-                raise ValueError(f"Base class '{self.accessor}' not found")
-            target_idx = bases.index(base)
-
-        # Remove base at target index
-        new_bases = bases[:target_idx] + bases[target_idx + 1:]
-
-        # If removing all bases, also remove the parentheses
-        if not new_bases:
-            return node.with_changes(
-                bases=[],
-                lpar=cst.MaybeSentinel.DEFAULT,
-                rpar=cst.MaybeSentinel.DEFAULT
-            )
-
-        return node.with_changes(bases=new_bases)
 
 
 def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
@@ -3059,15 +2497,10 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
 
     new_code = transform.apply()
     if new_code is None:
-        # Fallback to LibCST
-        module = cst.parse_module(source_code)
-        transformer = ComponentRemover(
-            selector.symbol_path,
-            selector.component,
-            selector.accessor
+        raise ValueError(
+            f"Failed to remove component '{selector.component}' from "
+            f"{'.'.join(selector.symbol_path)}: overlapping byte ranges"
         )
-        new_module = module.visit(transformer)
-        new_code = new_module.code
 
     # Generate diff
     diff = _generate_diff(selector.file_path, source_code, new_code)
@@ -3079,81 +2512,23 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     return diff
 
 
-def _slice_ellipsis_sequence(sequence: tuple, position: int, total_pattern_items: int) -> tuple:
-    """Helper to slice a sequence (args/elements) for ellipsis capture.
-
-    Args:
-        sequence: The tuple of items to slice (e.g., node.args or node.elements)
-        position: Position of ellipsis in pattern
-        total_pattern_items: Total number of items in the pattern
-
-    Returns:
-        Tuple of items captured by the ellipsis
-    """
-    # If ellipsis is the only item, capture all
-    if total_pattern_items == 1:
-        return sequence
-    # If ellipsis is at the end, capture from position onwards
-    elif position == total_pattern_items - 1:
-        return sequence[position:]
-    # If ellipsis is at the start, calculate how many to capture
-    elif position == 0:
-        num_fixed_after = total_pattern_items - 1
-        return sequence[:-num_fixed_after] if num_fixed_after > 0 else sequence
-    # If ellipsis is in the middle
-    else:
-        num_fixed_after = total_pattern_items - position - 1
-        return sequence[position:-num_fixed_after] if num_fixed_after > 0 else sequence[position:]
-
-
-def _extract_ellipsis_and_partial_captures(
-    node: cst.CSTNode,
-    ellipsis_info: dict,
-    captures: dict,
-) -> None:
-    """Extract captures for ellipsis metavars and partial dict patterns.
-
-    Mutates `captures` in place.
-    """
-    for name, info in ellipsis_info.items():
-        if name == "__partial_dict__":
-            continue
-        if isinstance(node, cst.Call) and "total_args" in info:
-            position = info["position"]
-            total_pattern_args = info["total_args"]
-            captures[name] = _slice_ellipsis_sequence(tuple(node.args), position, total_pattern_args)
-        elif isinstance(node, (cst.List, cst.Tuple, cst.Set)) and "total_elements" in info:
-            position = info["position"]
-            total_pattern_elements = info["total_elements"]
-            captures[name] = _slice_ellipsis_sequence(tuple(node.elements), position, total_pattern_elements)
-        elif isinstance(node, cst.Dict) and "total_elements" in info:
-            position = info["position"]
-            total_pattern_elements = info["total_elements"]
-            captures[name] = _slice_ellipsis_sequence(tuple(node.elements), position, total_pattern_elements)
-
-    # Handle partial dict captures (extract from individual elements)
-    if "__partial_dict__" in ellipsis_info and isinstance(node, cst.Dict):
-        partial_info = ellipsis_info["__partial_dict__"]
-        for elem_matcher in partial_info["element_matchers"]:
-            for elem in node.elements:
-                extracted = m.extract(elem, elem_matcher)
-                if extracted is not None:
-                    captures.update(extracted)
-                    break
-
-
 _CONTENT_REF_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\.content\}")
 
 
-def _extract_string_content(node: cst.CSTNode) -> str | None:
-    """Extract the inner content of a string literal, stripping quotes.
+def _extract_string_content_from_text(text: str) -> str | None:
+    """Extract the inner content of a string literal from source text.
 
-    For a SimpleString like ``"MyClass"`` returns ``MyClass``.
-    Returns None for non-string nodes or string types that cannot be
+    For a string like ``"MyClass"`` or ``'MyClass'`` returns ``MyClass``.
+    Returns None for non-string text or complex strings that cannot be
     trivially unwrapped (f-strings, concatenated strings).
     """
-    if isinstance(node, cst.SimpleString):
-        return str(ast.literal_eval(node.value))
+    text = text.strip()
+    try:
+        result = ast.literal_eval(text)
+        if isinstance(result, str):
+            return result
+    except (ValueError, SyntaxError):
+        pass
     return None
 
 
@@ -3168,117 +2543,6 @@ class PatternMatch:
     col: int | None = None
     end_col: int | None = None
 
-
-def _extract_all_captures(node: cst.CSTNode, matcher: m.BaseMatcherNode, metavar_names: set[str]) -> dict[str, list[cst.CSTNode]]:
-    """Extract all occurrences of each metavariable from a matched node.
-
-    LibCST's m.extract() only returns one value per metavar name, overwriting
-    if the same name appears multiple times. This function collects ALL
-    occurrences by walking both the pattern and matched node in parallel.
-
-    Args:
-        node: The matched CST node
-        matcher: The matcher pattern
-        metavar_names: Set of metavar names to collect
-
-    Returns:
-        Dictionary mapping metavar name to list of all captured nodes
-    """
-    captures = {name: [] for name in metavar_names}
-
-    def walk_parallel(node, matcher):
-        """Recursively walk node and matcher in parallel, collecting captures."""
-        # If matcher is SaveMatchedNode (check by __class__.__name__ since it's internal)
-        if hasattr(matcher, 'name') and hasattr(matcher, 'matcher') and matcher.__class__.__name__ == '_ExtractMatchingNode':
-            name = matcher.name
-            if name in captures:
-                captures[name].append(node)
-            # Continue with inner matcher
-            walk_parallel(node, matcher.matcher)
-            return
-
-        # For compound matchers, recurse on corresponding parts
-        if isinstance(matcher, m.ListComp) and isinstance(node, cst.ListComp):
-            walk_parallel(node.elt, matcher.elt)
-            walk_parallel(node.for_in, matcher.for_in)
-        elif isinstance(matcher, m.SetComp) and isinstance(node, cst.SetComp):
-            walk_parallel(node.elt, matcher.elt)
-            walk_parallel(node.for_in, matcher.for_in)
-        elif isinstance(matcher, m.DictComp) and isinstance(node, cst.DictComp):
-            walk_parallel(node.key, matcher.key)
-            walk_parallel(node.value, matcher.value)
-            walk_parallel(node.for_in, matcher.for_in)
-        elif isinstance(matcher, m.GeneratorExp) and isinstance(node, cst.GeneratorExp):
-            walk_parallel(node.elt, matcher.elt)
-            walk_parallel(node.for_in, matcher.for_in)
-        elif isinstance(matcher, m.CompFor) and isinstance(node, cst.CompFor):
-            walk_parallel(node.target, matcher.target)
-            walk_parallel(node.iter, matcher.iter)
-            # Handle ifs if present
-            if hasattr(matcher, 'ifs') and matcher.ifs and node.ifs:
-                for node_if, matcher_if in zip(node.ifs, matcher.ifs):
-                    if hasattr(matcher_if, 'test'):
-                        walk_parallel(node_if.test, matcher_if.test)
-        elif isinstance(matcher, m.Call) and isinstance(node, cst.Call):
-            walk_parallel(node.func, matcher.func)
-            # Handle args
-            if hasattr(matcher, 'args'):
-                for node_arg, matcher_arg in zip(node.args, matcher.args):
-                    if isinstance(matcher_arg, m.Arg):
-                        walk_parallel(node_arg.value, matcher_arg.value)
-        elif isinstance(matcher, m.Tuple) and isinstance(node, cst.Tuple):
-            if hasattr(matcher, 'elements'):
-                for node_elem, matcher_elem in zip(node.elements, matcher.elements):
-                    if isinstance(matcher_elem, m.Element) and isinstance(node_elem, cst.Element):
-                        walk_parallel(node_elem.value, matcher_elem.value)
-        elif isinstance(matcher, m.List) and isinstance(node, cst.List):
-            if hasattr(matcher, 'elements'):
-                for node_elem, matcher_elem in zip(node.elements, matcher.elements):
-                    if isinstance(matcher_elem, m.Element) and isinstance(node_elem, cst.Element):
-                        walk_parallel(node_elem.value, matcher_elem.value)
-        elif isinstance(matcher, m.Set) and isinstance(node, cst.Set):
-            if hasattr(matcher, 'elements'):
-                for node_elem, matcher_elem in zip(node.elements, matcher.elements):
-                    if isinstance(matcher_elem, m.Element) and isinstance(node_elem, cst.Element):
-                        walk_parallel(node_elem.value, matcher_elem.value)
-        elif isinstance(matcher, m.FormattedString) and isinstance(node, cst.FormattedString):
-            if hasattr(matcher, 'parts'):
-                for node_part, matcher_part in zip(node.parts, matcher.parts):
-                    if isinstance(matcher_part, m.FormattedStringExpression) and isinstance(node_part, cst.FormattedStringExpression):
-                        walk_parallel(node_part.expression, matcher_part.expression)
-        # Add more node types as needed
-
-    walk_parallel(node, matcher)
-    return captures
-
-
-def _validate_repeated_metavars(node: cst.CSTNode, matcher: m.BaseMatcherNode, metavar_names: set[str]) -> bool:
-    """Validate that repeated metavariables captured identical values.
-
-    When a metavar appears multiple times in a pattern (e.g., $X in both
-    positions of [$X for $X in $Y]), we need to verify all occurrences
-    captured structurally equal nodes.
-
-    Args:
-        node: The matched CST node
-        matcher: The matcher pattern
-        metavar_names: Set of metavar names in the pattern
-
-    Returns:
-        True if all repeated metavars captured equal values
-    """
-    all_captures = _extract_all_captures(node, matcher, metavar_names)
-
-    # Check each metavar - all captures should be equal
-    for name, captured_nodes in all_captures.items():
-        if len(captured_nodes) > 1:
-            # Compare all captures - they should be structurally equal
-            first = captured_nodes[0]
-            for other in captured_nodes[1:]:
-                if not first.deep_equals(other):
-                    return False
-
-    return True
 
 
 def _filter_matches_by_import(
@@ -3459,9 +2723,10 @@ def find_pattern(
     
     matches = []
     for m in raw_matches:
+        captures = {k: v for k, v in m[6].items() if k != "_"}
         matches.append(PatternMatch(
             node_text=m[5],
-            captures=m[6],
+            captures=captures,
             line=m[1],
             col=m[2],
             end_line=m[3],
@@ -3505,270 +2770,6 @@ def find_pattern(
             )
 
     return matches
-
-    """
-    # Handle --where as alias for --inside
-    if where is not None:
-        if inside is not None:
-            raise ValueError("Cannot specify both 'where' and 'inside' parameters")
-        inside = where
-
-    # Validate inside/not_inside constraints
-    if inside and not_inside:
-        raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
-
-    # Parse pattern
-    pattern = parse_pattern(pattern_str)
-
-    # Extract metavar names for validation
-    metavar_names = {mv.name for mv in pattern.metavars}
-
-    # Detect oracle type constraints on metavars
-    oracle_constraints: dict[str, tuple[str, str]] = {}
-    for mv in pattern.metavars:
-        if is_oracle_type_constraint(mv.type_constraint):
-            oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
-
-    # Read file (or use source_override)
-    if source_override is not None:
-        source_code = source_override
-    else:
-        file = Path(file_path)
-        if not file.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        source_code = file.read_text()
-
-    # Compile pattern and constraints to Rust IR
-    rust_ir = compile_pattern_to_rust_ir(pattern_str)
-    if rust_ir is None:
-        # This should no longer happen as Rust matcher is now comprehensive
-        raise ValueError(f"Pattern '{pattern_str}' could not be compiled to Rust IR")
-
-    inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
-    not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
-    
-    if (inside and inside_ir is None) or (not_inside and not_inside_ir is None):
-        raise ValueError("Constraint could not be compiled to Rust IR")
-
-    # Find matches using Rust engine
-    raw_matches = _rust.find_pattern_in_files(
-        [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
-    )
-    # raw_matches is list of (file, line, col, end_line, end_col, text, captures)
-    
-    matches = []
-    for m in raw_matches:
-        matches.append(PatternMatch(
-            node_text=m[5],
-            captures=m[6],
-            line=m[1],
-            col=m[2],
-            end_line=m[3],
-            end_col=m[4],
-            matched_text=m[5],
-        ))
-
-    # Post-filter by scope if requested
-    if scope is not None:
-        from .ast_utils import find_nested_definitions, find_symbol_by_path
-        symbols = find_nested_definitions(file_path)
-        target_sym = find_symbol_by_path(symbols, scope)
-        if target_sym:
-            matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
-        else:
-            # Scope not found -- no matches
-            matches = []
-
-    # Post-filter by import origin if requested
-    if imported_from is not None:
-        project_root = _find_project_root(file_path)
-        matches = _filter_matches_by_import(
-            matches, imported_from, file_path, project_root, source_code
-        )
-
-    # Post-filter by scope locality if requested
-    if scope_local:
-        project_root = _find_project_root(file_path)
-        matches = _filter_matches_by_scope_local(
-            matches, file_path, project_root, source_code
-        )
-
-    # Post-filter by TypeOracle type constraints
-    if oracle_constraints and type_oracle is not None:
-        matches = _filter_matches_by_type_oracle(
-            matches, oracle_constraints, type_oracle,
-            file_path
-        )
-
-    return matches
-
-
-def _filter_matches_by_scope_local(
-    matches: list[PatternMatch],
-    file_path: str,
-    project_root: str,
-    content: str,
-    position_provider: Mapping,
-) -> list[PatternMatch]:
-    """Post-filter pattern matches to only include those where the root name
-    is locally defined (not imported).
-
-    Uses PyScopeResolver to check if the root Name node in each match
-    is a definition or a reference to a local name.
-    """
-    resolver = _rust.PyScopeResolver(project_root)
-    resolver.index_file(file_path, content)
-    refs = resolver.references_in_file(file_path)
-    
-    # Map (line, col) -> (qn, kind)
-    ref_map = {}
-    for qn, line, col, offset, end_offset, kind in refs:
-        ref_map[(line, col)] = (qn, kind)
-
-    filtered = []
-    for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
-
-        if not isinstance(root_name, cst.Name):
-            # Non-name matches are kept (e.g., literals)
-            filtered.append(match)
-            continue
-
-        try:
-            pos = position_provider[root_name]
-            line = pos.start.line
-            col = pos.start.column
-        except (KeyError, AttributeError):
-            # No position info -- keep the match
-            filtered.append(match)
-            continue
-
-        qn_info = ref_map.get((line, col))
-        if not qn_info:
-            # No QN info -- keep the match (could be a builtin or unresolved)
-            filtered.append(match)
-            continue
-
-        qn, kind = qn_info
-        # Definition is always local.
-        # For other references, we check if the QN starts with the current module path.
-        if kind == "definition":
-            filtered.append(match)
-        else:
-            module_root = _find_project_root(file_path)
-            module_path = _file_to_module(file_path, module_root)
-            if qn == module_path or qn.startswith(module_path + "."):
-                filtered.append(match)
-
-    return filtered
-
-
-def _filter_matches_by_type_oracle(
-    matches: list[PatternMatch],
-    oracle_constraints: dict[str, tuple[str, str]],
-    type_oracle: TypeOracle,
-    file_path: str,
-    position_provider: Mapping,
-) -> list[PatternMatch]:
-    """Post-filter pattern matches using TypeOracle type constraints.
-
-    For each match, checks whether captured metavar values satisfy their
-    :type[X] or :returns[X] constraints by querying the TypeOracle for
-    inferred types at the capture's source position.
-
-    Args:
-        matches: Pattern matches to filter.
-        oracle_constraints: Mapping from metavar name to (kind, type_string)
-            where kind is 'type' or 'returns'.
-        type_oracle: A TypeOracle instance.
-        file_path: Path to the source file being searched.
-        position_provider: Resolved LibCST PositionProvider metadata
-            (mapping from CSTNode to CodeRange).
-    """
-    from .type_oracle import FileTypes, TypeDescriptor, parse_type_string
-
-    # Build the type index for this file once
-    file_types: FileTypes = type_oracle.infer_file(Path(file_path))
-    logger.debug("Filtering %d matches by type oracle constraints", len(matches))
-
-    filtered = []
-    for match in matches:
-        keep = True
-        for metavar_name, (kind, type_string) in oracle_constraints.items():
-            captured = match.captures.get(metavar_name)
-            if captured is None:
-                continue
-
-            constraint_td = parse_type_string(type_string)
-
-            if kind == "type":
-                # Look up the inferred type at the captured node's position
-                try:
-                    pos = position_provider[captured]
-                    binding = file_types.type_at(pos.start.line, pos.start.column + 1)
-                except (KeyError, AttributeError):
-                    binding = None
-
-                if binding is None:
-                    # No type info — skip this match (can't confirm)
-                    keep = False
-                    break
-
-                if not binding.type_descriptor.matches(constraint_td):
-                    keep = False
-                    break
-
-            elif kind == "returns":
-                # For :returns[X], the captured node should be a function definition.
-                # Look up the function's return type from the oracle.
-                try:
-                    pos = position_provider[captured]
-                    line = pos.start.line
-                    col = pos.start.column + 1
-                except (KeyError, AttributeError):
-                    keep = False
-                    break
-
-                matched_return = False
-
-                # Try exact positional lookup first (O(1))
-                binding = file_types.type_at(line, col)
-                if binding is not None and binding.binding_kind == "definition":
-                    td = binding.type_descriptor
-                    if td.kind == "callable" and td.return_type is not None:
-                        matched_return = td.return_type.matches(constraint_td)
-                    elif td.matches(constraint_td):
-                        matched_return = True
-
-                # Fall back to name-based lookup if positional miss
-                if not matched_return and isinstance(captured, cst.Name):
-                    for b in file_types.types_for_name(captured.value):
-                        if b.line == line and b.binding_kind == "definition":
-                            td = b.type_descriptor
-                            if td.kind == "callable" and td.return_type is not None:
-                                matched_return = td.return_type.matches(constraint_td)
-                            elif td.matches(constraint_td):
-                                matched_return = True
-                            if matched_return:
-                                break
-
-                if not matched_return:
-                    keep = False
-                    break
-
-        if keep:
-            filtered.append(match)
-
-    logger.debug(
-        "Type oracle filtering: %d/%d matches passed", len(filtered), len(matches),
-    )
-    return filtered
 
 
 def remove_symbol(
@@ -3901,24 +2902,24 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     return code
 
 
-class _NameCollector(cst.CSTVisitor):
-    """Visitor to collect all Name references in code."""
-
-    def __init__(self):
-        self.names: set[str] = set()
-
-    def visit_Name(self, node: cst.Name) -> None:
-        """Collect name references."""
-        self.names.add(node.value)
-
-    def visit_Attribute(self, node: cst.Attribute) -> None:
-        """Collect the base name from attribute access (e.g., 'ast' from 'ast.parse')."""
-        # Only collect the leftmost name in the chain
-        current = node.value
-        while isinstance(current, cst.Attribute):
-            current = current.value
-        if isinstance(current, cst.Name):
-            self.names.add(current.value)
+def _collect_names(source: str) -> set[str]:
+    """Collect all Name references in code using stdlib ast."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            # Collect the leftmost name in the chain
+            current = node.value
+            while isinstance(current, ast.Attribute):
+                current = current.value
+            if isinstance(current, ast.Name):
+                names.add(current.id)
+    return names
 
 
 def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
@@ -3936,93 +2937,51 @@ def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
         >>> imports = analyze_imports(source, "module.py")
         >>> # Returns ["import ast"] if module.py has that import
     """
-    # Parse the symbol source to collect all name references
-    try:
-        symbol_module = cst.parse_module(symbol_source)
-    except Exception:
-        # If we can't parse, return empty - better than crashing
+    used_names = _collect_names(symbol_source)
+    if not used_names:
         return []
 
-    collector = _NameCollector()
-    symbol_module.visit(collector)
-    used_names = collector.names
-
-    # Parse the source file to get its imports
     source_path = Path(source_file)
     if not source_path.exists():
         return []
 
     try:
-        source_module = cst.parse_module(source_path.read_text())
+        source_tree = ast.parse(source_path.read_text())
     except Exception:
         return []
 
-    # Collect needed imports
     needed_imports = []
 
-    for stmt in source_module.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for inner_stmt in stmt.body:
-                if isinstance(inner_stmt, cst.Import):
-                    # Handle "import X" or "import X as Y"
-                    for name_item in inner_stmt.names:
-                        if isinstance(name_item, cst.ImportAlias):
-                            # Get the module name
-                            module_name = name_item.name.value if isinstance(name_item.name, cst.Name) else str(name_item.name)
-                            # Get the alias if present
-                            if name_item.asname:
-                                alias = name_item.asname.name.value
-                                # Check if alias is used
-                                if alias in used_names:
-                                    needed_imports.append(cst.Module([stmt]).code.strip())
-                                    break
-                            else:
-                                # Check if module name is used
-                                if module_name in used_names:
-                                    needed_imports.append(f"import {module_name}")
-
-                elif isinstance(inner_stmt, cst.ImportFrom):
-                    # Handle "from X import Y, Z"
-                    if isinstance(inner_stmt.module, cst.Name):
-                        module_name = inner_stmt.module.value
-                    elif isinstance(inner_stmt.module, cst.Attribute):
-                        # Handle dotted imports like "from a.b import c"
-                        module_name = cst.Module([]).code_for_node(inner_stmt.module)
+    for stmt in source_tree.body:
+        if isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                effective_name = alias.asname or alias.name.split('.')[0]
+                if effective_name in used_names:
+                    if alias.asname:
+                        needed_imports.append(f"import {alias.name} as {alias.asname}")
                     else:
-                        continue
+                        needed_imports.append(f"import {alias.name}")
 
-                    if isinstance(inner_stmt.names, cst.ImportStar):
-                        # Can't analyze star imports easily, skip
-                        continue
+        elif isinstance(stmt, ast.ImportFrom):
+            if stmt.names and isinstance(stmt.names[0], ast.alias) and stmt.names[0].name == '*':
+                continue
 
-                    # Collect which names are actually used
-                    used_import_names = []
-                    for name_item in inner_stmt.names:
-                        if isinstance(name_item, cst.ImportAlias):
-                            import_name = name_item.name.value if isinstance(name_item.name, cst.Name) else str(name_item.name)
-                            # Check if the imported name or its alias is used
-                            if name_item.asname:
-                                alias = name_item.asname.name.value
-                                if alias in used_names:
-                                    used_import_names.append((import_name, alias))
-                            else:
-                                if import_name in used_names:
-                                    used_import_names.append((import_name, None))
+            module_name = stmt.module or ''
 
-                    # Generate the from import statement with only used names
-                    if used_import_names:
-                        if len(used_import_names) == 1 and not used_import_names[0][1]:
-                            # Single name, no alias
-                            needed_imports.append(f"from {module_name} import {used_import_names[0][0]}")
-                        else:
-                            # Multiple names or with aliases
-                            import_parts = []
-                            for name, alias in used_import_names:
-                                if alias:
-                                    import_parts.append(f"{name} as {alias}")
-                                else:
-                                    import_parts.append(name)
-                            needed_imports.append(f"from {module_name} import {', '.join(import_parts)}")
+            used_import_names = []
+            for alias in stmt.names:
+                effective_name = alias.asname or alias.name
+                if effective_name in used_names:
+                    used_import_names.append((alias.name, alias.asname))
+
+            if used_import_names:
+                import_parts = []
+                for name, asname in used_import_names:
+                    if asname:
+                        import_parts.append(f"{name} as {asname}")
+                    else:
+                        import_parts.append(name)
+                needed_imports.append(f"from {module_name} import {', '.join(import_parts)}")
 
     return needed_imports
 
@@ -4103,20 +3062,19 @@ def _is_valid_replacement(code: str) -> bool:
     This ensures that replacements don't produce syntactically invalid code.
     """
     try:
-        cst.parse_expression(code)
+        ast.parse(code, mode='eval')
         return True
-    except Exception:
+    except SyntaxError:
         try:
-            temp_module = cst.parse_module(code)
-            # Return True if it contains at least one statement or is an empty valid module
-            return bool(temp_module.body) or code.strip() == ""
-        except Exception:
+            ast.parse(code, mode='exec')
+            return True
+        except SyntaxError:
             return False
 
 
 def _substitute_metavars(
     replacement_str: str,
-    captures: dict[str, cst.CSTNode | tuple[cst.CSTNode, ...]],
+    captures: dict[str, str],
 ) -> str | None:
     """Substitute metavars in replacement string with captured code.
 
@@ -4135,11 +3093,11 @@ def _substitute_metavars(
     for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
         ref_name = ref_match.group(1)
         captured = captures.get(ref_name)
-        if (
-            captured is None
-            or isinstance(captured, tuple)
-            or (content := _extract_string_content(captured)) is None
-        ):
+        if captured is None:
+            content_failed = True
+            break
+        content = _extract_string_content_from_text(captured)
+        if content is None:
             content_failed = True
             break
         replacement_code = replacement_code.replace(
@@ -4149,37 +3107,11 @@ def _substitute_metavars(
         return None
 
     # Second pass: substitute regular metavar references ($NAME, $...NAME).
-    for name, captured_node in captures.items():
-        # Handle ellipsis captures (tuples of args/elements)
-        if isinstance(captured_node, tuple):
-            # Convert each item to code and join with commas
-            if len(captured_node) == 0:
-                code = ""
-            else:
-                # Unwrap based on type: Arg.value, Element.value, or whole DictElement
-                item_codes = []
-                for item in captured_node:
-                    if isinstance(item, cst.Arg):
-                        # Preserve full Arg node (keyword=, *, **) but strip trailing comma
-                        clean_arg = item.with_changes(comma=cst.MaybeSentinel.DEFAULT)
-                        item_codes.append(cst.Module([]).code_for_node(clean_arg))
-                    elif isinstance(item, cst.Element):
-                        item_codes.append(cst.Module([]).code_for_node(item.value))
-                    elif isinstance(item, cst.DictElement):
-                        # For dict elements, include key: value
-                        key_code = cst.Module([]).code_for_node(item.key)
-                        value_code = cst.Module([]).code_for_node(item.value)
-                        item_codes.append(f"{key_code}: {value_code}")
-                    else:
-                        item_codes.append(cst.Module([]).code_for_node(item))
-                code = ", ".join(item_codes)
-            # Replace $...NAME with the comma-separated items
-            replacement_code = replacement_code.replace(f"$...{name}", code)
-        else:
-            # Convert captured node to code string
-            code = cst.Module([]).code_for_node(captured_node)
-            # Replace metavar in replacement string
-            replacement_code = replacement_code.replace(f"${name}", code)
+    for name, code in captures.items():
+        # Replace $...NAME with the captured text (already a string from Rust)
+        replacement_code = replacement_code.replace(f"$...{name}", code)
+        # Replace $NAME with the captured text
+        replacement_code = replacement_code.replace(f"${name}", code)
 
     # Clean up comma artifacts from empty ellipsis substitutions
     replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
@@ -4335,118 +3267,50 @@ class Reference:
     is_write: bool
 
 
-class _DocstringRenamer(cst.CSTTransformer):
-    """Replace old_name with new_name inside docstrings only.
-
-    A docstring is the first statement in a function, class, or module body
-    when it's a bare string expression (Expr containing a string literal).
-    """
-
-    def __init__(self, old_name: str, new_name: str):
-        self.old_name = old_name
-        self.new_name = new_name
-        self.changed = False
-
-    def _replace_in_string(self, node: cst.BaseExpression) -> cst.BaseExpression:
-        if isinstance(node, cst.SimpleString):
-            new_value = node.value.replace(self.old_name, self.new_name)
-            if new_value != node.value:
-                self.changed = True
-                return node.with_changes(value=new_value)
-        elif isinstance(node, cst.ConcatenatedString):
-            new_parts = []
-            parts_changed = False
-            for part in node.parts:
-                if isinstance(part, cst.FormattedStringText):
-                    new_value = part.value.replace(self.old_name, self.new_name)
-                    if new_value != part.value:
-                        parts_changed = True
-                        new_parts.append(part.with_changes(value=new_value))
-                    else:
-                        new_parts.append(part)
-                else:
-                    new_parts.append(part)
-            if parts_changed:
-                self.changed = True
-                return node.with_changes(parts=new_parts)
-        return node
-
-    def _process_body(
-        self, body: cst.IndentedBlock
-    ) -> cst.IndentedBlock:
-        """Check if the first statement is a docstring and replace if so."""
-        stmts = list(body.body)
-        if not stmts:
-            return body
-
-        first = stmts[0]
-        if (isinstance(first, cst.SimpleStatementLine)
-                and len(first.body) == 1
-                and isinstance(first.body[0], cst.Expr)):
-            expr = first.body[0].value
-            if isinstance(expr, (cst.SimpleString, cst.ConcatenatedString)):
-                new_expr = self._replace_in_string(expr)
-                if new_expr is not expr:
-                    new_stmt = first.body[0].with_changes(value=new_expr)
-                    new_first = first.with_changes(body=[new_stmt])
-                    stmts[0] = new_first
-                    return body.with_changes(body=stmts)
-        return body
-
-    def leave_FunctionDef(
-        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
-    ) -> cst.FunctionDef:
-        if isinstance(updated_node.body, cst.IndentedBlock):
-            new_body = self._process_body(updated_node.body)
-            if new_body is not updated_node.body:
-                return updated_node.with_changes(body=new_body)
-        return updated_node
-
-    def leave_ClassDef(
-        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
-    ) -> cst.ClassDef:
-        if isinstance(updated_node.body, cst.IndentedBlock):
-            new_body = self._process_body(updated_node.body)
-            if new_body is not updated_node.body:
-                return updated_node.with_changes(body=new_body)
-        return updated_node
-
-    def leave_Module(
-        self, original_node: cst.Module, updated_node: cst.Module
-    ) -> cst.Module:
-        stmts = list(updated_node.body)
-        if not stmts:
-            return updated_node
-
-        first = stmts[0]
-        if (isinstance(first, cst.SimpleStatementLine)
-                and len(first.body) == 1
-                and isinstance(first.body[0], cst.Expr)):
-            expr = first.body[0].value
-            if isinstance(expr, (cst.SimpleString, cst.ConcatenatedString)):
-                new_expr = self._replace_in_string(expr)
-                if new_expr is not expr:
-                    new_stmt = first.body[0].with_changes(value=new_expr)
-                    new_first = first.with_changes(body=[new_stmt])
-                    stmts[0] = new_first
-                    return updated_node.with_changes(body=stmts)
-        return updated_node
-
-
 def _rename_in_docstrings(content: str, old_name: str, new_name: str) -> str | None:
     """Replace old_name with new_name in all docstrings.
+
+    Uses stdlib ast to find docstring positions, then performs text replacement
+    within those ranges.
 
     Returns new content if changes were made, None otherwise.
     """
     try:
-        module = cst.parse_module(content)
-        renamer = _DocstringRenamer(old_name, new_name)
-        new_module = module.visit(renamer)
-        if renamer.changed:
-            return new_module.code
+        tree = ast.parse(content)
+    except SyntaxError:
         return None
-    except Exception:
+
+    lines = content.splitlines(keepends=True)
+    docstring_ranges: list[tuple[int, int]] = []
+
+    def _collect_docstrings(node: ast.AST) -> None:
+        body = getattr(node, 'body', None)
+        if not isinstance(body, list) or not body:
+            return
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            docstring_ranges.append((first.lineno - 1, first.end_lineno))
+        for child in body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                _collect_docstrings(child)
+
+    _collect_docstrings(tree)
+
+    if not docstring_ranges:
         return None
+
+    changed = False
+    for start_line, end_line in docstring_ranges:
+        for i in range(start_line, end_line):
+            if i < len(lines) and old_name in lines[i]:
+                lines[i] = lines[i].replace(old_name, new_name)
+                changed = True
+
+    if changed:
+        return "".join(lines)
+    return None
 
 
 def find_references(
@@ -4821,33 +3685,20 @@ def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: i
 def _get_all_exported_names(content: str) -> set[str]:
     """Extract names listed in __all__ from file content."""
     try:
-        module = _cached_parse(content)
+        tree = ast.parse(content)
     except Exception:
         return set()
 
     names: set[str] = set()
-    for stmt in module.body:
-        # Match: __all__ = [...]  or  __all__ = (...)
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if (isinstance(item, cst.Assign)
-                        and len(item.targets) == 1
-                        and isinstance(item.targets[0].target, cst.Name)
-                        and item.targets[0].target.value == '__all__'):
-                    value = item.value
-                    elements = None
-                    if isinstance(value, (cst.List, cst.Tuple)):
-                        elements = value.elements
-                    if elements:
-                        for el in elements:
-                            if isinstance(el, cst.Element) and isinstance(el.value, (cst.SimpleString, cst.ConcatenatedString)):
-                                # Extract the string value
-                                try:
-                                    raw = el.value.evaluated_value
-                                    if isinstance(raw, str):
-                                        names.add(raw)
-                                except Exception:
-                                    pass
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target = stmt.targets[0]
+            if isinstance(target, ast.Name) and target.id == '__all__':
+                value = stmt.value
+                if isinstance(value, (ast.List, ast.Tuple)):
+                    for el in value.elts:
+                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                            names.add(el.value)
     return names
 
 

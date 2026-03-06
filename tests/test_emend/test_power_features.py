@@ -3,7 +3,6 @@
 import json
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern, generate_graph
 
@@ -29,7 +28,7 @@ class TestWhereFlag:
             "    w = 4\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), where="class MyClass")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"y", "z"}
 
     def test_where_def_pattern(self, tmp_path):
@@ -44,7 +43,7 @@ class TestWhereFlag:
             "    print('test two')\n"
         )
         matches = find_pattern("print($X)", str(f), where="def test_*")
-        captured = {cst.Module([]).code_for_node(m.captures["X"]) for m in matches}
+        captured = {m.captures["X"] for m in matches}
         assert captured == {"'test one'", "'test two'"}
 
     def test_where_conflicts_with_inside(self, tmp_path):
@@ -88,7 +87,7 @@ class TestEnhancedInside:
             "w = 4\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), inside="def test_*")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"y", "z"}
 
     def test_inside_class_with_name(self, tmp_path):
@@ -102,7 +101,7 @@ class TestEnhancedInside:
             "z = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), inside="class MyClass")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"x"}
 
     def test_inside_class_wildcard(self, tmp_path):
@@ -117,7 +116,7 @@ class TestEnhancedInside:
             "    c = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), inside="class Test*")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"a", "b"}
 
     def test_inside_try_colon(self, tmp_path):
@@ -132,7 +131,7 @@ class TestEnhancedInside:
             "w = 4\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), inside="try:")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"y", "z"}
 
     def test_inside_async_def_name(self, tmp_path):
@@ -147,7 +146,7 @@ class TestEnhancedInside:
             "    z = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), inside="async def fetch_*")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"x"}
 
 
@@ -165,7 +164,7 @@ class TestEnhancedNotInside:
             "z = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), not_inside="def test_*")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"x", "z"}
 
     def test_not_inside_try_colon(self, tmp_path):
@@ -180,7 +179,7 @@ class TestEnhancedNotInside:
             "w = 4\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), not_inside="try:")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"x", "w"}
 
     def test_not_inside_class_name(self, tmp_path):
@@ -194,7 +193,7 @@ class TestEnhancedNotInside:
             "z = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), not_inside="class MyClass")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"y", "z"}
 
     def test_not_inside_except_pattern(self, tmp_path):
@@ -209,7 +208,7 @@ class TestEnhancedNotInside:
             "    z = fallback_type()\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), not_inside="except ValueError:")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         # x and z are kept, y is excluded (inside except ValueError)
         assert "y" not in names
         assert "z" in names
@@ -278,7 +277,7 @@ class TestInsideKeywords:
         )
         matches = find_pattern("print($X)", str(f), inside="def")
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["X"]) == "'func'"
+        assert matches[0].captures["X"] == "'func'"
 
     def test_not_inside_class_keyword(self, tmp_path):
         """Simple 'class' keyword still works for not_inside."""
@@ -290,7 +289,7 @@ class TestInsideKeywords:
             "z = 3\n"
         )
         matches = find_pattern("$NAME = $VALUE", str(f), not_inside="class")
-        names = {cst.Module([]).code_for_node(m.captures["NAME"]) for m in matches}
+        names = {m.captures["NAME"] for m in matches}
         assert names == {"x", "z"}
 
 
@@ -316,13 +315,13 @@ class TestScopeLocal:
         )
         # Without scope_local: both calls match
         all_matches = find_pattern("$FUNC($A, $B)", str(f))
-        all_names = {cst.Module([]).code_for_node(m.captures["FUNC"]) for m in all_matches}
+        all_names = {m.captures["FUNC"] for m in all_matches}
         assert "join" in all_names
         assert "join_local" in all_names
 
         # With scope_local: only locally-defined join_local matches
         local_matches = find_pattern("$FUNC($A, $B)", str(f), scope_local=True)
-        local_names = {cst.Module([]).code_for_node(m.captures["FUNC"]) for m in local_matches}
+        local_names = {m.captures["FUNC"] for m in local_matches}
         assert "join_local" in local_names
         assert "join" not in local_names
 

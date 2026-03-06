@@ -912,9 +912,20 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
     if isinstance(node, cst.Name):
         if node.value in metavar_map:
             metavar = metavar_map[node.value]
-            if metavar.type_constraint in (":int", ":str", ":call"):
-                return {"type": "type_constraint", "kind": metavar.type_constraint[1:]}
-            if metavar.type_constraint is not None:
+            tc = metavar.type_constraint
+            if tc in ("int", "str", "call", "float",
+                      "identifier", "attr", "stmt"):
+                return {"type": "type_constraint", "kind": tc, "name": metavar.name}
+            if tc is not None and tc.startswith("!"):
+                inner = tc[1:]
+                if inner in ("int", "str", "call", "float",
+                             "identifier", "attr", "stmt"):
+                    return {"type": "type_constraint", "kind": tc, "name": metavar.name}
+            if tc is not None:
+                # Oracle constraints (e.g., :type[X], :returns[X]) are checked
+                # post-match. Treat the metavar as a regular capture.
+                if is_oracle_type_constraint(tc):
+                    return {"type": "metavar", "name": metavar.name}
                 return None
             if metavar.ellipsis:
                 return {"type": "ellipsis", "name": metavar.name}
@@ -1239,7 +1250,7 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             comp_ir = _cst_to_rust_ir(comp_target.comparator, metavar_map)
             if comp_ir is None:
                 return None
-            ops_ir.append([op_str, comp_ir])
+            ops_ir.append({"op": op_str, "comparator": comp_ir})
         return {"type": "compare", "left": left_ir, "ops": ops_ir}
 
     elif isinstance(node, cst.UnaryOperation):
@@ -1346,8 +1357,726 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
         return None
 
 
+def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
+    """Convert a stdlib ast node to a Rust IR dict."""
+    import ast as _ast
+
+    if isinstance(node, _ast.Name):
+        if node.id in metavar_map:
+            metavar = metavar_map[node.id]
+            tc = metavar.type_constraint
+            if tc in ("int", "str", "call", "float",
+                      "identifier", "attr", "stmt"):
+                return {"type": "type_constraint", "kind": tc, "name": metavar.name}
+            if tc is not None and tc.startswith("!"):
+                inner = tc[1:]
+                if inner in ("int", "str", "call", "float",
+                             "identifier", "attr", "stmt"):
+                    return {"type": "type_constraint", "kind": tc, "name": metavar.name}
+            if tc is not None:
+                # Oracle constraints (e.g., :type[X], :returns[X]) are checked
+                # post-match. Treat the metavar as a regular capture.
+                if is_oracle_type_constraint(tc):
+                    return {"type": "metavar", "name": metavar.name}
+                return None
+            if metavar.ellipsis:
+                return {"type": "ellipsis", "name": metavar.name}
+            else:
+                return {"type": "metavar", "name": metavar.name}
+        else:
+            if node.id == "None":
+                return {"type": "none"}
+            if node.id == "True":
+                return {"type": "bool", "value": True}
+            if node.id == "False":
+                return {"type": "bool", "value": False}
+            return {"type": "name", "value": node.id}
+
+    elif isinstance(node, _ast.Constant):
+        if node.value is None:
+            return {"type": "none"}
+        if isinstance(node.value, bool):
+            return {"type": "bool", "value": node.value}
+        if isinstance(node.value, int):
+            return {"type": "integer", "value": str(node.value)}
+        if isinstance(node.value, float):
+            return {"type": "float", "value": str(node.value)}
+        if isinstance(node.value, str):
+            return {"type": "string", "value": repr(node.value)}
+        if node.value is ...:
+            return {"type": "ellipsis_literal"}
+        return None
+
+    elif isinstance(node, _ast.Call):
+        func_ir = _ast_to_rust_ir(node.func, metavar_map)
+        if func_ir is None:
+            return None
+        args_ir = []
+        has_ellipsis = False
+        for arg in node.args:
+            if isinstance(arg, _ast.Starred):
+                inner_ir = _ast_to_rust_ir(arg.value, metavar_map)
+                if inner_ir is None:
+                    return None
+                args_ir.append({"type": "star", "value": inner_ir})
+                continue
+            if isinstance(arg, _ast.Name) and arg.id in metavar_map:
+                metavar = metavar_map[arg.id]
+                if metavar.ellipsis:
+                    args_ir.append({"type": "ellipsis", "name": metavar.name})
+                    has_ellipsis = True
+                    continue
+            arg_ir = _ast_to_rust_ir(arg, metavar_map)
+            if arg_ir is None:
+                return None
+            args_ir.append(arg_ir)
+        for kw in node.keywords:
+            if kw.arg is None:
+                # **kwargs
+                inner_ir = _ast_to_rust_ir(kw.value, metavar_map)
+                if inner_ir is None:
+                    return None
+                args_ir.append({"type": "double_star", "value": inner_ir})
+            else:
+                val_ir = _ast_to_rust_ir(kw.value, metavar_map)
+                if val_ir is None:
+                    return None
+                args_ir.append({"type": "keyword_arg", "key": kw.arg, "value": val_ir})
+        return {
+            "type": "call",
+            "func": func_ir,
+            "args": args_ir,
+            "exact_args": not has_ellipsis,
+        }
+
+    elif isinstance(node, _ast.Attribute):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "attr", "value": value_ir, "attr": node.attr}
+
+    elif isinstance(node, _ast.List):
+        if len(node.elts) == 0:
+            return {"type": "empty_list"}
+        elems_ir = []
+        for elt in node.elts:
+            e_ir = _ast_to_rust_ir(elt, metavar_map)
+            if e_ir is None:
+                return None
+            elems_ir.append(e_ir)
+        return {"type": "list", "elements": elems_ir}
+
+    elif isinstance(node, _ast.Tuple):
+        elems_ir = []
+        for elt in node.elts:
+            e_ir = _ast_to_rust_ir(elt, metavar_map)
+            if e_ir is None:
+                return None
+            elems_ir.append(e_ir)
+        return {"type": "tuple", "elements": elems_ir}
+
+    elif isinstance(node, _ast.Set):
+        elems_ir = []
+        for elt in node.elts:
+            e_ir = _ast_to_rust_ir(elt, metavar_map)
+            if e_ir is None:
+                return None
+            elems_ir.append(e_ir)
+        return {"type": "set", "elements": elems_ir}
+
+    elif isinstance(node, _ast.Dict):
+        elems_ir = []
+        for k, v in zip(node.keys, node.values):
+            if k is None:
+                # **spread
+                if isinstance(v, _ast.Name) and v.id in metavar_map:
+                    metavar = metavar_map[v.id]
+                    if metavar.ellipsis:
+                        elems_ir.append({"type": "ellipsis", "name": metavar.name})
+                        continue
+                if isinstance(v, _ast.Name) and v.id == "__EMEND_SPREAD__":
+                    elems_ir.append({"type": "ellipsis"})
+                    continue
+                v_ir = _ast_to_rust_ir(v, metavar_map)
+                if v_ir is None:
+                    return None
+                elems_ir.append({"type": "spread", "value": v_ir})
+            else:
+                if isinstance(k, _ast.Name) and k.id in metavar_map:
+                    metavar = metavar_map[k.id]
+                    if metavar.ellipsis:
+                        elems_ir.append({"type": "ellipsis", "name": metavar.name})
+                        continue
+                k_ir = _ast_to_rust_ir(k, metavar_map)
+                v_ir = _ast_to_rust_ir(v, metavar_map)
+                if k_ir is None or v_ir is None:
+                    return None
+                elems_ir.append({"type": "pair", "key": k_ir, "value": v_ir})
+        return {"type": "dict", "elements": elems_ir}
+
+    elif isinstance(node, _ast.Subscript):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        if isinstance(node.slice, _ast.Tuple):
+            slices_ir = []
+            for elt in node.slice.elts:
+                s_ir = _ast_to_rust_ir(elt, metavar_map)
+                if s_ir is None:
+                    return None
+                slices_ir.append(s_ir)
+        else:
+            s_ir = _ast_to_rust_ir(node.slice, metavar_map)
+            if s_ir is None:
+                return None
+            slices_ir = [s_ir]
+        return {"type": "subscript", "value": value_ir, "slices": slices_ir}
+
+    elif isinstance(node, _ast.BinOp):
+        left_ir = _ast_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        right_ir = _ast_to_rust_ir(node.right, metavar_map)
+        if right_ir is None:
+            return None
+        op_map = {
+            _ast.Add: "+", _ast.Sub: "-", _ast.Mult: "*",
+            _ast.Div: "/", _ast.FloorDiv: "//", _ast.Mod: "%",
+            _ast.Pow: "**", _ast.BitAnd: "&", _ast.BitOr: "|",
+            _ast.BitXor: "^", _ast.LShift: "<<", _ast.RShift: ">>",
+            _ast.MatMult: "@",
+        }
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        return {"type": "binary_op", "left": left_ir, "op": op_str, "right": right_ir}
+
+    elif isinstance(node, _ast.BoolOp):
+        op_map = {_ast.And: "and", _ast.Or: "or"}
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        # BoolOp has a list of values; build nested binary ops
+        result = _ast_to_rust_ir(node.values[0], metavar_map)
+        if result is None:
+            return None
+        for val in node.values[1:]:
+            right = _ast_to_rust_ir(val, metavar_map)
+            if right is None:
+                return None
+            result = {"type": "binary_op", "left": result, "op": op_str, "right": right}
+        return result
+
+    elif isinstance(node, _ast.Compare):
+        left_ir = _ast_to_rust_ir(node.left, metavar_map)
+        if left_ir is None:
+            return None
+        comp_op_map = {
+            _ast.Eq: "==", _ast.NotEq: "!=",
+            _ast.Lt: "<", _ast.Gt: ">",
+            _ast.LtE: "<=", _ast.GtE: ">=",
+            _ast.Is: "is", _ast.IsNot: "is not",
+            _ast.In: "in", _ast.NotIn: "not in",
+        }
+        ops_ir = []
+        for op, comparator in zip(node.ops, node.comparators):
+            op_str = comp_op_map.get(type(op))
+            if op_str is None:
+                return None
+            comp_ir = _ast_to_rust_ir(comparator, metavar_map)
+            if comp_ir is None:
+                return None
+            ops_ir.append({"op": op_str, "comparator": comp_ir})
+        return {"type": "compare", "left": left_ir, "ops": ops_ir}
+
+    elif isinstance(node, _ast.UnaryOp):
+        op_map = {
+            _ast.USub: "-", _ast.UAdd: "+", _ast.Invert: "~", _ast.Not: "not",
+        }
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        operand_ir = _ast_to_rust_ir(node.operand, metavar_map)
+        if operand_ir is None:
+            return None
+        return {"type": "unary_op", "op": op_str, "operand": operand_ir}
+
+    elif isinstance(node, _ast.Assign):
+        if len(node.targets) != 1:
+            return None
+        target_ir = _ast_to_rust_ir(node.targets[0], metavar_map)
+        if target_ir is None:
+            return None
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "assign", "target": target_ir, "value": value_ir}
+
+    elif isinstance(node, _ast.AugAssign):
+        target_ir = _ast_to_rust_ir(node.target, metavar_map)
+        if target_ir is None:
+            return None
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        op_map = {
+            _ast.Add: "+=", _ast.Sub: "-=", _ast.Mult: "*=",
+            _ast.Div: "/=", _ast.FloorDiv: "//=", _ast.Mod: "%=",
+            _ast.Pow: "**=", _ast.BitAnd: "&=", _ast.BitOr: "|=",
+            _ast.BitXor: "^=", _ast.LShift: "<<=", _ast.RShift: ">>=",
+            _ast.MatMult: "@=",
+        }
+        op_str = op_map.get(type(node.op))
+        if op_str is None:
+            return None
+        return {"type": "aug_assign", "target": target_ir, "op": op_str, "value": value_ir}
+
+    elif isinstance(node, _ast.AnnAssign):
+        target_ir = _ast_to_rust_ir(node.target, metavar_map)
+        if target_ir is None:
+            return None
+        annotation_ir = _ast_to_rust_ir(node.annotation, metavar_map)
+        if annotation_ir is None:
+            return None
+        value_ir = None
+        if node.value:
+            value_ir = _ast_to_rust_ir(node.value, metavar_map)
+            if value_ir is None:
+                return None
+        return {
+            "type": "ann_assign",
+            "target": target_ir,
+            "annotation": annotation_ir,
+            "value": value_ir
+        }
+
+    elif isinstance(node, _ast.FunctionDef) or isinstance(node, _ast.AsyncFunctionDef):
+        name = node.name
+        if name in metavar_map:
+            name_ir = {"type": "metavar", "name": metavar_map[name].name}
+        else:
+            name_ir = {"type": "name", "value": name}
+        decorators_ir = []
+        for dec in node.decorator_list:
+            dec_ir = _ast_to_rust_ir(dec, metavar_map)
+            if dec_ir is None:
+                return None
+            decorators_ir.append(dec_ir)
+        param_patterns = []
+        args = node.args
+        # positional-only params
+        for p in args.posonlyargs:
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "name", "value": p.arg})
+        # regular params
+        n_defaults = len(args.defaults)
+        n_args = len(args.args)
+        for i, p in enumerate(args.args):
+            default_idx = i - (n_args - n_defaults)
+            has_default = default_idx >= 0
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                    continue
+                if has_default:
+                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                if has_default:
+                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    param_patterns.append({"type": "name", "value": p.arg})
+        # *args
+        if args.vararg:
+            p = args.vararg
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+        # keyword-only params
+        for i, p in enumerate(args.kwonlyargs):
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                default = args.kw_defaults[i]
+                if default is not None:
+                    dv_ir = _ast_to_rust_ir(default, metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    param_patterns.append({"type": "name", "value": p.arg})
+        # **kwargs
+        if args.kwarg:
+            p = args.kwarg
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+        return {
+            "type": "funcdef",
+            "name": name_ir,
+            "params": param_patterns,
+            "decorators": decorators_ir,
+            "is_async": isinstance(node, _ast.AsyncFunctionDef),
+        }
+
+    elif isinstance(node, _ast.ClassDef):
+        name = node.name
+        if name in metavar_map:
+            name_ir = {"type": "metavar", "name": metavar_map[name].name}
+        else:
+            name_ir = {"type": "name", "value": name}
+        decorators_ir = []
+        for dec in node.decorator_list:
+            dec_ir = _ast_to_rust_ir(dec, metavar_map)
+            if dec_ir is None:
+                return None
+            decorators_ir.append(dec_ir)
+        bases_ir = []
+        for base in node.bases:
+            base_ir = _ast_to_rust_ir(base, metavar_map)
+            if base_ir is None:
+                return None
+            bases_ir.append(base_ir)
+        return {
+            "type": "classdef",
+            "name": name_ir,
+            "bases": bases_ir,
+            "decorators": decorators_ir
+        }
+
+    elif isinstance(node, (_ast.ListComp, _ast.SetComp, _ast.GeneratorExp)):
+        elt_ir = _ast_to_rust_ir(node.elt, metavar_map)
+        if elt_ir is None:
+            return None
+        generators_ir = []
+        for gen in node.generators:
+            target_ir = _ast_to_rust_ir(gen.target, metavar_map)
+            if target_ir is None:
+                return None
+            iter_ir = _ast_to_rust_ir(gen.iter, metavar_map)
+            if iter_ir is None:
+                return None
+            ifs_ir = []
+            for if_clause in gen.ifs:
+                if_ir = _ast_to_rust_ir(if_clause, metavar_map)
+                if if_ir is None:
+                    return None
+                ifs_ir.append(if_ir)
+            generators_ir.append({
+                "target": target_ir,
+                "iter": iter_ir,
+                "ifs": ifs_ir
+            })
+        kind = "list_comprehension"
+        if isinstance(node, _ast.SetComp):
+            kind = "set_comprehension"
+        elif isinstance(node, _ast.GeneratorExp):
+            kind = "generator_expression"
+        return {
+            "type": "comprehension",
+            "kind": kind,
+            "elt": elt_ir,
+            "generators": generators_ir
+        }
+
+    elif isinstance(node, _ast.DictComp):
+        key_ir = _ast_to_rust_ir(node.key, metavar_map)
+        if key_ir is None:
+            return None
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        generators_ir = []
+        for gen in node.generators:
+            target_ir = _ast_to_rust_ir(gen.target, metavar_map)
+            if target_ir is None:
+                return None
+            iter_ir = _ast_to_rust_ir(gen.iter, metavar_map)
+            if iter_ir is None:
+                return None
+            ifs_ir = []
+            for if_clause in gen.ifs:
+                if_ir = _ast_to_rust_ir(if_clause, metavar_map)
+                if if_ir is None:
+                    return None
+                ifs_ir.append(if_ir)
+            generators_ir.append({
+                "target": target_ir,
+                "iter": iter_ir,
+                "ifs": ifs_ir
+            })
+        return {
+            "type": "dict_comprehension",
+            "key": key_ir,
+            "value": value_ir,
+            "generators": generators_ir
+        }
+
+    elif isinstance(node, _ast.JoinedStr):
+        parts_ir = []
+        for val in node.values:
+            if isinstance(val, _ast.Constant) and isinstance(val.value, str):
+                parts_ir.append({"type": "fstring_text", "value": val.value})
+            elif isinstance(val, _ast.FormattedValue):
+                expr_ir = _ast_to_rust_ir(val.value, metavar_map)
+                if expr_ir is None:
+                    return None
+                parts_ir.append({"type": "fstring_expr", "value": expr_ir})
+            else:
+                return None
+        return {"type": "fstring", "parts": parts_ir}
+
+    elif isinstance(node, _ast.Starred):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "star", "value": value_ir}
+
+    elif isinstance(node, _ast.IfExp):
+        test_ir = _ast_to_rust_ir(node.test, metavar_map)
+        body_ir = _ast_to_rust_ir(node.body, metavar_map)
+        orelse_ir = _ast_to_rust_ir(node.orelse, metavar_map)
+        if test_ir is None or body_ir is None or orelse_ir is None:
+            return None
+        return {"type": "ifexp", "test": test_ir, "body": body_ir, "orelse": orelse_ir}
+
+    elif isinstance(node, _ast.Lambda):
+        # Build param patterns similar to FunctionDef
+        param_patterns = []
+        args = node.args
+        n_defaults = len(args.defaults)
+        n_args = len(args.args)
+        for i, p in enumerate(args.args):
+            default_idx = i - (n_args - n_defaults)
+            has_default = default_idx >= 0
+            if p.arg in metavar_map:
+                metavar = metavar_map[p.arg]
+                if metavar.ellipsis:
+                    param_patterns.append({"type": "ellipsis"})
+                else:
+                    param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "name", "value": p.arg})
+        if args.vararg:
+            if args.vararg.arg in metavar_map:
+                param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+        if args.kwarg:
+            if args.kwarg.arg in metavar_map:
+                param_patterns.append({"type": "any"})
+            else:
+                param_patterns.append({"type": "any"})
+        body_ir = _ast_to_rust_ir(node.body, metavar_map)
+        if body_ir is None:
+            return None
+        return {
+            "type": "lambda",
+            "params": param_patterns,
+            "body": body_ir,
+        }
+
+    elif isinstance(node, _ast.NamedExpr):
+        target_ir = _ast_to_rust_ir(node.target, metavar_map)
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if target_ir is None or value_ir is None:
+            return None
+        return {"type": "named_expr", "target": target_ir, "value": value_ir}
+
+    elif isinstance(node, _ast.If):
+        test_ir = _ast_to_rust_ir(node.test, metavar_map)
+        if test_ir is None:
+            return None
+        return {"type": "if_stmt", "test": test_ir}
+
+    elif isinstance(node, _ast.While):
+        test_ir = _ast_to_rust_ir(node.test, metavar_map)
+        if test_ir is None:
+            return None
+        return {"type": "while_stmt", "test": test_ir}
+
+    elif isinstance(node, _ast.For) or isinstance(node, _ast.AsyncFor):
+        target_ir = _ast_to_rust_ir(node.target, metavar_map)
+        iter_ir = _ast_to_rust_ir(node.iter, metavar_map)
+        if target_ir is None or iter_ir is None:
+            return None
+        return {
+            "type": "for_stmt",
+            "target": target_ir,
+            "iter": iter_ir,
+            "is_async": isinstance(node, _ast.AsyncFor),
+        }
+
+    elif isinstance(node, _ast.With) or isinstance(node, _ast.AsyncWith):
+        if not node.items:
+            return None
+        item = node.items[0]
+        ctx_ir = _ast_to_rust_ir(item.context_expr, metavar_map)
+        if ctx_ir is None:
+            return None
+        var_ir = None
+        if item.optional_vars:
+            var_ir = _ast_to_rust_ir(item.optional_vars, metavar_map)
+        return {
+            "type": "with_stmt",
+            "context": ctx_ir,
+            "var": var_ir,
+            "is_async": isinstance(node, _ast.AsyncWith),
+        }
+
+    elif isinstance(node, _ast.Try):
+        return {"type": "try_stmt"}
+
+    elif isinstance(node, _ast.ExceptHandler):
+        type_ir = None
+        if node.type:
+            type_ir = _ast_to_rust_ir(node.type, metavar_map)
+        name = node.name
+        name_ir = None
+        if name:
+            if name in metavar_map:
+                name_ir = {"type": "metavar", "name": metavar_map[name].name}
+            else:
+                name_ir = {"type": "name", "value": name}
+        return {"type": "except_handler", "exception_type": type_ir, "name": name_ir}
+
+    elif isinstance(node, _ast.Expr):
+        return _ast_to_rust_ir(node.value, metavar_map)
+
+    elif isinstance(node, _ast.Return):
+        value_ir = None
+        if node.value is not None:
+            value_ir = _ast_to_rust_ir(node.value, metavar_map)
+            if value_ir is None:
+                return None
+        return {"type": "return", "value": value_ir}
+
+    elif isinstance(node, _ast.Assert):
+        test_ir = _ast_to_rust_ir(node.test, metavar_map)
+        if test_ir is None:
+            return None
+        msg_ir = None
+        if node.msg is not None:
+            msg_ir = _ast_to_rust_ir(node.msg, metavar_map)
+            if msg_ir is None:
+                return None
+        return {"type": "assert", "test": test_ir, "msg": msg_ir}
+
+    elif isinstance(node, _ast.Raise):
+        exc_ir = None
+        if node.exc is not None:
+            exc_ir = _ast_to_rust_ir(node.exc, metavar_map)
+            if exc_ir is None:
+                return None
+        return {"type": "raise", "exc": exc_ir}
+
+    elif isinstance(node, _ast.Delete):
+        if len(node.targets) != 1:
+            return None
+        target_ir = _ast_to_rust_ir(node.targets[0], metavar_map)
+        if target_ir is None:
+            return None
+        return {"type": "delete", "target": target_ir}
+
+    elif isinstance(node, _ast.Global):
+        # Global has identifier names, but metavars need special handling
+        # If any name is a metavar, we can't express this as a simple name list
+        # Convert to a positional match
+        items_ir = []
+        for name in node.names:
+            if name in metavar_map:
+                metavar = metavar_map[name]
+                items_ir.append({"type": "metavar", "name": metavar.name})
+            else:
+                items_ir.append(name)
+        return {"type": "global", "names": items_ir}
+
+    elif isinstance(node, _ast.Nonlocal):
+        items_ir = []
+        for name in node.names:
+            if name in metavar_map:
+                metavar = metavar_map[name]
+                items_ir.append({"type": "metavar", "name": metavar.name})
+            else:
+                items_ir.append(name)
+        return {"type": "nonlocal", "names": items_ir}
+
+    elif isinstance(node, _ast.Await):
+        value_ir = _ast_to_rust_ir(node.value, metavar_map)
+        if value_ir is None:
+            return None
+        return {"type": "await", "value": value_ir}
+
+    elif isinstance(node, _ast.ImportFrom):
+        module = node.module
+        module_ir = None
+        if module is not None:
+            if module in metavar_map:
+                module_ir = {"type": "metavar", "name": metavar_map[module].name}
+            else:
+                module_ir = module
+        names = []
+        for alias in node.names:
+            name = alias.name
+            asname = alias.asname
+            name_ir = name
+            asname_ir = asname
+            if name in metavar_map:
+                name_ir = {"type": "metavar", "name": metavar_map[name].name}
+            if asname and asname in metavar_map:
+                asname_ir = {"type": "metavar", "name": metavar_map[asname].name}
+            names.append({"name": name_ir, "asname": asname_ir})
+        return {"type": "import_from", "module": module_ir, "names": names}
+
+    elif isinstance(node, _ast.Import):
+        names = []
+        for alias in node.names:
+            name = alias.name
+            asname = alias.asname
+            name_ir = name
+            asname_ir = asname
+            if name in metavar_map:
+                name_ir = {"type": "metavar", "name": metavar_map[name].name}
+            if asname and asname in metavar_map:
+                asname_ir = {"type": "metavar", "name": metavar_map[asname].name}
+            names.append({"name": name_ir, "asname": asname_ir})
+        return {"type": "import", "names": names}
+
+    return None
+
+
 def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
     """Compile a pattern string to Rust IR dict for the tree-sitter fast path."""
+    import ast as _ast
+
     try:
         pattern = parse_pattern(pattern_str)
         temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
@@ -1364,25 +2093,24 @@ def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
             parse_code = temp_code + "\n    pass"
 
         try:
-            expr = cst.parse_expression(parse_code)
-        except Exception:
+            tree = _ast.parse(parse_code, mode='eval')
+            expr = tree.body
+        except SyntaxError:
             try:
-                module = cst.parse_module(parse_code)
-                if module.body:
-                    expr = module.body[0]
-                    if isinstance(expr, cst.SimpleStatementLine) and len(expr.body) == 1:
-                        expr = expr.body[0]
-                    if is_try and isinstance(expr, cst.Try):
+                tree = _ast.parse(parse_code, mode='exec')
+                if tree.body:
+                    expr = tree.body[0]
+                    if is_try and isinstance(expr, _ast.Try):
                         pass
-                    elif is_except_header and isinstance(expr, cst.Try):
+                    elif is_except_header and isinstance(expr, _ast.Try):
                         if expr.handlers:
                             expr = expr.handlers[0]
                 else:
                     return None
-            except Exception:
+            except SyntaxError:
                 return None
 
-        return _cst_to_rust_ir(expr, metavar_map)
+        return _ast_to_rust_ir(expr, metavar_map)
 
     except Exception:
         return None

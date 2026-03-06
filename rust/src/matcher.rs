@@ -158,11 +158,114 @@ pub enum PatternNode {
     /// Type constraint: `:int`, `:str`, `:call`.
     TypeConstraint {
         kind: String,
+        name: Option<String>,
     },
     /// Dictionary literal: `{"a": 1, **extras}`.
     Dict(Vec<DictElementPattern>),
     /// Set literal: `{a, b, *c}`.
     Set(Vec<PatternNode>),
+    /// Return statement: `return value`.
+    Return {
+        value: Option<Box<PatternNode>>,
+    },
+    /// Assert statement: `assert test, msg`.
+    Assert {
+        test: Box<PatternNode>,
+        msg: Option<Box<PatternNode>>,
+    },
+    /// Raise statement: `raise exc`.
+    Raise {
+        exc: Option<Box<PatternNode>>,
+    },
+    /// Delete statement: `del target`.
+    Delete {
+        target: Box<PatternNode>,
+    },
+    /// Global statement: `global x, y`.
+    Global {
+        names: Vec<GlobalName>,
+    },
+    /// Nonlocal statement: `nonlocal x, y`.
+    Nonlocal {
+        names: Vec<GlobalName>,
+    },
+    /// Await expression: `await expr`.
+    Await {
+        value: Box<PatternNode>,
+    },
+    /// Ternary/conditional expression: `body if test else orelse`.
+    IfExp {
+        body: Box<PatternNode>,
+        test: Box<PatternNode>,
+        orelse: Box<PatternNode>,
+    },
+    /// Lambda expression: `lambda params: body`.
+    Lambda {
+        params: Vec<ParamPattern>,
+        body: Box<PatternNode>,
+    },
+    /// Walrus/named expression: `target := value`.
+    NamedExpr {
+        target: Box<PatternNode>,
+        value: Box<PatternNode>,
+    },
+    /// Import from: `from module import name`.
+    ImportFrom {
+        module: Option<NameOrMetavar>,
+        names: Vec<ImportAlias>,
+    },
+    /// Import: `import module`.
+    Import {
+        names: Vec<ImportAlias>,
+    },
+    /// If statement header: `if condition:`.
+    IfStmt {
+        test: Box<PatternNode>,
+    },
+    /// While statement header: `while condition:`.
+    WhileStmt {
+        test: Box<PatternNode>,
+    },
+    /// For statement: `for target in iter:`.
+    ForStmt {
+        target: Box<PatternNode>,
+        iter: Box<PatternNode>,
+        is_async: bool,
+    },
+    /// With statement: `with context as var:`.
+    WithStmt {
+        context: Box<PatternNode>,
+        var: Option<Box<PatternNode>>,
+        is_async: bool,
+    },
+    /// Try statement: `try:`.
+    TryStmt,
+    /// Except handler: `except Type as name:`.
+    ExceptHandler {
+        exception_type: Option<Box<PatternNode>>,
+        name: Option<Box<PatternNode>>,
+    },
+}
+
+/// Name in global/nonlocal statement: either literal or metavar.
+#[derive(Debug, Clone)]
+pub enum GlobalName {
+    Literal(String),
+    Metavar(String),
+}
+
+/// A name that can be either a literal string or a metavar.
+#[derive(Debug, Clone)]
+pub enum NameOrMetavar {
+    Literal(String),
+    Metavar(String),
+}
+
+/// Import alias: `name as asname`.
+#[derive(Debug, Clone)]
+pub struct ImportAlias {
+    pub name: NameOrMetavar,
+    pub asname: Option<NameOrMetavar>,
 }
 
 /// Part of a dictionary literal.
@@ -216,6 +319,41 @@ fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenera
         ifs.push(deserialize_pattern(&item)?);
     }
     Ok(ComprehensionGenerator { target, iter, ifs })
+}
+
+fn deserialize_param_pattern(obj: &Bound<'_, PyAny>) -> PyResult<ParamPattern> {
+    let item_d = obj.downcast::<PyDict>()?;
+    let param_type: String = item_d
+        .get_item("type")?
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Param missing 'type'")
+        })?
+        .extract()?;
+    match param_type.as_str() {
+        "ellipsis" => {
+            if let Some(name_obj) = item_d.get_item("name")? {
+                let name: String = name_obj.extract()?;
+                Ok(ParamPattern::EllipsisMetavar(name))
+            } else {
+                Ok(ParamPattern::Ellipsis)
+            }
+        }
+        "any" => Ok(ParamPattern::Any),
+        "with_default" => {
+            let dv_obj = item_d.get_item("default_value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "WithDefault missing 'default_value'",
+                )
+            })?;
+            let dv = deserialize_pattern(&dv_obj)?;
+            Ok(ParamPattern::WithDefault(Box::new(dv)))
+        }
+        "name" => {
+            // Exact name match — treat as Any for now since params match by position
+            Ok(ParamPattern::Any)
+        }
+        _ => Ok(ParamPattern::Any),
+    }
 }
 
 fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
@@ -734,7 +872,12 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let kind: String = d.get_item("kind")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("TypeConstraint missing 'kind'")
             })?.extract()?;
-            Ok(PatternNode::TypeConstraint { kind })
+            let name: Option<String> = if let Some(n) = d.get_item("name")? {
+                if n.is_none() { None } else { Some(n.extract()?) }
+            } else {
+                None
+            };
+            Ok(PatternNode::TypeConstraint { kind, name })
         }
 
         "dict" => {
@@ -786,6 +929,340 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 elements.push(deserialize_pattern(&item)?);
             }
             Ok(PatternNode::Set(elements))
+        }
+
+        "return" => {
+            let value = if let Some(val_obj) = d.get_item("value")? {
+                if val_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&val_obj)?)) }
+            } else {
+                None
+            };
+            Ok(PatternNode::Return { value })
+        }
+
+        "assert" => {
+            let test_obj = d.get_item("test")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Assert missing 'test'")
+            })?;
+            let test = deserialize_pattern(&test_obj)?;
+            let msg = if let Some(msg_obj) = d.get_item("msg")? {
+                if msg_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&msg_obj)?)) }
+            } else {
+                None
+            };
+            Ok(PatternNode::Assert { test: Box::new(test), msg })
+        }
+
+        "raise" => {
+            let exc = if let Some(exc_obj) = d.get_item("exc")? {
+                if exc_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&exc_obj)?)) }
+            } else {
+                None
+            };
+            Ok(PatternNode::Raise { exc })
+        }
+
+        "delete" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Delete missing 'target'")
+            })?;
+            Ok(PatternNode::Delete { target: Box::new(deserialize_pattern(&target_obj)?) })
+        }
+
+        "global" => {
+            let names_obj = d.get_item("names")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Global missing 'names'")
+            })?;
+            let names_list = names_obj.downcast::<PyList>()?;
+            let mut names = Vec::new();
+            for item in names_list.iter() {
+                if let Ok(s) = item.extract::<String>() {
+                    names.push(GlobalName::Literal(s));
+                } else if let Ok(item_d) = item.downcast::<PyDict>() {
+                    let t: String = item_d.get_item("type")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                    })?.extract()?;
+                    if t == "metavar" {
+                        let name: String = item_d.get_item("name")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                        })?.extract()?;
+                        names.push(GlobalName::Metavar(name));
+                    }
+                }
+            }
+            Ok(PatternNode::Global { names })
+        }
+
+        "nonlocal" => {
+            let names_obj = d.get_item("names")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Nonlocal missing 'names'")
+            })?;
+            let names_list = names_obj.downcast::<PyList>()?;
+            let mut names = Vec::new();
+            for item in names_list.iter() {
+                if let Ok(s) = item.extract::<String>() {
+                    names.push(GlobalName::Literal(s));
+                } else if let Ok(item_d) = item.downcast::<PyDict>() {
+                    let t: String = item_d.get_item("type")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                    })?.extract()?;
+                    if t == "metavar" {
+                        let name: String = item_d.get_item("name")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                        })?.extract()?;
+                        names.push(GlobalName::Metavar(name));
+                    }
+                }
+            }
+            Ok(PatternNode::Nonlocal { names })
+        }
+
+        "await" => {
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Await missing 'value'")
+            })?;
+            Ok(PatternNode::Await { value: Box::new(deserialize_pattern(&value_obj)?) })
+        }
+
+        "ifexp" => {
+            let body_obj = d.get_item("body")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("IfExp missing 'body'")
+            })?;
+            let test_obj = d.get_item("test")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("IfExp missing 'test'")
+            })?;
+            let orelse_obj = d.get_item("orelse")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("IfExp missing 'orelse'")
+            })?;
+            Ok(PatternNode::IfExp {
+                body: Box::new(deserialize_pattern(&body_obj)?),
+                test: Box::new(deserialize_pattern(&test_obj)?),
+                orelse: Box::new(deserialize_pattern(&orelse_obj)?),
+            })
+        }
+
+        "lambda" => {
+            let params_obj = d.get_item("params")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Lambda missing 'params'")
+            })?;
+            let params_list = params_obj.downcast::<PyList>()?;
+            let mut params = Vec::new();
+            for item in params_list.iter() {
+                params.push(deserialize_param_pattern(&item)?);
+            }
+            let body_obj = d.get_item("body")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Lambda missing 'body'")
+            })?;
+            Ok(PatternNode::Lambda {
+                params,
+                body: Box::new(deserialize_pattern(&body_obj)?),
+            })
+        }
+
+        "named_expr" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("NamedExpr missing 'target'")
+            })?;
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("NamedExpr missing 'value'")
+            })?;
+            Ok(PatternNode::NamedExpr {
+                target: Box::new(deserialize_pattern(&target_obj)?),
+                value: Box::new(deserialize_pattern(&value_obj)?),
+            })
+        }
+
+        "import_from" => {
+            let module: Option<NameOrMetavar> = if let Some(mod_obj) = d.get_item("module")? {
+                if mod_obj.is_none() {
+                    None
+                } else if let Ok(s) = mod_obj.extract::<String>() {
+                    Some(NameOrMetavar::Literal(s))
+                } else if let Ok(mod_d) = mod_obj.downcast::<PyDict>() {
+                    let t: String = mod_d.get_item("type")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                    })?.extract()?;
+                    if t == "metavar" {
+                        let n: String = mod_d.get_item("name")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                        })?.extract()?;
+                        Some(NameOrMetavar::Metavar(n))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let names_obj = d.get_item("names")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportFrom missing 'names'")
+            })?;
+            let names_list = names_obj.downcast::<PyList>()?;
+            let mut names = Vec::new();
+            for item in names_list.iter() {
+                let item_d = item.downcast::<PyDict>()?;
+                let name_obj = item_d.get_item("name")?.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportAlias missing 'name'")
+                })?;
+                let name = if let Ok(s) = name_obj.extract::<String>() {
+                    NameOrMetavar::Literal(s)
+                } else if let Ok(n_d) = name_obj.downcast::<PyDict>() {
+                    let t: String = n_d.get_item("type")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                    })?.extract()?;
+                    if t == "metavar" {
+                        let n: String = n_d.get_item("name")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                        })?.extract()?;
+                        NameOrMetavar::Metavar(n)
+                    } else {
+                        NameOrMetavar::Literal(name_obj.str()?.to_string())
+                    }
+                } else {
+                    NameOrMetavar::Literal(name_obj.str()?.to_string())
+                };
+                let asname: Option<NameOrMetavar> = if let Some(a) = item_d.get_item("asname")? {
+                    if a.is_none() {
+                        None
+                    } else if let Ok(s) = a.extract::<String>() {
+                        Some(NameOrMetavar::Literal(s))
+                    } else if let Ok(a_d) = a.downcast::<PyDict>() {
+                        let t: String = a_d.get_item("type")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                        })?.extract()?;
+                        if t == "metavar" {
+                            let n: String = a_d.get_item("name")?.ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                            })?.extract()?;
+                            Some(NameOrMetavar::Metavar(n))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                names.push(ImportAlias { name, asname });
+            }
+            Ok(PatternNode::ImportFrom { module, names })
+        }
+
+        "import" => {
+            let names_obj = d.get_item("names")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Import missing 'names'")
+            })?;
+            let names_list = names_obj.downcast::<PyList>()?;
+            let mut names = Vec::new();
+            for item in names_list.iter() {
+                let item_d = item.downcast::<PyDict>()?;
+                let name_obj = item_d.get_item("name")?.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportAlias missing 'name'")
+                })?;
+                let name = if let Ok(s) = name_obj.extract::<String>() {
+                    NameOrMetavar::Literal(s)
+                } else if let Ok(n_d) = name_obj.downcast::<PyDict>() {
+                    let t: String = n_d.get_item("type")?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                    })?.extract()?;
+                    if t == "metavar" {
+                        let n: String = n_d.get_item("name")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                        })?.extract()?;
+                        NameOrMetavar::Metavar(n)
+                    } else {
+                        NameOrMetavar::Literal(name_obj.str()?.to_string())
+                    }
+                } else {
+                    NameOrMetavar::Literal(name_obj.str()?.to_string())
+                };
+                let asname: Option<NameOrMetavar> = if let Some(a) = item_d.get_item("asname")? {
+                    if a.is_none() {
+                        None
+                    } else if let Ok(s) = a.extract::<String>() {
+                        Some(NameOrMetavar::Literal(s))
+                    } else if let Ok(a_d) = a.downcast::<PyDict>() {
+                        let t: String = a_d.get_item("type")?.ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
+                        })?.extract()?;
+                        if t == "metavar" {
+                            let n: String = a_d.get_item("name")?.ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>("missing name")
+                            })?.extract()?;
+                            Some(NameOrMetavar::Metavar(n))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                names.push(ImportAlias { name, asname });
+            }
+            Ok(PatternNode::Import { names })
+        }
+
+        "if_stmt" => {
+            let test_obj = d.get_item("test")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("IfStmt missing 'test'")
+            })?;
+            Ok(PatternNode::IfStmt { test: Box::new(deserialize_pattern(&test_obj)?) })
+        }
+
+        "while_stmt" => {
+            let test_obj = d.get_item("test")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("WhileStmt missing 'test'")
+            })?;
+            Ok(PatternNode::WhileStmt { test: Box::new(deserialize_pattern(&test_obj)?) })
+        }
+
+        "for_stmt" => {
+            let target_obj = d.get_item("target")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("ForStmt missing 'target'")
+            })?;
+            let iter_obj = d.get_item("iter")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("ForStmt missing 'iter'")
+            })?;
+            let is_async = if let Some(v) = d.get_item("is_async")? { v.extract::<bool>().unwrap_or(false) } else { false };
+            Ok(PatternNode::ForStmt {
+                target: Box::new(deserialize_pattern(&target_obj)?),
+                iter: Box::new(deserialize_pattern(&iter_obj)?),
+                is_async,
+            })
+        }
+
+        "with_stmt" => {
+            let ctx_obj = d.get_item("context")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("WithStmt missing 'context'")
+            })?;
+            let var = if let Some(v_obj) = d.get_item("var")? {
+                if v_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&v_obj)?)) }
+            } else {
+                None
+            };
+            let is_async = if let Some(v) = d.get_item("is_async")? { v.extract::<bool>().unwrap_or(false) } else { false };
+            Ok(PatternNode::WithStmt { context: Box::new(deserialize_pattern(&ctx_obj)?), var, is_async })
+        }
+
+        "try_stmt" => Ok(PatternNode::TryStmt),
+
+        "except_handler" => {
+            let exc_type = if let Some(t_obj) = d.get_item("exception_type")? {
+                if t_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&t_obj)?)) }
+            } else {
+                None
+            };
+            let name = if let Some(n_obj) = d.get_item("name")? {
+                if n_obj.is_none() { None } else { Some(Box::new(deserialize_pattern(&n_obj)?)) }
+            } else {
+                None
+            };
+            Ok(PatternNode::ExceptHandler { exception_type: exc_type, name })
         }
 
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1435,15 +1912,39 @@ fn matches_node<'a>(
             }
         }
 
-        PatternNode::TypeConstraint { kind } => {
-            let matched = match kind.as_str() {
+        PatternNode::TypeConstraint { kind, name } => {
+            let (negated, inner_kind) = if kind.starts_with('!') {
+                (true, &kind[1..])
+            } else {
+                (false, kind.as_str())
+            };
+            let type_match = match inner_kind {
                 "int" => node.kind() == "integer",
                 "str" => node.kind() == "string" || node.kind() == "concatenated_string",
                 "call" => node.kind() == "call",
                 "float" => node.kind() == "float",
+                "identifier" => node.kind() == "identifier",
+                "attr" => node.kind() == "attribute",
+                "stmt" => matches!(node.kind(),
+                    "expression_statement" | "return_statement" | "assert_statement"
+                    | "raise_statement" | "delete_statement" | "pass_statement"
+                    | "break_statement" | "continue_statement" | "global_statement"
+                    | "nonlocal_statement" | "import_statement" | "import_from_statement"
+                    | "if_statement" | "for_statement" | "while_statement"
+                    | "try_statement" | "with_statement" | "function_definition"
+                    | "class_definition" | "decorated_definition" | "assignment"
+                    | "augmented_assignment"),
                 _ => false,
             };
-            if matched { Some(node) } else { None }
+            let matched = if negated { !type_match } else { type_match };
+            if matched {
+                if let Some(n) = name {
+                    captures.insert(n.clone(), node_text(node, source).to_string());
+                }
+                Some(node)
+            } else {
+                None
+            }
         }
 
         PatternNode::Assign { target, value } => {
@@ -1514,6 +2015,450 @@ fn matches_node<'a>(
             } else {
                 None
             }
+        }
+
+        PatternNode::Return { value } => {
+            if node.kind() != "return_statement" {
+                return None;
+            }
+            match value {
+                Some(val_pattern) => {
+                    // Find the value child (skip the 'return' keyword)
+                    let mut cursor = node.walk();
+                    let val_node = node.children(&mut cursor)
+                        .find(|n| n.is_named());
+                    match val_node {
+                        Some(vn) => {
+                            if matches_node(vn, source, val_pattern, captures).is_some() {
+                                Some(node)
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                }
+                None => Some(node),
+            }
+        }
+
+        PatternNode::Assert { test, msg } => {
+            if node.kind() != "assert_statement" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let named_children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if named_children.is_empty() {
+                return None;
+            }
+            if matches_node(named_children[0], source, test, captures).is_none() {
+                return None;
+            }
+            if let Some(msg_pattern) = msg {
+                if named_children.len() < 2 {
+                    return None;
+                }
+                if matches_node(named_children[1], source, msg_pattern, captures).is_none() {
+                    return None;
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::Raise { exc } => {
+            if node.kind() != "raise_statement" {
+                return None;
+            }
+            match exc {
+                Some(exc_pattern) => {
+                    let mut cursor = node.walk();
+                    let exc_node = node.children(&mut cursor)
+                        .find(|n| n.is_named());
+                    match exc_node {
+                        Some(en) => {
+                            if matches_node(en, source, exc_pattern, captures).is_some() {
+                                Some(node)
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                }
+                None => Some(node),
+            }
+        }
+
+        PatternNode::Delete { target } => {
+            if node.kind() != "delete_statement" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let target_node = node.children(&mut cursor)
+                .find(|n| n.is_named());
+            match target_node {
+                Some(tn) => {
+                    if matches_node(tn, source, target, captures).is_some() {
+                        Some(node)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        }
+
+        PatternNode::Global { names } => {
+            if node.kind() != "global_statement" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let named_children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if named_children.len() != names.len() {
+                return None;
+            }
+            for (child, expected) in named_children.iter().zip(names.iter()) {
+                match expected {
+                    GlobalName::Literal(name) => {
+                        if node_text(*child, source) != name.as_str() {
+                            return None;
+                        }
+                    }
+                    GlobalName::Metavar(name) => {
+                        captures.insert(name.clone(), node_text(*child, source).to_string());
+                    }
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::Nonlocal { names } => {
+            if node.kind() != "nonlocal_statement" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let named_children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if named_children.len() != names.len() {
+                return None;
+            }
+            for (child, expected) in named_children.iter().zip(names.iter()) {
+                match expected {
+                    GlobalName::Literal(name) => {
+                        if node_text(*child, source) != name.as_str() {
+                            return None;
+                        }
+                    }
+                    GlobalName::Metavar(name) => {
+                        captures.insert(name.clone(), node_text(*child, source).to_string());
+                    }
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::Await { value } => {
+            if node.kind() != "await" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let val_node = node.children(&mut cursor)
+                .find(|n| n.is_named());
+            match val_node {
+                Some(vn) => {
+                    if matches_node(vn, source, value, captures).is_some() {
+                        Some(node)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        }
+
+        PatternNode::IfExp { body, test, orelse } => {
+            if node.kind() != "conditional_expression" {
+                return None;
+            }
+            // tree-sitter: conditional_expression has no named fields
+            // Children (named): body_expr, test_expr, orelse_expr
+            let mut cursor = node.walk();
+            let named_children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if named_children.len() < 3 {
+                return None;
+            }
+            if matches_node(named_children[0], source, body, captures).is_none() {
+                return None;
+            }
+            if matches_node(named_children[1], source, test, captures).is_none() {
+                return None;
+            }
+            if matches_node(named_children[2], source, orelse, captures).is_none() {
+                return None;
+            }
+            Some(node)
+        }
+
+        PatternNode::Lambda { params, body } => {
+            if node.kind() != "lambda" {
+                return None;
+            }
+            // Match lambda body
+            let body_node = match node.child_by_field_name("body") {
+                Some(n) => n,
+                None => return None,
+            };
+            if matches_node(body_node, source, body, captures).is_none() {
+                return None;
+            }
+            // Match params
+            if params.is_empty() {
+                // Pattern has no params — lambda must also have no params
+                if node.child_by_field_name("parameters").is_some() {
+                    return None;
+                }
+            } else {
+                let params_node = match node.child_by_field_name("parameters") {
+                    Some(n) => n,
+                    None => {
+                        // No params in lambda but pattern expects some
+                        return None;
+                    }
+                };
+                let param_children = collect_params(params_node);
+                if !match_params(params, &param_children, source, captures) {
+                    return None;
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::NamedExpr { target, value } => {
+            if node.kind() != "named_expression" {
+                return None;
+            }
+            let name_node = match node.child_by_field_name("name") {
+                Some(n) => n,
+                None => return None,
+            };
+            let value_node = match node.child_by_field_name("value") {
+                Some(n) => n,
+                None => return None,
+            };
+            if matches_node(name_node, source, target, captures).is_none() {
+                return None;
+            }
+            if matches_node(value_node, source, value, captures).is_none() {
+                return None;
+            }
+            Some(node)
+        }
+
+        PatternNode::ImportFrom { module, names } => {
+            if node.kind() != "import_from_statement" {
+                return None;
+            }
+            // Check module name if specified
+            if let Some(mod_ref) = module {
+                let mod_node = match node.child_by_field_name("module_name") {
+                    Some(n) => n,
+                    None => return None,
+                };
+                let actual_mod = node_text(mod_node, source);
+                match mod_ref {
+                    NameOrMetavar::Literal(expected) => {
+                        if actual_mod != expected.as_str() {
+                            return None;
+                        }
+                    }
+                    NameOrMetavar::Metavar(name) => {
+                        captures.insert(name.clone(), actual_mod.to_string());
+                    }
+                }
+            }
+            // Match import names using the "name" field
+            let mut cursor = node.walk();
+            let import_names: Vec<Node> = node.children_by_field_name("name", &mut cursor).collect();
+
+            if names.len() > import_names.len() {
+                return None;
+            }
+            for (alias, imp_node) in names.iter().zip(import_names.iter()) {
+                if !match_import_alias(alias, *imp_node, source, captures) {
+                    return None;
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::Import { names } => {
+            if node.kind() != "import_statement" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let import_nodes: Vec<Node> = node.children_by_field_name("name", &mut cursor).collect();
+            if names.len() > import_nodes.len() {
+                return None;
+            }
+            for (alias, imp_node) in names.iter().zip(import_nodes.iter()) {
+                if !match_import_alias(alias, *imp_node, source, captures) {
+                    return None;
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::IfStmt { test } => {
+            if node.kind() != "if_statement" {
+                return None;
+            }
+            let cond = match node.child_by_field_name("condition") {
+                Some(n) => n,
+                None => return None,
+            };
+            if matches_node(cond, source, test, captures).is_some() {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::WhileStmt { test } => {
+            if node.kind() != "while_statement" {
+                return None;
+            }
+            let cond = match node.child_by_field_name("condition") {
+                Some(n) => n,
+                None => return None,
+            };
+            if matches_node(cond, source, test, captures).is_some() {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::ForStmt { target, iter, is_async } => {
+            let expected_kind = if *is_async { "for_statement" } else { "for_statement" };
+            if node.kind() != expected_kind {
+                return None;
+            }
+            // Check async: async for is wrapped in a for_statement under an "async" keyword
+            // In tree-sitter Python, async for is still "for_statement" but may have
+            // an async parent. For pattern matching, we check the node text.
+            if *is_async && !node_text(node, source).starts_with("async") {
+                return None;
+            }
+            let left = match node.child_by_field_name("left") {
+                Some(n) => n,
+                None => return None,
+            };
+            let right = match node.child_by_field_name("right") {
+                Some(n) => n,
+                None => return None,
+            };
+            if matches_node(left, source, target, captures).is_none() {
+                return None;
+            }
+            if matches_node(right, source, iter, captures).is_none() {
+                return None;
+            }
+            Some(node)
+        }
+
+        PatternNode::WithStmt { context, var, is_async } => {
+            if node.kind() != "with_statement" {
+                return None;
+            }
+            if *is_async && !node_text(node, source).starts_with("async") {
+                return None;
+            }
+            // with_statement has with_clause children which contain with_item nodes
+            let mut cursor = node.walk();
+            let with_items: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.kind() == "with_clause" || n.kind() == "with_item")
+                .flat_map(|n| {
+                    if n.kind() == "with_clause" {
+                        let mut c = n.walk();
+                        n.children(&mut c).filter(|n| n.kind() == "with_item").collect::<Vec<_>>()
+                    } else {
+                        vec![n]
+                    }
+                })
+                .collect();
+            if with_items.is_empty() {
+                return None;
+            }
+            let item = with_items[0];
+            // with_item has "value" field (context expr) and optional "alias" field (as var)
+            let ctx_node = if let Some(n) = item.child_by_field_name("value") {
+                n
+            } else {
+                // Fallback: first named child of with_item
+                let mut c2 = item.walk();
+                let first_named = item.children(&mut c2).find(|n| n.is_named());
+                match first_named {
+                    Some(n) => n,
+                    None => return None,
+                }
+            };
+            if matches_node(ctx_node, source, context, captures).is_none() {
+                return None;
+            }
+            if let Some(var_pattern) = var {
+                let alias_node = item.child_by_field_name("alias");
+                match alias_node {
+                    Some(an) => {
+                        if matches_node(an, source, var_pattern, captures).is_none() {
+                            return None;
+                        }
+                    }
+                    None => return None,
+                }
+            }
+            Some(node)
+        }
+
+        PatternNode::TryStmt => {
+            if node.kind() == "try_statement" {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::ExceptHandler { exception_type, name } => {
+            if node.kind() != "except_clause" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let named_children: Vec<Node> = node.children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if let Some(type_pattern) = exception_type {
+                if named_children.is_empty() {
+                    return None;
+                }
+                if matches_node(named_children[0], source, type_pattern, captures).is_none() {
+                    return None;
+                }
+            }
+            if let Some(name_pattern) = name {
+                if named_children.len() < 2 {
+                    return None;
+                }
+                if matches_node(named_children[1], source, name_pattern, captures).is_none() {
+                    return None;
+                }
+            }
+            Some(node)
         }
     }
 }
@@ -1983,6 +2928,53 @@ fn match_dict_element(
 // ---------------------------------------------------------------------------
 // Tree walker with ancestor tracking
 // ---------------------------------------------------------------------------
+
+fn match_import_alias<'a>(
+    alias: &ImportAlias,
+    imp_node: Node<'a>,
+    source: &[u8],
+    captures: &mut HashMap<String, String>,
+) -> bool {
+    let imp_text = node_text(imp_node, source);
+    // Check if the import node is an aliased import (has " as ")
+    let (actual_name, actual_alias) = if imp_node.kind() == "aliased_import" {
+        if let Some(pos) = imp_text.find(" as ") {
+            (&imp_text[..pos], Some(&imp_text[pos + 4..]))
+        } else {
+            (imp_text, None)
+        }
+    } else {
+        (imp_text, None)
+    };
+
+    // Match the name part
+    match &alias.name {
+        NameOrMetavar::Literal(expected) => {
+            if actual_name != expected.as_str() {
+                return false;
+            }
+        }
+        NameOrMetavar::Metavar(mv_name) => {
+            captures.insert(mv_name.clone(), actual_name.to_string());
+        }
+    }
+
+    // Match the asname part
+    match (&alias.asname, actual_alias) {
+        (None, None) => {} // both have no alias
+        (None, Some(_)) => return false, // pattern has no alias but source does
+        (Some(_), None) => return false, // pattern expects alias but source doesn't
+        (Some(NameOrMetavar::Literal(expected)), Some(actual)) => {
+            if actual != expected.as_str() {
+                return false;
+            }
+        }
+        (Some(NameOrMetavar::Metavar(mv_name)), Some(actual)) => {
+            captures.insert(mv_name.clone(), actual.to_string());
+        }
+    }
+    true
+}
 
 fn walk_with_ancestors<'a, F>(
     node: Node<'a>,
