@@ -245,6 +245,8 @@ pub enum PatternNode {
         exception_type: Option<Box<PatternNode>>,
         name: Option<Box<PatternNode>>,
     },
+    /// Match any of these node kinds (used for constraint matching).
+    NodeKindMatch(Vec<String>),
 }
 
 /// Name in global/nonlocal statement: either literal or metavar.
@@ -853,7 +855,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 let part_type: String = item_d.get_item("type")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("FString part missing 'type'")
                 })?.extract()?;
-                if part_type == "text" {
+                if part_type == "text" || part_type == "fstring_text" {
                     let text: String = item_d.get_item("value")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("FString text missing 'value'")
                     })?.extract()?;
@@ -1265,6 +1267,20 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             Ok(PatternNode::ExceptHandler { exception_type: exc_type, name })
         }
 
+        "node_kind_match" => {
+            let kinds_obj = d.get_item("kinds")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("NodeKindMatch missing 'kinds'")
+            })?;
+            let kinds_list: &Bound<'_, PyList> = kinds_obj.downcast::<PyList>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("NodeKindMatch 'kinds' must be a list")
+            })?;
+            let kinds: Vec<String> = kinds_list
+                .iter()
+                .map(|item| item.extract::<String>())
+                .collect::<PyResult<Vec<String>>>()?;
+            Ok(PatternNode::NodeKindMatch(kinds))
+        }
+
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Unknown pattern type: {}",
             type_str
@@ -1315,6 +1331,26 @@ fn matches_node<'a>(
     pattern: &PatternNode,
     captures: &mut HashMap<String, String>,
 ) -> Option<Node<'a>> {
+    // Unwrap parenthesized_expression for specific pattern types that look "through" parens.
+    // For AnyExpr/Metavar/Ellipsis, we match the outer parenthesized node directly.
+    if node.kind() == "parenthesized_expression" {
+        match pattern {
+            PatternNode::AnyExpr | PatternNode::Metavar(_)
+            | PatternNode::Ellipsis | PatternNode::EllipsisMetavar(_) => {}
+            _ => {
+                // Try matching the inner expression
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        if let Some(result) = matches_node(child, source, pattern, captures) {
+                            return Some(result);
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+    }
     match pattern {
         PatternNode::AnyExpr => Some(node),
         PatternNode::Metavar(name) => {
@@ -1374,11 +1410,24 @@ fn matches_node<'a>(
             }
             match node.child_by_field_name("arguments") {
                 Some(arg_list) => {
-                    let call_args = collect_call_args(arg_list);
-                    if match_args(args, &call_args, source, *exact_args, captures) {
-                        Some(node)
+                    // In tree-sitter-python, `any(x for x in items)` uses
+                    // a generator_expression directly as the arguments field
+                    // instead of an argument_list node.
+                    if arg_list.kind() == "generator_expression" {
+                        // Treat the genexp as a single argument
+                        let call_args = vec![arg_list];
+                        if match_args(args, &call_args, source, *exact_args, captures) {
+                            Some(node)
+                        } else {
+                            None
+                        }
                     } else {
-                        None
+                        let call_args = collect_call_args(arg_list);
+                        if match_args(args, &call_args, source, *exact_args, captures) {
+                            Some(node)
+                        } else {
+                            None
+                        }
                     }
                 }
                 None => {
@@ -1631,7 +1680,7 @@ fn matches_node<'a>(
         }
 
         PatternNode::Tuple(elems) => {
-            if node.kind() != "tuple" && node.kind() != "expression_list" {
+            if node.kind() != "tuple" && node.kind() != "expression_list" && node.kind() != "pattern_list" && node.kind() != "tuple_pattern" {
                 return None;
             }
             let mut tuple_elems: Vec<Node> = {
@@ -1861,12 +1910,26 @@ fn matches_node<'a>(
             if matches_node(body_node, source, elt, captures).is_none() {
                 return None;
             }
+            // In tree-sitter-python, for_in_clause and if_clause are
+            // siblings under the comprehension node.  Group each
+            // for_in_clause with the if_clauses that follow it (up to
+            // the next for_in_clause).
             let mut cursor = node.walk();
-            let gen_nodes: Vec<Node> = node
+            let clause_children: Vec<Node> = node
                 .children(&mut cursor)
-                .filter(|n| n.kind() == "for_in_clause")
+                .filter(|n| n.kind() == "for_in_clause" || n.kind() == "if_clause")
                 .collect();
-            if match_generators(generators, &gen_nodes, source, captures) {
+            let mut gen_groups: Vec<(Node, Vec<Node>)> = Vec::new();
+            for child in &clause_children {
+                if child.kind() == "for_in_clause" {
+                    gen_groups.push((*child, Vec::new()));
+                } else if child.kind() == "if_clause" {
+                    if let Some(last) = gen_groups.last_mut() {
+                        last.1.push(*child);
+                    }
+                }
+            }
+            if match_generators_with_ifs(generators, &gen_groups, source, captures) {
                 Some(node)
             } else {
                 None
@@ -1881,11 +1944,16 @@ fn matches_node<'a>(
             if node.kind() != "dictionary_comprehension" {
                 return None;
             }
-            let key_node = match node.child_by_field_name("key") {
+            // dict comprehension body is a "pair" node with key/value fields
+            let body_node = match node.child_by_field_name("body") {
                 Some(n) => n,
                 None => return None,
             };
-            let value_node = match node.child_by_field_name("value") {
+            let key_node = match body_node.child_by_field_name("key") {
+                Some(n) => n,
+                None => return None,
+            };
+            let value_node = match body_node.child_by_field_name("value") {
                 Some(n) => n,
                 None => return None,
             };
@@ -1893,11 +1961,21 @@ fn matches_node<'a>(
                 return None;
             }
             let mut cursor = node.walk();
-            let gen_nodes: Vec<Node> = node
+            let clause_children: Vec<Node> = node
                 .children(&mut cursor)
-                .filter(|n| n.kind() == "for_in_clause")
+                .filter(|n| n.kind() == "for_in_clause" || n.kind() == "if_clause")
                 .collect();
-            if match_generators(generators, &gen_nodes, source, captures) {
+            let mut gen_groups: Vec<(Node, Vec<Node>)> = Vec::new();
+            for child in &clause_children {
+                if child.kind() == "for_in_clause" {
+                    gen_groups.push((*child, Vec::new()));
+                } else if child.kind() == "if_clause" {
+                    if let Some(last) = gen_groups.last_mut() {
+                        last.1.push(*child);
+                    }
+                }
+            }
+            if match_generators_with_ifs(generators, &gen_groups, source, captures) {
                 Some(node)
             } else {
                 None
@@ -2381,46 +2459,64 @@ fn matches_node<'a>(
                 return None;
             }
             // with_statement has with_clause children which contain with_item nodes
+            let mut with_items: Vec<Node> = Vec::new();
             let mut cursor = node.walk();
-            let with_items: Vec<Node> = node.children(&mut cursor)
-                .filter(|n| n.kind() == "with_clause" || n.kind() == "with_item")
-                .flat_map(|n| {
-                    if n.kind() == "with_clause" {
-                        let mut c = n.walk();
-                        n.children(&mut c).filter(|n| n.kind() == "with_item").collect::<Vec<_>>()
-                    } else {
-                        vec![n]
+            for child in node.children(&mut cursor) {
+                if child.kind() == "with_item" {
+                    with_items.push(child);
+                } else if child.kind() == "with_clause" {
+                    let mut c2 = child.walk();
+                    for grandchild in child.children(&mut c2) {
+                        if grandchild.kind() == "with_item" {
+                            with_items.push(grandchild);
+                        }
                     }
-                })
-                .collect();
+                }
+            }
             if with_items.is_empty() {
                 return None;
             }
             let item = with_items[0];
-            // with_item has "value" field (context expr) and optional "alias" field (as var)
-            let ctx_node = if let Some(n) = item.child_by_field_name("value") {
-                n
-            } else {
-                // Fallback: first named child of with_item
-                let mut c2 = item.walk();
-                let first_named = item.children(&mut c2).find(|n| n.is_named());
-                match first_named {
-                    Some(n) => n,
-                    None => return None,
-                }
+            // with_item has "value" field (context expr); the "as var" part is the
+            // second named child (after the expression).
+            // with_item has "value" field which is either a plain expression
+            // or an as_pattern node (for "with expr as var:" syntax).
+            let value_node = match item.child_by_field_name("value") {
+                Some(n) => n,
+                None => return None,
             };
-            if matches_node(ctx_node, source, context, captures).is_none() {
-                return None;
-            }
-            if let Some(var_pattern) = var {
-                let alias_node = item.child_by_field_name("alias");
-                match alias_node {
-                    Some(an) => {
-                        if matches_node(an, source, var_pattern, captures).is_none() {
-                            return None;
-                        }
-                    }
+            if value_node.kind() == "as_pattern" {
+                // "with expr as var:" — as_pattern has the expression and alias
+                let mut c3 = value_node.walk();
+                let named_children: Vec<Node> = value_node.children(&mut c3)
+                    .filter(|n| n.is_named())
+                    .collect();
+                let expr_node = match named_children.first() {
+                    Some(n) => *n,
                     None => return None,
+                };
+                if matches_node(expr_node, source, context, captures).is_none() {
+                    return None;
+                }
+                if let Some(var_pattern) = var {
+                    let alias_node = value_node.child_by_field_name("alias");
+                    match alias_node {
+                        Some(an) => {
+                            if matches_node(an, source, var_pattern, captures).is_none() {
+                                return None;
+                            }
+                        }
+                        None => return None,
+                    }
+                }
+            } else {
+                // "with expr:" — no as clause
+                if matches_node(value_node, source, context, captures).is_none() {
+                    return None;
+                }
+                if var.is_some() {
+                    // Pattern requires "as var" but statement doesn't have one
+                    return None;
                 }
             }
             Some(node)
@@ -2428,6 +2524,14 @@ fn matches_node<'a>(
 
         PatternNode::TryStmt => {
             if node.kind() == "try_statement" {
+                Some(node)
+            } else {
+                None
+            }
+        }
+
+        PatternNode::NodeKindMatch(kinds) => {
+            if kinds.iter().any(|k| k == node.kind()) {
                 Some(node)
             } else {
                 None
@@ -2686,15 +2790,13 @@ fn match_sequence(
     source: &[u8],
     captures: &mut HashMap<String, String>,
 ) -> bool {
-    let has_ellipsis = patterns.iter().any(|p| matches!(p, PatternNode::Ellipsis | PatternNode::EllipsisMetavar(_)));
-    if has_ellipsis && patterns.len() == 1 {
-        if let PatternNode::EllipsisMetavar(name) = &patterns[0] {
-             let text: Vec<_> = nodes.iter().map(|n| node_text(*n, source)).collect();
-             captures.insert(name.clone(), text.join(", "));
-        }
-        return true;
-    }
-    if !has_ellipsis {
+    // Find ellipsis position
+    let ellipsis_pos = patterns.iter().position(
+        |p| matches!(p, PatternNode::Ellipsis | PatternNode::EllipsisMetavar(_))
+    );
+
+    if ellipsis_pos.is_none() {
+        // No ellipsis — exact element count match
         if nodes.len() != patterns.len() {
             return false;
         }
@@ -2705,37 +2807,42 @@ fn match_sequence(
         }
         return true;
     }
-    
-    let non_ellipsis: Vec<&PatternNode> = patterns
-        .iter()
-        .filter(|p| !matches!(p, PatternNode::Ellipsis | PatternNode::EllipsisMetavar(_)))
-        .collect();
-    if non_ellipsis.is_empty() {
-        return true;
-    }
-    if nodes.len() < non_ellipsis.len() {
+
+    let eidx = ellipsis_pos.unwrap();
+    let prefix = &patterns[..eidx];
+    let suffix = &patterns[eidx + 1..];
+
+    // Need at least prefix.len() + suffix.len() nodes
+    if nodes.len() < prefix.len() + suffix.len() {
         return false;
     }
-    'outer: for start in 0..=(nodes.len() - non_ellipsis.len()) {
-        let mut temp_captures = captures.clone();
-        for (j, pnode) in non_ellipsis.iter().enumerate() {
-            if matches_node(nodes[start + j], source, pnode, &mut temp_captures).is_none() {
-                continue 'outer;
-            }
+
+    let mut temp_captures = captures.clone();
+
+    // Match prefix patterns against first prefix.len() nodes
+    for (i, p) in prefix.iter().enumerate() {
+        if matches_node(nodes[i], source, p, &mut temp_captures).is_none() {
+            return false;
         }
-        // Capture prefix/suffix
-        if let PatternNode::EllipsisMetavar(name) = &patterns[0] {
-             let text: Vec<_> = nodes[..start].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
-        }
-        if let PatternNode::EllipsisMetavar(name) = &patterns[patterns.len()-1] {
-             let text: Vec<_> = nodes[start+non_ellipsis.len()..].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
-        }
-        *captures = temp_captures;
-        return true;
     }
-    false
+
+    // Match suffix patterns against last suffix.len() nodes
+    let suffix_start = nodes.len() - suffix.len();
+    for (i, p) in suffix.iter().enumerate() {
+        if matches_node(nodes[suffix_start + i], source, p, &mut temp_captures).is_none() {
+            return false;
+        }
+    }
+
+    // Capture the ellipsis (everything between prefix and suffix)
+    if let PatternNode::EllipsisMetavar(name) = &patterns[eidx] {
+        let middle_nodes = &nodes[prefix.len()..suffix_start];
+        let text: Vec<_> = middle_nodes.iter().map(|n| node_text(*n, source)).collect();
+        temp_captures.insert(name.clone(), text.join(", "));
+    }
+
+    *captures = temp_captures;
+    true
 }
 
 fn match_fstring(
@@ -2810,11 +2917,18 @@ fn match_generator(
         return false;
     }
     let mut cursor = node.walk();
-    let if_nodes: Vec<Node> = node
+    let if_clause_nodes: Vec<Node> = node
         .children(&mut cursor)
         .filter(|n| n.kind() == "if_clause")
-        .filter_map(|n| n.child_by_field_name("condition"))
         .collect();
+    let mut if_nodes: Vec<Node> = Vec::new();
+    for ic in &if_clause_nodes {
+        let mut c = ic.walk();
+        let children: Vec<Node> = ic.children(&mut c).filter(|ch| ch.is_named()).collect();
+        if let Some(expr) = children.first() {
+            if_nodes.push(*expr);
+        }
+    }
 
     match_sequence(&pattern.ifs, &if_nodes, source, captures)
 }
@@ -2830,6 +2944,51 @@ fn match_generators(
     }
     for (i, p) in patterns.iter().enumerate() {
         if !match_generator(p, nodes[i], source, captures) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Match generators with their associated if_clauses grouped from the parent node.
+/// Each entry in `groups` is (for_in_clause_node, vec_of_if_clause_nodes).
+fn match_generators_with_ifs(
+    patterns: &[ComprehensionGenerator],
+    groups: &[(Node, Vec<Node>)],
+    source: &[u8],
+    captures: &mut HashMap<String, String>,
+) -> bool {
+    if groups.len() != patterns.len() {
+        return false;
+    }
+    for (i, p) in patterns.iter().enumerate() {
+        let (for_node, if_clause_nodes) = &groups[i];
+        if for_node.kind() != "for_in_clause" {
+            return false;
+        }
+        let target_node = match for_node.child_by_field_name("left") {
+            Some(n) => n,
+            None => return false,
+        };
+        let iter_node = match for_node.child_by_field_name("right") {
+            Some(n) => n,
+            None => return false,
+        };
+        if matches_node(target_node, source, &p.target, captures).is_none()
+            || matches_node(iter_node, source, &p.iter, captures).is_none()
+        {
+            return false;
+        }
+        // Extract condition expressions from if_clause nodes
+        let mut if_exprs: Vec<Node> = Vec::new();
+        for ic in if_clause_nodes {
+            let mut c = ic.walk();
+            let children: Vec<Node> = ic.children(&mut c).filter(|ch| ch.is_named()).collect();
+            if let Some(expr) = children.first() {
+                if_exprs.push(*expr);
+            }
+        }
+        if !match_sequence(&p.ifs, &if_exprs, source, captures) {
             return false;
         }
     }
@@ -3046,6 +3205,18 @@ fn find_pattern_in_tree(
             let text = std::str::from_utf8(&source_bytes[matched_node.start_byte()..matched_node.end_byte()])
                 .unwrap_or("")
                 .to_string();
+
+            // Deduplicate: skip if we already have a match at this exact position
+            let start_byte = matched_node.start_byte();
+            let end_byte = matched_node.end_byte();
+            if results.iter().any(|r: &(String, usize, usize, usize, usize, String, HashMap<String, String>)| {
+                r.1 == start.row + 1 && r.2 == start.column && r.3 == end.row + 1 && r.4 == end.column
+            }) {
+                return;
+            }
+            // Also skip if a match at the inner position was already captured
+            // (from parenthesized expression unwrapping)
+            let _ = (start_byte, end_byte);
 
             results.push((
                 file_path.to_string(),

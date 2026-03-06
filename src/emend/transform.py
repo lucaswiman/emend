@@ -2646,8 +2646,65 @@ def _filter_matches_by_type_oracle(
     if not matches:
         return []
 
-    # TODO: Implement type-aware filtering using metavar positions from Rust
-    return matches
+    from pathlib import Path
+    from .type_oracle import parse_type_string
+
+    # Get type info for the file
+    file_types = type_oracle.infer_file(Path(file_path))
+
+    # Read source to find capture positions
+    source_lines = Path(file_path).read_text().splitlines()
+
+    filtered = []
+    for match in matches:
+        keep = True
+        for metavar_name, (kind, type_str) in constraints.items():
+            captured_text = match.captures.get(metavar_name)
+            if captured_text is None:
+                keep = False
+                break
+
+            # Find the position of the captured text within the match
+            match_line = match.line
+            if match_line is None or match_line < 1:
+                keep = False
+                break
+
+            # Look up type binding at the match position
+            # Try to find the captured name in the source line
+            line_idx = match_line - 1
+            if line_idx >= len(source_lines):
+                keep = False
+                break
+
+            line_text = source_lines[line_idx]
+            col = line_text.find(captured_text)
+            if col < 0:
+                keep = False
+                break
+
+            binding = file_types.type_at(match_line, col + 1)  # 1-indexed col
+            if binding is None:
+                keep = False
+                break
+
+            if kind == "type":
+                constraint_td = parse_type_string(type_str)
+                if not binding.type_descriptor.matches(constraint_td):
+                    keep = False
+                    break
+            elif kind == "returns":
+                # For returns constraint, check the return type
+                constraint_td = parse_type_string(type_str)
+                ret_type = binding.type_descriptor.return_type
+                if ret_type is None or not ret_type.matches(constraint_td):
+                    keep = False
+                    break
+
+        if keep:
+            filtered.append(match)
+
+    return filtered
 
 
 def find_pattern(
@@ -2713,14 +2770,17 @@ def find_pattern(
     inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
     not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
     
-    if (inside and inside_ir is None) or (not_inside and not_inside_ir is None):
-        raise ValueError("Constraint could not be compiled to Rust IR")
+    if inside and inside_ir is None:
+        raise ValueError(f"Unknown inside/not_inside constraint: '{inside}'")
+    if not_inside and not_inside_ir is None:
+        raise ValueError(f"Unknown inside/not_inside constraint: '{not_inside}'")
 
     # Find matches using Rust engine
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
     )
-    
+
+
     matches = []
     for m in raw_matches:
         captures = {k: v for k, v in m[6].items() if k != "_"}
