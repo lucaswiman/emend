@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import logging
-import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 import yaml
-from emend.transform import find_pattern, replace_pattern, extract_pattern_literals, _NOQA_RE
+from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 
 
 @dataclass
@@ -56,28 +54,8 @@ def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
     all emend rules) or a set of emend rule names extracted from
     ``emend:<rule>`` entries.
     """
-    result: dict[int, set[str] | None] = {}
-    try:
-        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-        for tok_type, tok_string, (srow, _), _, _ in tokens:
-            if tok_type == tokenize.COMMENT:
-                m = _NOQA_RE.search(tok_string)
-                if m:
-                    rules_str = m.group(1)
-                    if rules_str:
-                        rules = set()
-                        for r in rules_str.split(","):
-                            r = r.strip()
-                            if r.startswith("emend:"):
-                                rules.add(r[len("emend:"):])
-                        if rules:
-                            result[srow] = rules
-                        # e.g. "# noqa: E501" with no emend: prefix → no effect
-                    else:
-                        result[srow] = None  # bare noqa suppresses all
-    except tokenize.TokenError:
-        pass
-    return result
+    from emend.language_plugins import load_plugin
+    return load_plugin("python").comment_handler.find_noqa_comments(source)
 
 
 def _build_statement_line_map(source: str) -> dict[int, tuple[int, int]]:

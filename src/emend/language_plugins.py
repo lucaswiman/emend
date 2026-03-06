@@ -10,7 +10,10 @@ Phase 2b provides ``NoOpImportHandler``, ``RegexCommentHandler``, and
 ``NoOpPatternCompiler`` as generic stubs used for languages that do not yet
 have a dedicated plugin.
 
-Phase 2c (extracting a full ``PythonPlugin``) is out of scope here.
+Phase 2c extracts Python-specific code into ``PythonImportHandler``,
+``PythonCommentHandler``, and ``PythonPatternCompiler`` in ``python_plugin.py``.
+Phase 2d rewires the original call sites in ``transform.py`` and ``lint.py``
+to delegate through the plugin system.
 """
 from __future__ import annotations
 
@@ -27,15 +30,19 @@ class ImportHandler(ABC):
     """Abstract interface for import extraction and manipulation."""
 
     @abstractmethod
-    def extract_imports(self, source: str) -> list[tuple[str, str, str | None, bool]]:
-        """Return a list of ``(module, name, alias, is_from_import)`` tuples."""
+    def extract_imports(self, source: str) -> str:
+        """Return all top-level import statements as a single string."""
         ...
 
     @abstractmethod
-    def add_import(
-        self, source: str, module: str, name: str, alias: str | None = None
+    def add_import_text(
+        self, import_str: str, position: int, source_code: str
     ) -> str:
-        """Return *source* with an import for *name* from *module* added."""
+        """Return *source_code* with *import_str* inserted at *position*.
+
+        *position* == 0 means prepend (after ``__future__`` imports);
+        *position* == -1 means append (after the last import).
+        """
         ...
 
     @abstractmethod
@@ -69,12 +76,22 @@ class CommentHandler(ABC):
         """
         ...
 
+    @abstractmethod
+    def rename_in_docstrings(
+        self, content: str, old_name: str, new_name: str
+    ) -> str | None:
+        """Replace *old_name* with *new_name* in all docstrings.
+
+        Returns new content if changes were made, ``None`` otherwise.
+        """
+        ...
+
 
 class PatternCompiler(ABC):
     """Abstract interface for compiling pattern strings to the Rust IR."""
 
     @abstractmethod
-    def compile(self, pattern_str: str, metavar_map: dict) -> dict | None:
+    def compile(self, pattern_str: str) -> dict | None:
         """Return a Rust-IR dict for *pattern_str*, or ``None`` if unsupported."""
         ...
 
@@ -99,13 +116,13 @@ class LanguagePlugin:
 class NoOpImportHandler(ImportHandler):
     """Import handler that performs no operations (returns source unchanged)."""
 
-    def extract_imports(self, source: str) -> list[tuple[str, str, str | None, bool]]:
-        return []
+    def extract_imports(self, source: str) -> str:
+        return ""
 
-    def add_import(
-        self, source: str, module: str, name: str, alias: str | None = None
+    def add_import_text(
+        self, import_str: str, position: int, source_code: str
     ) -> str:
-        return source
+        return source_code
 
     def remove_import(self, source: str, module: str, name: str) -> str:
         return source
@@ -143,11 +160,16 @@ class RegexCommentHandler(CommentHandler):
                 result[lineno] = tags
         return result
 
+    def rename_in_docstrings(
+        self, content: str, old_name: str, new_name: str
+    ) -> str | None:
+        return None
+
 
 class NoOpPatternCompiler(PatternCompiler):
     """Pattern compiler that defers to the default Rust IR path (returns None)."""
 
-    def compile(self, pattern_str: str, metavar_map: dict) -> dict | None:
+    def compile(self, pattern_str: str) -> dict | None:
         # Returning None signals callers to use the default compilation path.
         return None
 
@@ -167,9 +189,11 @@ _COMMENT_PREFIXES: dict[str, str] = {
 def load_plugin(language: str) -> LanguagePlugin:
     """Return a ``LanguagePlugin`` for *language*.
 
-    Currently returns stub implementations for all languages.
-    Phase 2c will add ``PythonPlugin`` discovery here.
+    Returns the full Python plugin for ``"python"``; stubs for other languages.
     """
+    if language == "python":
+        from emend.python_plugin import create_python_plugin
+        return create_python_plugin()
     prefix = _COMMENT_PREFIXES.get(language, "#")
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),

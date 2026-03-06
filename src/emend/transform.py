@@ -1914,18 +1914,8 @@ def visit_project_ts(
 
 def _get_imports(source_code: str) -> str:
     """Extract all top-level import statements as a single string."""
-    try:
-        tree = ast.parse(source_code)
-    except SyntaxError:
-        return ""
-    lines = source_code.splitlines(keepends=True)
-    imports = []
-    for stmt in tree.body:
-        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            start = stmt.lineno - 1
-            end = stmt.end_lineno
-            imports.append("".join(lines[start:end]))
-    return "".join(imports)
+    from emend.language_plugins import load_plugin
+    return load_plugin("python").import_handler.extract_imports(source_code)
 
 
 def _add_import_text(
@@ -1947,38 +1937,14 @@ def _add_import_text(
     Returns:
         Unified diff showing changes
     """
+    from emend.language_plugins import load_plugin
     try:
-        tree = ast.parse(source_code)
+        new_code = load_plugin("python").import_handler.add_import_text(
+            import_str, position, source_code
+        )
     except SyntaxError:
         raise ValueError(f"Cannot parse {file_path}")
 
-    lines = source_code.splitlines(keepends=True)
-    import_line = import_str.rstrip('\n') + '\n'
-
-    # Find import line ranges
-    first_import_line = None
-    last_import_line = None
-    last_future_line = None
-    for stmt in tree.body:
-        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            if first_import_line is None:
-                first_import_line = stmt.lineno
-            last_import_line = stmt.end_lineno
-            if isinstance(stmt, ast.ImportFrom) and stmt.module == '__future__':
-                last_future_line = stmt.end_lineno
-
-    if position == 0:
-        # Prepend: insert after __future__ imports
-        insert_at = (last_future_line or 0)
-        lines.insert(insert_at, import_line)
-    else:
-        # Append: insert after the last import
-        if last_import_line is not None:
-            lines.insert(last_import_line, import_line)
-        else:
-            lines.insert(0, import_line)
-
-    new_code = "".join(lines)
     diff = _generate_diff(str(file_path), source_code, new_code)
 
     if apply:
@@ -3317,49 +3283,9 @@ class Reference:
 
 
 def _rename_in_docstrings(content: str, old_name: str, new_name: str) -> str | None:
-    """Replace old_name with new_name in all docstrings.
-
-    Uses stdlib ast to find docstring positions, then performs text replacement
-    within those ranges.
-
-    Returns new content if changes were made, None otherwise.
-    """
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return None
-
-    lines = content.splitlines(keepends=True)
-    docstring_ranges: list[tuple[int, int]] = []
-
-    def _collect_docstrings(node: ast.AST) -> None:
-        body = getattr(node, 'body', None)
-        if not isinstance(body, list) or not body:
-            return
-        first = body[0]
-        if (isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)):
-            docstring_ranges.append((first.lineno - 1, first.end_lineno))
-        for child in body:
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                _collect_docstrings(child)
-
-    _collect_docstrings(tree)
-
-    if not docstring_ranges:
-        return None
-
-    changed = False
-    for start_line, end_line in docstring_ranges:
-        for i in range(start_line, end_line):
-            if i < len(lines) and old_name in lines[i]:
-                lines[i] = lines[i].replace(old_name, new_name)
-                changed = True
-
-    if changed:
-        return "".join(lines)
-    return None
+    """Replace old_name with new_name in all docstrings."""
+    from emend.language_plugins import load_plugin
+    return load_plugin("python").comment_handler.rename_in_docstrings(content, old_name, new_name)
 
 
 def find_references(
@@ -3750,18 +3676,6 @@ def _get_all_exported_names(content: str) -> set[str]:
                             names.add(el.value)
     return names
 
-
-def _has_noqa_deadcode(source: str, line: int) -> bool:
-    """Check whether *line* has a ``# noqa: emend:deadcode`` comment."""
-    from .lint import parse_noqa_comments
-    noqa = parse_noqa_comments(source)
-    if line not in noqa:
-        return False
-    entry = noqa[line]
-    # None means bare noqa (suppresses everything)
-    if entry is None:
-        return True
-    return 'deadcode' in entry
 
 
 def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
