@@ -2179,6 +2179,44 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
                     "decorators": [{"type": "ellipsis"}],
                 }
 
+    # Simple keyword constraints for compound statements
+    # Use NodeKindMatch to match related tree-sitter node types
+    if constraint == "if":
+        return {
+            "type": "node_kind_match",
+            "kinds": ["if_statement", "conditional_expression"],
+        }
+
+    if constraint == "for":
+        return {
+            "type": "node_kind_match",
+            "kinds": [
+                "for_statement",
+                "list_comprehension",
+                "set_comprehension",
+                "dictionary_comprehension",
+                "generator_expression",
+            ],
+        }
+
+    if constraint == "while":
+        return {
+            "type": "node_kind_match",
+            "kinds": ["while_statement"],
+        }
+
+    if constraint == "try":
+        return {
+            "type": "node_kind_match",
+            "kinds": ["try_statement"],
+        }
+
+    if constraint == "with":
+        return {
+            "type": "node_kind_match",
+            "kinds": ["with_statement"],
+        }
+
     stripped = constraint.rstrip()
     if stripped.endswith(":"):
         ir = compile_pattern_to_rust_ir(stripped)
