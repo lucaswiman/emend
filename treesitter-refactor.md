@@ -539,7 +539,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 
 ## Migration Strategy
 
-### Phase 0: Vendor GritQL Crates + Build Integration Layer (Week 1-2)
+### Phase 0: Vendor GritQL Crates + Build Integration Layer
 
 1. **Vendor** `grit-pattern-matcher`, `grit-util`, and the Python language
    definition from `marzano-language` into `emend_core/vendor/`
@@ -552,7 +552,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 
 **Validation**: All 265 test files pass with GritQL pattern engine.
 
-### Phase 1: Build Scope Resolver (Week 2-4)
+### Phase 1: Build Scope Resolver
 
 1. **Implement** `scope.rs`: scope tree, binding table, import table
 2. **Implement** Python language config (`languages/python/config.toml`)
@@ -564,7 +564,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 6. **Wire** into `find_references`, `find_callers`, `find_dead_code`
 7. **Feature flag**: `EMEND_USE_RUST_SCOPE=1` to toggle
 
-### Phase 2: Build Rewrite Engine + Migrate Transforms (Week 4-6)
+### Phase 2: Build Rewrite Engine + Migrate Transforms
 
 1. **Implement** `transform.rs`: byte-range edit engine
 2. **Wire** GritQL rewrite output → `FileTransform`
@@ -575,7 +575,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 6. **Migrate** `move`/`copy-to`: scope resolver + byte-range edits
 7. **Run full test suite at each step**
 
-### Phase 3: Remove LibCST (Week 6-7)
+### Phase 3: Remove LibCST
 
 1. Remove all `import libcst` statements
 2. Delete LibCST-specific code: `_cached_parse`, visitor base classes,
@@ -584,7 +584,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 4. Run full test suite
 5. Benchmark: measure end-to-end speedup
 
-### Phase 4: Add Language Config + Second Language (Week 7-9)
+### Phase 4: Add Language Config + Second Language
 
 1. **Finalize** the language config TOML schema
 2. **Refactor** scope resolver to be config-driven
@@ -996,3 +996,657 @@ All test failures from the migration have been resolved. The full test suite pas
   - [ ] Python integration tests for TypeScript symbol lookup and refactoring
   - [ ] Rust unit tests for TypeScript-specific scoping rules
   - [ ] End-to-end tests for TypeScript imports, class members, nested functions
+
+---
+
+## Appendix F: Cross-Language Support Design (Proposal)
+
+### Executive Summary
+
+Emend is **85% language-agnostic** architecturally. The Rust tree-sitter backend, pattern matching IR, and type oracle are completely generic. To support new languages, only add:
+
+1. **Language config TOML file** (scope/binding rules for Rust scope resolver)
+2. **Symbol extraction query file** (`.scm` tree-sitter query for symbol discovery)
+3. **Language plugin for Python** (import handling, docstring syntax)
+
+No custom Rust code required for most languages. This section outlines the strategy for scaling to "all tree-sitter grammars."
+
+### Analysis: What's Already Language-Agnostic
+
+#### Core Strengths
+
+| Component | Status | Evidence |
+|-----------|--------|----------|
+| **Pattern matching IR** | ✅ Language-agnostic | `matcher.rs` uses abstract syntax concepts (calls, attributes, assignments); no Python-specific node types |
+| **Scope resolver** | ✅ Language-agnostic | Driven entirely by `languages/{lang}/config.toml`; accepts file extension parameter |
+| **Symbol extraction** | ✅ Language-agnostic | `symbols.rs` + `.scm` tree-sitter queries; works for any language with a grammar |
+| **Selector/component grammar** | ✅ Language-agnostic | `grammars/selector.lark` references generic concepts: `params`, `returns`, `decorators`, `bases`, `body`, `imports` |
+| **Pattern string grammar** | ✅ Language-agnostic | `grammars/pattern.lark` supports metavars, type constraints, ellipsis—no Python syntax |
+| **Type oracle abstraction** | ✅ Language-agnostic | `TypeOracle` ABC + LSP client (`type_oracle.py:33-182`); already supports any LSP-compatible type checker |
+| **Find/replace operations** | ✅ Language-agnostic | Work on pattern IR and tree-sitter ranges; no language-specific assumptions |
+| **Reference resolution** | ✅ Language-agnostic | Uses Rust scope resolver; parameterized by config TOML |
+
+#### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Python CLI (cli.py)                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  emend search, replace, edit, add, refs, rename...           │
+│                                                               │
+│  ┌───────────────────────────────────────────────────────┐   │
+│  │   Language-Agnostic Layer (transform.py, query.py)    │   │
+│  │                                                         │   │
+│  │  · find_pattern(), replace_pattern()                  │   │
+│  │  · find_references(), find_callers()                  │   │
+│  │  · collect_symbols()                                  │   │
+│  │  · get_component(), set_component(), add_component()  │   │
+│  │  · resolve_imports()                                  │   │
+│  └────────────────┬────────────────────────────────────┬─┘   │
+│                   │                                    │       │
+│    ┌──────────────┼────────────────────────────────┐   │       │
+│    │              │                                │   │       │
+│    ▼              ▼                                │   ▼       │
+│  ┌──────────────────────────┐    ┌──────────────────────────┐│
+│  │   Rust Backend           │    │ Type Oracle (LSP)        ││
+│  │   (emend_core)           │    │                          ││
+│  ├──────────────────────────┤    ├──────────────────────────┤│
+│  │ · Pattern matcher        │    │ · PyreflyAdapter         ││
+│  │ · Scope resolver         │    │ · PyrightAdapter (LSP)   ││
+│  │ · Symbol extraction      │    │ · TyAdapter (LSP)        ││
+│  │ · Component ranges       │    │ · RustAnalyzer (LSP)     ││
+│  │ · Reference collection   │    │ · gopls, tsserver, etc.  ││
+│  ├──────────────────────────┤    └──────────────────────────┘│
+│  │ Config-driven:           │                                 │
+│  │ · scope creators         │ Type inference is LSP:         │
+│  │ · binding rules          │ Language-independent!           │
+│  │ · import resolution      │                                 │
+│  │ · QN construction        │                                 │
+│  └──────────────────────────┘                                 │
+│           ▲                                                   │
+│           │                                                   │
+│    ┌──────┴──────────────────┬──────────────────┐             │
+│    │                         │                  │             │
+│    ▼                         ▼                  ▼             │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐      │
+│  │ Scope rules  │   │  Symbol      │   │ Import       │      │
+│  │ TOML config  │   │  extraction  │   │ resolution   │      │
+│  │              │   │  query (.scm)│   │ plugin (.py) │      │
+│  │ languages/   │   │              │   │              │      │
+│  │ {lang}/      │   │ languages/   │   │ Languages/   │      │
+│  │ config.toml  │   │ {lang}/      │   │ {lang}/      │      │
+│  │              │   │ symbols.scm  │   │ plugin.py    │      │
+│  └──────────────┘   └──────────────┘   └──────────────┘      │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+         ▲                       ▲
+         │                       │
+    Tree-sitter Grammar      Language-specific
+    (external crate)         configuration files
+```
+
+### Current Python-Specific Code (What Needs Generalization)
+
+#### 1. File Extension Hardcoding
+
+**Files affected**: `cli.py:62`, `transform.py:4722`, `component_selector.py:65`
+
+```python
+# Current (Python-only)
+if f.endswith('.py'):
+    ...
+```
+
+**Why it's blocking**: File discovery skips non-Python files; prevents CLI from working with other languages.
+
+**Generalization strategy**: Add language detection:
+```python
+# Proposed
+LANGUAGE_EXTENSIONS = {
+    "python": [".py", ".pyi"],
+    "rust": [".rs"],
+    "go": [".go"],
+    "typescript": [".ts", ".tsx", ".js", ".jsx"],
+}
+
+def file_matches_language(path: str, language: str) -> bool:
+    ext = Path(path).suffix.lower()
+    return ext in LANGUAGE_EXTENSIONS.get(language, [])
+```
+
+#### 2. Import Handling (Python AST)
+
+**Files affected**: `transform.py:1915-2020 (_get_imports, _add_import_text)`
+
+**Current approach**:
+- Uses Python's `ast.parse()` to extract imports
+- Hardcoded logic for `__future__` imports
+- Assumes `from X import Y, Z` syntax
+
+**Why it's blocking**: Cannot rename imports or add imports in non-Python languages.
+
+**Generalization strategy**: Language-specific import plugin system:
+
+```python
+class ImportHandler(ABC):
+    @abstractmethod
+    def extract_imports(self, source: str) -> list[ImportBinding]:
+        """Extract imports from source code."""
+
+    @abstractmethod
+    def add_import(self, source: str, module: str, name: str, alias: str | None) -> str:
+        """Insert a new import into source code."""
+
+    @abstractmethod
+    def remove_import(self, source: str, module: str, name: str) -> str:
+        """Remove an import from source code."""
+
+    @abstractmethod
+    def sort_imports(self, source: str) -> str:
+        """Sort imports according to language conventions."""
+
+# Implementations per language
+class PythonImportHandler(ImportHandler):
+    # Uses ast.parse(), respects __future__, uses isort conventions
+
+class RustImportHandler(ImportHandler):
+    # Uses regex or tree-sitter query for use declarations
+
+class GoImportHandler(ImportHandler):
+    # Uses tree-sitter for import blocks
+```
+
+**Storage**: `languages/{lang}/plugin.py`:
+```python
+# languages/python/plugin.py
+from emend.import_handlers import ImportHandler, PythonImportHandler
+
+handlers = {
+    "import": PythonImportHandler(),
+}
+
+# languages/rust/plugin.py
+from emend.import_handlers import ImportHandler, RustImportHandler
+
+handlers = {
+    "import": RustImportHandler(),
+}
+```
+
+**Usage in transform.py**:
+```python
+def _get_imports(source: str, language: str) -> list[ImportBinding]:
+    handler = _load_import_handler(language)
+    return handler.extract_imports(source)
+```
+
+#### 3. Docstring / Comment Handling
+
+**Files affected**: `transform.py:3319-3340 (_rename_in_docstrings)`, `lint.py:52-80 (parse_noqa_comments)`
+
+**Current approach**:
+- Uses Python AST to find docstrings (string literals as first statement)
+- Tokenizes Python to find `# noqa` comments
+
+**Why it's blocking**: Docstring updates and noqa suppression won't work for other languages.
+
+**Generalization strategy**: Comment handler plugin:
+
+```python
+class CommentHandler(ABC):
+    @abstractmethod
+    def find_docstrings(self, source: str, symbol_info: SymbolInfo) -> list[tuple[int, int, str]]:
+        """Find docstring byte ranges and content for a symbol."""
+
+    @abstractmethod
+    def find_noqa_comments(self, source: str) -> dict[int, set[str]]:
+        """Map line numbers to noqa tags present on that line."""
+
+    @abstractmethod
+    def parse_comment_syntax(self) -> tuple[str, str]:
+        """Return (single_line_comment_prefix, multi_line_comment_start_end)."""
+```
+
+**Storage**: `languages/{lang}/plugin.py`:
+```python
+# languages/python/plugin.py
+class PythonCommentHandler(CommentHandler):
+    # Uses ast.get_docstring(), tokenizer for # noqa
+
+handlers = {
+    "comment": PythonCommentHandler(),
+}
+
+# languages/rust/plugin.py
+class RustCommentHandler(CommentHandler):
+    # Uses tree-sitter query for doc comments (/// or //)
+
+handlers = {
+    "comment": RustCommentHandler(),
+}
+```
+
+#### 4. Pattern String Parsing Syntax
+
+**Files affected**: `pattern.py:139-164 (compound header detection)`, `pattern.py:257-970 (_ast_to_rust_ir)`
+
+**Current approach**: Parses pattern strings using Python's `ast` module.
+
+**Why it's blocking**: Cannot write patterns using Rust, Go, or TypeScript syntax.
+
+**Example issue**: Pattern `"if x > 0: print(x)"` assumes Python's `if ... :` syntax.
+
+**Generalization strategy**: **Two-tier pattern syntax**
+
+1. **Language-neutral patterns** (recommended):
+   ```
+   # Works in all languages (uses tree-sitter pattern syntax)
+   $X.foo($Y) -type[int]
+   ```
+
+2. **Language-native patterns** (for power users):
+   ```python
+   # Emend uses language-specific parser for the pattern string
+   emend search --pattern-lang rust "if x > 0 { ... }"
+   emend search --pattern-lang python "if x > 0: ..."
+   ```
+
+**Implementation**:
+```python
+def compile_pattern(pattern: str, language: str, pattern_lang: str | None = None) -> PatternIR:
+    if pattern_lang is None:
+        # Use neutral syntax (always works)
+        return compile_neutral_pattern(pattern)
+    else:
+        # Use language-native syntax
+        handler = _load_pattern_handler(pattern_lang)
+        return handler.compile(pattern)
+
+# languages/python/plugin.py
+class PythonPatternHandler:
+    def compile(self, pattern: str) -> PatternIR:
+        tree = ast.parse(pattern, mode='eval')  # or 'exec' for statements
+        return _ast_to_rust_ir(tree)
+
+# languages/rust/plugin.py
+class RustPatternHandler:
+    def compile(self, pattern: str) -> PatternIR:
+        # Could use tree-sitter directly or a Rust crate
+        # For now: Use tree-sitter queries (S-expressions)
+```
+
+**Better approach**: Treat patterns as **tree-sitter query language** (universal):
+
+```
+# These are tree-sitter S-expressions (language-independent!)
+(call
+  function: (identifier) @func
+  arguments: (arguments (identifier) @arg))
+```
+
+**Then the neutral pattern syntax compiles to tree-sitter queries**:
+```
+$FUNC($ARG)  →  (call function: (_) @FUNC arguments: (_) @ARG)
+```
+
+### Proposed Implementation Plan
+
+#### Phase 1: Configuration Foundation
+
+**Goals**: Make file discovery and language detection configurable.
+
+1. **Add `.emend/config.toml`**:
+```toml
+[project]
+# Default language for this project
+language = "python"
+
+# Multi-language projects can specify per-pattern
+# (or auto-detect by extension as fallback)
+```
+
+2. **Refactor file discovery**:
+```python
+# cli.py
+def get_language_from_context() -> str:
+    # Check .emend/config.toml
+    # Fallback: auto-detect from file argument
+    # Default: "python"
+
+def discover_files(pattern: str, language: str) -> list[Path]:
+    # Use LANGUAGE_EXTENSIONS to find all matching files
+```
+
+3. **Pass language through call stack**:
+```python
+# Every function gets a `language: str` parameter
+def find_pattern(pattern: str, files: list[str], language: str = "python") -> SearchResults:
+    ...
+```
+
+**Tests**:
+- `.emend/config.toml` is correctly parsed
+- File discovery works for multiple extensions
+- Language parameter flows through transform operations
+
+#### Phase 2: Language Plugin System
+
+**Goals**: Make import, docstring, and comment handling pluggable.
+
+1. **Create plugin loader**:
+```python
+# src/emend/language_plugins.py
+class LanguagePlugin:
+    import_handler: ImportHandler
+    comment_handler: CommentHandler
+
+def load_plugin(language: str) -> LanguagePlugin:
+    # Load languages/{language}/plugin.py
+    # Instantiate handlers
+    # Cache result
+```
+
+2. **Implement Python plugin** (refactor existing code):
+```python
+# languages/python/plugin.py
+class PythonImportHandler(ImportHandler):
+    def extract_imports(self, source: str) -> list[ImportBinding]:
+        # Move _get_imports logic here
+
+    def add_import(self, source: str, module: str, name: str, alias: str | None) -> str:
+        # Move _add_import_text logic here
+
+class PythonCommentHandler(CommentHandler):
+    def find_docstrings(self, source: str, symbol_info: SymbolInfo) -> list[...]:
+        # Move _rename_in_docstrings logic here
+
+    def find_noqa_comments(self, source: str) -> dict[int, set[str]]:
+        # Move parse_noqa_comments logic here
+
+handlers = {
+    "import": PythonImportHandler(),
+    "comment": PythonCommentHandler(),
+}
+```
+
+3. **Refactor transform.py to use plugins**:
+```python
+def _get_imports(source: str, language: str) -> list[ImportBinding]:
+    plugin = load_plugin(language)
+    return plugin.import_handler.extract_imports(source)
+
+def _add_import_text(source: str, module: str, name: str, language: str) -> str:
+    plugin = load_plugin(language)
+    return plugin.import_handler.add_import(source, module, name, None)
+
+def _rename_in_docstrings(source: str, old_name: str, new_name: str,
+                          symbol_info: SymbolInfo, language: str) -> str:
+    plugin = load_plugin(language)
+    return plugin.comment_handler.update_docstrings(source, old_name, new_name, symbol_info)
+
+def parse_noqa_comments(source: str, language: str) -> dict[int, set[str]]:
+    plugin = load_plugin(language)
+    return plugin.comment_handler.find_noqa_comments(source)
+```
+
+**Tests**:
+- Python import extraction/addition works
+- Python docstring/noqa detection works
+- Plugin loading and caching work
+- Empty implementations don't crash
+
+#### Phase 3: Stub Implementations for New Languages
+
+**Goals**: Make adding a new language declarative (no code changes required for basic features).
+
+1. **Create stub implementations**:
+```python
+# src/emend/language_plugins.py
+
+class NoOpImportHandler(ImportHandler):
+    """For languages where import renaming isn't supported yet."""
+    def extract_imports(self, source: str) -> list[ImportBinding]:
+        return []  # No imports found
+    def add_import(self, source: str, module: str, name: str, alias: str | None) -> str:
+        return source  # No-op
+    # ... etc
+
+class RegexCommentHandler(CommentHandler):
+    """Base implementation using comment prefix + simple parsing."""
+    def __init__(self, line_comment_prefix: str):
+        self.line_comment_prefix = line_comment_prefix
+    def find_noqa_comments(self, source: str) -> dict[int, set[str]]:
+        # Simple regex-based noqa detection
+        # Extract "# noqa: deadcode" style comments
+```
+
+2. **Provide skeleton plugin for new language**:
+```python
+# languages/rust/plugin.py (minimal)
+from emend.language_plugins import NoOpImportHandler, RegexCommentHandler
+
+handlers = {
+    "import": NoOpImportHandler(),  # TODO: implement Rust import handling
+    "comment": RegexCommentHandler("//"),  # Works for basic noqa support
+}
+```
+
+3. **Documentation template**:
+```markdown
+# Adding Support for a New Language
+
+## Step 1: Create Language Directory
+```
+languages/mylang/
+├── config.toml          # Scope/binding/import/QN rules
+├── symbols.scm          # Symbol extraction query
+└── plugin.py            # (Optional) Import/comment handling
+```
+
+## Step 2: Configure Scoping Rules
+Edit `config.toml` with your language's:
+- Scope creators (functions, classes, modules)
+- Binding rules (assignments, parameters, etc.)
+- Import statement structure
+- Qualified name conventions
+
+See `languages/python/config.toml` for example.
+
+## Step 3: Write Symbol Query
+Create `symbols.scm` using tree-sitter query syntax:
+```scm
+(function_declaration
+  name: (identifier) @name) @function
+```
+
+See `languages/python/symbols.scm` for example.
+
+## Step 4: (Optional) Implement Language Plugin
+If your language needs custom import/comment handling, implement:
+```python
+# languages/mylang/plugin.py
+from emend.language_plugins import ImportHandler, CommentHandler
+
+class MyLangImportHandler(ImportHandler):
+    def extract_imports(self, source: str) -> list[ImportBinding]:
+        ...
+
+handlers = {
+    "import": MyLangImportHandler(),
+}
+```
+
+That's it! Test with:
+```bash
+emend search '$X.foo()' --in src/ --language mylang
+```
+```
+
+**Tests**:
+- Can add Rust language with minimal config
+- Can add Go language with minimal config
+- Symbol extraction works
+- No-op import handler doesn't crash
+
+#### Phase 4: Type Oracle Universalization
+
+**Goals**: Support type constraints for multiple languages.
+
+1. **Document LSP discovery**:
+```python
+# type_oracle.py - Add language support mapping
+LANGUAGE_TO_LSP = {
+    "python": [
+        ("pyright-langserver", "python"),  # (command, languageId)
+        ("pylsp", "python"),
+    ],
+    "rust": [
+        ("rust-analyzer", "rust"),
+    ],
+    "go": [
+        ("gopls", "go"),
+    ],
+    "typescript": [
+        ("typescript-language-server", "typescript"),
+    ],
+}
+
+def detect_type_engine(project_root: Path, language: str = "python") -> str | None:
+    # Check for language-specific config files or tools
+    # Use LANGUAGE_TO_LSP as fallback
+```
+
+2. **Allow language parameter to type oracle**:
+```python
+def create_type_oracle(language: str = "python", engine: str = "auto") -> TypeOracle:
+    if engine == "auto":
+        engine = detect_type_engine(Path.cwd(), language)
+
+    if engine and engine.startswith("lsp:"):
+        return LSPTypeOracle(engine, language)
+
+    # Fallback
+    return NoOpTypeOracle()
+```
+
+3. **Update type constraint filtering**:
+```python
+def _filter_matches_by_type_oracle(matches: list[Match], oracle: TypeOracle,
+                                     language: str) -> list[Match]:
+    # Pass language to oracle.infer_file()
+    # LSP client sends languageId: language
+```
+
+**Tests**:
+- Type constraints work with Pyright (Python)
+- Type constraints work with rust-analyzer (Rust)
+- Type constraints gracefully degrade if type checker unavailable
+
+#### Phase 5: Extended Pattern Syntax (Optional)
+
+**Goals**: Support language-native pattern syntax.
+
+1. **Add `--pattern-lang` flag**:
+```bash
+emend search '$X.foo()' --pattern-lang neutral  # (default, tree-sitter)
+emend search 'if x > 0: print(x)' --pattern-lang python
+emend search 'if x > 0 { println!("{}", x); }' --pattern-lang rust
+```
+
+2. **Implement pattern handlers per language**:
+```python
+# languages/python/plugin.py
+class PythonPatternHandler:
+    def compile(self, pattern: str) -> PatternIR:
+        tree = ast.parse(pattern, mode='eval')
+        return _ast_to_rust_ir(tree)
+
+# languages/rust/plugin.py
+class RustPatternHandler:
+    def compile(self, pattern: str) -> PatternIR:
+        # Use tree-sitter to parse Rust syntax
+        # Convert to Emend PatternIR
+        ...
+```
+
+3. **Wire into pattern compilation**:
+```python
+def compile_pattern_to_rust_ir(pattern: str, language: str,
+                                pattern_syntax: str = "neutral") -> dict:
+    if pattern_syntax == "neutral":
+        return compile_neutral_pattern(pattern, language)
+    else:
+        handler = load_pattern_handler(pattern_syntax)
+        return handler.compile(pattern)
+```
+
+**Tests**:
+- Python syntax patterns work
+- Rust syntax patterns work
+- Mismatched pattern/file languages give helpful error
+
+### Revised Component Selection Grammar
+
+To support generic components across languages, extend the selector grammar:
+
+```lark
+component : "[" COMPONENT_NAME "]"
+
+COMPONENT_NAME :
+    "params"           # Function/method parameters
+    | "returns"        # Return type annotation
+    | "decorators"     # Decorators / attributes
+    | "bases"          # Class bases / implements
+    | "body"           # Function/class body
+    | "imports"        # Module imports
+    | "type_annotation" # Type annotation (TypeScript, Rust, Python)
+    | "docstring"      # Docstring / doc comment
+    | "attributes"     # Object properties / fields
+    | "methods"        # Object methods / functions
+    | "generics"       # Type parameters (Rust, Go, TypeScript)
+```
+
+**Language-specific mappings in plugin**:
+```python
+# languages/rust/plugin.py
+COMPONENT_MAPPING = {
+    "decorators": "#[...]",  # Rust uses #[attr]
+    "type_annotation": ": Type",  # Colon syntax
+    "generics": "<T, U>",
+}
+
+# languages/go/plugin.py
+COMPONENT_MAPPING = {
+    "decorators": None,  # Go has no decorators
+    "generics": "[T any]",  # Generic syntax
+}
+```
+
+### Summary: Adding a New Language
+
+After this proposal is implemented, adding **Rust** language support requires:
+
+1. **Create `languages/rust/config.toml`** (copy template, customize scope creators + bindings) — ~100 lines
+2. **Create `languages/rust/symbols.scm`** (tree-sitter query) — ~30 lines
+3. **Run tests** — all existing emend commands work immediately
+
+That's it. No custom Rust code. No new Python classes. Just configuration files.
+
+For languages that need custom import handling (optional):
+4. **Create `languages/rust/plugin.py`** (inherit NoOpImportHandler or implement custom) — ~50 lines
+
+### Implementation Effort
+
+By the end of Phase 3, you can add any tree-sitter-supported language with ~200 lines of TOML/query/Python.
+
+### Alignment with Existing Architecture
+
+This proposal requires **no breaking changes**:
+- ✅ Existing Python projects work unchanged
+- ✅ Scope resolver already accepts language parameter
+- ✅ Pattern matcher is language-agnostic
+- ✅ Type oracle already LSP-based
+- ✅ Backward compatible: default to Python if no language specified
+
+All changes are **additive**: new config directories, plugin system, language detection. The core Rust backend remains untouched.
