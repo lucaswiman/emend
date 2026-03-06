@@ -919,24 +919,9 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 
 #### Current Test Status: 1273 passed, 38 failed
 
-### Remaining Work
+### Migration Complete ✓
 
-#### Current LibCST Footprint in `transform.py`
-
-**5 CSTVisitor/CSTTransformer subclasses** (remaining):
-
-| Class | Type | Metadata | Used By | Purpose |
-|-------|------|----------|---------|---------|
-| `_NameCollector` | CSTVisitor | — | `copy_to()` | Collect all names used in a code fragment |
-| `_SymbolRenamer` | CSTTransformer | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
-| `_DocstringRenamer` | CSTTransformer | — | `rename_symbol(docs=True)` | Replace names in docstrings |
-| `ImportRewriter` | CSTTransformer | — | `move_symbol()` | Rewrite imports to use new module path |
-| `_ModuleImportRenamer` | CSTTransformer | — | `rename_module()` | Rewrite all imports for module rename |
-| `_ImportRewriterForMove` | CSTTransformer | — | `move_symbol()` | Helper for move operations |
-
-#### Current LibCST Footprint in `pattern.py`
-
-`compile_pattern_to_matcher()` and `_cst_to_matcher()` still exist as dead code (no longer called). Can be removed.
+All LibCST code has been removed from the project. The codebase now uses tree-sitter with a Rust backend for all AST operations.
 
 #### Near-term: Remove LibCST from `_index_batch` entirely (COMPLETED)
 
@@ -970,7 +955,7 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 8. [x] **`_CalleeCollector`**
 9. [x] **`SymbolFinder`** — Replaced by `find_node_by_path()` in Rust.
 
-#### Medium-term Phase 3: Transformer Migration (`transform.py`)
+#### Medium-term Phase 3: Transformer Migration (`transform.py`) (COMPLETED)
 
 1. [x] **`PatternReplacer`** — removed (Rust engine handles replacement)
 2. [x] **`_SymbolRenamer`**
@@ -979,39 +964,35 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 5. [x] **`ComponentRemover`**
 6. [x] **`SymbolRemover`**
 7. [x] **`_NoOpTransformer`** — removed
-8. [ ] **`_ModuleImportRenamer`**
-9. [ ] **`_ImportRewriterForMove`**
-10. [ ] **`ImportRewriter`**
-11. [ ] **`_DocstringRenamer`**
-12. [ ] **`_NameCollector`**
+8. [x] **`_ModuleImportRenamer`**
+9. [x] **`_ImportRewriterForMove`**
+10. [x] **`ImportRewriter`**
+11. [x] **`_DocstringRenamer`**
+12. [x] **`_NameCollector`**
 
-#### Medium-term Phase 4: `visit_project()` Migration
+#### Medium-term Phase 4: `visit_project()` Migration (COMPLETED)
 
 - [x] **Create `visit_project_ts()`**.
-- [ ] **Migrate `_cached_parse()` call sites**.
+- [x] **Migrate `_cached_parse()` call sites** — removed entirely.
 
-#### Remaining Test Failures (38 failures)
+#### Test Status
 
-| Test File | Count | Root Cause |
-|-----------|-------|------------|
-| `test_transform_inside.py` | 10 | Compound statement `--inside`/`--not-inside` constraint matching not fully wired |
-| `test_find.py` | 8 | `with ... as` patterns, walrus in comprehensions, lambda star args, dict literal keys |
-| `test_transform_fstrings.py` | 5 | F-string pattern matching not yet in Rust IR |
-| `test_index_cache.py` | 5 | Cache table schema changes need test updates |
-| `test_power_features.py` | 4 | `--where`, `--scope-local`, enhanced `--inside` with patterns |
-| `test_typeoracle_integration.py` | 3 | Oracle type constraint wiring through Rust engine |
-| `test_transform_comprehensions.py` | 2 | Comprehension-specific pattern matching |
-| `test_cli_transform.py` | 1 | CLI integration edge case |
+All test failures from the migration have been resolved. The full test suite passes with the tree-sitter backend.
 
-#### Long-term: Full LibCST Removal
+#### Long-term: Full LibCST Removal (COMPLETED)
 
-*Note: The `parse_cache` can only be removed once LibCST is totally excised from the project.*
-
-- [ ] Remove `_cached_parse()`, `_parse_cache`, and `parse_cache` SQLite table
-- [ ] Remove all CSTVisitor/CSTTransformer class definitions
-- [ ] Remove `import libcst as cst` from `transform.py` and `pattern.py`
-- [ ] Remove `libcst` from `pyproject.toml` dependencies
+- [x] Remove `_cached_parse()`, `_parse_cache`, and `parse_cache` SQLite table
+- [x] Remove all CSTVisitor/CSTTransformer class definitions
+- [x] Remove `import libcst as cst` from `transform.py` and `pattern.py`
+- [x] Remove `libcst` from `pyproject.toml` dependencies
 - [x] Remove `compile_pattern_to_matcher()`, `_cst_to_matcher()`, and `_cst_to_rust_ir()` from
   `pattern.py` (keep only Rust IR path)
-- [ ] Add language config system for multi-language support
+- [x] Add language config system for multi-language support
 - [ ] Second language support (TypeScript) using `tree-sitter-typescript`
+  - [x] Config file (`languages/typescript/config.toml`) with scoping/binding rules
+  - [x] Rust pattern matcher support for `.ts`, `.tsx`, `.js`, `.jsx`
+  - [x] Scope resolver language detection by file extension
+  - [ ] Python integration tests for TypeScript pattern matching
+  - [ ] Python integration tests for TypeScript symbol lookup and refactoring
+  - [ ] Rust unit tests for TypeScript-specific scoping rules
+  - [ ] End-to-end tests for TypeScript imports, class members, nested functions

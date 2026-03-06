@@ -354,7 +354,7 @@ const PYTHON_KEYWORDS: &[&str] = &["True", "False", "None"];
 /// Collect all identifier and attribute positions from Python source.
 ///
 /// Returns a list of (name, line, start_col_1indexed, end_col_1indexed) tuples.
-/// Used by type_oracle to replace LibCST's _SymbolCollector.
+/// Used by type_oracle to collect symbol positions from the parse tree.
 pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, usize)> {
     let tree = match parse_python(source) {
         Some(t) => t,

@@ -263,7 +263,7 @@ def extract_metavars(pattern: Q.CodeSnippet) -> list[Q.MetaVar]:
     returns a list of MetaVar objects.
 
     This is useful for building the metavar map needed by the
-    tree-sitter / LibCST pattern compiler.
+    tree-sitter pattern compiler.
     """
     metavars: list[Q.MetaVar] = []
     seen: set[str] = set()

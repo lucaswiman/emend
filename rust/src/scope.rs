@@ -1,10 +1,9 @@
-//! Scope resolver: builds scope trees from tree-sitter CSTs and resolves
+//! Scope resolver: builds scope trees from tree-sitter and resolves
 //! qualified names.
 //!
-//! This module replaces LibCST's QualifiedNameProvider with a persistent,
-//! incremental scope index built on tree-sitter.  The scoping rules are
-//! driven by a language config file (TOML), making the resolver
-//! language-agnostic in principle.
+//! Provides a persistent, incremental scope index built on tree-sitter.
+//! The scoping rules are driven by a language config file (TOML), making
+//! the resolver language-agnostic in principle.
 //!
 //! # Architecture
 //!

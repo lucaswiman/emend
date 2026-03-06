@@ -159,14 +159,10 @@ Verifying installation
 Dependencies
 ------------
 
-emend's Python layer uses LibCST as its sole AST backend — all parsing, traversal,
-and transformation (including ``search``, ``rename``, ``refs``, and scope analysis)
-go through LibCST. The bundled ``emend_core`` Rust extension accelerates file
-discovery and pattern matching via tree-sitter and rayon.
+emend uses the bundled ``emend_core`` Rust extension (built on tree-sitter) as its AST backend — all parsing, traversal, scope analysis, pattern matching, and transformation go through tree-sitter and Rust. The extension is GIL-free and optimized for parallel file scanning on free-threaded Python.
 
 Runtime dependencies (all installed automatically):
 
-- `LibCST <https://github.com/Instagram/LibCST>`_ -- Concrete syntax tree parsing and transformation
 - `Typer <https://typer.tiangolo.com/>`_ -- CLI framework
 - `Lark <https://github.com/lark-parser/lark>`_ -- Grammar-based parsing for selectors and patterns
 - `PyYAML <https://pyyaml.org/>`_ -- YAML parsing for batch operations and lint rules

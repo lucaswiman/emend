@@ -394,7 +394,7 @@ Full configuration
 How it works
 ~~~~~~~~~~~~
 
-Dead code detection uses LibCST's ``QualifiedNameProvider`` for scope-aware analysis. It:
+Dead code detection uses tree-sitter-based scope analysis for scope-aware analysis. It:
 
 1. Collects all top-level function and class definitions across the project
 2. Visits every file once (O(files) not O(symbols * files)) to find references

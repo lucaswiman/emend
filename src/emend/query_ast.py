@@ -46,8 +46,8 @@ class CodeSnippet:
     """A backtick-delimited code pattern.
 
     The ``code`` field contains the raw source text (without backticks).
-    It is parsed by tree-sitter or LibCST to build the structural
-    matcher.  Metavariables ($x etc.) are embedded in the code.
+    It is parsed by tree-sitter to build the structural matcher.
+    Metavariables ($x etc.) are embedded in the code.
     """
 
     code: str

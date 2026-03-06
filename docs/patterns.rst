@@ -68,7 +68,7 @@ For inferred (not just syntactic) type checking, use ``:type[X]`` and ``:returns
    # Find functions returning Optional[str] (parameterized form)
    emend search '$F:returns[Optional[str]]' src/ --type-engine pyright
 
-TypeOracle constraints fall through to the LibCST path (no Rust fast-path). The engine is started once and results are cached per-file. Use ``--type-engine auto`` (default) to let emend detect the engine from project config files; or specify ``pyrefly``, ``pyright``, or ``ty`` explicitly.
+TypeOracle constraints are cached per-file for efficiency. The engine is started once and results are cached. Use ``--type-engine auto`` (default) to let emend detect the engine from project config files; or specify ``pyrefly``, ``pyright``, or ``ty`` explicitly.
 
 Basic patterns
 --------------

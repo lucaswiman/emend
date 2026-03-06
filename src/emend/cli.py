@@ -1209,7 +1209,7 @@ def refs_cmd(
 ):
     """Find all references to a symbol across the project.
 
-    Uses LibCST to find usages, not just text matches.
+    Uses tree-sitter and Rust scope resolver for scope-aware reference finding.
     With --calls-only, only returns actual call sites (not mere references or imports).
 
     Examples:
@@ -1925,7 +1925,7 @@ def index_cmd(
     """Pre-build caches for faster cross-project operations.
 
     Parses every Python file in the project and builds:
-    - LibCST parse cache (speeds up all pattern operations)
+    - Parse cache (speeds up all pattern operations)
     - Qualified-name index (speeds up refs, rename, callers)
     - Symbol index (instant symbol lookup, typeahead, file outline)
     - Import graph (fast import-based file filtering)

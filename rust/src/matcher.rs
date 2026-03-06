@@ -1344,7 +1344,7 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
 /// Match a tree-sitter node against a pattern node.
 /// Returns Some(node) if it matches, where 'node' is the node to use for
 /// positional information (usually the node itself, but may be a child
-/// like expression_list for tuples to match LibCST's positions).
+/// like expression_list for tuples).
 fn matches_node<'a>(
     node: Node<'a>,
     source: &[u8],

@@ -615,7 +615,7 @@ Copy a symbol to another file.
 refs
 ----
 
-Find all references to a symbol across the project using LibCST's scope analysis.
+Find all references to a symbol across the project using tree-sitter-based scope analysis.
 With ``--calls-only``, only returns actual call sites.
 
 .. code-block:: text
@@ -817,7 +817,7 @@ faster.
 +-------------------------+---------------------------------------------------+
 | Cache                   | Effect                                            |
 +=========================+===================================================+
-| LibCST parse cache      | Avoids re-parsing unchanged files (~5x faster)    |
+| Tree-sitter parse cache | Avoids re-parsing unchanged files (~5x faster)    |
 +-------------------------+---------------------------------------------------+
 | Qualified-name index    | Skips MetadataWrapper for non-matching files       |
 +-------------------------+---------------------------------------------------+

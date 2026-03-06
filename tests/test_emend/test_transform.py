@@ -528,7 +528,7 @@ class TestReplacePattern:
             "point = (x, y)\n"
         )
 
-        # If coordinates are misaligned (include parens when LibCST expects them excluded),
+        # If coordinates are misaligned (include parens when tree-sitter expects them excluded),
         # this might produce point = ((y, x))
         diff, count = replace_pattern("($A, $B)", "($B, $A)", str(test_file), apply=True)
 

@@ -311,12 +311,12 @@ class TestSelectorUnification:
 
 
 # ---------------------------------------------------------------------------
-# list-symbols LibCST regression tests
+# list-symbols tree-sitter regression tests
 # ---------------------------------------------------------------------------
 
-class TestListSymbolsLibCST:
+class TestListSymbolsTreeSitter:
     def test_basic_output(self, tmp_path):
-        """list-symbols produces correct output after LibCST migration."""
+        """list-symbols produces correct output after tree-sitter migration."""
         code = '''\
 def foo(x: int) -> str:
     return str(x)

@@ -37,8 +37,8 @@ def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list
         source,
         max_depth=max_depth + 1 if max_depth is not None else None,
     )
-    # Filter out variables and references at the top level to match the
-    # old LibCST behavior (only function/class definitions).
+    # Filter out variables and references at the top level
+    # to return only function/class definitions.
     return [_rust_dict_to_nested_symbol(d) for d in rust_syms
             if d.get("kind") not in ("variable", "reference")]
 

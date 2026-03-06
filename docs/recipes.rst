@@ -156,7 +156,7 @@ Find all places a function is called
    # Pattern-based search (text matching)
    emend search 'process_request($X)' src/ --json
 
-   # Scope-aware callers analysis (uses LibCST scope analysis)
+   # Scope-aware callers analysis (uses tree-sitter scope analysis)
    emend refs src/api.py::process_request --calls-only
 
 Understand what a function depends on

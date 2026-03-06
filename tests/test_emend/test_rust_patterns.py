@@ -1,7 +1,7 @@
-"""Tests for Rust fast-path pattern matching via compile_pattern_to_rust_ir.
+"""Tests for tree-sitter pattern matching via compile_pattern_to_rust_ir.
 
 Verifies that patterns compile to Rust IR correctly and that the Rust
-tree-sitter matcher produces the same results as the Python LibCST path.
+tree-sitter matcher produces the expected results.
 """
 
 import pytest

@@ -321,9 +321,9 @@ def _extract_noqa_lines(source: str) -> set[int]:
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
-    Runs in a subprocess.  Parses a batch of files (LibCST), resolves
-    qualified names, collects symbol definitions, import relationships,
-    and reference entries, then writes directly to the SQLite disk cache.
+    Runs in a subprocess.  Parses a batch of files, resolves qualified names,
+    collects symbol definitions, import relationships, and reference entries,
+    then writes directly to the SQLite disk cache.
 
     Files whose content hash is already present in all cache tables are
     skipped (cache-hit fast path).
@@ -1127,11 +1127,11 @@ def warm_caches(
     resolved to build the QN index, and finally type inference results are
     stored in the ``type_cache`` table.
 
-    Uses a ``ProcessPoolExecutor`` so that LibCST parsing (CPU-bound)
+    Uses a ``ProcessPoolExecutor`` so that file parsing (CPU-bound)
     runs across multiple cores without GIL contention.  Files are split
     into batches; each worker process parses its batch and writes results
     directly to the SQLite disk cache (WAL mode allows concurrent writers),
-    avoiding the overhead of serialising LibCST modules back to the main
+    avoiding the overhead of serialising parse results back to the main
     process.
 
     Args:
@@ -1417,8 +1417,8 @@ def find_pattern_in_project(
     3. **Rust tree-sitter batch** — if the pattern compiles to Rust IR
        and no advanced constraints are active, match all files at once
        in Rust.
-    4. **Python/LibCST fallback** — parse and match remaining files
-       with LibCST, in parallel via ``ThreadPoolExecutor``.
+    4. **Pattern matching fallback** — parse and match remaining files
+       in parallel via ``ThreadPoolExecutor``.
 
     Returns a list of ``ProjectPatternMatch`` (file_path + match).
     """
@@ -1519,7 +1519,7 @@ def find_pattern_in_project(
                 except Exception:
                     logger.debug("Rust batch path failed, falling back")
 
-    # --- Stage 4: Python/LibCST fallback (parallel) ---
+    # --- Stage 4: Pattern matching fallback (parallel) ---
     results: list[ProjectPatternMatch] = []
 
     if is_single_file:
@@ -2935,14 +2935,13 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     code = "".join(symbol_lines)
 
     # We ALWAYS dedent here because we extracted raw lines from a potentially
-    # indented context (e.g. a method in a class). LibCST's code_for_node
-    # returned the node's code relative to its own start, which is effectively
-    # dedented.
+    # indented context (e.g. a method in a class). The parser returns positions
+    # relative to the node's own start, which is effectively dedented.
     import textwrap
     code = textwrap.dedent(code)
-    
+
     # If the explicit dedent flag is True, we've already done it above.
-    # Standard LibCST behavior was that get_symbol_source(selector) returned 
+    # The expected behavior is that get_symbol_source(selector) returns
     # dedented code for the symbol.
     
     # Ensure it ends with exactly one newline to match expected test behavior
@@ -3373,9 +3372,9 @@ def find_references(
 ) -> Iterator[Reference]:
     """Find all references to a symbol across the project.
 
-    Uses LibCST QualifiedNameProvider for scope-aware resolution:
-    only returns references that actually refer to the target symbol,
-    not coincidental same-named symbols in other scopes or files.
+    Uses Rust scope resolver for scope-aware resolution: only returns
+    references that actually refer to the target symbol, not coincidental
+    same-named symbols in other scopes or files.
 
     Args:
         selector: Symbol to find references for
