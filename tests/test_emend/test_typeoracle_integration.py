@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from emend.pattern import (
-    compile_pattern_to_matcher,
+    compile_pattern_to_rust_ir,
     is_oracle_type_constraint,
     parse_oracle_type_constraint,
     parse_pattern,
@@ -119,22 +119,22 @@ class TestOracleConstraintHelpers:
 
 
 class TestOracleConstraintCompilation:
-    """Test that oracle constraints compile into DoNotCare matchers."""
+    """Test that oracle constraints compile to Rust IR (oracle metavars become metavars)."""
 
     def test_type_constraint_compiles(self):
-        pat = parse_pattern("$X:type[Connection]")
-        matcher, info = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        # :type[X] is an oracle constraint — compiles but the metavar is not
+        # a simple type constraint so it falls through to metavar
+        ir = compile_pattern_to_rust_ir("$X:type[Connection]")
+        # Oracle constraints are handled post-match, so the IR treats $X as a metavar
+        assert ir is not None
 
     def test_returns_constraint_compiles(self):
-        pat = parse_pattern("$F:returns[str]")
-        matcher, info = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        ir = compile_pattern_to_rust_ir("$F:returns[str]")
+        assert ir is not None
 
     def test_complex_pattern_compiles(self):
-        pat = parse_pattern("$F($X:type[bytes], $Y:int)")
-        matcher, info = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        ir = compile_pattern_to_rust_ir("$F($X:type[bytes], $Y:int)")
+        assert ir is not None
 
 
 # ---------------------------------------------------------------------------

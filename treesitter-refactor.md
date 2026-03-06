@@ -880,15 +880,53 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 ---
 
+### Phase 1.0: Pattern Engine Full Rust Migration (IN PROGRESS)
+
+Massively expanded the Rust pattern matcher and Python IR compiler so that the vast majority of patterns now compile to Rust IR and match via the Rust engine, bypassing LibCST entirely.
+
+#### Rust Extension Enhancements (`emend_core` — `matcher.rs`)
+
+- **+996 lines** in `matcher.rs`
+- **New `PatternNode` variants**: `Return`, `Assert`, `Raise`, `Delete`, `Global`, `Nonlocal`, `Await`, `IfExp`, `Lambda`, `NamedExpr`, `ImportFrom`, `Import`, `IfStmt`, `WhileStmt`, `ForStmt`, `WithStmt`, `TryStmt`, `ExceptHandler`
+- **`NameOrMetavar` enum**: Supports metavar captures in import module names, import names, and aliases
+- **`ImportAlias` struct**: Full import alias matching with optional `as` name
+- **`deserialize_param_pattern()`**: Extracted reusable param deserialization for funcdef + lambda
+- **`match_import_alias()`**: Matching logic for import aliases with metavar support
+- **TypeConstraint enhancements**: Added `name` field for capture; negated constraints (`:!int`); new kinds `"identifier"`, `"attr"`, `"stmt"`
+- **Compound statement matching**: `if_statement`, `while_statement`, `for_statement`, `with_statement`, `try_statement`, `except_handler`
+
+#### Python File Changes
+
+**`pattern.py`** (+743 lines):
+- **`_ast_to_rust_ir()`**: Massively expanded to handle `Return`, `Assert`, `Raise`, `Delete`, `Global`, `Nonlocal`, `Await`, `ImportFrom`, `Import`, `IfExp`, `Lambda`, `NamedExpr`, compound statements (`If`, `While`, `For`, `With`, `Try`, `ExceptHandler`)
+- **Compare ops format**: Fixed from `[op_str, comp_ir]` lists to `{"op": op_str, "comparator": comp_ir}` dicts
+- **Type constraint handling**: Fixed prefix mismatch (`:int` vs `int`), added negated constraint support, oracle constraint fallback
+- **Import IR**: Full metavar support for module names, import names, and aliases
+
+**`transform.py`** (-1149 lines net):
+- **Removed LibCST-based classes**: `PatternFinder`, `ConstrainedPatternFinder`, `ScopedPatternFinder`, `PatternReplacer`, `RustGuidedFinder`, and associated LibCST helpers
+- **Restored `_get_disk_cache()`** with thread-safe globals
+- **Fixed anonymous metavar filtering**: `captures = {k: v for k, v in m[6].items() if k != "_"}`
+- **`find_pattern()`**: Now routes 100% through Rust engine for pattern matching
+
+#### Test Changes
+
+- **`test_pattern.py`**: Replaced `compile_pattern_to_matcher` tests with `compile_pattern_to_rust_ir` tests
+- **`test_rust_patterns.py`**: Updated Compare ops format assertions
+- **`test_transform.py`**: Updated ellipsis capture assertions to string format (Rust returns comma-separated strings, not tuples)
+- **`test_typeoracle_integration.py`**: Replaced `compile_pattern_to_matcher` with `compile_pattern_to_rust_ir`
+- **`test_index_cache.py`**: Updated assertions for new cache behavior (`parse_cache` no longer populated)
+
+#### Current Test Status: 1273 passed, 38 failed
+
 ### Remaining Work
 
 #### Current LibCST Footprint in `transform.py`
 
-**7 CSTVisitor/CSTTransformer subclasses** (remaining):
+**5 CSTVisitor/CSTTransformer subclasses** (remaining):
 
 | Class | Type | Metadata | Used By | Purpose |
 |-------|------|----------|---------|---------|
-| `PatternReplacer` | CSTTransformer | — | `replace_in_file()` | Replace matched patterns with replacement code |
 | `_NameCollector` | CSTVisitor | — | `copy_to()` | Collect all names used in a code fragment |
 | `_SymbolRenamer` | CSTTransformer | QualifiedNameProvider | `rename_symbol()` | Scope-aware rename using QN matching |
 | `_DocstringRenamer` | CSTTransformer | — | `rename_symbol(docs=True)` | Replace names in docstrings |
@@ -896,26 +934,22 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 | `_ModuleImportRenamer` | CSTTransformer | — | `rename_module()` | Rewrite all imports for module rename |
 | `_ImportRewriterForMove` | CSTTransformer | — | `move_symbol()` | Helper for move operations |
 
-**18 `cst.parse_module()` calls** in `transform.py`.
-
-**12 `MetadataWrapper` usages**.
-
 #### Current LibCST Footprint in `pattern.py`
 
-**1,610 lines**, 163 `cst.*` usages, 212 `m.*` matcher usages.
+`compile_pattern_to_matcher()` and `_cst_to_matcher()` still exist as dead code (no longer called). Can be removed.
 
 #### Near-term: Remove LibCST from `_index_batch` entirely (COMPLETED)
 
 - [x] **Stop relying on LibCST for metadata indexing**. (QN, symbol, and reference indexing now use Tree-sitter, bypassing slow MetadataWrapper).
 - [x] **Remove `_extract_all_exports(module)`**.
 - [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
-- [ ] **Optional: Remove `parse_cache` population**. (Deferred: the persistent LibCST parse cache must be maintained for refactoring performance until LibCST is completely excised from the project).
+- [x] **Remove `parse_cache` population**. (parse_cache is no longer populated; only `qn_index` table remains active).
 
-#### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`)
+#### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`) (NEARLY COMPLETE)
 
-1. [x] **Expand Rust IR coverage in `_cst_to_rust_ir()`**
-2. [ ] **Port `_cst_to_matcher()` to Rust** (`matcher.rs`).
-3. [ ] **Remove LibCST matcher dependency** once 100% of patterns go through Rust.
+1. [x] **Expand Rust IR coverage in `_ast_to_rust_ir()`** — now handles 25+ node types
+2. [x] **Route all pattern matching through Rust engine** — `find_pattern()` uses Rust exclusively
+3. [ ] **Remove dead LibCST code**: `compile_pattern_to_matcher()`, `_cst_to_matcher()`, all `m.*` matcher imports
 
 #### Phase 0.95: Simplification & Unification (COMPLETED)
 
@@ -938,23 +972,36 @@ Implemented `RustGuidedFinder` to use the Rust pattern matcher for all searches 
 
 #### Medium-term Phase 3: Transformer Migration (`transform.py`)
 
-1. [x] **`PatternReplacer`**
+1. [x] **`PatternReplacer`** — removed (Rust engine handles replacement)
 2. [x] **`_SymbolRenamer`**
 3. [x] **`ComponentSetter`**
 4. [x] **`ComponentAdder`**
 5. [x] **`ComponentRemover`**
 6. [x] **`SymbolRemover`**
-7. [ ] **`_ModuleImportRenamer`**
-8. [ ] **`_ImportRewriterForMove`**
-9. [ ] **`ImportRewriter`**
-10. [ ] **`_DocstringRenamer`**
-11. [ ] **`_NoOpTransformer`**
+7. [x] **`_NoOpTransformer`** — removed
+8. [ ] **`_ModuleImportRenamer`**
+9. [ ] **`_ImportRewriterForMove`**
+10. [ ] **`ImportRewriter`**
+11. [ ] **`_DocstringRenamer`**
 12. [ ] **`_NameCollector`**
 
 #### Medium-term Phase 4: `visit_project()` Migration
 
 - [x] **Create `visit_project_ts()`**.
 - [ ] **Migrate `_cached_parse()` call sites**.
+
+#### Remaining Test Failures (38 failures)
+
+| Test File | Count | Root Cause |
+|-----------|-------|------------|
+| `test_transform_inside.py` | 10 | Compound statement `--inside`/`--not-inside` constraint matching not fully wired |
+| `test_find.py` | 8 | `with ... as` patterns, walrus in comprehensions, lambda star args, dict literal keys |
+| `test_transform_fstrings.py` | 5 | F-string pattern matching not yet in Rust IR |
+| `test_index_cache.py` | 5 | Cache table schema changes need test updates |
+| `test_power_features.py` | 4 | `--where`, `--scope-local`, enhanced `--inside` with patterns |
+| `test_typeoracle_integration.py` | 3 | Oracle type constraint wiring through Rust engine |
+| `test_transform_comprehensions.py` | 2 | Comprehension-specific pattern matching |
+| `test_cli_transform.py` | 1 | CLI integration edge case |
 
 #### Long-term: Full LibCST Removal
 

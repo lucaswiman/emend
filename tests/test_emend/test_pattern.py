@@ -31,55 +31,47 @@ class TestPatternParsing:
 
 
 class TestCompilePattern:
-    """Tests for compile_pattern_to_matcher() function."""
+    """Tests for compile_pattern_to_rust_ir() function."""
 
     def test_compile_simple_call(self):
         """Compile a simple function call pattern."""
-        from emend.pattern import compile_pattern_to_matcher
+        from emend.pattern import compile_pattern_to_rust_ir
 
-        pat = parse_pattern("print('hello')")
-        matcher = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        ir = compile_pattern_to_rust_ir("print('hello')")
+        assert ir is not None
+        assert ir["type"] == "call"
 
     def test_compile_with_metavar(self):
         """Compile pattern with a single metavariable."""
-        from emend.pattern import compile_pattern_to_matcher
+        from emend.pattern import compile_pattern_to_rust_ir
 
-        pat = parse_pattern("print($X)")
-        matcher = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        ir = compile_pattern_to_rust_ir("print($X)")
+        assert ir is not None
+        assert ir["type"] == "call"
+        assert ir["args"][0] == {"type": "metavar", "name": "X"}
 
     def test_compile_multiple_metavars(self):
         """Compile pattern with multiple metavariables."""
-        from emend.pattern import compile_pattern_to_matcher
+        from emend.pattern import compile_pattern_to_rust_ir
 
-        pat = parse_pattern("func($A, $B)")
-        matcher = compile_pattern_to_matcher(pat)
-        assert matcher is not None
+        ir = compile_pattern_to_rust_ir("func($A, $B)")
+        assert ir is not None
+        assert len(ir["args"]) == 2
 
-    def test_compile_ellipsis_returns_info(self):
-        """Compile ellipsis pattern returns ellipsis_info dict."""
-        from emend.pattern import compile_pattern_to_matcher
+    def test_compile_ellipsis_returns_ir(self):
+        """Compile ellipsis pattern returns IR with ellipsis node."""
+        from emend.pattern import compile_pattern_to_rust_ir
 
-        pat = parse_pattern("func($...ARGS)")
-        result = compile_pattern_to_matcher(pat)
+        ir = compile_pattern_to_rust_ir("func($...ARGS)")
+        assert ir is not None
+        assert ir["type"] == "call"
+        assert ir["args"][0] == {"type": "ellipsis", "name": "ARGS"}
 
-        # Should return tuple (matcher, ellipsis_info)
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        matcher, ellipsis_info = result
-        assert matcher is not None
-        assert isinstance(ellipsis_info, dict)
-        assert "ARGS" in ellipsis_info
+    def test_compile_mixed_ellipsis_returns_ir(self):
+        """Compile pattern with mixed captures returns correct IR."""
+        from emend.pattern import compile_pattern_to_rust_ir
 
-    def test_compile_mixed_ellipsis_returns_info(self):
-        """Compile pattern with mixed captures returns correct ellipsis_info."""
-        from emend.pattern import compile_pattern_to_matcher
-
-        pat = parse_pattern("func($X, $...REST)")
-        result = compile_pattern_to_matcher(pat)
-
-        assert isinstance(result, tuple)
-        matcher, ellipsis_info = result
-        assert "REST" in ellipsis_info
-        assert "X" not in ellipsis_info  # Regular captures not in ellipsis_info
+        ir = compile_pattern_to_rust_ir("func($X, $...REST)")
+        assert ir is not None
+        assert ir["args"][0] == {"type": "metavar", "name": "X"}
+        assert ir["args"][1] == {"type": "ellipsis", "name": "REST"}
