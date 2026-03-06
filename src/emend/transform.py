@@ -102,10 +102,6 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS parse_cache "
-        "(hash BLOB PRIMARY KEY, data BLOB)"
-    )
-    conn.execute(
         "CREATE TABLE IF NOT EXISTS qn_index "
         "(hash BLOB PRIMARY KEY, qnames BLOB)"
     )
@@ -415,8 +411,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         need_import = content_hash not in cached_import
         need_ref = content_hash not in cached_ref
         # Skip if the QN cache is populated (the core index).
-        # parse_cache is no longer populated (LibCST removed), so we only
-        # check qn_index.  The derived tables (symbol_index, import_graph,
+        # The derived tables (symbol_index, import_graph,
         # reference_index) may legitimately have zero rows for a given file
         # (e.g., a file with only assignments has no symbols, a file with
         # no imports has no import_graph rows).  We re-derive them only
@@ -1149,7 +1144,7 @@ def warm_caches(
             Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
 
     Returns:
-        Dict with stats: ``{"files", "parse_cached", "qn_cached",
+        Dict with stats: ``{"files", "indexed", "qn_cached",
         "type_cached", "type_engine"}``.
     """
     import multiprocessing
@@ -1170,7 +1165,7 @@ def warm_caches(
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
     stats: dict[str, int | str] = {
-        "files": len(file_contents), "parse_cached": 0, "qn_cached": 0,
+        "files": len(file_contents), "indexed": 0, "qn_cached": 0,
         "skipped": 0, "sym_cached": 0, "import_cached": 0, "ref_cached": 0,
         "type_cached": 0, "type_engine": "",
     }
@@ -1206,7 +1201,7 @@ def warm_caches(
         for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
-            stats["parse_cached"] += parse_n
+            stats["indexed"] += parse_n
             stats["qn_cached"] += qn_n
             stats["skipped"] += skip_n
             stats["sym_cached"] += sym_n
@@ -1221,7 +1216,7 @@ def warm_caches(
     logger.info(
         "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d)",
         stats["files"], time.monotonic() - t0,
-        stats["parse_cached"], stats["qn_cached"],
+        stats["indexed"], stats["qn_cached"],
         stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
     )
 

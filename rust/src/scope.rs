@@ -1858,7 +1858,7 @@ impl LanguageConfig {
     }
 
     pub fn load_for_extension(ext: &str, project_root: &Path) -> Result<Self, String> {
-        // Try to load from languages/<name>.toml
+        // Try to load from languages/<name>/config.toml
         // For now, hardcode the mapping or look in a specific directory
         let lang_dir = project_root.join("languages");
         let lang_name = match ext {
@@ -1866,7 +1866,7 @@ impl LanguageConfig {
             "ts" | "tsx" | "js" | "jsx" => "typescript",
             _ => return Err(format!("Unsupported extension: {}", ext)),
         };
-        let config_path = lang_dir.join(format!("{}.toml", lang_name));
+        let config_path = lang_dir.join(lang_name).join("config.toml");
         if config_path.exists() {
             let toml_str = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
             return Self::from_toml(&toml_str);

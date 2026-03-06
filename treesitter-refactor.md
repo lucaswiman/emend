@@ -286,14 +286,14 @@ map to GritQL patterns:
 - `copy-to` / `move` (whole-symbol operations)
 - `rename` (scope-aware, uses QN resolver)
 
-#### 4. Language Config (`languages/*.toml` -- new)
+#### 4. Language Config (`languages/<lang>/config.toml` -- new)
 
 A TOML config file per language that defines scoping rules for the scope
 resolver.  This enables cross-language qualified name resolution without
 modifying Rust code.
 
 ```toml
-# languages/python.toml
+# languages/python/config.toml
 [language]
 name = "python"
 tree_sitter_grammar = "tree-sitter-python"
@@ -361,7 +361,7 @@ private_prefix = "_"
 ```
 
 ```toml
-# languages/typescript.toml
+# languages/typescript/config.toml
 [language]
 name = "typescript"
 tree_sitter_grammar = "tree-sitter-typescript"
@@ -522,7 +522,7 @@ The current `symbols.rs` implementation manually iterates over tree nodes and ha
 Currently, `scope.rs` uses `LanguageConfig::python_default()`, effectively hardcoding the Python configuration.
 
 **Proposal**:
-- Ensure `ScopeResolver` loads `languages/<lang>.toml` at runtime.
+- Ensure `ScopeResolver` loads `languages/<lang>/config.toml` at runtime.
 - Move all "what is a function", "what binds a name" logic into the TOML config (or `.scm` queries referenced by the config).
 - **Goal**: The Rust code should know *nothing* about "def" or "class" keywords, only "scope creator nodes" defined in config.
 
@@ -555,7 +555,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 ### Phase 1: Build Scope Resolver (Week 2-4)
 
 1. **Implement** `scope.rs`: scope tree, binding table, import table
-2. **Implement** Python language config (`languages/python.toml`)
+2. **Implement** Python language config (`languages/python/config.toml`)
 3. **Implement** `python` import resolution strategy
 4. **Build comparison harness**: for every `.py` file in `tests/`, compare
    LibCST QualifiedNameProvider output with Rust scope resolver output
@@ -588,7 +588,7 @@ Currently, `symbols.rs` (used for `search --output summary`) and `scope.rs` (use
 
 1. **Finalize** the language config TOML schema
 2. **Refactor** scope resolver to be config-driven
-3. **Add TypeScript config** (`languages/typescript.toml`)
+3. **Add TypeScript config** (`languages/typescript/config.toml`)
 4. **Implement `node` resolution strategy** for JS/TS imports
 5. **Test** basic TypeScript operations: `search`, `refs`, `rename`
 6. **Add tree-sitter-typescript** grammar dependency
@@ -612,7 +612,7 @@ Unified the symbol extraction backend and moved language-specific logic into con
 | File | Status | Changes |
 |------|--------|---------|
 | `ast_commands.py` | **Updated** | `collect_symbols` now queries `PyScopeResolver` instead of separate `symbols.rs` logic. |
-| `rust/queries/python/symbols.scm` | **New** | Declarative definition of Python symbols using standard TS query syntax. |
+| `languages/python/symbols.scm` | **New** | Declarative definition of Python symbols using standard TS query syntax. |
 
 ### Phase 1: Pattern Engine Expansion (COMPLETED)
 
@@ -956,7 +956,7 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 1. [x] **Replace `symbols.rs` manual walking with Tree-sitter Queries (`queries/<lang>/symbols.scm`)**.
 2. [x] **Unify `search --output summary` to use `ScopeResolver` logic** (eliminating duplicate symbol finding).
 3. [x] **Implement runtime TOML config loading** for `ScopeResolver` (replacing `python_default()`).
-4. [x] **Move Python-specific scoping rules** from Rust code into `languages/python.toml`.
+4. [x] **Move Python-specific scoping rules** from Rust code into `languages/python/config.toml`.
 
 #### Medium-term Phase 2: Read-Only Visitor Migration (`transform.py`)
 

@@ -31,7 +31,32 @@ Use `${NAME.content}` in a replacement template to strip surrounding quotes from
 
 #### Performance
 
-Refactored much of the codebase to use rust, treesitter and python freethreading.
+Refactored much of the codebase to use Rust, tree-sitter, and Python free-threading.
+
+#### Complete tree-sitter migration
+
+LibCST has been fully replaced by the Rust `emend_core` extension built on tree-sitter. All pattern matching, symbol collection, scope resolution, and code transformation now runs through the Rust backend.
+
+- **Removed `parse_cache`** — the LibCST parse cache table is no longer needed; all caching is content-hash based via the scope resolver and symbol index.
+- **Removed all LibCST visitors and transformers** — `PatternFinder`, `ConstrainedPatternFinder`, `PatternReplacer`, `_SymbolRenamer`, `ComponentSetter`, `ComponentAdder`, `ComponentRemover`, `SymbolRemover`, `_ReferenceFinder`, `_CallerFilter`, `_CalleeCollector`, `_ImportOriginCollector`, `_BulkReferenceFinder`, and others have been replaced by Rust equivalents.
+- **Rust structural matcher** covers all Python expression and statement types: assignments, comprehensions, f-strings, imports, compound statements (`if`/`while`/`for`/`with`/`try`), lambda, walrus, and more.
+- **`PyScopeResolver`** provides qualified name resolution, reference finding, and dead code analysis entirely in Rust.
+- **`PyFileTransform`** handles all code mutations via non-overlapping byte-range edits.
+
+#### Language configuration reorganization
+
+Language-specific configuration is now organized in per-language directories under `languages/`:
+
+```
+languages/
+├── python/
+│   ├── config.toml      # Scope resolver config
+│   └── symbols.scm      # Tree-sitter symbol query
+└── typescript/
+    └── config.toml      # Scope resolver config
+```
+
+Documentation now includes a guide for adding new language support.
 
 ---
 
@@ -66,4 +91,4 @@ The command surface was unified to reduce cognitive overhead:
 See [`TODOS.md`](TODOS.md) and [`ideas/FUTURE_WORK.md`](ideas/FUTURE_WORK.md). Short summary:
 
 - `$X:stmt` type constraint is parsed by the grammar but not fully implemented.
-- `graph`, `callers`, and `refs` use per-file `QualifiedNameProvider`; switching to `FullRepoManager` + `FullyQualifiedNameProvider` would improve cross-file name resolution.
+- `graph`, `callers`, and `refs` use per-file `QualifiedNameProvider`; switching to `FullRepoManager` + `FullyQualifiedNameProvider` would improve cross-file name resolution

@@ -8,11 +8,11 @@
 |------|---------|
 | `cli.py` | CLI entry point (Typer), all command definitions |
 | `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code |
-| `pattern.py` | LibCST pattern matching with `$METAVAR` support |
+| `pattern.py` | Pattern parsing and Rust IR compilation with `$METAVAR` support |
 | `component_selector.py` | Selector parsing (`file.py::Sym[component][accessor]`) |
-| `ast_commands.py` | List-symbols and copy-to commands (LibCST `_ListSymbolsVisitor` with `PositionProvider`) |
-| `ast_utils.py` | AST traversal utilities using LibCST (`_NestedDefinitionVisitor` with `PositionProvider`) |
-| `query.py` | Symbol collection and filtering for `lookup` (LibCST `_SymbolCollector` with `PositionProvider`) |
+| `ast_commands.py` | List-symbols and copy-to commands (uses Rust `emend_core` for symbol collection) |
+| `ast_utils.py` | AST traversal utilities (uses Rust `emend_core.collect_symbols_from_str()`) |
+| `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
 | `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial pattern normalization |
@@ -35,7 +35,7 @@
 | Test File | Tests For |
 |-----------|-----------|
 | `test_add_parameter.py` | `add` command (parameters, decorators, bases) |
-| `test_ast_migration.py` | LibCST migration regression tests (ast_utils, query, search --output summary) |
+| `test_ast_migration.py` | Tree-sitter migration regression tests (ast_utils, query, search --output summary) |
 | `test_batch.py` | `batch` command (YAML/JSON operations) |
 | `test_callers.py` | `callers` command |
 | `test_dead_code.py` | `dead-code` command (detection, CLI, exclude-refs, strings-as-refs, noqa, git last-reference, lint integration) |
@@ -74,7 +74,7 @@
 | `test_type_oracle.py` | `TypeOracle` unit tests: `parse_type_string`, `TypeDescriptor`, `FileTypes`, cache, parsers, `detect_type_engine`, stress tests, optional pyrefly/pyright integration |
 | `test_typeoracle_integration.py` | End-to-end integration: `:type[X]`/`:returns[X]` pattern constraints, oracle-aware lookup, `cmd_edit`/`cmd_add` wiring |
 | `test_vim_rpc.py` | Vim plugin JSON-RPC protocol tests: dispatch, search, selector, file_symbols, status, reindex, error handling, serialization |
-| `test_visit_project.py` | `visit_project()` helper |
+| `test_visit_project.py` | `visit_project_ts()` helper |
 
 ## Commands
 
@@ -99,23 +99,23 @@
 
 ## Architecture
 
-### LibCST-Only Backend
+### Tree-sitter + Rust Backend
 
-All source code now uses LibCST exclusively (no stdlib `ast`). This includes:
-- `ast_utils.py` -- `_NestedDefinitionVisitor` with `PositionProvider`
-- `query.py` -- `_SymbolCollector` with `PositionProvider`
-- `ast_commands.py` -- `_ListSymbolsVisitor` with `PositionProvider`
+All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on tree-sitter:
+- `ast_utils.py` — uses `emend_core.collect_symbols_from_str()`
+- `query.py` — uses `PyScopeResolver` for symbol collection and filtering
+- `ast_commands.py` — uses `emend_core` for symbol collection with rich metadata
 
 ### Cross-Project Operations
 
-All cross-project functions use the shared `visit_project()` helper in `transform.py`, which encapsulates iterating project files with text-check, parse, and MetadataWrapper setup:
+Cross-project functions use `visit_project_ts()` in `transform.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
 
-- `find_references()` -- `_ReferenceFinder` CSTVisitor with QualifiedNameProvider + PositionProvider (scope-aware)
-- `rename_symbol()` -- `_SymbolRenamer` CSTTransformer with QualifiedNameProvider (scope-aware) + optional `_DocstringRenamer`
-- `move_module()` / `rename_module()` -- `_ModuleImportRenamer` + filesystem operations
-- `find_callers()` -- finds call sites (not just references) using `_CallerFilter` with QualifiedNameProvider + PositionProvider
-- `find_callees()` -- analyzes function body to list all called functions
-- `generate_graph()` -- builds call graph from callers/callees analysis
+- `find_references()` — uses `PyScopeResolver.references_in_file()` for scope-aware reference finding
+- `rename_symbol()` — uses scope resolver + byte-range edits via `PyFileTransform`
+- `move_module()` / `rename_module()` — import rewriting + filesystem operations
+- `find_callers()` — uses `references_in_file()` filtered to `kind == "call"`
+- `find_callees()` — uses `references_in_file()` + `find_nested_definitions()`
+- `generate_graph()` — builds call graph from callers/callees analysis
 
 ### Lint Engine
 
@@ -142,8 +142,8 @@ Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the sha
 
 ### Dead Code Detection
 
-`transform.py` contains `find_dead_code()` and `_BulkReferenceFinder`:
-- Single-pass O(files) analysis using `QualifiedNameProvider`
+`transform.py` contains `find_dead_code()`:
+- Single-pass O(files) analysis using `PyScopeResolver`
 - `_find_python_source_root()` detects `src/` layout via `pyproject.toml`
 - Entry point heuristics skip decorated symbols, dunders, tests, `__all__` members
 - Configurable `entry-point-decorators`, `entry-point-names`, and `exclude-paths` (with glob support) via `.emend/patterns.yaml` or CLI flags
@@ -171,7 +171,7 @@ make test TESTS="-k default"
 
 ## Adding Commands
 
-1. Add command implementation in `transform.py` (for LibCST-based operations) or `ast_commands.py` (for AST-based)
+1. Add command implementation in `transform.py` (for tree-sitter-based operations) or `ast_commands.py` (for symbol listing)
 2. Import and wire up in `cli.py`:
    - Import the function from `transform.py`
    - Add `@app.command()` definition with Typer annotations

@@ -1,8 +1,7 @@
-"""Regression tests for the ast->LibCST migration.
+"""Regression tests for AST backend migration.
 
 Validates that find_nested_definitions, query symbol collection,
-and list-symbols produce identical output after migrating from
-stdlib ast to LibCST.
+and list-symbols produce correct output across AST backend changes.
 """
 
 import subprocess

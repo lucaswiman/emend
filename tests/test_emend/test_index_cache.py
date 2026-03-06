@@ -35,12 +35,11 @@ class TestIndexBatchCacheHit:
 
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
-        # parse_n now tracks files processed (not parse_cache rows)
-        assert parse_n == 1
+        assert processed_n == 1
         assert qn_n == 1
         assert skipped == 0
         # SOURCE has one function "hello" — should have at least 1 symbol
@@ -57,10 +56,10 @@ class TestIndexBatchCacheHit:
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         # Warm run — must skip
-        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
-        assert parse_n == 0
+        assert processed_n == 0
         assert qn_n == 0
         assert sym_n == 0
         assert skipped == 1
@@ -81,27 +80,23 @@ class TestIndexBatchCacheHit:
         assert rows_after_cold == rows_after_warm == 1
 
     def test_partial_cache_only_missing_part_indexed(self, tmp_path):
-        """If only parse is cached (not qn), only qn is added on second run."""
-        import hashlib
-
+        """If qn_index is missing for a file, it is indexed on next run."""
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
-        content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
 
-        # Pre-populate parse_cache but NOT qn_index
+        # Create DB with schema but no qn_index entries for this file
         conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE parse_cache (hash BLOB PRIMARY KEY, data BLOB)")
-        conn.execute("INSERT INTO parse_cache VALUES (?, ?)", (content_hash, b"dummy"))
+        conn.execute("CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
         conn.commit()
         conn.close()
 
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        parse_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
-        assert parse_n == 1  # file processed (parse_cache no longer checked)
+        assert processed_n == 1  # file processed
         assert qn_n == 1    # was missing, now added
         assert skipped == 0  # not fully cached, so not counted as skipped
 
@@ -124,7 +119,7 @@ class TestWarmCachesSkipped:
         stats = warm_caches(str(proj), type_engine=None)
 
         assert stats["skipped"] == 0
-        assert stats["parse_cached"] == 2
+        assert stats["indexed"] == 2
         assert stats["qn_cached"] == 2
 
     def test_warm_run_all_skipped(self, tmp_path):
@@ -136,7 +131,7 @@ class TestWarmCachesSkipped:
 
         stats = warm_caches(str(proj), type_engine=None)  # warm
         assert stats["skipped"] == 2
-        assert stats["parse_cached"] == 0
+        assert stats["indexed"] == 0
         assert stats["qn_cached"] == 0
 
     def test_warm_run_is_fast(self, tmp_path):
