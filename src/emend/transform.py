@@ -345,7 +345,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     from emend import emend_core as _rust
 
     db_path, source_root, project_root, file_batch = args
-    parse_rows: list[tuple[bytes, bytes]] = []
     qn_rows: list[tuple[bytes, bytes]] = []
     sym_rows: list[tuple] = []
     import_rows: list[tuple[bytes, str, str]] = []
@@ -365,7 +364,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     all_hashes = [h for h, _, _ in file_hashes]
 
     # Pre-check which hashes are already present in cache tables.
-    cached_parse: set[bytes] = set()
     cached_qn: set[bytes] = set()
     cached_sym: set[bytes] = set()
     cached_import: set[bytes] = set()
@@ -376,7 +374,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         conn_check.execute("PRAGMA synchronous=NORMAL")
         placeholders = ",".join("?" * len(all_hashes))
         for table, target_set in [
-            ("parse_cache", cached_parse),
             ("qn_index", cached_qn),
         ]:
             try:
@@ -411,21 +408,24 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         pass  # If pre-check fails, process everything
 
     skipped = 0
+    processed = 0
     for content_hash, py_file, content in file_hashes:
-        need_parse = content_hash not in cached_parse
         need_qn = content_hash not in cached_qn
         need_sym = content_hash not in cached_sym
         need_import = content_hash not in cached_import
         need_ref = content_hash not in cached_ref
-        # Skip if the core caches (parse + QN) are populated.
-        # The derived tables (symbol_index, import_graph, reference_index)
-        # may legitimately have zero rows for a given file (e.g., a file
-        # with only assignments has no symbols, a file with no imports has
-        # no import_graph rows).  We re-derive them only when the core
-        # caches need updating.
-        if not need_parse and not need_qn:
+        # Skip if the QN cache is populated (the core index).
+        # parse_cache is no longer populated (LibCST removed), so we only
+        # check qn_index.  The derived tables (symbol_index, import_graph,
+        # reference_index) may legitimately have zero rows for a given file
+        # (e.g., a file with only assignments has no symbols, a file with
+        # no imports has no import_graph rows).  We re-derive them only
+        # when the QN cache needs updating.
+        if not need_qn:
             skipped += 1
             continue
+
+        processed += 1
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
@@ -433,9 +433,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         if need_qn or need_ref:
             try:
                 scope_resolver.index_file(py_file, content)
-                scope_indexed = True
-            except Exception:
-                pass
                 scope_indexed = True
             except Exception:
                 pass
@@ -528,17 +525,13 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
-    has_data = parse_rows or qn_rows or sym_rows or import_rows or ref_rows
+    has_data = qn_rows or sym_rows or import_rows or ref_rows
     if has_data:
         try:
             conn = sqlite3.connect(db_path, timeout=30)
             # Ensure schema exists (idempotent; normally pre-created by
             # warm_caches, but needed when _index_batch is called directly).
             _init_cache_schema(conn)
-            if parse_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO parse_cache VALUES (?, ?)", parse_rows
-                )
             if qn_rows:
                 conn.executemany(
                     "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
@@ -590,7 +583,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             pass
 
-    return (len(parse_rows), len(qn_rows), skipped,
+    return (processed, len(qn_rows), skipped,
             len(sym_rows), len(import_rows), len(ref_rows))
 
 
@@ -2613,21 +2606,23 @@ def _filter_matches_by_scope_local(
     resolver = _rust.PyScopeResolver(project_root)
     resolver.index_file(file_path, content)
 
+    # Build a set of names that are imported (defined via import statements).
+    imported_names: set[str] = set()
+    references = resolver.references_in_file(file_path)
+    for qn, line, col, offset, end_offset, kind in references:
+        if kind == "import":
+            # Extract the local name from the qualified name
+            # (e.g., "os.path.join" → "join")
+            local_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
+            imported_names.add(local_name)
+
     filtered = []
     for match in matches:
         root_name = _extract_root_name(match.node_text or "")
         if not root_name:
             continue
 
-        references = resolver.references_in_file(file_path)
-        is_local = True
-        for qn, line, col, offset, end_offset, kind in references:
-            if line == match.line and col == match.col:
-                if kind == "import":
-                    is_local = False
-                break
-        
-        if is_local:
+        if root_name not in imported_names:
             filtered.append(match)
 
     return filtered

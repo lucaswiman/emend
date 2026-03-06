@@ -945,11 +945,11 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 - [x] **Evaluate removing `_QNCollector` and `_RefIndexCollector`**.
 - [x] **Remove `parse_cache` population**. (parse_cache is no longer populated; only `qn_index` table remains active).
 
-#### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`) (NEARLY COMPLETE)
+#### Medium-term Phase 1: Pattern Engine Migration (`pattern.py`) (COMPLETED)
 
 1. [x] **Expand Rust IR coverage in `_ast_to_rust_ir()`** — now handles 25+ node types
 2. [x] **Route all pattern matching through Rust engine** — `find_pattern()` uses Rust exclusively
-3. [ ] **Remove dead LibCST code**: `compile_pattern_to_matcher()`, `_cst_to_matcher()`, all `m.*` matcher imports
+3. [x] **Remove dead LibCST code**: `compile_pattern_to_matcher()`, `_cst_to_matcher()`, `_cst_to_rust_ir()`, all `m.*` matcher imports, operator-to-matcher helpers (~1100 lines removed)
 
 #### Phase 0.95: Simplification & Unification (COMPLETED)
 
@@ -1011,7 +1011,7 @@ Massively expanded the Rust pattern matcher and Python IR compiler so that the v
 - [ ] Remove all CSTVisitor/CSTTransformer class definitions
 - [ ] Remove `import libcst as cst` from `transform.py` and `pattern.py`
 - [ ] Remove `libcst` from `pyproject.toml` dependencies
-- [ ] Remove `compile_pattern_to_matcher()` and `_cst_to_matcher()` from
+- [x] Remove `compile_pattern_to_matcher()`, `_cst_to_matcher()`, and `_cst_to_rust_ir()` from
   `pattern.py` (keep only Rust IR path)
 - [ ] Add language config system for multi-language support
 - [ ] Second language support (TypeScript) using `tree-sitter-typescript`

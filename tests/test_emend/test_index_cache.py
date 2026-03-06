@@ -39,8 +39,8 @@ class TestIndexBatchCacheHit:
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
-        # parse_cache is no longer populated (LibCST removed)
-        assert parse_n == 0
+        # parse_n now tracks files processed (not parse_cache rows)
+        assert parse_n == 1
         assert qn_n == 1
         assert skipped == 0
         # SOURCE has one function "hello" — should have at least 1 symbol
@@ -101,7 +101,7 @@ class TestIndexBatchCacheHit:
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
-        assert parse_n == 0  # already cached
+        assert parse_n == 1  # file processed (parse_cache no longer checked)
         assert qn_n == 1    # was missing, now added
         assert skipped == 0  # not fully cached, so not counted as skipped
 
