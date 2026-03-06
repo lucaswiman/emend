@@ -1039,7 +1039,7 @@ def replace_cmd(
         files, is_multi_file = resolve_files(search_path)
 
         # Pre-filter: use Rust matcher to find which files actually have
-        # matches, so we only LibCST-parse those files.
+        # matches, so we only need to process those files.
         file_strs = [str(f) for f in files]
         if is_multi_file and len(file_strs) > 1:
             import time as _time
@@ -2006,20 +2006,20 @@ def index_cmd(
 
     elapsed = _time.monotonic() - t0
     skipped = stats.get("skipped", 0)
-    new_parse = stats["parse_cached"]
+    new_indexed = stats["indexed"]
     new_qn = stats["qn_cached"]
     new_sym = stats.get("sym_cached", 0)
     new_ref = stats.get("ref_cached", 0)
     new_types = int(stats.get("type_cached", 0))
     engine_name = str(stats.get("type_engine", ""))
 
-    parse_qn = f"parse: {new_parse}, qn: {new_qn}"
-    if skipped and not new_parse and not new_qn:
+    indexed_qn = f"indexed: {new_indexed}, qn: {new_qn}"
+    if skipped and not new_indexed and not new_qn:
         detail = f"all {skipped} already cached"
     elif skipped:
-        detail = f"{parse_qn}, already cached: {skipped}"
+        detail = f"{indexed_qn}, already cached: {skipped}"
     else:
-        detail = parse_qn
+        detail = indexed_qn
     if new_sym:
         detail += f", symbols: {new_sym}"
     if new_ref:

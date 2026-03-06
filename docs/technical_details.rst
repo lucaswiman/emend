@@ -59,9 +59,6 @@ refactoring workflows:
 - **Type Oracle integration** — adapters for external type inference engines
   (Pyright, Pyrefly) that provide optional semantic metadata.
 
-LibCST is maintained as a legacy fallback for a small subset of complex
-pattern matching features during the transition to the full Tree-sitter backend.
-
 Language Configuration
 ----------------------
 
@@ -75,6 +72,100 @@ supported language is defined by a TOML configuration file that specifies:
 - **Import Resolution** — strategies for resolving cross-file qualified names.
 - **Visibility Rules** — language-specific conventions for public vs. private
   API detection.
+
+Adding a new language
+---------------------
+
+To add support for a new language, create a directory under ``languages/`` with
+two files:
+
+.. code-block:: text
+
+   languages/<lang_name>/
+   ├── config.toml       # scope resolver configuration
+   └── symbols.scm       # tree-sitter query for symbol extraction
+
+config.toml
+~~~~~~~~~~~
+
+The configuration file drives the scope resolver and qualified-name builder.
+Use ``languages/python/config.toml`` as a reference.  The file contains the
+following sections:
+
+``[language]``
+   Top-level metadata: language ``name``, the ``tree_sitter_grammar`` crate to
+   use for parsing, ``file_extensions`` (e.g., ``[".py"]``), and ``keywords``
+   that the pattern compiler should treat as reserved.
+
+``[scoping]``
+   Declares which AST node types create new scopes (``scope_creators``) and per-
+   kind rules.  Each scope kind has an ``is_closure_boundary`` flag that controls
+   whether name lookups propagate outward (e.g., Python class scopes are closure
+   boundaries, so inner functions cannot see class-level names directly).
+
+``[bindings]``
+   Rules for how names are introduced into a scope: assignments, loop targets,
+   function/class parameters, ``with`` targets, exception handler names, and
+   definition nodes (functions, classes).  Each rule maps an AST node type to
+   the child field that holds the bound name.
+
+``[imports]``
+   Describes the structure of import statements so the resolver can extract
+   module paths and bound names.  ``resolution`` selects one of the built-in
+   resolvers (see below).
+
+``[qualified_names]``
+   Controls how qualified names are assembled: ``module_separator`` (``"."`` for
+   Python), ``class_member_prefix`` and ``nested_function_prefix`` flags, and
+   the ``locals_marker`` string for nested scopes.
+
+``[exports]``
+   Public API conventions such as ``__all__`` membership or naming patterns
+   that mark a symbol as an entry point for dead-code analysis.
+
+``[builtins]``
+   A list of names that are always in scope and do not need resolution (e.g.,
+   ``print``, ``len``, ``True`` in Python).
+
+symbols.scm
+~~~~~~~~~~~~
+
+A `tree-sitter query <https://tree-sitter.github.io/tree-sitter/using-parsers/queries/>`_
+file that defines which AST nodes constitute symbols for the ``search --output
+summary`` and ``deadcode`` commands.  The Python query captures function
+definitions, class definitions, decorated definitions, and top-level variable
+assignments.  Each captured node should use a ``@name`` capture for the
+symbol's identifier and a top-level capture (e.g., ``@function``, ``@class``,
+``@variable``) for the full node.
+
+Import resolution strategies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Rust backend provides built-in import resolution strategies selected by
+the ``resolution`` field in ``[imports]``:
+
+- ``"python"`` — follows importlib semantics: ``sys.path``, ``src/`` layout
+  detection, relative imports, and namespace packages.
+- ``"node"`` — implements Node.js module resolution for JavaScript and
+  TypeScript: ``node_modules`` lookup, ``index.js`` defaults, and
+  ``package.json`` ``main``/``exports`` fields.
+
+Adding a new resolution strategy requires changes to the Rust ``emend_core``
+crate.
+
+Testing
+~~~~~~~
+
+After adding a new language configuration, run the full test suite to verify
+that the scope resolver, symbol collection, and reference analysis all behave
+correctly:
+
+.. code-block:: bash
+
+   make test
+
+Pay particular attention to qualified-name construction and import resolution,
+as errors in those areas propagate to ``refs``, ``rename``, and ``deadcode``.
 
 Caching and indexing
 --------------------
@@ -98,9 +189,6 @@ Overview of cache tables
    * - Table
      - Key
      - Contents
-   * - ``parse_cache``
-     - content MD5 (BLOB)
-     - Compressed-pickled ``libcst.Module``.  Avoids reparsing unchanged files.
    * - ``qn_index``
      - content MD5 (BLOB)
      - Compressed-pickled ``set[str]`` of every qualified name in the file.
@@ -138,44 +226,28 @@ Overview of cache tables
        ``indexed_at:<worktree_id>``.  Per-worktree keys are scoped by the
        worktree's resolved root path.
 
-In-memory parse cache
-~~~~~~~~~~~~~~~~~~~~~
-
-``transform._cached_parse()`` maintains a two-tier cache:
-
-1. **In-memory dict** (256 entries, keyed on source MD5).  Thread-safe via
-   ``threading.Lock``.  When full, the oldest 25 % of entries are evicted.
-2. **Disk** (``parse_cache`` table).  On a cache miss the source is parsed,
-   the result is written to disk, then promoted to memory.
-
-This means repeated lookups for the same unchanged file are free after the
-first parse, even across process restarts.
-
 How caches are populated
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 There are two population paths:
 
-**Lazy (on first use).**  ``_cached_parse()`` populates ``parse_cache``
-transparently whenever a file is parsed.  ``visit_project()`` populates
-``qn_index`` as a side-effect of running ``QualifiedNameProvider``: after each
-file's ``MetadataWrapper.visit()`` completes, a lightweight ``_QNCollector``
-re-walks the resolved tree and stores the qualified-name set.
+**Lazy (on first use).**  ``visit_project()`` populates ``qn_index`` as a
+side-effect of running the Rust ``PyScopeResolver``: after each file is
+resolved, the qualified-name set is stored in the cache.
 
 **Eager (``emend index``).**  ``warm_caches()`` scans the project in parallel
 using a ``ProcessPoolExecutor``.  Each worker subprocess (``_index_batch()``)
 receives a batch of ``(file_path, source_text)`` tuples and performs:
 
-1. **Parse** — ``cst.parse_module()`` → compressed pickle → ``parse_cache``.
-2. **QN resolution** — ``MetadataWrapper`` + ``_QNCollector`` → compressed
-   pickle → ``qn_index``.
-3. **Symbol collection** — ``_SymbolCollector`` (from ``query.py``) →
+1. **QN resolution** — ``PyScopeResolver`` → compressed pickle → ``qn_index``.
+2. **Symbol collection** — ``emend_core.collect_symbols_from_str()`` →
    ``symbol_index`` rows (name, kind, line, signature, etc.).
-4. **Import extraction** — regex scan of ``import`` / ``from … import``
+3. **Import extraction** — regex scan of ``import`` / ``from … import``
    statements → ``import_graph`` rows.
-5. **Reference collection** — ``_RefIndexCollector`` visitor with
-   ``QualifiedNameProvider + PositionProvider + ParentNodeProvider`` →
+4. **Reference collection** — ``PyScopeResolver`` reference output →
    ``reference_index`` rows (target QN, line, column, ref_kind).
+
+All analysis is handled by the Rust tree-sitter backend.
 
 After all workers finish, the main process performs three additional steps:
 
@@ -189,7 +261,7 @@ After all workers finish, the main process performs three additional steps:
 
 Workers write directly to the SQLite database (WAL mode permits concurrent
 writers across processes).  Files whose content hash already appears in all
-relevant tables are skipped without parsing.
+relevant tables are skipped.
 
 How caches are invalidated
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -228,10 +300,8 @@ How caches are cleaned
 ~~~~~~~~~~~~~~~~~~~~~~
 
 emend does **not** aggressively prune old entries.  Content-hash keyed tables
-(``parse_cache``, ``qn_index``, ``type_cache``) accumulate entries across
-branch switches, which is intentional: switching back to an earlier branch
-reuses those entries.  The in-memory parse cache is bounded at 256 entries and
-self-evicting.
+(``qn_index``, ``type_cache``) accumulate entries across branch switches, which
+is intentional: switching back to an earlier branch reuses those entries.
 
 Path-indexed rows are kept consistent by the re-index cycle described above:
 when a file's content changes, its old rows (keyed on the previous content
@@ -314,12 +384,10 @@ Pattern grammar
 ---------------
 
 Patterns are parsed by a second Lark grammar (``grammars/pattern.lark``) into
-``Pattern`` dataclasses containing ``MetaVar`` objects.  ``compile_pattern_to_matcher()``
-translates a ``Pattern`` into a LibCST matcher tree.  A separate
-``compile_pattern_to_rust_ir()`` path translates simple patterns into a JSON IR
-consumed by the Rust tree-sitter engine; patterns that use features the Rust
-engine does not support (e.g. complex structural constraints) fall through to
-the LibCST path automatically.
+``Pattern`` dataclasses containing ``MetaVar`` objects.
+``compile_pattern_to_rust_ir()`` translates a ``Pattern`` into a JSON IR
+consumed by the Rust structural matcher engine, which performs matching directly
+on the Tree-sitter AST.
 
 Metavariable types:
 
@@ -388,9 +456,8 @@ Integration with pattern matching
 ``:type[X]`` and ``:returns[X]`` constraint tokens are matched syntactically by
 ``m.DoNotCare()`` (any node passes) and then *post-filtered* by
 ``_filter_matches_by_type_oracle()`` in ``transform.py``.  This keeps the Rust
-fast-path bypass simple: any oracle constraint skips the Rust engine and runs
-the full LibCST path (which provides ``PositionProvider`` metadata needed to
-look up nodes by position).
+fast-path bypass simple: any oracle constraint is post-filtered after the Rust
+structural matcher returns positional match data.
 
 Engine autodetection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -410,18 +477,17 @@ optional ``replace`` pattern for ``--fix`` mode.
 
 The lint engine applies a two-tier scan:
 
-1. **Rust fast-path** — rules whose ``find`` pattern compiles to Rust IR are
+1. **Batch Rust path** — rules whose ``find`` pattern compiles to Rust IR are
    batched into a single ``find_multi_patterns_in_files`` call.  This handles
    the common case of simple pattern rules (function calls, attribute accesses)
    with no structural scope constraint.
-2. **LibCST path** — rules with complex patterns or ``not-inside`` constraints
-   that don't compile to Rust IR are evaluated per-file using
-   ``find_pattern()`` with full LibCST scope resolution.
+2. **Single-file Rust path** — rules with complex patterns or ``not-inside``
+   constraints are evaluated per-file using ``find_pattern()`` with the Rust
+   structural matcher.
 
 ``# noqa`` suppression is implemented by tokenizing the source for ``# noqa``
-comments, then mapping each comment to its enclosing statement range via
-``_StatementRangeMapper`` (a LibCST ``CSTVisitor``).  A suppressed statement
-suppresses all matches inside it.
+comments, then mapping each comment to its enclosing statement range.  A
+suppressed statement suppresses all matches inside it.
 
 Free-threaded Python
 ---------------------
@@ -432,11 +498,9 @@ take full advantage:
 
 - ``emend_core`` is registered ``gil_used = false``, so all Rust functions
   release the GIL immediately and can run on multiple OS threads simultaneously.
-- LibCST's ``MetadataWrapper`` is run through a ``ThreadPoolExecutor`` on
-  free-threaded Python for cross-file operations (``rename``, ``refs``).
-- The ``_cached_parse()`` cache uses a fine-grained ``threading.Lock`` that is
-  only held during dict read/write, not during parsing, so threads rarely
-  contend on it.
+- Cross-file operations (``rename``, ``refs``) use a ``ThreadPoolExecutor`` on
+  free-threaded Python, with the Rust extension performing GIL-free analysis
+  across threads.
 
 To enable free-threaded speedups, install emend with a free-threaded Python:
 
