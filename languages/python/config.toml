@@ -152,6 +152,9 @@ module_field = "module_name"
 name_field = "name"
 alias_field = "alias"
 star_import = "wildcard_import"
+dotted_name = "dotted_name"
+aliased_import = "aliased_import"
+identifier = "identifier"
 
 # Import resolution strategy. Built-in strategies:
 #   "python" -- importlib semantics: sys.path, src/ layout detection,

@@ -84,6 +84,7 @@ resolution = "node"
 module_separator = "/"
 class_member_prefix = true
 nested_function_prefix = false
+locals_marker = ""
 
 [exports]
 export_statement = "export_statement"

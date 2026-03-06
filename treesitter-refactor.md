@@ -1384,48 +1384,49 @@ detection pluggable per-language.
 
 ##### 2c. Extract Python plugin from existing code
 
-- [ ] **Create `languages/python/plugin.py`** with:
-  - [ ] `PythonImportHandler` — move `_get_imports()` (`transform.py:1915`)
+- [x] **Create `languages/python/plugin.py`** with:
+  - [x] `PythonImportHandler` — move `_get_imports()` (`transform.py:1915`)
     and `_add_import_text()` (`transform.py:1931`) logic into handler
     methods.
-  - [ ] `PythonCommentHandler` — move `_rename_in_docstrings()`
+  - [x] `PythonCommentHandler` — move `_rename_in_docstrings()`
     (`transform.py:3319`) and `parse_noqa_comments()` (`lint.py:52`)
     logic into handler methods.
-  - [ ] `PythonPatternCompiler` — wraps existing `_ast_to_rust_ir()`
+  - [x] `PythonPatternCompiler` — wraps existing `_ast_to_rust_ir()`
     (`pattern.py:255`) and `compile_pattern_to_rust_ir()`
     (`pattern.py:973`).
 
 ##### 2d. Refactor call sites to use plugin system
 
-- [ ] **`transform.py:_get_imports()`** — delegate to
+- [x] **`transform.py:_get_imports()`** — delegate to
   `load_plugin(language).import_handler.extract_imports()`.
-- [ ] **`transform.py:_add_import_text()`** — delegate to
+- [x] **`transform.py:_add_import_text()`** — delegate to
   `load_plugin(language).import_handler.add_import()`.
-- [ ] **`transform.py:_rename_in_docstrings()`** — delegate to
+- [x] **`transform.py:_rename_in_docstrings()`** — delegate to
   `load_plugin(language).comment_handler`.
-- [ ] **`lint.py:parse_noqa_comments()`** — delegate to
+- [x] **`lint.py:parse_noqa_comments()`** — delegate to
   `load_plugin(language).comment_handler.find_noqa_comments()`.
 - [ ] **`pattern.py:compile_pattern_to_rust_ir()`** — delegate to
   `load_plugin(language).pattern_compiler.compile()`.  Current Python
   `ast`-based compilation becomes the `PythonPatternCompiler`.
+  (Deferred — needs Rust integration work in Phase 5)
 
 ##### 2e. Tests
 
-- [ ] Test that `PythonImportHandler.extract_imports()` produces same
+- [x] Test that `PythonImportHandler.extract_imports()` produces same
   output as the current `_get_imports()` on a corpus of test files.
-- [ ] Test that `PythonImportHandler.add_import()` produces same output
+- [x] Test that `PythonImportHandler.add_import()` produces same output
   as the current `_add_import_text()`.
-- [ ] Test that `PythonCommentHandler.find_noqa_comments()` matches
+- [x] Test that `PythonCommentHandler.find_noqa_comments()` matches
   current `parse_noqa_comments()`.
-- [ ] Test that `NoOpImportHandler` returns source unchanged / empty
+- [x] Test that `NoOpImportHandler` returns source unchanged / empty
   lists.
 - [ ] Test that `RegexCommentHandler("//")` detects `// noqa: deadcode`
   comments in C-style languages.
-- [ ] Test that `load_plugin("python")` returns a `LanguagePlugin` with
+- [x] Test that `load_plugin("python")` returns a `LanguagePlugin` with
   all three handlers populated.
-- [ ] Test that `load_plugin("unknown_lang")` returns defaults (NoOp
+- [x] Test that `load_plugin("unknown_lang")` returns defaults (NoOp
   import, Regex comment, TreeSitter pattern compiler) without crashing.
-- [ ] Full `make test` passes — no regressions from the refactor.
+- [x] Full `make test` passes — no regressions from the refactor.
 
 ---
 

@@ -284,12 +284,24 @@ pub struct DefinitionsSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportsSection {
     pub import_statement: String,
+    #[serde(default)]
     pub import_from: String,
     pub module_field: String,
     pub name_field: String,
+    #[serde(default)]
     pub alias_field: String,
+    #[serde(default)]
     pub star_import: String,
     pub resolution: String,
+    /// Child node type for dotted module paths (e.g. "dotted_name" in Python).
+    #[serde(default)]
+    pub dotted_name: Option<String>,
+    /// Child node type for aliased imports (e.g. "aliased_import" in Python).
+    #[serde(default)]
+    pub aliased_import: Option<String>,
+    /// Child node type for plain identifiers in from-imports (e.g. "identifier" in Python).
+    #[serde(default)]
+    pub identifier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -774,16 +786,20 @@ impl ScopeResolver {
             current_scope
         };
 
+        let cfg_imports = &self.config.imports;
+        let is_plain_import = node_kind == cfg_imports.import_statement
+            && (cfg_imports.import_from.is_empty() || node_kind != cfg_imports.import_from);
+        let is_from_import = !cfg_imports.import_from.is_empty()
+            && node_kind == cfg_imports.import_from;
+
         // Track whether we're inside an import statement.
-        let child_in_import = in_import
-            || node_kind == "import_statement"
-            || node_kind == "import_from_statement";
+        let child_in_import = in_import || is_plain_import || is_from_import;
 
         // Special handling for imports: record module name references
-        if node_kind == "import_statement" {
+        if is_plain_import {
             for_each_child(&node, |child| {
                 let ck = child.kind();
-                if ck == "dotted_name" {
+                if cfg_imports.dotted_name.as_deref() == Some(ck) {
                     let qn = node_text(child, source).to_string();
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
@@ -795,7 +811,7 @@ impl ScopeResolver {
                         qn: QualifiedName { name: qn },
                         kind: ReferenceKind::Import,
                     });
-                } else if ck == "aliased_import" {
+                } else if cfg_imports.aliased_import.as_deref() == Some(ck) {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let qn = node_text(name_node, source).to_string();
                         qn_set.insert(qn.clone());
@@ -809,7 +825,7 @@ impl ScopeResolver {
                             kind: ReferenceKind::Import,
                         });
                     }
-                    // Alias part will be processed as a definition in collect_bindings, 
+                    // Alias part will be processed as a definition in collect_bindings,
                     // and we don't want a reference for the alias name here.
                 }
             });
@@ -817,8 +833,8 @@ impl ScopeResolver {
             return;
         }
 
-        if node_kind == "import_from_statement" {
-            let mod_node_id = if let Some(mod_node) = node.child_by_field_name("module_name") {
+        if is_from_import {
+            let mod_node_id = if let Some(mod_node) = node.child_by_field_name(&cfg_imports.module_field) {
                 let qn = node_text(mod_node, source).to_string();
                 qn_set.insert(qn.clone());
                 refs.push(Reference {
@@ -834,14 +850,17 @@ impl ScopeResolver {
             } else {
                 None
             };
-            
+
             // For the imported names, we still want to process them
             for_each_child(&node, |child| {
                 if mod_node_id == Some(child.id()) {
                     return;
                 }
                 let ck = child.kind();
-                if ck == "identifier" || ck == "dotted_name" || ck == "aliased_import" {
+                let is_name_node = cfg_imports.identifier.as_deref() == Some(ck)
+                    || cfg_imports.dotted_name.as_deref() == Some(ck)
+                    || cfg_imports.aliased_import.as_deref() == Some(ck);
+                if is_name_node {
                     // These resolve to symbols in the module
                     self.walk_references(
                         &mut child.walk(), file_path, source, module_path,
@@ -1369,8 +1388,11 @@ impl ScopeResolver {
             };
 
         // Collect imports
-        if node_kind == "import_statement" || node_kind == "import_from_statement" {
-            Self::collect_import(ctx, &node);
+        if node_kind == self.config.imports.import_statement
+            || (!self.config.imports.import_from.is_empty()
+                && node_kind == self.config.imports.import_from)
+        {
+            self.collect_import(ctx, &node);
         }
 
         // Collect assignments and other bindings
@@ -1550,84 +1572,105 @@ impl ScopeResolver {
     }
 
     /// Collect imports from an import statement node.
-    fn collect_import(ctx: &mut BuildContext, node: &tree_sitter::Node) {
-        match node.kind() {
-            "import_statement" => {
-                for_each_child(node, |child| {
-                    if child.kind() != "dotted_name" && child.kind() != "aliased_import" {
-                        return;
-                    }
-                    let (local_name, module_path) = if child.kind() == "aliased_import" {
-                        let name_node = child.child_by_field_name("name");
-                        let alias_node = child.child_by_field_name("alias");
-                        match (name_node, alias_node) {
-                            (Some(n), Some(a)) => (ctx.text(a).to_string(), ctx.text(n).to_string()),
-                            (Some(n), None) => {
-                                let text = ctx.text(n).to_string();
-                                let local = text.split('.').next().unwrap_or(&text).to_string();
-                                (local, text)
-                            }
-                            _ => return,
-                        }
-                    } else {
-                        let text = ctx.text(child).to_string();
-                        let local = text.split('.').next().unwrap_or(&text).to_string();
-                        (local, text)
-                    };
+    fn collect_import(&self, ctx: &mut BuildContext, node: &tree_sitter::Node) {
+        let imports = &self.config.imports;
+        let node_kind = node.kind();
 
+        // Is this a bare `import X` style (no "from")?
+        let is_plain_import = node_kind == imports.import_statement
+            && (imports.import_from.is_empty() || node_kind != imports.import_from);
+
+        // Is this a `from X import Y` style?
+        let is_from_import = !imports.import_from.is_empty()
+            && node_kind == imports.import_from;
+
+        if is_plain_import {
+            for_each_child(node, |child| {
+                let ck = child.kind();
+                let is_aliased = imports.aliased_import.as_deref() == Some(ck);
+                let is_dotted = imports.dotted_name.as_deref() == Some(ck);
+
+                if !is_aliased && !is_dotted {
+                    return;
+                }
+
+                let (local_name, module_path) = if is_aliased {
+                    let name_node = child.child_by_field_name("name");
+                    let alias_node = if !imports.alias_field.is_empty() {
+                        child.child_by_field_name(&imports.alias_field)
+                    } else {
+                        None
+                    };
+                    match (name_node, alias_node) {
+                        (Some(n), Some(a)) => (ctx.text(a).to_string(), ctx.text(n).to_string()),
+                        (Some(n), None) => {
+                            let text = ctx.text(n).to_string();
+                            let local = text.split('.').next().unwrap_or(&text).to_string();
+                            (local, text)
+                        }
+                        _ => return,
+                    }
+                } else {
+                    let text = ctx.text(child).to_string();
+                    let local = text.split('.').next().unwrap_or(&text).to_string();
+                    (local, text)
+                };
+
+                ctx.add_import(ImportBinding {
+                    local_name,
+                    module_path,
+                    imported_name: None,
+                    is_star: false,
+                });
+            });
+        } else if is_from_import {
+            let module_path = node
+                .child_by_field_name(&imports.module_field)
+                .map(|n| ctx.text(n).to_string())
+                .unwrap_or_default();
+
+            for_each_child(node, |child| {
+                let ck = child.kind();
+                let is_star = !imports.star_import.is_empty() && ck == imports.star_import;
+                let is_aliased = imports.aliased_import.as_deref() == Some(ck);
+                let is_plain_name = imports.dotted_name.as_deref() == Some(ck)
+                    || imports.identifier.as_deref() == Some(ck);
+
+                if is_star {
                     ctx.add_import(ImportBinding {
-                        local_name,
-                        module_path,
+                        local_name: "*".to_string(),
+                        module_path: module_path.clone(),
                         imported_name: None,
+                        is_star: true,
+                    });
+                } else if is_plain_name {
+                    let name = ctx.text(child).to_string();
+                    ctx.add_import(ImportBinding {
+                        local_name: name.clone(),
+                        module_path: module_path.clone(),
+                        imported_name: Some(name),
                         is_star: false,
                     });
-                });
-            }
-            "import_from_statement" => {
-                let module_path = node
-                    .child_by_field_name("module_name")
-                    .map(|n| ctx.text(n).to_string())
-                    .unwrap_or_default();
-
-                for_each_child(node, |child| {
-                    match child.kind() {
-                        "wildcard_import" => {
-                            ctx.add_import(ImportBinding {
-                                local_name: "*".to_string(),
-                                module_path: module_path.clone(),
-                                imported_name: None,
-                                is_star: true,
-                            });
-                        }
-                        "dotted_name" | "identifier" => {
-                            let name = ctx.text(child).to_string();
-                            ctx.add_import(ImportBinding {
-                                local_name: name.clone(),
-                                module_path: module_path.clone(),
-                                imported_name: Some(name),
-                                is_star: false,
-                            });
-                        }
-                        "aliased_import" => {
-                            if let Some(name_node) = child.child_by_field_name("name") {
-                                let imported = ctx.text(name_node).to_string();
-                                let local = child
-                                    .child_by_field_name("alias")
-                                    .map(|a| ctx.text(a).to_string())
-                                    .unwrap_or_else(|| imported.clone());
-                                ctx.add_import(ImportBinding {
-                                    local_name: local,
-                                    module_path: module_path.clone(),
-                                    imported_name: Some(imported),
-                                    is_star: false,
-                                });
-                            }
-                        }
-                        _ => {}
+                } else if is_aliased {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let imported = ctx.text(name_node).to_string();
+                        let local = if !imports.alias_field.is_empty() {
+                            child
+                                .child_by_field_name(&imports.alias_field)
+                                .map(|a| ctx.text(a).to_string())
+                                .unwrap_or_else(|| imported.clone())
+                        } else {
+                            imported.clone()
+                        };
+                        ctx.add_import(ImportBinding {
+                            local_name: local,
+                            module_path: module_path.clone(),
+                            imported_name: Some(imported),
+                            is_star: false,
+                        });
                     }
-                });
-            }
-            _ => {}
+                }
+            });
         }
     }
 
@@ -1950,6 +1993,9 @@ impl LanguageConfig {
                 alias_field: "alias".to_string(),
                 star_import: "wildcard_import".to_string(),
                 resolution: "python".to_string(),
+                dotted_name: Some("dotted_name".to_string()),
+                aliased_import: Some("aliased_import".to_string()),
+                identifier: Some("identifier".to_string()),
             },
             qualified_names: QualifiedNamesSection {
                 module_separator: ".".to_string(),
