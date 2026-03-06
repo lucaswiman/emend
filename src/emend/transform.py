@@ -611,7 +611,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
         if need_ref and scope_indexed:
             try:
-                for qn_str, line, col, offset, kind in scope_resolver.references_in_file(py_file):
+                for qn_str, line, col, offset, end_offset, kind in scope_resolver.references_in_file(py_file):
                     ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
             except Exception:
                 pass
@@ -3857,7 +3857,7 @@ def _filter_matches_by_import(
     
     # Map (line, col) -> (qn, kind)
     ref_map = {}
-    for qn, line, col, offset, kind in refs:
+    for qn, line, col, offset, end_offset, kind in refs:
         ref_map[(line, col)] = (qn, kind)
 
     filtered = []
@@ -4158,7 +4158,7 @@ def _filter_matches_by_scope_local(
     
     # Map (line, col) -> (qn, kind)
     ref_map = {}
-    for qn, line, col, offset, kind in refs:
+    for qn, line, col, offset, end_offset, kind in refs:
         ref_map[(line, col)] = (qn, kind)
 
     filtered = []
@@ -5072,7 +5072,7 @@ def find_references(
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            for qn, line, col, offset, kind in resolver.references_in_file(py_file):
+            for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns:
                     is_def = kind == "definition"
                     is_imp = kind == "import"
@@ -5149,7 +5149,7 @@ def find_callers(
             candidate_files=candidates,
             target_qnames=all_target_qns,
         ):
-            for qn, line, col, offset, kind in resolver.references_in_file(py_file):
+            for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns and kind == "call":
                     yield Reference(
                         file_path=py_file,
@@ -5204,7 +5204,7 @@ def find_callees(
     callees: list[Callee] = []
     seen: set[tuple[str, int]] = set()
 
-    for qn, line, col, offset, kind in refs:
+    for qn, line, col, offset, end_offset, kind in refs:
         if kind == "call" and target_sym.line_start <= line <= target_sym.line_end:
             # deduplicate by (QN, line) to match old _CalleeCollector._seen behavior
             # (which was by name, but now we have line info too)
@@ -5850,12 +5850,13 @@ def rename_symbol(
         transform = _rust.PyFileTransform(content)
         changed = False
 
-        for qn, line, col, offset, kind in references:
+        for qn, line, col, offset, end_offset, kind in references:
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
-                if content[offset:offset+len(symbol_name)] == symbol_name:
-                    transform.replace_range(offset, offset + len(symbol_name), new_name)
+                # Now using end_offset for better precision!
+                if content[offset:end_offset].endswith(symbol_name):
+                    transform.replace_range(end_offset - len(symbol_name), end_offset, new_name)
                     changed = True
 
         if not changed:
@@ -5879,60 +5880,6 @@ def rename_symbol(
             Path(py_file).write_text(new_content)
 
     return diffs
-
-
-def _rewrite_imports(
-    content: str,
-    source_module: str,
-    dest_module: str,
-    symbol_name: str
-) -> str:
-    """Rewrite imports in content to reflect symbol move."""
-    import libcst as cst
-    from libcst import matchers as m
-
-    class ImportRewriter(cst.CSTTransformer):
-        """Transformer to rewrite import statements."""
-
-        def __init__(self, source_mod: str, dest_mod: str, sym_name: str):
-            self.source_mod = source_mod
-            self.dest_mod = dest_mod
-            self.sym_name = sym_name
-
-        def leave_ImportFrom(
-            self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-        ) -> cst.ImportFrom:
-            """Rewrite from X import Y statements."""
-            # Check if this imports from the source module
-            if updated_node.module is None:
-                return updated_node
-
-            module_name = cst.Module([]).code_for_node(updated_node.module).strip()
-
-            if module_name == self.source_mod:
-                # Check if it imports our symbol
-                if isinstance(updated_node.names, cst.ImportStar):
-                    return updated_node
-
-                for name in updated_node.names:
-                    if isinstance(name, cst.ImportAlias):
-                        imported_name = name.name.value if isinstance(name.name, cst.Name) else str(name.name)
-                        if imported_name == self.sym_name:
-                            # Rewrite the module name
-                            new_module = cst.parse_expression(self.dest_mod)
-                            if isinstance(new_module, (cst.Name, cst.Attribute)):
-                                return updated_node.with_changes(module=new_module)
-
-            return updated_node
-
-    try:
-        module = cst.parse_module(content)
-        rewriter = ImportRewriter(source_module, dest_module, symbol_name)
-        new_module = module.visit(rewriter)
-        return new_module.code
-    except Exception:
-        # If parsing fails, return original content
-        return content
 
 
 def move_symbol(
@@ -6011,39 +5958,65 @@ def _update_imports_for_move(
     resolved_dest = str(Path(dest_file).resolve())
     proj_root = _find_project_root(project_path or source_file)
 
-    # Use _rewrite_imports which handles the ImportRewriter transformer
-    import_pattern = f"from {source_module} import"
+    target_qn = f"{source_module}.{symbol_name}"
 
-    def factory(py_file: str, is_def_file: bool):
-        # We use _ModuleImportRenamer-like approach but specific to symbol moves.
-        # Return a no-op transformer for files we want to skip.
-        resolved_py = str(Path(py_file).resolve())
-        if resolved_py == resolved_source or resolved_py == resolved_dest:
-            return _NoOpTransformer()
-        return _ImportRewriterForMove(source_module, dest_module, symbol_name)
-
-    for py_file, result_module, rewriter in visit_project(
-        name_hint=import_pattern,
-        visitor_factory=factory,
+    for py_file, content, resolver in visit_project_ts(
+        name_hint=symbol_name,
         project_path=proj_root,
     ):
-        if isinstance(rewriter, _NoOpTransformer) or not rewriter.changed:
+        resolved_py = str(Path(py_file).resolve())
+        if resolved_py == resolved_source or resolved_py == resolved_dest:
             continue
 
-        content = Path(py_file).read_text()
-        new_content = result_module.code
+        transform = _rust.PyFileTransform(content)
+        changed = False
 
-        if new_content != content:
-            diff = _generate_diff(py_file, content, new_content)
-            diffs[py_file] = diff
+        references = resolver.references_in_file(py_file)
+        
+        for i, (qn, line, col, offset, end_offset, kind) in enumerate(references):
+            if kind != "import":
+                continue
+            
+            if qn == target_qn:
+                # This could be 'from source_module import symbol_name'
+                # or 'import source_module.symbol_name'
+                
+                # Search backwards for the module reference in the same statement
+                module_ref = None
+                for j in range(i - 1, -1, -1):
+                    pqn, pl, pc, po, peo, pk = references[j]
+                    if pk != "import": continue
+                    # Heuristic: must be on same or previous line
+                    if pl < line - 1: break
+                    if pqn == source_module:
+                        module_ref = (po, peo)
+                        break
+                
+                if module_ref:
+                    # 'from source_module import ...'
+                    transform.replace_range(module_ref[0], module_ref[1], dest_module)
+                    changed = True
+                else:
+                    # 'import source_module.symbol_name'
+                    # Replace the 'source_module' part of the QN
+                    if content[offset : offset + len(source_module)] == source_module:
+                        transform.replace_range(offset, offset + len(source_module), dest_module)
+                        changed = True
 
-            if apply:
-                Path(py_file).write_text(new_content)
+        if not changed:
+            continue
+
+        new_content = transform.apply()
+        if new_content is None or new_content == content:
+            continue
+
+        diff = _generate_diff(py_file, content, new_content)
+        diffs[py_file] = diff
+
+        if apply:
+            Path(py_file).write_text(new_content)
 
     return diffs
-
-
-
 def _rename_module_references(
     project_root: str,
     old_module: str,
@@ -6053,19 +6026,39 @@ def _rename_module_references(
     """Update all imports from old_module to new_module across the project."""
     diffs = {}
 
-    def factory(py_file: str, is_def_file: bool):
-        return _ModuleImportRenamer(old_module, new_module)
+    # hint for structural filter
+    name_hint = old_module.rsplit('.', 1)[-1]
 
-    for py_file, result_module, renamer in visit_project(
-        name_hint=old_module,
-        visitor_factory=factory,
+    for py_file, content, resolver in visit_project_ts(
+        name_hint=name_hint,
         project_path=project_root,
     ):
-        if not renamer.changed:
+        transform = _rust.PyFileTransform(content)
+        changed = False
+
+        for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
+            if kind != "import":
+                continue
+
+            # Exact match: import old_module or from old_module import ...
+            if qn == old_module:
+                transform.replace_range(offset, end_offset, new_module)
+                changed = True
+            # Prefix match: import old_module.sub or from old_module.sub import ...
+            elif qn.startswith(old_module + "."):
+                prefix_len = len(old_module)
+                # Verify that the source at offset matches old_module
+                if content[offset : offset + prefix_len] == old_module:
+                    transform.replace_range(offset, offset + prefix_len, new_module)
+                    changed = True
+
+        if not changed:
             continue
 
-        content = Path(py_file).read_text()
-        new_content = result_module.code
+        new_content = transform.apply()
+        if new_content is None or new_content == content:
+            continue
+
         diff = _generate_diff(py_file, content, new_content)
         diffs[py_file] = diff
 
@@ -6073,114 +6066,6 @@ def _rename_module_references(
             Path(py_file).write_text(new_content)
 
     return diffs
-
-
-class _NoOpTransformer(cst.CSTTransformer):
-    """A no-op transformer that makes no changes."""
-    changed = False
-
-
-class _ImportRewriterForMove(cst.CSTTransformer):
-    """Rewrite 'from source_module import symbol_name' to 'from dest_module import symbol_name'."""
-
-    def __init__(self, source_module: str, dest_module: str, symbol_name: str):
-        self.source_module = source_module
-        self.dest_module = dest_module
-        self.symbol_name = symbol_name
-        self.changed = False
-
-    def leave_ImportFrom(
-        self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-    ) -> cst.ImportFrom:
-        if updated_node.module is None:
-            return updated_node
-
-        module_name = cst.Module([]).code_for_node(updated_node.module).strip()
-
-        if module_name == self.source_module:
-            if isinstance(updated_node.names, cst.ImportStar):
-                return updated_node
-
-            for name in updated_node.names:
-                if isinstance(name, cst.ImportAlias):
-                    imported_name = name.name.value if isinstance(name.name, cst.Name) else str(name.name)
-                    if imported_name == self.symbol_name:
-                        new_module = cst.parse_expression(self.dest_module)
-                        if isinstance(new_module, (cst.Name, cst.Attribute)):
-                            self.changed = True
-                            return updated_node.with_changes(module=new_module)
-
-        return updated_node
-
-
-class _ModuleImportRenamer(cst.CSTTransformer):
-    """Rewrite import statements to replace old_module with new_module."""
-
-    def __init__(self, old_module: str, new_module: str):
-        self.old_module = old_module
-        self.new_module = new_module
-        self.changed = False
-
-    def _module_name_str(self, node) -> str:
-        """Convert a module attribute/name node to dotted string."""
-        return cst.Module([]).code_for_node(node).strip()
-
-    def leave_ImportFrom(
-        self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-    ) -> cst.ImportFrom:
-        if updated_node.module is None:
-            return updated_node
-
-        module_name = self._module_name_str(updated_node.module)
-
-        if module_name == self.old_module:
-            # Exact match: from old_module import X -> from new_module import X
-            new_mod_node = cst.parse_expression(self.new_module)
-            if isinstance(new_mod_node, (cst.Name, cst.Attribute)):
-                self.changed = True
-                return updated_node.with_changes(module=new_mod_node)
-        elif module_name.startswith(self.old_module + '.'):
-            # Prefix match: from old_module.sub import X -> from new_module.sub import X
-            suffix = module_name[len(self.old_module):]
-            new_name = self.new_module + suffix
-            new_mod_node = cst.parse_expression(new_name)
-            if isinstance(new_mod_node, (cst.Name, cst.Attribute)):
-                self.changed = True
-                return updated_node.with_changes(module=new_mod_node)
-
-        return updated_node
-
-    def leave_Import(
-        self, original_node: cst.Import, updated_node: cst.Import
-    ) -> cst.Import:
-        if isinstance(updated_node.names, cst.ImportStar):
-            return updated_node
-
-        new_names = []
-        any_changed = False
-        for alias in updated_node.names:
-            if isinstance(alias, cst.ImportAlias):
-                name_str = self._module_name_str(alias.name)
-                if name_str == self.old_module:
-                    new_mod_node = cst.parse_expression(self.new_module)
-                    if isinstance(new_mod_node, (cst.Name, cst.Attribute)):
-                        any_changed = True
-                        new_names.append(alias.with_changes(name=new_mod_node))
-                        continue
-                elif name_str.startswith(self.old_module + '.'):
-                    suffix = name_str[len(self.old_module):]
-                    new_name = self.new_module + suffix
-                    new_mod_node = cst.parse_expression(new_name)
-                    if isinstance(new_mod_node, (cst.Name, cst.Attribute)):
-                        any_changed = True
-                        new_names.append(alias.with_changes(name=new_mod_node))
-                        continue
-            new_names.append(alias)
-
-        if any_changed:
-            self.changed = True
-            return updated_node.with_changes(names=new_names)
-        return updated_node
 
 
 def move_module(

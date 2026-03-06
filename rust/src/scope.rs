@@ -134,6 +134,7 @@ pub struct Reference {
     pub line: usize,
     pub column: usize,
     pub byte_offset: usize,
+    pub end_byte: usize,
     pub qn: QualifiedName,
     pub kind: ReferenceKind,
 }
@@ -759,6 +760,80 @@ impl ScopeResolver {
             || node_kind == "import_statement"
             || node_kind == "import_from_statement";
 
+        // Special handling for imports: record module name references
+        if node_kind == "import_statement" {
+            for_each_child(&node, |child| {
+                let ck = child.kind();
+                if ck == "dotted_name" {
+                    let qn = node_text(child, source).to_string();
+                    qn_set.insert(qn.clone());
+                    refs.push(Reference {
+                        file: file_path.to_path_buf(),
+                        line: child.start_position().row + 1,
+                        column: child.start_position().column,
+                        byte_offset: child.start_byte(),
+                        end_byte: child.end_byte(),
+                        qn: QualifiedName { name: qn },
+                        kind: ReferenceKind::Import,
+                    });
+                } else if ck == "aliased_import" {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let qn = node_text(name_node, source).to_string();
+                        qn_set.insert(qn.clone());
+                        refs.push(Reference {
+                            file: file_path.to_path_buf(),
+                            line: name_node.start_position().row + 1,
+                            column: name_node.start_position().column,
+                            byte_offset: name_node.start_byte(),
+                            end_byte: name_node.end_byte(),
+                            qn: QualifiedName { name: qn },
+                            kind: ReferenceKind::Import,
+                        });
+                    }
+                    // Alias part will be processed as a definition in collect_bindings, 
+                    // and we don't want a reference for the alias name here.
+                }
+            });
+            // We've handled the children we care about
+            return;
+        }
+
+        if node_kind == "import_from_statement" {
+            let mod_node_id = if let Some(mod_node) = node.child_by_field_name("module_name") {
+                let qn = node_text(mod_node, source).to_string();
+                qn_set.insert(qn.clone());
+                refs.push(Reference {
+                    file: file_path.to_path_buf(),
+                    line: mod_node.start_position().row + 1,
+                    column: mod_node.start_position().column,
+                    byte_offset: mod_node.start_byte(),
+                    end_byte: mod_node.end_byte(),
+                    qn: QualifiedName { name: qn },
+                    kind: ReferenceKind::Import,
+                });
+                Some(mod_node.id())
+            } else {
+                None
+            };
+            
+            // For the imported names, we still want to process them
+            for_each_child(&node, |child| {
+                if mod_node_id == Some(child.id()) {
+                    return;
+                }
+                let ck = child.kind();
+                if ck == "identifier" || ck == "dotted_name" || ck == "aliased_import" {
+                    // These resolve to symbols in the module
+                    self.walk_references(
+                        &mut child.walk(), file_path, source, module_path,
+                        scopes, scope_index, imports, current_scope, true,
+                        refs, qn_set,
+                    );
+                }
+            });
+            return;
+        }
+
         // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
         if node_kind == "identifier" {
@@ -785,6 +860,7 @@ impl ScopeResolver {
                         line: node.start_position().row + 1,
                         column: node.start_position().column,
                         byte_offset: node.start_byte(),
+                        end_byte: node.end_byte(),
                         qn: QualifiedName { name: qn },
                         kind,
                     });
@@ -809,6 +885,7 @@ impl ScopeResolver {
                         line: node.start_position().row + 1,
                         column: node.start_position().column,
                         byte_offset: node.start_byte(),
+                        end_byte: node.end_byte(),
                         qn: QualifiedName { name: qn },
                         kind,
                     });
