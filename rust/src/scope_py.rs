@@ -15,27 +15,39 @@ pub struct PyScopeResolver {
 #[pymethods]
 impl PyScopeResolver {
     #[new]
-    fn new(project_root: &str) -> Self {
-        let config = LanguageConfig::python_default();
-        Self {
-            inner: ScopeResolver::new(config, PathBuf::from(project_root)),
-        }
+    #[pyo3(signature = (project_root, extension=None))]
+    fn new(project_root: &str, extension: Option<&str>) -> PyResult<Self> {
+        let root = PathBuf::from(project_root);
+        let config = if let Some(ext) = extension {
+            LanguageConfig::load_for_extension(ext, &root).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to load config: {}", e))
+            })?
+        } else {
+            LanguageConfig::python_default()
+        };
+        Ok(Self {
+            inner: ScopeResolver::new(config, root),
+        })
     }
 
     /// Index a single file.  Re-indexes only if content hash changed.
     fn index_file(&mut self, path: &str, source: &str) -> PyResult<()> {
-        let tree = parse_python(source).ok_or_else(|| {
+        let path_buf = PathBuf::from(path);
+        let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let tree = crate::pattern::parse_by_extension(source, ext).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to parse file")
         })?;
-        self.inner.index_file(&PathBuf::from(path), source, &tree);
+        self.inner.index_file(&path_buf, source, &tree);
         Ok(())
     }
 
     /// Index multiple files sequentially.
     fn index_files(&mut self, files_and_sources: Vec<(String, String)>) -> PyResult<()> {
         for (path, source) in &files_and_sources {
-            if let Some(tree) = parse_python(source) {
-                self.inner.index_file(&PathBuf::from(path), source, &tree);
+            let path_buf = PathBuf::from(path);
+            let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if let Some(tree) = crate::pattern::parse_by_extension(source, ext) {
+                self.inner.index_file(&path_buf, source, &tree);
             }
         }
         Ok(())

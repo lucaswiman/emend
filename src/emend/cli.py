@@ -222,7 +222,6 @@ def _print_pattern_match_code(
     file_lines_cache: dict[str, list[str]],
     *,
     is_tty: bool = False,
-    module_for_node=None,
 ) -> None:
     """Print a pattern match with a file:line header followed by matched source lines.
 
@@ -627,7 +626,6 @@ def search(
             _t_search_start = _time.monotonic()
             _logger = logging.getLogger("emend.search")
             target_path = path or "."
-            import libcst as cst
             from emend import emend_core
 
             _t0 = _time.monotonic()
@@ -665,24 +663,12 @@ def search(
                 all_matches = list(_iter_matches())
                 serialized_matches = []
                 for file_path_str, match in all_matches:
-                    if match.matched_text is not None:
-                        code_str = match.matched_text.strip()
-                    else:
-                        code_str = cst.Module([]).code_for_node(match.node).strip()
-                    captures = {}
-                    for cap_name, captured in match.captures.items():
-                        if isinstance(captured, tuple):
-                            items = []
-                            for item in captured:
-                                items.append(cst.Module([]).code_for_node(item).strip())
-                            captures[cap_name] = ", ".join(items)
-                        else:
-                            captures[cap_name] = cst.Module([]).code_for_node(captured).strip()
+                    code_str = (match.matched_text or "").strip()
                     serialized_matches.append({
                         "file": file_path_str,
                         "line": match.line,
                         "code": code_str,
-                        "captures": captures
+                        "captures": match.captures
                     })
                 print(json.dumps({"count": len(all_matches), "matches": serialized_matches}))
                 _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
@@ -722,7 +708,7 @@ def search(
                         n_total += 1
                         _print_pattern_match_code(
                             file_path_str, match, _file_lines_cache,
-                            is_tty=is_tty, module_for_node=cst.Module([]),
+                            is_tty=is_tty,
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             return

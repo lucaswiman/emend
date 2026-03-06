@@ -12,6 +12,7 @@
 name = "python"
 tree_sitter_grammar = "tree-sitter-python"
 file_extensions = ["py", "pyi"]
+keywords = ["True", "False", "None"]
 
 # ---------------------------------------------------------------------------
 # Scoping rules
@@ -190,3 +191,23 @@ public_by_default = true
 private_prefix = "_"
 # Dunder methods are always considered public/entry-points
 dunder_is_public = true
+
+[builtins]
+names = [
+    "print", "len", "range", "int", "str", "float", "bool", "list",
+    "dict", "set", "tuple", "type", "isinstance", "issubclass",
+    "hasattr", "getattr", "setattr", "delattr", "property",
+    "staticmethod", "classmethod", "super", "object", "Exception",
+    "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError",
+    "AttributeError", "ImportError", "OSError", "IOError", "FileNotFoundError",
+    "NotImplementedError", "StopIteration", "GeneratorExit", "SystemExit",
+    "AssertionError", "NameError", "ZeroDivisionError", "OverflowError",
+    "abs", "all", "any", "bin", "bytes", "callable", "chr", "complex",
+    "dir", "divmod", "enumerate", "eval", "exec", "filter", "format",
+    "frozenset", "globals", "hash", "hex", "id", "input" , "iter",
+    "map", "max", "min", "next", "oct", "open", "ord", "pow",
+    "repr", "reversed", "round", "slice", "sorted", "sum", "vars",
+    "zip", "breakpoint", "memoryview", "bytearray",
+    "__name__", "__file__", "__doc__", "__package__", "__spec__",
+    "__import__", "__build_class__"
+]

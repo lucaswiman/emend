@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from lark import Lark, Transformer, Token
 import importlib.resources
-import libcst as cst
-from libcst import matchers as m
 from typing import Union
 import re as _re
 
@@ -119,32 +117,6 @@ def parse_pattern(pattern_str: str) -> Pattern:
         raw=pattern_str,
         metavars=transformer.metavars
     )
-
-
-def _comp_for_to_matcher(
-    comp_for: cst.CompFor,
-    metavar_map: dict[str, MetaVar],
-    ellipsis_info: dict | None = None
-) -> m.BaseMatcherNode:
-    """Convert CompFor node to matcher."""
-    if ellipsis_info is None:
-        ellipsis_info = {}
-
-    # Match the target (loop variable)
-    target_matcher = _cst_to_matcher(comp_for.target, metavar_map, ellipsis_info)
-
-    # Match the iterable
-    iter_matcher = _cst_to_matcher(comp_for.iter, metavar_map, ellipsis_info)
-
-    # Match any if clauses
-    if comp_for.ifs:
-        ifs_matchers = []
-        for comp_if in comp_for.ifs:
-            test_matcher = _cst_to_matcher(comp_if.test, metavar_map, ellipsis_info)
-            ifs_matchers.append(m.CompIf(test=test_matcher))
-        return m.CompFor(target=target_matcher, iter=iter_matcher, ifs=ifs_matchers)
-    else:
-        return m.CompFor(target=target_matcher, iter=iter_matcher)
 
 
 def is_oracle_type_constraint(constraint: str | None) -> bool:
@@ -945,9 +917,9 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             if metavar.type_constraint is not None:
                 return None
             if metavar.ellipsis:
-                return {"type": "ellipsis"}
+                return {"type": "ellipsis", "name": metavar.name}
             else:
-                return {"type": "any_expr"}
+                return {"type": "metavar", "name": metavar.name}
         else:
             if node.value == "None":
                 return {"type": "none"}
@@ -967,7 +939,7 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
             if arg.star == "" and isinstance(arg.value, cst.Name) and arg.value.value in metavar_map:
                 metavar = metavar_map[arg.value.value]
                 if metavar.ellipsis:
-                    args_ir.append({"type": "ellipsis"})
+                    args_ir.append({"type": "ellipsis", "name": metavar.name})
                     has_ellipsis = True
                     continue
             arg_ir = _cst_to_rust_ir(arg.value, metavar_map)
@@ -1140,7 +1112,7 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                 if isinstance(elem.key, cst.Name) and elem.key.value in metavar_map:
                     metavar = metavar_map[elem.key.value]
                     if metavar.ellipsis:
-                        elems_ir.append({"type": "ellipsis"})
+                        elems_ir.append({"type": "ellipsis", "name": metavar.name})
                         continue
                 
                 k_ir = _cst_to_rust_ir(elem.key, metavar_map)
@@ -1154,7 +1126,7 @@ def _cst_to_rust_ir(node: cst.CSTNode, metavar_map: dict[str, MetaVar]) -> dict 
                     if elem.value.value in metavar_map:
                         metavar = metavar_map[elem.value.value]
                         if metavar.ellipsis:
-                            elems_ir.append({"type": "ellipsis"})
+                            elems_ir.append({"type": "ellipsis", "name": metavar.name})
                             continue
                     elif elem.value.value == "__EMEND_SPREAD__":
                         elems_ir.append({"type": "ellipsis"})

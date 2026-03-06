@@ -3,20 +3,42 @@
 use crate::Match;
 use tree_sitter::{Parser, Node, Tree};
 
-/// Get a thread-local Python parser.
-fn get_parser() -> Parser {
+/// Get a thread-local parser for a specific language.
+fn get_parser(lang_name: &str) -> Parser {
     let mut parser = Parser::new();
-    let language = tree_sitter_python::LANGUAGE;
+    let language = match lang_name {
+        "python" => tree_sitter_python::LANGUAGE,
+        "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX,
+        _ => tree_sitter_python::LANGUAGE,
+    };
     parser
         .set_language(&language.into())
-        .expect("Failed to set Python language");
+        .expect("Failed to set language");
     parser
 }
 
 /// Parse Python source into a tree-sitter Tree.
 pub(crate) fn parse_python(source: &str) -> Option<Tree> {
-    let mut parser = get_parser();
+    let mut parser = get_parser("python");
     parser.parse(source.as_bytes(), None)
+}
+
+/// Parse TypeScript/TSX source into a tree-sitter Tree.
+pub(crate) fn parse_typescript(source: &str, is_tsx: bool) -> Option<Tree> {
+    let mut parser = if is_tsx { get_parser("tsx") } else { get_parser("typescript") };
+    parser.parse(source.as_bytes(), None)
+}
+
+/// Parse source based on file extension.
+pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
+    match ext {
+        "py" | "pyi" => parse_python(source),
+        "ts" => parse_typescript(source, false),
+        "tsx" => parse_typescript(source, true),
+        "js" | "jsx" => parse_typescript(source, false), // JS uses TS grammar
+        _ => parse_python(source),
+    }
 }
 
 /// Find all `identifier` nodes in the tree that match `target_name`.

@@ -205,6 +205,14 @@ pub struct LanguageConfig {
     pub imports: ImportsSection,
     pub qualified_names: QualifiedNamesSection,
     pub exports: ExportsSection,
+    #[serde(default)]
+    pub builtins: BuiltinsSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuiltinsSection {
+    #[serde(default)]
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +220,8 @@ pub struct LanguageSection {
     pub name: String,
     pub tree_sitter_grammar: String,
     pub file_extensions: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,6 +586,16 @@ impl ScopeResolver {
         }
     }
 
+    fn derive_module_path(&self, file_path: &Path, separator: &str) -> String {
+        derive_module_path(
+            file_path,
+            &self.project_root,
+            separator,
+            &self.config.imports.resolution,
+            &self.config.language.file_extensions,
+        )
+    }
+
     pub fn get_symbols(&self, path: &Path) -> Vec<crate::symbols::RustSymbol> {
         if let Some(file_scope) = self.file_scopes.get(path) {
             file_scope.to_rust_symbols(&self.config)
@@ -594,7 +614,7 @@ impl ScopeResolver {
             }
         }
 
-        let module_path = derive_module_path(path, &self.project_root, &self.config.qualified_names.module_separator);
+        let module_path = self.derive_module_path(path, &self.config.qualified_names.module_separator);
         let file_scope = self.build_file_scope(path, source, tree, hash, module_path.clone());
 
         // Update QN index: remove old entries for this file, add new ones
@@ -841,9 +861,9 @@ impl ScopeResolver {
             let is_attr_name = node.parent().map_or(false, |p| {
                 p.kind() == "attribute" && p.child_by_field_name("attribute") == Some(node)
             });
-            // Skip Python keywords that tree-sitter reports as identifiers
+            // Skip language keywords that tree-sitter reports as identifiers
             let name = node_text(node, source);
-            let is_keyword = matches!(name, "True" | "False" | "None");
+            let is_keyword = self.config.language.keywords.iter().any(|k| k == name);
 
             if !is_attr_name && !is_keyword {
                 let kind = self.classify_reference(&node, in_import);
@@ -1067,7 +1087,7 @@ impl ScopeResolver {
         }
 
         // 3. Builtins (common ones)
-        if is_python_builtin(name) {
+        if self.config.builtins.names.iter().any(|b| b == name) {
             return Some(format!("builtins.{}", name));
         }
 
@@ -1641,7 +1661,7 @@ impl ScopeResolver {
                         .file_to_module
                         .get(file_path)
                         .cloned()
-                        .unwrap_or_else(|| derive_module_path(file_path, &self.project_root, sep));
+                        .unwrap_or_else(|| self.derive_module_path(file_path, sep));
                     parts.push(module_path);
                     break;
                 }
@@ -1751,27 +1771,7 @@ fn find_scope_name<'a>(parent: &'a Scope, scope: &Scope, expected_kind: BindingK
 // Utility functions
 // ---------------------------------------------------------------------------
 
-/// Check if a name is a Python builtin.
-fn is_python_builtin(name: &str) -> bool {
-    matches!(name,
-        "print" | "len" | "range" | "int" | "str" | "float" | "bool" | "list"
-        | "dict" | "set" | "tuple" | "type" | "isinstance" | "issubclass"
-        | "hasattr" | "getattr" | "setattr" | "delattr" | "property"
-        | "staticmethod" | "classmethod" | "super" | "object" | "Exception"
-        | "ValueError" | "TypeError" | "KeyError" | "IndexError" | "RuntimeError"
-        | "AttributeError" | "ImportError" | "OSError" | "IOError" | "FileNotFoundError"
-        | "NotImplementedError" | "StopIteration" | "GeneratorExit" | "SystemExit"
-        | "AssertionError" | "NameError" | "ZeroDivisionError" | "OverflowError"
-        | "abs" | "all" | "any" | "bin" | "bytes" | "callable" | "chr" | "complex"
-        | "dir" | "divmod" | "enumerate" | "eval" | "exec" | "filter" | "format"
-        | "frozenset" | "globals" | "hash" | "hex" | "id" | "input" | "iter"
-        | "map" | "max" | "min" | "next" | "oct" | "open" | "ord" | "pow"
-        | "repr" | "reversed" | "round" | "slice" | "sorted" | "sum" | "vars"
-        | "zip" | "breakpoint" | "memoryview" | "bytearray"
-        | "__name__" | "__file__" | "__doc__" | "__package__" | "__spec__"
-        | "__import__" | "__build_class__"
-    )
-}
+
 
 /// Compute a content hash for cache invalidation (single-pass FNV-1a variant).
 fn content_hash(source: &str) -> [u8; 16] {
@@ -1790,10 +1790,14 @@ fn content_hash(source: &str) -> [u8; 16] {
     hash
 }
 
-/// Derive a Python module path from a file path relative to the project root.
-///
-/// E.g., `src/mypackage/module.py` → `mypackage.module`
-fn derive_module_path(file_path: &Path, project_root: &Path, separator: &str) -> String {
+/// Derive a module path from a file path relative to the project root.
+fn derive_module_path(
+    file_path: &Path,
+    project_root: &Path,
+    separator: &str,
+    strategy: &str,
+    extensions: &[String],
+) -> String {
     let relative = file_path
         .strip_prefix(project_root)
         .unwrap_or(file_path);
@@ -1801,24 +1805,44 @@ fn derive_module_path(file_path: &Path, project_root: &Path, separator: &str) ->
     let parts: Vec<&str> = relative
         .components()
         .filter_map(|c| c.as_os_str().to_str())
-        // Skip leading "src" directory
-        .skip_while(|&c| c == "src")
         .collect();
+    
+    // Strategy-specific pre-processing
+    let parts = match strategy {
+        "python" => {
+            // Python: skip leading "src"
+            parts.into_iter().skip_while(|&c| c == "src").collect()
+        }
+        _ => parts,
+    };
 
     let mut parts = parts;
 
     // Strip file extension from last component
     if let Some(last) = parts.last_mut() {
-        if let Some(stem) = last.strip_suffix(".py") {
-            *last = stem;
-        } else if let Some(stem) = last.strip_suffix(".pyi") {
-            *last = stem;
+        for ext in extensions {
+            if let Some(stem) = last.strip_suffix(&format!(".{}", ext)) {
+                *last = stem;
+                break;
+            }
         }
     }
 
-    // Strip __init__ from end (package init files)
-    if parts.last() == Some(&"__init__") {
-        parts.pop();
+    // Strategy-specific post-processing
+    match strategy {
+        "python" => {
+             // Strip __init__ from end (package init files)
+            if parts.last() == Some(&"__init__") {
+                parts.pop();
+            }
+        }
+        "node" => {
+             // Strip index from end
+            if parts.last() == Some(&"index") {
+                parts.pop();
+            }
+        }
+        _ => {}
     }
 
     parts.join(separator)
@@ -1833,12 +1857,35 @@ impl LanguageConfig {
         toml::from_str(toml_str).map_err(|e| e.to_string())
     }
 
+    pub fn load_for_extension(ext: &str, project_root: &Path) -> Result<Self, String> {
+        // Try to load from languages/<name>.toml
+        // For now, hardcode the mapping or look in a specific directory
+        let lang_dir = project_root.join("languages");
+        let lang_name = match ext {
+            "py" | "pyi" => "python",
+            "ts" | "tsx" | "js" | "jsx" => "typescript",
+            _ => return Err(format!("Unsupported extension: {}", ext)),
+        };
+        let config_path = lang_dir.join(format!("{}.toml", lang_name));
+        if config_path.exists() {
+            let toml_str = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+            return Self::from_toml(&toml_str);
+        }
+
+        // Fallback to defaults
+        match lang_name {
+            "python" => Ok(Self::python_default()),
+            _ => Err(format!("No config found for {}", lang_name)),
+        }
+    }
+
     pub fn python_default() -> Self {
         LanguageConfig {
             language: LanguageSection {
                 name: "python".to_string(),
                 tree_sitter_grammar: "tree-sitter-python".to_string(),
                 file_extensions: vec!["py".to_string(), "pyi".to_string()],
+                keywords: vec!["True".to_string(), "False".to_string(), "None".to_string()],
             },
             scoping: ScopingSection {
                 scope_creators: vec![
@@ -1916,6 +1963,26 @@ impl LanguageConfig {
                 public_by_default: true,
                 private_prefix: "_".to_string(),
                 dunder_is_public: true,
+            },
+            builtins: BuiltinsSection {
+                names: vec![
+                    "print", "len", "range", "int", "str", "float", "bool", "list",
+                    "dict", "set", "tuple", "type", "isinstance", "issubclass",
+                    "hasattr", "getattr", "setattr", "delattr", "property",
+                    "staticmethod", "classmethod", "super", "object", "Exception",
+                    "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError",
+                    "AttributeError", "ImportError", "OSError", "IOError", "FileNotFoundError",
+                    "NotImplementedError", "StopIteration", "GeneratorExit", "SystemExit",
+                    "AssertionError", "NameError", "ZeroDivisionError", "OverflowError",
+                    "abs", "all", "any", "bin", "bytes", "callable", "chr", "complex",
+                    "dir", "divmod", "enumerate", "eval", "exec", "filter", "format",
+                    "frozenset", "globals", "hash", "hex", "id", "input", "iter",
+                    "map", "max", "min", "next", "oct", "open", "ord", "pow",
+                    "repr", "reversed", "round", "slice", "sorted", "sum", "vars",
+                    "zip", "breakpoint", "memoryview", "bytearray",
+                    "__name__", "__file__", "__doc__", "__package__", "__spec__",
+                    "__import__", "__build_class__",
+                ].into_iter().map(String::from).collect(),
             },
         }
     }
@@ -2071,17 +2138,28 @@ class MyClass:
 
     #[test]
     fn test_derive_module_path() {
+        let py_exts = vec!["py".to_string(), "pyi".to_string()];
         assert_eq!(
-            derive_module_path(Path::new("/project/src/mypackage/module.py"), Path::new("/project"), "."),
+            derive_module_path(Path::new("/project/src/mypackage/module.py"), Path::new("/project"), ".", "python", &py_exts),
             "mypackage.module"
         );
         assert_eq!(
-            derive_module_path(Path::new("/project/mypackage/__init__.py"), Path::new("/project"), "."),
+            derive_module_path(Path::new("/project/mypackage/__init__.py"), Path::new("/project"), ".", "python", &py_exts),
             "mypackage"
         );
         assert_eq!(
-            derive_module_path(Path::new("/project/src/pkg/sub/file.py"), Path::new("/project"), "."),
+            derive_module_path(Path::new("/project/src/pkg/sub/file.py"), Path::new("/project"), ".", "python", &py_exts),
             "pkg.sub.file"
+        );
+
+        let ts_exts = vec!["ts".to_string(), "tsx".to_string(), "js".to_string()];
+        assert_eq!(
+            derive_module_path(Path::new("/project/src/components/Button.tsx"), Path::new("/project"), "/", "node", &ts_exts),
+            "src/components/Button"
+        );
+        assert_eq!(
+            derive_module_path(Path::new("/project/src/utils/index.ts"), Path::new("/project"), "/", "node", &ts_exts),
+            "src/utils"
         );
     }
 

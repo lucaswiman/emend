@@ -10,8 +10,6 @@ import difflib
 import hashlib
 import logging
 import threading
-import libcst as cst
-from libcst import matchers as m
 from dataclasses import dataclass
 import re
 import sys
@@ -21,7 +19,6 @@ import time
 from .component_selector import ExtendedSelector, parse_extended_selector
 from .pattern import (
     parse_pattern,
-    compile_pattern_to_matcher,
     compile_pattern_to_rust_ir,
     compile_constraint_to_rust_ir,
     Pattern,
@@ -30,12 +27,9 @@ from .pattern import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
     from .type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
-
-_SCHEMA_VERSION = "4"
 
 
 # ---------------------------------------------------------------------------
@@ -1953,172 +1947,6 @@ def prefilter_files_structural(files: list[str], name: str) -> list[str]:
     return list({m.file for m in matches})
 
 
-def visit_project(
-    name_hint: str,
-    visitor_factory: Callable[[str, bool], cst.CSTVisitor | cst.CSTTransformer],
-    project_path: str | None = None,
-    metadata_providers: Sequence = (),
-    target_file: str | None = None,
-    candidate_files: set[str] | None = None,
-    target_qnames: set[str] | None = None,
-) -> Iterator[tuple[str, cst.Module, object]]:
-    """Iterate over Python files in the project, yielding (file_path, module, visitor).
-
-    Args:
-        name_hint: A string that must appear in the file text for pre-filtering.
-        visitor_factory: Called with (file_path, is_definition_file) -> visitor.
-        project_path: Project root directory.
-        metadata_providers: LibCST metadata providers to use with MetadataWrapper.
-        target_file: The resolved path of the file defining the symbol (for is_def_file).
-        candidate_files: If provided, only visit these files (pre-filtered by import graph).
-        target_qnames: If provided, use QN index cache to skip files whose cached
-                       qualified-name set has no overlap with these names.
-    """
-    t_start = time.monotonic()
-    project_root = project_path or "."
-    py_files = _collect_python_files(project_root)
-    logger.info("visit_project: %d python files collected from %s", len(py_files), project_root)
-    if candidate_files is not None:
-        # Pre-filter to only files in the candidate set
-        # Always include the target_file itself (definition file)
-        before = len(py_files)
-        py_files = [f for f in py_files
-                    if f in candidate_files
-                    or (target_file and str(Path(f).resolve()) == target_file)]
-        logger.info("visit_project: candidate_files filter %d -> %d", before, len(py_files))
-
-    # Structural pre-filter for cross-project ops: use tree-sitter to find
-    # files with actual identifier matches (eliminates strings/comments false positives)
-    if metadata_providers and name_hint:
-        before = len(py_files)
-        t0 = time.monotonic()
-        py_files = prefilter_files_structural(py_files, name_hint)
-        logger.info("visit_project: structural prefilter %d -> %d in %.3fs (hint=%r)", before, len(py_files), time.monotonic() - t0, name_hint)
-        # Re-add target_file if it was filtered out (definition file must always be visited)
-        if target_file and target_file not in py_files:
-            py_files.append(target_file)
-
-    # Batch read + filter in Rust (parallel I/O + substring pre-filter)
-    hints = [name_hint] if name_hint and not metadata_providers else []
-    t0 = time.monotonic()
-    file_contents = _rust.read_and_filter_files(py_files, hints)
-    logger.info("visit_project: read_and_filter %d -> %d files in %.3fs (hints=%r)", len(py_files), len(file_contents), time.monotonic() - t0, hints)
-
-    # Ensure target_file is always included (definition file must be visited)
-    if target_file and not metadata_providers:
-        seen = {str(Path(f).resolve()) for f, _ in file_contents}
-        if target_file not in seen:
-            try:
-                content = Path(target_file).read_text()
-                file_contents.append((target_file, content))
-            except Exception:
-                pass
-
-    # QN-index pre-filter: skip files whose cached qualified-name set
-    # has no overlap with the target QNs.  Files without cached data are
-    # kept (they'll be cached after MetadataWrapper runs).
-    _uses_qnp = cst.metadata.QualifiedNameProvider in metadata_providers
-    if target_qnames and _uses_qnp:
-        before = len(file_contents)
-        t0 = time.monotonic()
-        filtered_contents: list[tuple[str, str]] = []
-        n_cache_hits = 0
-        for py_file, content in file_contents:
-            # Always visit the definition file
-            if target_file and str(Path(py_file).resolve()) == target_file:
-                filtered_contents.append((py_file, content))
-                continue
-            content_hash = hashlib.md5(
-                content.encode(), usedforsecurity=False
-            ).digest()
-            cached_qns = _get_cached_qnames(content_hash)
-            if cached_qns is not None:
-                n_cache_hits += 1
-                if not target_qnames.intersection(cached_qns):
-                    continue  # no overlap → skip
-            filtered_contents.append((py_file, content))
-        logger.info(
-            "visit_project: qn_index filter %d -> %d in %.3fs "
-            "(%d cache hits)",
-            before, len(filtered_contents),
-            time.monotonic() - t0, n_cache_hits,
-        )
-        file_contents = filtered_contents
-
-    if metadata_providers and len(file_contents) > 1:
-        # Parallel path: each MetadataWrapper is independent per file — no shared state
-        def _visit_one(args: tuple[str, str]) -> tuple[str, cst.Module, object] | None:
-            py_file, content = args
-            is_def_file = (target_file is not None
-                           and str(Path(py_file).resolve()) == target_file)
-            try:
-                module = _cached_parse(content)
-                visitor = visitor_factory(py_file, is_def_file)
-                wrapper = cst.metadata.MetadataWrapper(module)
-                result_module = wrapper.visit(visitor)
-                # Cache QN data as a side-effect.
-                if _uses_qnp:
-                    try:
-                        # Use tree-sitter via Rust scope resolver (faster, no LibCST)
-                        # Create a local resolver for this thread.
-                        resolver = _rust.PyScopeResolver(project_root)
-                        resolver.index_file(py_file, content)
-                        all_qnames = set(resolver.all_qnames_in_file(py_file))
-                        content_hash = hashlib.md5(
-                            content.encode(), usedforsecurity=False
-                        ).digest()
-                        _store_qnames(content_hash, all_qnames)
-                    except Exception:
-                        pass
-                return (py_file, result_module, visitor)
-            except Exception:
-                return None
-
-        t0 = time.monotonic()
-        n_visited = 0
-        with ThreadPoolExecutor() as executor:
-            for result in executor.map(_visit_one, file_contents):
-                if result is not None:
-                    n_visited += 1
-                    yield result
-        logger.info("visit_project: parallel visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
-    else:
-        # Sequential path: no metadata providers or single file
-        t0 = time.monotonic()
-        n_visited = 0
-        for py_file, content in file_contents:
-            is_def_file = (target_file is not None
-                           and str(Path(py_file).resolve()) == target_file)
-            try:
-                t_file = time.monotonic()
-                module = _cached_parse(content)
-                visitor = visitor_factory(py_file, is_def_file)
-                if metadata_providers:
-                    wrapper = cst.metadata.MetadataWrapper(module)
-                    result_module = wrapper.visit(visitor)
-                    # Cache QN data
-                    if _uses_qnp:
-                        try:
-                            # Use tree-sitter via Rust scope resolver
-                            resolver = _rust.PyScopeResolver(project_root)
-                            resolver.index_file(py_file, content)
-                            all_qnames = set(resolver.all_qnames_in_file(py_file))
-                            content_hash = hashlib.md5(
-                                content.encode(), usedforsecurity=False
-                            ).digest()
-                            _store_qnames(content_hash, all_qnames)
-                        except Exception:
-                            pass
-                else:
-                    result_module = module.visit(visitor)
-                logger.debug("visit_project: visited %s in %.3fs", py_file, time.monotonic() - t_file)
-                n_visited += 1
-                yield (py_file, result_module, visitor)
-            except Exception:
-                continue
-        logger.info("visit_project: sequential visit %d files in %.3fs (total %.3fs)", n_visited, time.monotonic() - t0, time.monotonic() - t_start)
-
-
 def visit_project_ts(
     name_hint: str,
     project_path: str,
@@ -2168,87 +1996,16 @@ def visit_project_ts(
         file_contents = filtered_contents
 
     # Index and yield
-    resolver = _rust.PyScopeResolver(project_root)
     for py_file, content in file_contents:
         try:
+            ext = Path(py_file).suffix.lstrip('.')
+            resolver = _rust.PyScopeResolver(project_root, ext)
             resolver.index_file(py_file, content)
             yield py_file, content, resolver
         except Exception:
             continue
 
     logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
-
-
-def _add_import(
-    module: cst.Module,
-    import_str: str,
-    position: int,
-    file_path: Path,
-    apply: bool,
-    source_code: str
-) -> str:
-    """Add an import statement to a module.
-
-    Args:
-        module: Parsed CST module
-        import_str: Import statement to add (e.g., "import os")
-        position: 0 for prepend, -1 for append
-        file_path: Path to the file
-        apply: Whether to apply changes
-        source_code: Original source code
-
-    Returns:
-        Unified diff showing changes
-    """
-    # Parse the import statement
-    import_stmt = cst.parse_statement(import_str)
-
-    # Find the last import in the module
-    last_import_idx = -1
-    first_import_idx = -1
-    for i, stmt in enumerate(module.body):
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if isinstance(item, (cst.Import, cst.ImportFrom)):
-                    if first_import_idx == -1:
-                        first_import_idx = i
-                    last_import_idx = i
-                    break
-
-    # Build new body
-    new_body = list(module.body)
-
-    if position == 0:
-        # Prepend: insert at the beginning or after __future__ imports
-        insert_idx = 0
-        # Check for __future__ imports and insert after them
-        for i, stmt in enumerate(module.body):
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for item in stmt.body:
-                    if isinstance(item, cst.ImportFrom):
-                        if item.module and cst.Module([]).code_for_node(item.module) == "__future__":
-                            insert_idx = i + 1
-                            break
-        new_body.insert(insert_idx, import_stmt)
-    else:
-        # Append: insert after the last import or at the beginning if no imports
-        if last_import_idx >= 0:
-            new_body.insert(last_import_idx + 1, import_stmt)
-        else:
-            # No imports yet, add at the beginning
-            new_body.insert(0, import_stmt)
-
-    new_module = module.with_changes(body=new_body)
-    new_code = new_module.code
-
-    # Generate diff
-    diff = _generate_diff(str(file_path), source_code, new_code)
-
-    # Apply changes if requested
-    if apply:
-        file_path.write_text(new_code)
-
-    return diff
 
 
 def _get_imports(module: cst.Module) -> str:
@@ -3403,8 +3160,8 @@ def _extract_string_content(node: cst.CSTNode) -> str | None:
 @dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
-    node: cst.CSTNode | None
-    captures: dict[str, cst.CSTNode]
+    node_text: str | None
+    captures: dict[str, str]
     line: int | None = None
     matched_text: str | None = None
     end_line: int | None = None
@@ -3524,421 +3281,109 @@ def _validate_repeated_metavars(node: cst.CSTNode, matcher: m.BaseMatcherNode, m
     return True
 
 
-class PatternFinder(cst.CSTVisitor):
-    """Visitor to find all matches of a pattern."""
-
-    def __init__(self, matcher: m.BaseMatcherNode, ellipsis_info: dict | None = None, position_provider: cst.metadata.PositionProvider | None = None, metavar_names: set[str] | None = None):
-        self.matcher = matcher
-        self.ellipsis_info = ellipsis_info or {}
-        self.position_provider = position_provider
-        self.metavar_names = metavar_names or set()
-        self.matches: list[PatternMatch] = []
-
-    def on_visit(self, node: cst.CSTNode) -> bool:
-        """Check if this node matches the pattern."""
-        # Try to match this node
-        if m.matches(node, self.matcher):
-            # Validate repeated metavars captured equal values
-            if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
-                return True  # Continue visiting, but don't add this as a match
-
-            # Extract captures
-            captures = m.extract(node, self.matcher)
-
-            # Handle ellipsis and partial dict captures
-            _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
-
-            # Get position if position provider is available
-            line = None
-            end_line = None
-            col = None
-            end_col = None
-            if self.position_provider is not None:
-                try:
-                    pos = self.position_provider[node]
-                    line = pos.start.line
-                    end_line = pos.end.line
-                    col = pos.start.column
-                    end_col = pos.end.column
-                except KeyError:
-                    pass  # Node position not available
-
-            self.matches.append(PatternMatch(
-                node=node, captures=captures, line=line,
-                end_line=end_line, col=col, end_col=end_col,
-            ))
-        return True  # Continue visiting children
-
-
-class RustGuidedFinder(cst.CSTVisitor):
-    """Visitor that uses pre-calculated Rust match positions to extract captures.
-
-    This avoids running the slow LibCST m.matches() on every node.
-    """
-
-    def __init__(
-        self,
-        matcher: m.BaseMatcherNode,
-        ellipsis_info: dict,
-        position_provider: cst.metadata.PositionProvider,
-        rust_matches: dict[tuple[int, int, int, int], str],
-        metavar_names: set[str],
-    ):
-        self.matcher = matcher
-        self.ellipsis_info = ellipsis_info
-        self.position_provider = position_provider
-        # Dict of (line, col, end_line, end_col) -> matched_text
-        self.rust_matches = rust_matches
-        self.metavar_names = metavar_names
-        self.matches: list[PatternMatch] = []
-
-    def on_visit(self, node: cst.CSTNode) -> bool:
-        try:
-            pos = self.position_provider[node]
-            # Rust uses 1-based line, 0-based column
-            # LibCST PositionProvider uses 1-based line, 0-based column
-            key = (pos.start.line, pos.start.column, pos.end.line, pos.end.column)
-
-            matched_text = None
-            if key in self.rust_matches:
-                matched_text = self.rust_matches[key]
-            elif isinstance(node, (cst.FunctionDef, cst.ClassDef)) and node.decorators:
-                # LibCST FunctionDef/ClassDef positions often exclude decorators,
-                # whereas Tree-sitter 'decorated_definition' nodes include them.
-                # Try finding a match that starts at the first decorator.
-                try:
-                    first_dec_pos = self.position_provider[node.decorators[0]]
-                    full_key = (first_dec_pos.start.line, first_dec_pos.start.column, pos.end.line, pos.end.column)
-                    if full_key in self.rust_matches:
-                        matched_text = self.rust_matches[full_key]
-                        key = full_key
-                except (KeyError, AttributeError):
-                    pass
-            elif isinstance(node, cst.Tuple):
-                # LibCST Tuple nodes often exclude parentheses from their position,
-                # whereas Tree-sitter 'tuple' nodes include them.
-                # Try adjusting the key by 1 column on each side.
-                alt_key = (pos.start.line, pos.start.column - 1, pos.end.line, pos.end.column + 1)
-                if alt_key in self.rust_matches:
-                    matched_text = self.rust_matches[alt_key]
-                    key = alt_key
-
-            if matched_text is not None:
-                # This node corresponds to a Rust match.
-                # Extract captures using LibCST matcher.
-                # We can assume m.matches(node, self.matcher) is mostly True,
-                # but we call m.extract which returns None if no match.
-                captures = m.extract(node, self.matcher)
-
-                if captures is not None:
-                    # Validate repeated metavars
-                    if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
-                        return True
-
-                    # Handle ellipsis and partial dict captures
-                    _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
-
-                    self.matches.append(PatternMatch(
-                        node=node,
-                        captures=captures,
-                        matched_text=matched_text,
-                        line=key[0],
-                        col=key[1],
-                        end_line=key[2],
-                        end_col=key[3],
-                    ))
-        except (KeyError, AttributeError):
-            pass
-
-        return True
-
-
-def _parse_constraint(constraint: str) -> callable:
-    """Parse a constraint string into a node checker function.
-
-    Supports:
-    - Simple keywords: "def", "class", "for", "while", "try", "with", "if", "async def"
-    - Pattern with name glob: "def test_*", "class My*", "def *_helper"
-    - Compound statement patterns: "try:", "except *:", "for $V in $I:"
-
-    Returns:
-        A function (node) -> bool that checks if a node matches.
-    """
-    import fnmatch as fnmatch_mod
-
-    # Simple keyword checkers
-    KEYWORD_CHECKERS = {
-        "def": lambda node: isinstance(node, cst.FunctionDef),
-        "async def": lambda node: isinstance(node, cst.FunctionDef) and node.asynchronous is not None,
-        "class": lambda node: isinstance(node, cst.ClassDef),
-        "for": lambda node: isinstance(node, (cst.For, cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)),
-        "while": lambda node: isinstance(node, cst.While),
-        "with": lambda node: isinstance(node, cst.With),
-        "try": lambda node: isinstance(node, (cst.Try, cst.TryStar)),
-        "if": lambda node: isinstance(node, (cst.If, cst.IfExp)),
-    }
-
-    # Check for exact keyword match first
-    if constraint in KEYWORD_CHECKERS:
-        return KEYWORD_CHECKERS[constraint]
-
-    # Check for "keyword name_pattern" form: "def test_*", "class My*", etc.
-    for keyword in ("async def", "def", "class"):
-        if constraint.startswith(keyword + " "):
-            name_pattern = constraint[len(keyword) + 1:].strip()
-            if keyword == "def":
-                def checker(node, pat=name_pattern):
-                    return (isinstance(node, cst.FunctionDef)
-                            and fnmatch_mod.fnmatch(node.name.value, pat))
-                return checker
-            elif keyword == "async def":
-                def checker(node, pat=name_pattern):
-                    return (isinstance(node, cst.FunctionDef)
-                            and node.asynchronous is not None
-                            and fnmatch_mod.fnmatch(node.name.value, pat))
-                return checker
-            elif keyword == "class":
-                def checker(node, pat=name_pattern):
-                    return (isinstance(node, cst.ClassDef)
-                            and fnmatch_mod.fnmatch(node.name.value, pat))
-                return checker
-
-    # Check for compound statement pattern forms ending with ':'
-    stripped = constraint.rstrip()
-    if stripped.endswith(":"):
-        body = stripped[:-1].strip()
-        # "try" (with colon)
-        if body == "try":
-            return KEYWORD_CHECKERS["try"]
-        # "except ..." pattern
-        if body.startswith("except"):
-            exc_part = body[6:].strip()
-            if not exc_part:
-                # bare "except:"
-                def checker(node):
-                    if isinstance(node, (cst.Try, cst.TryStar)):
-                        return True
-                    return isinstance(node, cst.ExceptHandler)
-                return checker
-            else:
-                # "except SomeError:" or "except *:" pattern
-                def checker(node, pat=exc_part):
-                    if not isinstance(node, cst.ExceptHandler):
-                        return False
-                    if node.type is None:
-                        return False
-                    type_code = cst.Module([]).code_for_node(node.type).strip()
-                    return fnmatch_mod.fnmatch(type_code, pat)
-                return checker
-
-    raise ValueError(
-        f"Unknown inside/not_inside constraint: '{constraint}'. "
-        f"Valid keywords: {', '.join(KEYWORD_CHECKERS.keys())}. "
-        f"Or use patterns like 'def test_*', 'class MyClass', 'try:'"
-    )
-
-
-class ConstrainedPatternFinder(cst.CSTVisitor):
-    """Visitor to find matches of a pattern with inside/not_inside constraints."""
-
-    # Mapping of keyword shortcuts to node type checkers (kept for reference)
-    KEYWORD_CHECKERS = {
-        "def": lambda node: isinstance(node, cst.FunctionDef),
-        "async def": lambda node: isinstance(node, cst.FunctionDef) and node.asynchronous is not None,
-        "class": lambda node: isinstance(node, cst.ClassDef),
-        "for": lambda node: isinstance(node, (cst.For, cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)),
-        "while": lambda node: isinstance(node, cst.While),
-        "with": lambda node: isinstance(node, cst.With),
-        "try": lambda node: isinstance(node, (cst.Try, cst.TryStar)),
-        "if": lambda node: isinstance(node, (cst.If, cst.IfExp)),
-    }
-
-    def __init__(
-        self,
-        matcher: m.BaseMatcherNode,
-        ellipsis_info: dict | None = None,
-        position_provider: cst.metadata.PositionProvider | None = None,
-        inside: str | None = None,
-        not_inside: str | None = None,
-        metavar_names: set[str] | None = None,
-    ):
-        self.matcher = matcher
-        self.ellipsis_info = ellipsis_info or {}
-        self.position_provider = position_provider
-        self.inside = inside
-        self.not_inside = not_inside
-        self.metavar_names = metavar_names or set()
-        self.ancestor_stack: list[cst.CSTNode] = []
-        self.matches: list[PatternMatch] = []
-
-        # Parse constraints into checker functions
-        self._inside_checker = _parse_constraint(inside) if inside else None
-        self._not_inside_checker = _parse_constraint(not_inside) if not_inside else None
-
-    def on_visit(self, node: cst.CSTNode) -> bool:
-        """Track ancestors and check if this node matches the pattern."""
-        # Push current node onto ancestor stack
-        self.ancestor_stack.append(node)
-
-        # Try to match this node
-        if m.matches(node, self.matcher):
-            # Validate repeated metavars captured equal values
-            if not _validate_repeated_metavars(node, self.matcher, self.metavar_names):
-                return True  # Continue visiting, but don't add this as a match
-
-            # Extract captures
-            captures = m.extract(node, self.matcher)
-
-            # Handle ellipsis and partial dict captures
-            _extract_ellipsis_and_partial_captures(node, self.ellipsis_info, captures)
-
-            # Check if match satisfies inside/not_inside constraint
-            if self._satisfies_constraint():
-                # Get position if position provider is available
-                line = None
-                end_line = None
-                col = None
-                end_col = None
-                if self.position_provider is not None:
-                    try:
-                        pos = self.position_provider[node]
-                        line = pos.start.line
-                        end_line = pos.end.line
-                        col = pos.start.column
-                        end_col = pos.end.column
-                    except KeyError:
-                        pass  # Node position not available
-
-                self.matches.append(PatternMatch(
-                    node=node, captures=captures, line=line,
-                    end_line=end_line, col=col, end_col=end_col,
-                ))
-
-        return True  # Continue visiting children
-
-    def on_leave(self, original_node: cst.CSTNode) -> None:
-        """Pop from ancestor stack when leaving a node."""
-        if self.ancestor_stack and self.ancestor_stack[-1] is original_node:
-            self.ancestor_stack.pop()
-
-    def _satisfies_constraint(self) -> bool:
-        """Check if current match satisfies the inside/not_inside constraint."""
-        if self._inside_checker:
-            # Must be inside at least one matching ancestor
-            # Don't check the current node (last item), check ancestors only
-            return any(self._inside_checker(ancestor) for ancestor in self.ancestor_stack[:-1])
-
-        if self._not_inside_checker:
-            # Must NOT be inside any matching ancestor
-            # Don't check the current node (last item), check ancestors only
-            return not any(self._not_inside_checker(ancestor) for ancestor in self.ancestor_stack[:-1])
-
-        return True  # No constraint
-
-
 def _filter_matches_by_import(
     matches: list[PatternMatch],
     imported_from: str,
     file_path: str,
     project_root: str,
     content: str,
-    position_provider: Mapping,
 ) -> list[PatternMatch]:
     """Post-filter pattern matches to only include those where the root name
     is imported from the specified module.
 
     Uses PyScopeResolver to resolve the qualified name of the leftmost
-    Name node in each match. If the QN starts with ``imported_from.``, the
-    match is kept.
+    name in each match and verifies it matches the target module.
     """
+    if not matches:
+        return []
+
+    # Use a single resolver per file for efficiency
     resolver = _rust.PyScopeResolver(project_root)
     resolver.index_file(file_path, content)
-    refs = resolver.references_in_file(file_path)
-    
-    # Map (line, col) -> (qn, kind)
-    ref_map = {}
-    for qn, line, col, offset, end_offset, kind in refs:
-        ref_map[(line, col)] = (qn, kind)
 
     filtered = []
     for match in matches:
-        node = match.node
-        # Walk to the leftmost Name node (for dotted access like json.loads)
-        root_name = node
-        while isinstance(root_name, cst.Call):
-            root_name = root_name.func
-        while isinstance(root_name, cst.Attribute):
-            root_name = root_name.value
-
-        if not isinstance(root_name, cst.Name):
+        # Extract the root name from the matched node
+        # For simplicity, we use the first identifier in the matched text
+        root_name = _extract_root_name(match.node_text or "")
+        if not root_name:
             continue
 
-        try:
-            pos = position_provider[root_name]
-            line = pos.start.line
-            col = pos.start.column
-        except (KeyError, AttributeError):
-            continue
-
-        qn_info = ref_map.get((line, col))
-        if not qn_info:
-            continue
+        # Resolve QN at match position
+        references = resolver.references_in_file(file_path)
         
-        qn, kind = qn_info
-        # Only consider IMPORT-sourced names (not LOCAL definitions)
-        if kind == "definition":
-            continue
-            
-        # Match if QN starts with module prefix (e.g. "json.loads")
-        # or if QN equals the module name itself
-        if qn == imported_from or qn.startswith(imported_from + "."):
+        match_qn = None
+        for qn, line, col, offset, end_offset, kind in references:
+            if line == match.line and col == match.col:
+                match_qn = qn
+                break
+        
+        if match_qn and match_qn.startswith(f"{imported_from}."):
             filtered.append(match)
-            
+        elif match_qn == imported_from:
+            filtered.append(match)
+
     return filtered
 
 
-def _assign_line_numbers_from_source(
-    matches: list[PatternMatch],
-    source_code: str,
-    module: cst.Module,
-) -> None:
-    """Assign line numbers to pattern matches without using MetadataWrapper.
+def _extract_root_name(text: str) -> str | None:
+    """Extract the first identifier from a code fragment."""
+    match = re.search(r"[a-zA-Z_]\w*", text)
+    return match.group(0) if match else None
 
-    Computes line numbers by generating the code for each matched node and
-    finding its position in the source text. This is much cheaper than
-    MetadataWrapper which requires a deep_clone + full code generation pass.
+
+def _filter_matches_by_scope_local(
+    matches: list[PatternMatch],
+    file_path: str,
+    project_root: str,
+    content: str,
+) -> list[PatternMatch]:
+    """Post-filter pattern matches to only include those where the root name
+    is locally defined (not imported).
+
+    Uses PyScopeResolver to check the origin of each match.
     """
     if not matches:
-        return
+        return []
 
-    import bisect
-    # Build a newline offset table for the source
-    line_starts = [0]
-    for i, ch in enumerate(source_code):
-        if ch == '\n':
-            line_starts.append(i + 1)
+    resolver = _rust.PyScopeResolver(project_root)
+    resolver.index_file(file_path, content)
 
-    def offset_to_line(offset: int) -> int:
-        """Convert a character offset to a 1-based line number."""
-        return bisect.bisect_right(line_starts, offset)
-
-    # For each match, find its code in the source to determine line number.
-    # Track search positions to handle duplicate code correctly - matches
-    # come from a DFS walk so they appear in source order.
-    search_start = 0
+    filtered = []
     for match in matches:
-        code_snippet = module.code_for_node(match.node).lstrip()
-        idx = source_code.find(code_snippet, search_start)
-        if idx < 0:
-            # If not found from current position, search from beginning
-            idx = source_code.find(code_snippet)
-        if idx >= 0:
-            match.line = offset_to_line(idx)
-            match.col = idx - line_starts[match.line - 1]
-            end_idx = idx + len(code_snippet)
-            match.end_line = offset_to_line(end_idx - 1) if end_idx > idx else match.line
-            match.end_col = end_idx - line_starts[match.end_line - 1]
-            search_start = idx + 1
+        root_name = _extract_root_name(match.node_text or "")
+        if not root_name:
+            continue
+
+        references = resolver.references_in_file(file_path)
+        is_local = True
+        for qn, line, col, offset, end_offset, kind in references:
+            if line == match.line and col == match.col:
+                if kind == "import":
+                    is_local = False
+                break
+        
+        if is_local:
+            filtered.append(match)
+
+    return filtered
+
+
+def _filter_matches_by_type_oracle(
+    matches: list[PatternMatch],
+    constraints: dict[str, tuple[str, str]],
+    type_oracle: TypeOracle,
+    file_path: str,
+) -> list[PatternMatch]:
+    """Post-filter pattern matches using inferred types from TypeOracle.
+
+    Filters each match based on metavar type constraints (e.g., :type[X] or :returns[X]).
+    """
+    if not matches:
+        return []
+
+    # TODO: Implement type-aware filtering using metavar positions from Rust
+    return matches
 
 
 def find_pattern(
@@ -3960,44 +3405,19 @@ def find_pattern(
         file_path: Path to Python file to search
         scope: Optional symbol path to limit matches to (e.g., ["MyClass", "method"])
         inside: Optional constraint - only match inside this structure.
-                Keywords: "def", "async def", "class", "for", "while", "try", "with", "if".
-                Patterns: "def test_*", "class MyClass", "try:", "except ValueError:".
         not_inside: Optional constraint - only match outside this structure.
-                    Supports same syntax as inside.
         imported_from: Optional module name - only match when the root name
                        in the pattern is imported from this module
         where: Optional constraint - only match inside a structure matching
                this pattern (e.g., 'class MyClass', 'def test_*').
                Alias for inside with pattern support.
         scope_local: If True, only match names that are locally defined
-                     (not imported). Uses QualifiedNameProvider.
+                     (not imported).
         source_override: If provided, search this source string instead of reading from file_path.
         type_oracle: Optional TypeOracle instance for :type[X] and :returns[X] constraints.
 
     Returns:
         List of matches with locations and captured values
-
-    Example:
-        >>> matches = find_pattern("print($X)", "file.py")
-        >>> len(matches)
-        2
-        >>> matches[0].captures['X']
-        <SimpleString node>
-
-        # Scoped search within a function:
-        >>> matches = find_pattern("old_name", "file.py", scope=["my_func"])
-
-        # Find only inside functions:
-        >>> matches = find_pattern("print($X)", "file.py", inside="def")
-
-        # Find only inside test functions:
-        >>> matches = find_pattern("print($X)", "file.py", inside="def test_*")
-
-        # Only match json.loads when json is the real json module:
-        >>> matches = find_pattern("json.loads($X)", "file.py", imported_from="json")
-
-        # Find inside specific class:
-        >>> matches = find_pattern("$X = $Y", "file.py", where="class MyClass")
     """
     # Handle --where as alias for --inside
     if where is not None:
@@ -4009,9 +3429,96 @@ def find_pattern(
     if inside and not_inside:
         raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
 
-    # Parse pattern and compile to matcher
+    # Parse pattern
     pattern = parse_pattern(pattern_str)
-    matcher, ellipsis_info = compile_pattern_to_matcher(pattern)
+
+    # Read file (or use source_override)
+    if source_override is not None:
+        source_code = source_override
+    else:
+        file = Path(file_path)
+        if not file.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        source_code = file.read_text()
+
+    # Compile pattern and constraints to Rust IR
+    rust_ir = compile_pattern_to_rust_ir(pattern_str)
+    if rust_ir is None:
+        raise ValueError(f"Pattern '{pattern_str}' could not be compiled to Rust IR")
+
+    inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
+    not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+    
+    if (inside and inside_ir is None) or (not_inside and not_inside_ir is None):
+        raise ValueError("Constraint could not be compiled to Rust IR")
+
+    # Find matches using Rust engine
+    raw_matches = _rust.find_pattern_in_files(
+        [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
+    )
+    
+    matches = []
+    for m in raw_matches:
+        matches.append(PatternMatch(
+            node_text=m[5],
+            captures=m[6],
+            line=m[1],
+            col=m[2],
+            end_line=m[3],
+            end_col=m[4],
+            matched_text=m[5],
+        ))
+
+    # Post-filter by scope if requested
+    if scope is not None:
+        from .ast_utils import find_nested_definitions, find_symbol_by_path
+        symbols = find_nested_definitions(file_path)
+        target_sym = find_symbol_by_path(symbols, scope)
+        if target_sym:
+            matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
+        else:
+            matches = []
+
+    # Post-filter by import origin if requested
+    if imported_from is not None:
+        project_root = _find_project_root(file_path)
+        matches = _filter_matches_by_import(
+            matches, imported_from, file_path, project_root, source_code
+        )
+
+    # Post-filter by scope locality if requested
+    if scope_local:
+        project_root = _find_project_root(file_path)
+        matches = _filter_matches_by_scope_local(
+            matches, file_path, project_root, source_code
+        )
+
+    # Post-filter by TypeOracle type constraints
+    if type_oracle is not None:
+        oracle_constraints = {}
+        for mv in pattern.metavars:
+            if is_oracle_type_constraint(mv.type_constraint):
+                oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
+        if oracle_constraints:
+            matches = _filter_matches_by_type_oracle(
+                matches, oracle_constraints, type_oracle, file_path
+            )
+
+    return matches
+
+    """
+    # Handle --where as alias for --inside
+    if where is not None:
+        if inside is not None:
+            raise ValueError("Cannot specify both 'where' and 'inside' parameters")
+        inside = where
+
+    # Validate inside/not_inside constraints
+    if inside and not_inside:
+        raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")
+
+    # Parse pattern
+    pattern = parse_pattern(pattern_str)
 
     # Extract metavar names for validation
     metavar_names = {mv.name for mv in pattern.metavars}
@@ -4022,7 +3529,7 @@ def find_pattern(
         if is_oracle_type_constraint(mv.type_constraint):
             oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
 
-    # Read and parse file (or use source_override)
+    # Read file (or use source_override)
     if source_override is not None:
         source_code = source_override
     else:
@@ -4030,73 +3537,36 @@ def find_pattern(
         if not file.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
-    module = _cached_parse(source_code)
 
-    # Try using Rust pattern matcher if available and applicable
+    # Compile pattern and constraints to Rust IR
     rust_ir = compile_pattern_to_rust_ir(pattern_str)
-    rust_matches = None
+    if rust_ir is None:
+        # This should no longer happen as Rust matcher is now comprehensive
+        raise ValueError(f"Pattern '{pattern_str}' could not be compiled to Rust IR")
+
+    inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
+    not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
     
-    if rust_ir is not None:
-        # Compile constraints to Rust IR
-        inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
-        not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
-        
-        # Only proceed if we have valid IR for all constraints present
-        if (inside is None or inside_ir is not None) and \
-           (not_inside is None or not_inside_ir is not None):
-            
-            raw_matches = _rust.find_pattern_in_files(
-                [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
-            )
-            # raw_matches is list of (file, line, col, end_line, end_col, text)
-            # Rust uses 1-based lines, 0-based columns
-            rust_matches = {
-                (m[1], m[2], m[3], m[4]): m[5] for m in raw_matches
-            }
+    if (inside and inside_ir is None) or (not_inside and not_inside_ir is None):
+        raise ValueError("Constraint could not be compiled to Rust IR")
 
+    # Find matches using Rust engine
+    raw_matches = _rust.find_pattern_in_files(
+        [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
+    )
+    # raw_matches is list of (file, line, col, end_line, end_col, text, captures)
+    
     matches = []
-    position_provider = None
-
-    if rust_matches is not None:
-        # Use Rust-guided extraction (requires PositionProvider)
-        wrapper = cst.MetadataWrapper(module)
-        position_provider = wrapper.resolve(cst.metadata.PositionProvider)
-        
-        finder = RustGuidedFinder(
-            matcher, ellipsis_info, position_provider, rust_matches, metavar_names
-        )
-        wrapper.visit(finder)
-        matches = finder.matches
-    else:
-        # Fallback to LibCST visitors
-        needs_wrapper = bool(inside or not_inside
-                             or imported_from is not None or scope_local
-                             or oracle_constraints)
-
-        if not needs_wrapper:
-            # Basic pattern matching without MetadataWrapper
-            finder = PatternFinder(matcher, ellipsis_info, None, metavar_names)
-            module.visit(finder)
-            # Compute line numbers from source text for each match
-            if finder.matches:
-                _assign_line_numbers_from_source(finder.matches, source_code, module)
-            matches = finder.matches
-        else:
-            # Full path: use MetadataWrapper for position info and post-filters
-            wrapper = cst.MetadataWrapper(module)
-            position_provider = wrapper.resolve(cst.metadata.PositionProvider)
-
-            # Find all matches - choose finder based on parameters
-            if inside or not_inside:
-                # Use constrained finder for inside/not_inside constraints
-                finder = ConstrainedPatternFinder(
-                    matcher, ellipsis_info, position_provider, inside, not_inside, metavar_names
-                )
-            else:
-                # Use basic finder for unconstrained searching
-                finder = PatternFinder(matcher, ellipsis_info, position_provider, metavar_names)
-            wrapper.visit(finder)
-            matches = finder.matches
+    for m in raw_matches:
+        matches.append(PatternMatch(
+            node_text=m[5],
+            captures=m[6],
+            line=m[1],
+            col=m[2],
+            end_line=m[3],
+            end_col=m[4],
+            matched_text=m[5],
+        ))
 
     # Post-filter by scope if requested
     if scope is not None:
@@ -4111,30 +3581,24 @@ def find_pattern(
 
     # Post-filter by import origin if requested
     if imported_from is not None:
-        if position_provider is None:
-             # Should not happen if needs_wrapper was correct, but safe fallback
-             pass
-        else:
-            project_root = _find_project_root(file_path)
-            matches = _filter_matches_by_import(
-                matches, imported_from, file_path, project_root, source_code, position_provider
-            )
+        project_root = _find_project_root(file_path)
+        matches = _filter_matches_by_import(
+            matches, imported_from, file_path, project_root, source_code
+        )
 
     # Post-filter by scope locality if requested
     if scope_local:
-        if position_provider:
-            project_root = _find_project_root(file_path)
-            matches = _filter_matches_by_scope_local(
-                matches, file_path, project_root, source_code, position_provider
-            )
+        project_root = _find_project_root(file_path)
+        matches = _filter_matches_by_scope_local(
+            matches, file_path, project_root, source_code
+        )
 
     # Post-filter by TypeOracle type constraints
     if oracle_constraints and type_oracle is not None:
-        if position_provider:
-            matches = _filter_matches_by_type_oracle(
-                matches, oracle_constraints, type_oracle,
-                file_path, position_provider,
-            )
+        matches = _filter_matches_by_type_oracle(
+            matches, oracle_constraints, type_oracle,
+            file_path
+        )
 
     return matches
 
