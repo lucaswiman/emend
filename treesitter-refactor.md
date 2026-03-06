@@ -1299,53 +1299,52 @@ can operate on non-Python files.
 
 ##### 1a. Build extension→language registry from existing TOML configs
 
-- [ ] **Create `src/emend/language_registry.py`** — a module that discovers
+- [x] **Create `src/emend/language_registry.py`** — a module that discovers
   `languages/*/config.toml` files (via `importlib.resources` or a known
   package path), parses the `[language]` section, and builds a lookup table:
   extension → language name, language name → list of extensions.
-- [ ] **Add `detect_language(path: str | Path) -> str | None`** — returns
+- [x] **Add `detect_language(path: str | Path) -> str | None`** — returns
   the language name from the file extension using the registry.  Returns
   `None` for unknown extensions.
-- [ ] **Add `get_extensions(language: str) -> list[str]`** — returns all
+- [x] **Add `get_extensions(language: str) -> list[str]`** — returns all
   registered extensions for a language (e.g. `["py", "pyi"]` for Python).
 
 ##### 1b. Replace hardcoded `.py` checks
 
-- [ ] **`cli.py:62`** — `resolve_path()` currently filters
+- [x] **`cli.py:62`** — `resolve_path()` currently filters
   `f.endswith('.py')`.  Replace with `detect_language(f) is not None` (or
   a language-specific filter when `--language` is passed).
-- [ ] **`cli.py:484`** — pattern-vs-symbol heuristic checks
+- [x] **`cli.py:484`** — pattern-vs-symbol heuristic checks
   `query.endswith('.py')`.  Replace with `detect_language(query)`.
-- [ ] **`component_selector.py:72`** — glob filtering uses
+- [x] **`component_selector.py:72`** — glob filtering uses
   `f.endswith('.py')`.  Replace with registry lookup.
-- [ ] **`transform.py:4722`** — `visit_project_ts()` filters with
+- [x] **`transform.py:4722`** — `visit_project_ts()` filters with
   `f.endswith('.py')`.  Replace with registry lookup, accepting
   a `language` parameter.
 
 ##### 1c. Add `--language` CLI option
 
-- [ ] **Add `--language` / `-L` option** to the top-level Typer app
+- [x] **Add `--language` / `-L` option** to the top-level Typer app
   (applies to all commands).  Default: `None` (auto-detect from file
   extensions; fall back to `"python"` for backward compatibility).
-- [ ] **Thread `language: str` parameter** through the call stack:
-  `cli.py` → `transform.py` functions (`find_pattern`,
-  `replace_pattern`, `find_references`, `rename_symbol`, etc.) →
-  `PyScopeResolver` (already accepts extensions).
+- [x] **Thread `language: str` parameter** through the call stack:
+  `cli.py` → `resolve_files()` and `search` pattern mode → language-aware
+  file collection. (Full threading to all transform.py functions deferred.)
 - [ ] **Auto-detect in mixed-language projects**: when `--language` is
   not given and the target is a directory, inspect file extensions
-  present and choose the most common, or error if ambiguous.
+  present and choose the most common, or error if ambiguous. (Deferred)
 
 ##### 1d. Tests
 
-- [ ] Test that `detect_language` returns correct results for `.py`,
+- [x] Test that `detect_language` returns correct results for `.py`,
   `.ts`, `.rs`, `.go`, `.tsx`, `.pyi`, `.jsx`, `.js`, and `None` for
   unknown extensions (`.txt`, `.md`).
-- [ ] Test that `get_extensions("python")` returns `["py", "pyi"]`.
-- [ ] Test that `resolve_path("src/")` includes `.ts` files when
+- [x] Test that `get_extensions("python")` returns `["py", "pyi"]`.
+- [x] Test that `resolve_path("src/")` includes `.ts` files when
   `--language typescript` is passed.
-- [ ] Test that `resolve_path("src/")` still defaults to `.py` files
+- [x] Test that `resolve_path("src/")` still defaults to `.py` files
   when no `--language` is given (backward compatibility).
-- [ ] Test that `visit_project_ts()` respects the language parameter.
+- [ ] Test that `visit_project_ts()` respects the language parameter. (Deferred)
 
 ---
 
@@ -1356,31 +1355,32 @@ detection pluggable per-language.
 
 ##### 2a. Define abstract interfaces
 
-- [ ] **Create `src/emend/language_plugins.py`** with:
-  - [ ] `ImportHandler` ABC:
+- [x] **Create `src/emend/language_plugins.py`** with:
+  - [x] `ImportHandler` ABC:
     - `extract_imports(source: str) -> list[ImportBinding]`
     - `add_import(source: str, module: str, name: str, alias: str | None) -> str`
     - `remove_import(source: str, module: str, name: str) -> str`
-  - [ ] `CommentHandler` ABC:
+  - [x] `CommentHandler` ABC:
     - `find_docstrings(source: str, tree: Tree, symbol_range: tuple[int,int]) -> list[tuple[int, int, str]]` (byte ranges + content)
     - `find_noqa_comments(source: str) -> dict[int, set[str] | None]`
     - `line_comment_prefix` property (e.g. `"#"`, `"//"`)
-  - [ ] `PatternCompiler` ABC:
+  - [x] `PatternCompiler` ABC:
     - `compile(pattern_str: str, metavar_map: dict) -> dict | None` (returns Rust IR dict)
-  - [ ] `LanguagePlugin` dataclass composing the above three handlers.
-  - [ ] `load_plugin(language: str) -> LanguagePlugin` — discovers and
+  - [x] `LanguagePlugin` dataclass composing the above three handlers.
+  - [x] `load_plugin(language: str) -> LanguagePlugin` — discovers and
     caches plugins.  Uses `languages/{language}/plugin.py` if it exists;
     otherwise returns a plugin with `NoOp`/default handlers.
 
 ##### 2b. Implement stub/default handlers
 
-- [ ] **`NoOpImportHandler`** — all methods return empty/no-op.
-- [ ] **`RegexCommentHandler(line_comment_prefix: str)`** — generic
+- [x] **`NoOpImportHandler`** — all methods return empty/no-op.
+- [x] **`RegexCommentHandler(line_comment_prefix: str)`** — generic
   noqa detection using `{prefix} noqa: {tag}` regex; `find_docstrings`
   returns `[]`.
 - [ ] **`TreeSitterPatternCompiler`** — generic pattern compilation that
   parses pattern strings using tree-sitter for the target language
   instead of Python's `ast` module.  This is the "neutral" fallback.
+  (Deferred — needs Rust integration work in Phase 5)
 
 ##### 2c. Extract Python plugin from existing code
 

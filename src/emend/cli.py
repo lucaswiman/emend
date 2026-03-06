@@ -44,28 +44,45 @@ def _reject_file_glob(selector_str: str, command_name: str) -> None:
         )
 
 
-def resolve_files(path: str) -> tuple[list[Path], bool]:
-    """Resolve a path argument to a list of Python files.
+def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool]:
+    """Resolve a path argument to a list of source files.
 
     Args:
         path: A file path, directory, or glob pattern.
+        language: Source language to filter by (default: "python").
 
     Returns:
         (files, is_multi_file) tuple.
     """
+    from emend.language_registry import get_extensions, matches_language
     path_obj = Path(path)
     if path_obj.is_dir():
-        from emend import emend_core
-        abs_path = str(path_obj.resolve())
-        return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
+        if language == "python":
+            from emend import emend_core
+            abs_path = str(path_obj.resolve())
+            return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
+        else:
+            exts = set(get_extensions(language))
+            files = [p for p in path_obj.rglob("*") if p.suffix.lstrip(".") in exts]
+            return sorted(files), True
     elif "*" in path or "?" in path:
-        return [Path(f) for f in glob_mod.glob(path, recursive=True) if f.endswith('.py')], True
+        return [Path(f) for f in glob_mod.glob(path, recursive=True)
+                if matches_language(f, language)], True
     else:
         return [path_obj], False
 
 
 
 import re as _re_module
+
+# Module-level state for options set in the app callback (e.g. --language).
+_state: dict = {"language": "python"}
+
+
+def _is_source_file_query(query: str) -> bool:
+    """Return True if *query* ends with a known source file extension."""
+    from emend.language_registry import is_source_file
+    return is_source_file(query)
 
 
 @dataclass
@@ -186,6 +203,10 @@ def _app_callback(
         int,
         typer.Option("-v", "--verbose", count=True, help="Verbose output (-v info, -vv debug with timestamps)."),
     ] = 0,
+    language: Annotated[
+        Optional[str],
+        typer.Option("--language", "-L", help="Source language (python, typescript, etc.). Default: python."),
+    ] = None,
 ) -> None:
     if verbose >= 2:
         logging.basicConfig(
@@ -201,6 +222,8 @@ def _app_callback(
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
+    if language is not None:
+        _state["language"] = language
 
 
 # ============================================================================
@@ -481,7 +504,7 @@ def search(
             _query_path = Path(query)
             if (not _query_path.exists()
                     and '/' not in query
-                    and not query.endswith('.py')
+                    and not _is_source_file_query(query)
                     and not ('*' in query or '?' in query)):
                 if path:
                     _p = Path(path)
@@ -626,16 +649,17 @@ def search(
             _t_search_start = _time.monotonic()
             _logger = logging.getLogger("emend.search")
             target_path = path or "."
-            from emend import emend_core
+            _lang = _state["language"]
 
             _t0 = _time.monotonic()
             target_obj = Path(target_path)
-            if target_obj.is_dir():
+            if target_obj.is_dir() and _lang == "python":
                 # Fast path: get string list directly from Rust, skip Path creation
+                from emend import emend_core
                 file_strs = emend_core.collect_python_files(str(target_obj.resolve()))
                 is_multi_file = True
             else:
-                files, is_multi_file = resolve_files(target_path)
+                files, is_multi_file = resolve_files(target_path, language=_lang)
                 file_strs = [str(f) for f in files]
             _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, target_path)
 

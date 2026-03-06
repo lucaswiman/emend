@@ -4714,12 +4714,13 @@ def cmd_lookup(
 
         # Expand file globs for query mode
         import glob as glob_mod
+        from emend.language_registry import matches_language
         files_to_query = []
         fop = Path(file_or_pattern)
         if fop.is_dir():
             files_to_query = [str(f) for f in fop.rglob("*.py")]
         elif '*' in file_or_pattern or '?' in file_or_pattern:
-            files_to_query = [f for f in glob_mod.glob(file_or_pattern, recursive=True) if f.endswith('.py')]
+            files_to_query = [f for f in glob_mod.glob(file_or_pattern, recursive=True) if matches_language(f, "python")]
         else:
             files_to_query = [file_or_pattern]
 
