@@ -39,6 +39,10 @@ pub enum ParamPattern {
     Any,
     /// `$P=default_value` — matches a parameter with specific default.
     WithDefault(Box<PatternNode>),
+    /// `*args` — matches a star parameter (vararg). Optional capture name.
+    Star(Option<String>),
+    /// `**kwargs` — matches a double-star parameter (kwarg). Optional capture name.
+    DoubleStar(Option<String>),
 }
 
 /// Structural pattern node — compiled from a Python dict IR.
@@ -353,6 +357,22 @@ fn deserialize_param_pattern(obj: &Bound<'_, PyAny>) -> PyResult<ParamPattern> {
         "name" => {
             // Exact name match — treat as Any for now since params match by position
             Ok(ParamPattern::Any)
+        }
+        "star" => {
+            let name = if let Some(name_obj) = item_d.get_item("name")? {
+                Some(name_obj.extract::<String>()?)
+            } else {
+                None
+            };
+            Ok(ParamPattern::Star(name))
+        }
+        "double_star" => {
+            let name = if let Some(name_obj) = item_d.get_item("name")? {
+                Some(name_obj.extract::<String>()?)
+            } else {
+                None
+            };
+            Ok(ParamPattern::DoubleStar(name))
         }
         _ => Ok(ParamPattern::Any),
     }
@@ -2732,24 +2752,49 @@ fn match_params(
         }
         for (i, pattern) in param_patterns.iter().enumerate() {
             match pattern {
-                ParamPattern::Any => {}
+                ParamPattern::Any => {
+                    // Any matches regular params but NOT star/double-star
+                    if params[i].kind() == "list_splat_pattern" || params[i].kind() == "dictionary_splat_pattern" {
+                        return false;
+                    }
+                }
                 ParamPattern::Ellipsis | ParamPattern::EllipsisMetavar(_) => unreachable!(),
                 ParamPattern::WithDefault(dv) => {
                     if !param_has_default(params[i], source, dv, captures) {
                         return false;
                     }
                 }
+                ParamPattern::Star(ref cap_name) => {
+                    if params[i].kind() != "list_splat_pattern" {
+                        return false;
+                    }
+                    if let Some(name) = cap_name {
+                        if let Some(id_node) = params[i].named_child(0) {
+                            captures.insert(name.clone(), node_text(id_node, source).to_string());
+                        }
+                    }
+                }
+                ParamPattern::DoubleStar(ref cap_name) => {
+                    if params[i].kind() != "dictionary_splat_pattern" {
+                        return false;
+                    }
+                    if let Some(name) = cap_name {
+                        if let Some(id_node) = params[i].named_child(0) {
+                            captures.insert(name.clone(), node_text(id_node, source).to_string());
+                        }
+                    }
+                }
             }
         }
         return true;
     }
-    
+
     // Subsequence matching for params
     let non_ellipsis_count = param_patterns.iter().filter(|p| !matches!(p, ParamPattern::Ellipsis | ParamPattern::EllipsisMetavar(_))).count();
     if params.len() < non_ellipsis_count {
         return false;
     }
-    
+
     let non_ellipsis: Vec<&ParamPattern> = param_patterns
         .iter()
         .filter(|p| !matches!(p, ParamPattern::Ellipsis | ParamPattern::EllipsisMetavar(_)))
@@ -2760,10 +2805,34 @@ fn match_params(
         for (j, pattern) in non_ellipsis.iter().enumerate() {
             let param = params[start + j];
             match pattern {
-                ParamPattern::Any => {}
+                ParamPattern::Any => {
+                    if param.kind() == "list_splat_pattern" || param.kind() == "dictionary_splat_pattern" {
+                        continue 'outer;
+                    }
+                }
                 ParamPattern::WithDefault(dv) => {
                     if !param_has_default(param, source, dv, &mut temp_captures) {
                         continue 'outer;
+                    }
+                }
+                ParamPattern::Star(ref cap_name) => {
+                    if param.kind() != "list_splat_pattern" {
+                        continue 'outer;
+                    }
+                    if let Some(name) = cap_name {
+                        if let Some(id_node) = param.named_child(0) {
+                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string());
+                        }
+                    }
+                }
+                ParamPattern::DoubleStar(ref cap_name) => {
+                    if param.kind() != "dictionary_splat_pattern" {
+                        continue 'outer;
+                    }
+                    if let Some(name) = cap_name {
+                        if let Some(id_node) = param.named_child(0) {
+                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string());
+                        }
                     }
                 }
                 _ => continue 'outer,
@@ -3013,7 +3082,7 @@ fn match_dict_elements(
         }
         return true;
     }
-    // Subsequence matching for dict elements
+    // Set-based matching for dict elements with spread (keys may be in any order)
     let non_ellipsis: Vec<&DictElementPattern> = patterns
         .iter()
         .filter(|p| !matches!(p, DictElementPattern::Ellipsis | DictElementPattern::EllipsisMetavar(_)))
@@ -3024,26 +3093,39 @@ fn match_dict_elements(
     if nodes.len() < non_ellipsis.len() {
         return false;
     }
-    'outer: for start in 0..=(nodes.len() - non_ellipsis.len()) {
-        let mut temp_captures = captures.clone();
-        for (j, pnode) in non_ellipsis.iter().enumerate() {
-            if !match_dict_element(pnode, nodes[start + j], source, &mut temp_captures) {
-                continue 'outer;
+    // For each pattern element, find any matching node (order-independent)
+    let mut temp_captures = captures.clone();
+    let mut used: Vec<bool> = vec![false; nodes.len()];
+    for pnode in &non_ellipsis {
+        let mut found = false;
+        for (ni, node) in nodes.iter().enumerate() {
+            if used[ni] {
+                continue;
+            }
+            let mut try_captures = temp_captures.clone();
+            if match_dict_element(pnode, *node, source, &mut try_captures) {
+                used[ni] = true;
+                temp_captures = try_captures;
+                found = true;
+                break;
             }
         }
-        // Capture prefix/suffix
-        if let DictElementPattern::EllipsisMetavar(name) = &patterns[0] {
-             let text: Vec<_> = nodes[..start].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
+        if !found {
+            return false;
         }
-        if let DictElementPattern::EllipsisMetavar(name) = &patterns[patterns.len()-1] {
-             let text: Vec<_> = nodes[start+non_ellipsis.len()..].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
-        }
-        *captures = temp_captures;
-        return true;
     }
-    false
+    // Capture unmatched elements for ellipsis metavar
+    for p in patterns {
+        if let DictElementPattern::EllipsisMetavar(name) = p {
+            let text: Vec<_> = nodes.iter().enumerate()
+                .filter(|(i, _)| !used[*i])
+                .map(|(_, n)| node_text(*n, source))
+                .collect();
+            temp_captures.insert(name.clone(), text.join(", "));
+        }
+    }
+    *captures = temp_captures;
+    true
 }
 
 fn match_dict_element(
