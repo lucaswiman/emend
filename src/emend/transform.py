@@ -1364,6 +1364,11 @@ from emend import emend_core as _rust
 _METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
 
 
+def _ext_from_path(file_path: str | Path) -> str:
+    """Return the file extension (without dot) for passing to emend_core functions."""
+    return Path(file_path).suffix.lstrip('.') or 'py'
+
+
 def extract_pattern_literals(pattern_str: str) -> list[str]:
     """Extract literal identifier tokens from a pattern string for pre-filtering.
 
@@ -1987,30 +1992,32 @@ def get_component(selector: ExtendedSelector) -> str:
             raise ValueError(f"Component '{selector.component}' requires a symbol path")
 
     # Get the range for the component using Rust accelerator
+    _ext = _ext_from_path(selector.file_path)
     range_info = _rust.get_symbol_component_range(
         source_code,
         selector.symbol_path,
         selector.component,
-        selector.accessor
+        selector.accessor,
+        ext=_ext,
     )
 
     if range_info is None:
         # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
         if not syms:
              raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-        
+
         # Symbol exists but component not found
         kind = syms[0]["kind"]
         if kind == "class" and selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
         elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-        
+
         raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
 
     start_byte, end_byte = range_info
-    
+
     # For returns, Rust returns an insertion point if it's not there.
     # get_component should raise error if it's truly not there.
     if selector.component == "returns" and start_byte == end_byte:
@@ -2048,19 +2055,21 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     source_code = file_path.read_text()
 
     # Get the range for the component using Rust accelerator
+    _ext = _ext_from_path(selector.file_path)
     range_info = _rust.get_symbol_component_range(
         source_code,
         selector.symbol_path,
         selector.component,
-        selector.accessor
+        selector.accessor,
+        ext=_ext,
     )
 
     if range_info is None:
         # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
         if not syms:
              raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-        
+
         # Match old error messages for invalid components
         kind = syms[0]["kind"]
         if kind == "class" and selector.component in ("params", "returns"):
@@ -2146,15 +2155,17 @@ def add_to_component(
         return _add_import_text(value, position, file_path, apply, source_code)
 
     # Get items and their ranges
+    _ext = _ext_from_path(selector.file_path)
     items_info = _rust.get_symbol_component_list_items(
         source_code,
         selector.symbol_path,
-        selector.component
+        selector.component,
+        ext=_ext,
     )
 
     if items_info is None:
         # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
         if not syms:
              raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
         
@@ -2217,11 +2228,12 @@ def add_to_component(
             source_code,
             selector.symbol_path,
             selector.component,
-            None
+            None,
+            ext=_ext,
         )
         if container_range is None:
              # Fallback: find if it's a class or function to give better error or handle it
-             syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+             syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
              if syms:
                  sym_kind = syms[0]["kind"]
                  if sym_kind == "class" and selector.component == "params":
@@ -2349,26 +2361,28 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     source_code = file_path.read_text()
 
     # Get the range for the component using Rust accelerator
+    _ext = _ext_from_path(selector.file_path)
     range_info = _rust.get_symbol_component_range(
         source_code,
         selector.symbol_path,
         selector.component,
-        selector.accessor
+        selector.accessor,
+        ext=_ext,
     )
 
     if range_info is None:
         # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector= ".".join(selector.symbol_path))
+        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
         if not syms:
              raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-        
+
         # Symbol exists but component not found
         kind = syms[0]["kind"]
         if kind == "class" and selector.component in ("params", "returns"):
             raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
         elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
             raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-        
+
         raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
 
     start_byte, end_byte = range_info

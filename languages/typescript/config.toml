@@ -91,6 +91,55 @@ export_statement = "export_statement"
 public_by_default = false
 private_prefix = "_"
 
+[symbols]
+function_node = "function_declaration"
+class_node = "class_declaration"
+# TypeScript has no decorated_definition wrapper; decorators are direct children
+decorated_node = ""
+definition_field = ""
+async_keyword = "async"
+name_field = "name"
+parameters_field = "formal_parameters"
+return_type_field = "type_annotation"
+body_field = "statement_block"
+superclasses_field = "class_heritage"
+decorator_node = "decorator"
+expression_statement_node = "expression_statement"
+# Inside class bodies, methods are method_definition nodes
+method_node = "method_definition"
+
+[[symbols.param_types]]
+node = "required_parameter"
+name_source = "field:pattern"
+[[symbols.param_types]]
+node = "optional_parameter"
+name_source = "field:pattern"
+[[symbols.param_types]]
+node = "rest_pattern"
+name_source = "child:0"
+prefix = "..."
+[[symbols.param_types]]
+node = "identifier"
+name_source = "self"
+
+[symbols.statements]
+simple = [
+    "expression_statement", "return_statement", "throw_statement",
+    "break_statement", "continue_statement", "import_statement",
+    "export_statement", "debugger_statement",
+    "lexical_declaration", "variable_declaration",
+]
+compound = [
+    "if_statement", "for_statement", "while_statement", "try_statement",
+    "for_in_statement", "for_of_statement",
+    "function_declaration", "class_declaration",
+    "switch_statement",
+]
+recurse_into = [
+    "statement_block", "program", "else_clause",
+    "catch_clause", "finally_clause", "switch_body", "switch_case",
+]
+
 [builtins]
 names = [
     "console", "window", "document", "process", "require", "module", "exports",

@@ -19,6 +19,31 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+const PYTHON_CONFIG_TOML: &str = include_str!("../../languages/python/config.toml");
+const TS_CONFIG_TOML: &str = include_str!("../../languages/typescript/config.toml");
+
+/// Return a cached `&'static LanguageConfig` for the given file extension.
+/// Defaults to Python config for unknown extensions.
+pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
+    static PY_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static TS_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    match ext {
+        "py" | "pyi" => PY_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
+                .unwrap_or_else(|_| LanguageConfig::python_default())
+        }),
+        "ts" | "tsx" | "js" | "jsx" => TS_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(TS_CONFIG_TOML)
+                .expect("Failed to parse TypeScript config")
+        }),
+        _ => PY_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
+                .unwrap_or_else(|_| LanguageConfig::python_default())
+        }),
+    }
+}
 
 use crate::symbols::node_text;
 
@@ -206,12 +231,221 @@ pub struct LanguageConfig {
     pub exports: ExportsSection,
     #[serde(default)]
     pub builtins: BuiltinsSection,
+    #[serde(default)]
+    pub symbols: SymbolsSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuiltinsSection {
     #[serde(default)]
     pub names: Vec<String>,
+}
+
+/// How to extract a single parameter's name from its tree-sitter node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamTypeConfig {
+    pub node: String,
+    /// "self" = the node's own text; "field:<name>" = child by field; "child:<idx>" = nth named child
+    pub name_source: String,
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+/// A punctuation-only separator node (e.g. positional-only `/` or keyword-only `*`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamSeparatorConfig {
+    pub node: String,
+    pub display: String,
+}
+
+/// Statement node type lists used by `get_statement_ranges`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StatementsConfig {
+    #[serde(default)]
+    pub simple: Vec<String>,
+    #[serde(default)]
+    pub compound: Vec<String>,
+    #[serde(default)]
+    pub recurse_into: Vec<String>,
+}
+
+impl StatementsConfig {
+    pub fn effective_simple(&self) -> std::borrow::Cow<[String]> {
+        if self.simple.is_empty() {
+            std::borrow::Cow::Owned(Self::python_simple_default())
+        } else {
+            std::borrow::Cow::Borrowed(&self.simple)
+        }
+    }
+
+    pub fn effective_recurse_into(&self) -> std::borrow::Cow<[String]> {
+        if self.recurse_into.is_empty() {
+            std::borrow::Cow::Owned(Self::python_recurse_into_default())
+        } else {
+            std::borrow::Cow::Borrowed(&self.recurse_into)
+        }
+    }
+
+    fn python_simple_default() -> Vec<String> {
+        vec![
+            "expression_statement", "return_statement", "delete_statement",
+            "raise_statement", "pass_statement", "break_statement",
+            "continue_statement", "import_statement", "import_from_statement",
+            "future_import_statement", "global_statement", "nonlocal_statement",
+            "assert_statement", "type_alias_statement", "print_statement",
+        ].into_iter().map(String::from).collect()
+    }
+
+    fn python_recurse_into_default() -> Vec<String> {
+        vec![
+            "if_statement", "for_statement", "while_statement", "try_statement",
+            "with_statement", "function_definition", "class_definition",
+            "decorated_definition", "match_statement", "block", "module",
+            "elif_clause", "else_clause", "except_clause", "finally_clause",
+            "case_clause",
+        ].into_iter().map(String::from).collect()
+    }
+}
+
+/// All symbol-extraction settings for `symbols.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SymbolsSection {
+    #[serde(default)] pub function_node: Option<String>,
+    #[serde(default)] pub class_node: Option<String>,
+    /// Wrapper node around decorated defs (Python: "decorated_definition"; empty = no wrapper).
+    #[serde(default)] pub decorated_node: Option<String>,
+    /// Field name within `decorated_node` that holds the real def.
+    #[serde(default)] pub definition_field: Option<String>,
+    /// Keyword token kind that marks async functions.
+    #[serde(default)] pub async_keyword: Option<String>,
+    #[serde(default)] pub name_field: Option<String>,
+    #[serde(default)] pub parameters_field: Option<String>,
+    #[serde(default)] pub return_type_field: Option<String>,
+    #[serde(default)] pub body_field: Option<String>,
+    #[serde(default)] pub superclasses_field: Option<String>,
+    #[serde(default)] pub decorator_node: Option<String>,
+    #[serde(default)] pub expression_statement_node: Option<String>,
+    /// Extra function-like node used inside class bodies (TypeScript: "method_definition").
+    #[serde(default)] pub method_node: Option<String>,
+    #[serde(default)] pub param_types: Vec<ParamTypeConfig>,
+    #[serde(default)] pub param_separators: Vec<ParamSeparatorConfig>,
+    #[serde(default)] pub statements: StatementsConfig,
+}
+
+impl SymbolsSection {
+    pub fn function_node(&self) -> &str {
+        self.function_node.as_deref().unwrap_or("function_definition")
+    }
+    pub fn class_node(&self) -> &str {
+        self.class_node.as_deref().unwrap_or("class_definition")
+    }
+    pub fn decorated_node(&self) -> &str {
+        self.decorated_node.as_deref().unwrap_or("decorated_definition")
+    }
+    pub fn definition_field(&self) -> &str {
+        self.definition_field.as_deref().unwrap_or("definition")
+    }
+    pub fn async_keyword(&self) -> &str {
+        self.async_keyword.as_deref().unwrap_or("async")
+    }
+    pub fn name_field(&self) -> &str {
+        self.name_field.as_deref().unwrap_or("name")
+    }
+    pub fn parameters_field(&self) -> &str {
+        self.parameters_field.as_deref().unwrap_or("parameters")
+    }
+    pub fn return_type_field(&self) -> &str {
+        self.return_type_field.as_deref().unwrap_or("return_type")
+    }
+    pub fn body_field(&self) -> &str {
+        self.body_field.as_deref().unwrap_or("body")
+    }
+    pub fn superclasses_field(&self) -> &str {
+        self.superclasses_field.as_deref().unwrap_or("superclasses")
+    }
+    pub fn decorator_node(&self) -> &str {
+        self.decorator_node.as_deref().unwrap_or("decorator")
+    }
+    pub fn expression_statement_node(&self) -> &str {
+        self.expression_statement_node.as_deref().unwrap_or("expression_statement")
+    }
+    pub fn method_node(&self) -> Option<&str> {
+        self.method_node.as_deref()
+    }
+
+    /// Returns param type configs; falls back to Python defaults when empty.
+    pub fn effective_param_types(&self) -> std::borrow::Cow<[ParamTypeConfig]> {
+        if self.param_types.is_empty() {
+            std::borrow::Cow::Owned(Self::python_param_types_default())
+        } else {
+            std::borrow::Cow::Borrowed(&self.param_types)
+        }
+    }
+
+    /// Returns param separator configs; falls back to Python defaults when empty.
+    pub fn effective_param_separators(&self) -> std::borrow::Cow<[ParamSeparatorConfig]> {
+        if self.param_separators.is_empty() {
+            std::borrow::Cow::Owned(Self::python_param_separators_default())
+        } else {
+            std::borrow::Cow::Borrowed(&self.param_separators)
+        }
+    }
+
+    fn python_param_types_default() -> Vec<ParamTypeConfig> {
+        vec![
+            ParamTypeConfig { node: "identifier".to_string(), name_source: "self".to_string(), prefix: None },
+            ParamTypeConfig { node: "typed_parameter".to_string(), name_source: "child:0".to_string(), prefix: None },
+            ParamTypeConfig { node: "default_parameter".to_string(), name_source: "field:name".to_string(), prefix: None },
+            ParamTypeConfig { node: "typed_default_parameter".to_string(), name_source: "field:name".to_string(), prefix: None },
+            ParamTypeConfig { node: "list_splat_pattern".to_string(), name_source: "child:0".to_string(), prefix: Some("*".to_string()) },
+            ParamTypeConfig { node: "dictionary_splat_pattern".to_string(), name_source: "child:0".to_string(), prefix: Some("**".to_string()) },
+        ]
+    }
+
+    fn python_param_separators_default() -> Vec<ParamSeparatorConfig> {
+        vec![
+            ParamSeparatorConfig { node: "positional_separator".to_string(), display: "/".to_string() },
+            ParamSeparatorConfig { node: "keyword_separator".to_string(), display: "*".to_string() },
+        ]
+    }
+
+    pub fn python_default() -> Self {
+        SymbolsSection {
+            function_node: Some("function_definition".to_string()),
+            class_node: Some("class_definition".to_string()),
+            decorated_node: Some("decorated_definition".to_string()),
+            definition_field: Some("definition".to_string()),
+            async_keyword: Some("async".to_string()),
+            name_field: Some("name".to_string()),
+            parameters_field: Some("parameters".to_string()),
+            return_type_field: Some("return_type".to_string()),
+            body_field: Some("body".to_string()),
+            superclasses_field: Some("superclasses".to_string()),
+            decorator_node: Some("decorator".to_string()),
+            expression_statement_node: Some("expression_statement".to_string()),
+            method_node: None,
+            param_types: Self::python_param_types_default(),
+            param_separators: Self::python_param_separators_default(),
+            statements: StatementsConfig {
+                simple: vec![
+                    "expression_statement", "return_statement", "delete_statement",
+                    "raise_statement", "pass_statement", "break_statement",
+                    "continue_statement", "import_statement", "import_from_statement",
+                    "future_import_statement", "global_statement", "nonlocal_statement",
+                    "assert_statement", "type_alias_statement", "print_statement",
+                ].into_iter().map(String::from).collect(),
+                compound: vec![
+                    "if_statement", "for_statement", "while_statement", "try_statement",
+                    "with_statement", "function_definition", "class_definition",
+                    "decorated_definition", "match_statement",
+                ].into_iter().map(String::from).collect(),
+                recurse_into: vec![
+                    "block", "module", "elif_clause", "else_clause",
+                    "except_clause", "finally_clause", "case_clause",
+                ].into_iter().map(String::from).collect(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,10 +489,13 @@ pub struct BindingsSection {
     pub assignment: Vec<AssignmentRule>,
     #[serde(rename = "loop")]
     pub loop_rules: Vec<AssignmentRule>,
+    #[serde(default)]
     pub context_manager: Vec<AssignmentRule>,
+    #[serde(default)]
     pub exception: Vec<AssignmentRule>,
     pub parameters: ParametersSection,
     pub definitions: DefinitionsSection,
+    #[serde(default)]
     pub walrus: Vec<AssignmentRule>,
 }
 
@@ -317,6 +554,7 @@ pub struct ExportsSection {
     pub all_variable: Option<String>,
     pub public_by_default: bool,
     pub private_prefix: String,
+    #[serde(default)]
     pub dunder_is_public: bool,
 }
 
@@ -2029,6 +2267,7 @@ impl LanguageConfig {
                     "__import__", "__build_class__",
                 ].into_iter().map(String::from).collect(),
             },
+            symbols: SymbolsSection::python_default(),
         }
     }
 }

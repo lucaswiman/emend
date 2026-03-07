@@ -58,14 +58,14 @@ def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
     return load_plugin("python").comment_handler.find_noqa_comments(source)
 
 
-def _build_statement_line_map(source: str) -> dict[int, tuple[int, int]]:
+def _build_statement_line_map(source: str, ext: str = "py") -> dict[int, tuple[int, int]]:
     """Build a mapping from line -> (stmt_start, stmt_end) using Rust tree-sitter.
 
     Uses emend_core.get_statement_ranges() for statement range mapping.
     """
     from emend import emend_core
     line_to_range: dict[int, tuple[int, int]] = {}
-    for start, end in emend_core.get_statement_ranges(source):
+    for start, end in emend_core.get_statement_ranges(source, ext=ext):
         for line in range(start, end + 1):
             line_to_range[line] = (start, end)
     return line_to_range

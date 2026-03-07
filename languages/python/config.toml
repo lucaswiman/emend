@@ -195,6 +195,66 @@ private_prefix = "_"
 # Dunder methods are always considered public/entry-points
 dunder_is_public = true
 
+[symbols]
+function_node = "function_definition"
+class_node = "class_definition"
+decorated_node = "decorated_definition"
+definition_field = "definition"
+async_keyword = "async"
+name_field = "name"
+parameters_field = "parameters"
+return_type_field = "return_type"
+body_field = "body"
+superclasses_field = "superclasses"
+decorator_node = "decorator"
+expression_statement_node = "expression_statement"
+
+[[symbols.param_types]]
+node = "identifier"
+name_source = "self"
+[[symbols.param_types]]
+node = "typed_parameter"
+name_source = "child:0"
+[[symbols.param_types]]
+node = "default_parameter"
+name_source = "field:name"
+[[symbols.param_types]]
+node = "typed_default_parameter"
+name_source = "field:name"
+[[symbols.param_types]]
+node = "list_splat_pattern"
+name_source = "child:0"
+prefix = "*"
+[[symbols.param_types]]
+node = "dictionary_splat_pattern"
+name_source = "child:0"
+prefix = "**"
+
+[[symbols.param_separators]]
+node = "positional_separator"
+display = "/"
+[[symbols.param_separators]]
+node = "keyword_separator"
+display = "*"
+
+[symbols.statements]
+simple = [
+    "expression_statement", "return_statement", "delete_statement",
+    "raise_statement", "pass_statement", "break_statement",
+    "continue_statement", "import_statement", "import_from_statement",
+    "future_import_statement", "global_statement", "nonlocal_statement",
+    "assert_statement", "type_alias_statement", "print_statement",
+]
+compound = [
+    "if_statement", "for_statement", "while_statement", "try_statement",
+    "with_statement", "function_definition", "class_definition",
+    "decorated_definition", "match_statement",
+]
+recurse_into = [
+    "block", "module", "elif_clause", "else_clause",
+    "except_clause", "finally_clause", "case_clause",
+]
+
 [builtins]
 names = [
     "print", "len", "range", "int", "str", "float", "bool", "list",

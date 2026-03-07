@@ -1469,7 +1469,7 @@ The `collect_import()` function (`scope.rs:1553`) and
 `symbols.rs` hardcodes `"function_definition"`, `"class_definition"`,
 `"decorated_definition"`, `"async"`, and Python-specific field names.
 
-- [ ] **Add `[symbols]` section to language config TOML**:
+- [x] **Add `[symbols]` section to language config TOML**:
   ```toml
   [symbols]
   function_node = "function_definition"
@@ -1480,11 +1480,14 @@ The `collect_import()` function (`scope.rs:1553`) and
   return_type_field = "return_type"
   name_field = "name"
   ```
-- [ ] **Refactor `symbols.rs` functions** (`collect_symbols_impl`,
+  Added to both `languages/python/config.toml` and `languages/typescript/config.toml`.
+- [x] **Refactor `symbols.rs` functions** (`collect_symbols_impl`,
   `find_node_by_path`, `get_symbol_component_range`, etc.) to read
   node type strings from config instead of hardcoded literals.
-- [ ] **Pass `LanguageConfig` to symbol functions** — currently they only
-  receive source + tree.  Add config parameter or store on a struct.
+  All 5 PyO3 functions now accept `ext: Option<&str>` and use `config_for_ext()`.
+- [x] **Pass `LanguageConfig` to symbol functions** — added `config_for_ext()` cached
+  helper using `OnceLock` + `include_str!`; `SymbolsSection` threaded through all
+  internal functions. Python call sites updated to pass `ext=`.
 
 ##### 3c. Generalize `matcher.rs` node type checks
 

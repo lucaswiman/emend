@@ -23,6 +23,7 @@ $(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
 	@mkdir -p $(@D) && touch $@
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
+	cargo test --manifest-path rust/Cargo.toml
 	$(VENV)/bin/pytest --tb=short -n 8 $(if $(TESTS),$(TESTS),tests/)
 
 deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
