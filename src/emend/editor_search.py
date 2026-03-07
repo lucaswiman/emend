@@ -508,6 +508,30 @@ class EditorSearchEngine:
         if kind:
             items = [c for c in items if c["kind"] == kind]
 
+        # Venv fallback: if no candidates from the project index, try venv
+        if not items and not file_scope:
+            try:
+                from emend.transform import lookup_venv_symbol
+                venv_results = lookup_venv_symbol(
+                    self.project_root,
+                    name_pattern=query if "*" in query or "?" in query else None,
+                    qualified_name=query if "." in query else None,
+                    limit=limit,
+                )
+                # For bare names, also try name_pattern
+                if not venv_results and "." not in query:
+                    venv_results = lookup_venv_symbol(
+                        self.project_root,
+                        name_pattern=query,
+                        limit=limit,
+                    )
+                for vr in venv_results:
+                    qn = vr.get("qualified_name", vr["name"])
+                    score = round(_score_symbol(vr["name"], qn, query), 1)
+                    items.append({**vr, "score": score})
+            except Exception:
+                logger.debug("Venv symbol lookup failed", exc_info=True)
+
         # Score and rank
         scored = [
             (round(_score_symbol(c["name"], c["qualified_name"], query), 1), c)
@@ -581,7 +605,7 @@ class EditorSearchEngine:
         """
         from emend.transform import (
             find_pattern_in_project,
-            _collect_python_files_scandir,
+            _collect_source_files_scandir,
         )
 
         scope_path = file_scope or self.project_root
@@ -590,7 +614,7 @@ class EditorSearchEngine:
         if scope_resolved.is_file():
             file_paths = [str(scope_resolved)]
         else:
-            file_paths = _collect_python_files_scandir(str(scope_resolved))
+            file_paths = _collect_source_files_scandir(str(scope_resolved))
 
         project_matches = find_pattern_in_project(
             pattern, file_paths,
@@ -666,6 +690,7 @@ class EditorSearchEngine:
         file_scope: str | None = None,
     ) -> SearchResult:
         """Search project files using rg or grep with a PCRE regex."""
+        t0 = time.monotonic()
         scope = file_scope or self.project_root
 
         rg = shutil.which("rg")
@@ -696,9 +721,11 @@ class EditorSearchEngine:
             )
             raw_lines = proc.stdout.splitlines()
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logging.getLogger("emend.editor").warning("grep search failed: %s", exc)
             return SearchResult(
-                items=[{"error": str(exc)}],
-                elapsed_ms=0, mode="grep",
+                items=[],
+                elapsed_ms=(time.monotonic() - t0) * 1000,
+                mode="grep",
             )
 
         items: list[dict] = []
@@ -727,7 +754,7 @@ class EditorSearchEngine:
 
         return SearchResult(
             items=items,
-            elapsed_ms=0,
+            elapsed_ms=(time.monotonic() - t0) * 1000,
             mode="grep",
             truncated=len(items) >= limit,
         )

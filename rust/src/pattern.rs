@@ -10,6 +10,7 @@ fn get_parser(lang_name: &str) -> Parser {
         "python" => tree_sitter_python::LANGUAGE,
         "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX,
+        "rust" => tree_sitter_rust::LANGUAGE,
         _ => tree_sitter_python::LANGUAGE,
     };
     parser
@@ -30,6 +31,12 @@ pub(crate) fn parse_typescript(source: &str, is_tsx: bool) -> Option<Tree> {
     parser.parse(source.as_bytes(), None)
 }
 
+/// Parse Rust source into a tree-sitter Tree.
+pub(crate) fn parse_rust(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("rust");
+    parser.parse(source.as_bytes(), None)
+}
+
 /// Parse source based on file extension.
 pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
     match ext {
@@ -37,6 +44,7 @@ pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
         "ts" => parse_typescript(source, false),
         "tsx" => parse_typescript(source, true),
         "js" | "jsx" => parse_typescript(source, false), // JS uses TS grammar
+        "rs" => parse_rust(source),
         _ => parse_python(source),
     }
 }

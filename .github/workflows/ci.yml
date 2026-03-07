@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
-        run: make test
+        run: make test-ci
 
       - name: Check for dead code
         run: make deadcode

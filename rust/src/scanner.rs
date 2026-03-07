@@ -12,12 +12,13 @@ pub const SKIP_DIRS: &[&str] = &[
     "build",
 ];
 
-/// Collect all `.py` files under `root`, skipping non-project directories.
+/// Collect all files under `root` with specific extensions, skipping non-project directories.
 ///
 /// Follows symlinks to both directories and files.
-pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
+pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let dotted: Vec<String> = extensions.iter().map(|ext| format!(".{}", ext)).collect();
 
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -60,11 +61,17 @@ pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
                 if !name_str.starts_with('.') && !SKIP_DIRS.contains(&name_str.as_ref()) {
                     stack.push(entry.path());
                 }
-            } else if is_file && name_str.ends_with(".py") {
-                files.push(entry.path());
+            } else if is_file {
+                if dotted.iter().any(|d| name_str.ends_with(d.as_str())) {
+                    files.push(entry.path());
+                }
             }
         }
     }
 
     files
+}
+
+pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
+    collect_files(root, &["py", "pyi"])
 }

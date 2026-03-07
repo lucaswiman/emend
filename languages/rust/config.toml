@@ -1,0 +1,202 @@
+# Rust language configuration for emend scope resolver.
+
+[language]
+name = "rust"
+tree_sitter_grammar = "tree-sitter-rust"
+file_extensions = ["rs"]
+keywords = ["let", "fn", "struct", "enum", "trait", "impl", "mod", "use", "pub", "crate", "self", "Self", "where", "type", "async", "await", "mut", "ref", "static", "const", "extern", "unsafe", "move"]
+
+[scoping]
+[[scoping.scope_creators]]
+node = "source_file"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "function_item"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "struct_item"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "enum_item"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "trait_item"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "impl_item"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "mod_item"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "block"
+kind = "block"
+
+[scoping.rules.class]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.function]
+is_closure_boundary = true
+names_visible_to_inner = true
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.block]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+[bindings]
+[[bindings.assignment]]
+node = "let_declaration"
+target = "pattern"
+
+[[bindings.assignment]]
+node = "assignment_expression"
+target = "left"
+
+[[bindings.loop]]
+node = "for_expression"
+target = "pattern"
+
+[bindings.parameters]
+param_nodes = ["parameter"]
+name_field = "pattern"
+
+[bindings.definitions]
+function_def = "function_item"
+class_def = "struct_item"
+name_field = "name"
+
+[imports]
+import_statement = "use_declaration"
+module_field = "argument"
+name_field = "argument"
+resolution = "rust"
+dotted_name = "identifier"
+aliased_import = "use_alias"
+identifier = "identifier"
+
+[qualified_names]
+module_separator = "::"
+class_member_prefix = true
+nested_function_prefix = false
+locals_marker = ""
+
+[exports]
+public_by_default = false
+private_prefix = ""
+
+[symbols]
+function_node = "function_item"
+class_node = "struct_item"
+decorated_node = "attribute_item"
+definition_field = ""
+async_keyword = "async"
+name_field = "name"
+parameters_field = "parameters"
+return_type_field = "return_type"
+body_field = "body"
+superclasses_field = "trait"
+decorator_node = "attribute_item"
+expression_statement_node = "expression_statement"
+
+[[symbols.param_types]]
+node = "parameter"
+name_source = "field:pattern"
+
+[symbols.statements]
+simple = [
+    "let_declaration", "use_declaration", "expression_statement",
+    "return_expression", "break_expression", "continue_expression",
+]
+compound = [
+    "if_expression", "for_expression", "while_expression", "loop_expression",
+    "match_expression", "function_item", "struct_item", "enum_item",
+    "trait_item", "impl_item", "mod_item",
+]
+recurse_into = [
+    "block", "source_file", "else_clause",
+]
+
+[builtins]
+names = [
+    "String", "Vec", "Option", "Result", "Some", "None", "Ok", "Err",
+    "Box", "Rc", "Arc", "u8", "u16", "u32", "u64", "u128", "usize",
+    "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool",
+    "char", "str", "Self", "self"
+]
+
+[pattern_matching]
+function_def = "function_item"
+class_def = "struct_item"
+call = "call_expression"
+attribute = "field_expression"
+identifier = "identifier"
+assignment = "assignment_expression"
+augmented_assignment = "compound_assignment_expr"
+annotated_assignment = "let_declaration"
+return_stmt = "return_expression"
+if_stmt = "if_expression"
+while_stmt = "while_expression"
+for_stmt = "for_expression"
+try_stmt = "try_expression"
+except_handler = ""
+for_in_clause = ""
+if_clause = ""
+pair = ""
+import_stmt = "use_declaration"
+import_from_stmt = "use_declaration"
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = "await_expression"
+yield_expr = ""
+lambda = "closure_expression"
+named_expr = ""
+integer = "integer_literal"
+float = "float_literal"
+string = "string_literal"
+list = "array_expression"
+tuple = "tuple_expression"
+set = ""
+dict = ""
+binary_operator = "binary_expression"
+boolean_operator = "boolean_expression"
+unary_operator = "unary_expression"
+comparison_operator = "binary_expression"
+subscript = "index_expression"
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = [
+    "let_declaration", "use_declaration", "expression_statement",
+    "function_item", "struct_item", "enum_item", "trait_item",
+    "impl_item", "mod_item",
+]
+func_field = "function"
+args_field = "arguments"
+object_field = "value"
+attr_field = "field"
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = "type"
+value_field = "value"
+condition_field = "condition"
+target_field = "left"
+iter_field = "right"
+elt_field = "body"

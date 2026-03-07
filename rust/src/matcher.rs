@@ -482,6 +482,13 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             })
         }
 
+        "arg" => {
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Arg pattern missing 'value'")
+            })?;
+            deserialize_pattern(&value_obj)
+        }
+
         "attr" => {
             let value_obj = d.get_item("value")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Attr pattern missing 'value'")
@@ -2110,6 +2117,15 @@ fn matches_node<'a>(
         }
 
         PatternNode::Return { value } => {
+            // Check if it's an expression_statement wrapping a return_statement (TS compatibility)
+            if node.kind() == config.symbols.expression_statement_node() {
+                if let Some(child) = node.named_child(0) {
+                    if child.kind() == config.pattern_matching.return_stmt {
+                        // Recurse using the same PatternNode::Return
+                        return matches_node(child, source, pattern, captures, config);
+                    }
+                }
+            }
             if node.kind() != config.pattern_matching.return_stmt {
                 return None;
             }
@@ -2964,6 +2980,7 @@ fn match_fstring(
     true
 }
 
+/*
 fn match_generator(
     pattern: &ComprehensionGenerator,
     node: Node,
@@ -3021,6 +3038,7 @@ fn match_generators(
     }
     true
 }
+*/
 
 /// Match generators with their associated if_clauses grouped from the parent node.
 /// Each entry in `groups` is (for_in_clause_node, vec_of_if_clause_nodes).
@@ -3816,10 +3834,11 @@ fn node_to_ir<'a>(
     }
 
     // Return Statement
-    if kind == config.pattern_matching.return_stmt {
+    if kind == config.pattern_matching.return_stmt || (kind == config.symbols.expression_statement_node() && node.named_child(0).map_or(false, |c| c.kind() == config.pattern_matching.return_stmt)) {
+        let real_node = if kind == config.pattern_matching.return_stmt { node } else { node.named_child(0).unwrap() };
         dict.set_item("type", "return").unwrap();
-        let val_node = node.child_by_field_name(&config.pattern_matching.value_field)
-            .or_else(|| node.named_child(0));
+        let val_node = real_node.child_by_field_name(&config.pattern_matching.value_field)
+            .or_else(|| real_node.named_child(0));
         if let Some(val) = val_node {
             dict.set_item("value", node_to_ir(py, val, source, config)).unwrap();
         }

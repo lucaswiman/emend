@@ -184,3 +184,15 @@ make test TESTS="-k default"
 - Tests use `tmp_path` fixture for file operations
 - Test functions use descriptive names: `test_<command>_<scenario>`
 - Read-only commands that output to stdout use `print(content, end='')` to avoid adding extra newlines
+
+## Development Workflow
+
+* Use Red/Green TDD. If writing an automated test is infeasible or redundant, use a manual testing procedure and verify that fails then succeeds.
+* Always identify yourself in commit messages (Claude Code, Gemini, Codex, etc.)
+* You should use `make test` rather than trying to run tests directly from the environment.
+
+## Environment notes
+
+Do not assume the dependencies will be installed on the active python installation. The venv must be built to include the compiled rust emend_core. THAT LIBRARY IS _REQUIRED_ for `emend` to function. DO NOT hack around its absence, which indicates you are not working in the correct environment. Try `make clean test` to build a functional .venv and run the test suite.
+
+Use `uv` commands for everything. If you do need to manually install a dependency, use `uv pip install` rather than `.venv/bin/pip install`.

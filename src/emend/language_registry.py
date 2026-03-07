@@ -32,6 +32,7 @@ from pathlib import Path
 _BUILTIN: dict[str, list[str]] = {
     "python": ["py", "pyi"],
     "typescript": ["ts", "tsx", "js", "jsx"],
+    "rust": ["rs"],
 }
 
 
@@ -145,7 +146,7 @@ def get_extensions(language: str) -> list[str]:
         get_extensions("cobol")        # []
     """
     _, lang_to_exts = _registry()
-    return lang_to_exts.get(language, [])
+    return lang_to_exts.get(language, []) or _BUILTIN.get(language, [])
 
 
 def get_all_languages() -> list[str]:
@@ -162,3 +163,40 @@ def matches_language(path: str | Path, language: str) -> bool:
 def is_source_file(path: str | Path) -> bool:
     """Return ``True`` if *path* has an extension known to any registered language."""
     return detect_language(path) is not None
+
+
+def get_module_separator(language: str) -> str:
+    """Return the qualified-name separator for *language* (e.g. ``"."`` or ``"::"``)."""
+    config = load_config(language)
+    return config.get("qualified_names", {}).get("module_separator", ".")
+
+
+@lru_cache(maxsize=16)
+def load_config(language: str) -> dict:
+    """Load the full TOML configuration for *language*.
+
+    Returns an empty dict if the language or config file is not found.
+    """
+    import sys
+    lang_dir = _find_languages_dir()
+    if not lang_dir:
+        return {}
+
+    config_path = lang_dir / language / "config.toml"
+    if not config_path.is_file():
+        return {}
+
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+            with open(config_path, "rb") as fh:
+                return tomllib.load(fh)
+        else:
+            # Fallback for Python < 3.11: use tomli if available, else empty
+            try:
+                import tomli
+                return tomli.loads(config_path.read_text())
+            except ImportError:
+                return {}
+    except Exception:
+        return {}

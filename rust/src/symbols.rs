@@ -1178,7 +1178,7 @@ class Animal {
 
     #[test]
     fn test_python_statement_ranges() {
-        let source = "x = 1\ny = 2\n";
+        let _source = "x = 1\ny = 2\n";
         let cfg = crate::scope::config_for_ext("py");
         let stmts = &cfg.symbols.statements;
         let simple_owned = stmts.effective_simple();
