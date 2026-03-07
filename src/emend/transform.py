@@ -1005,9 +1005,9 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     """
     import sqlite3 as _sql3
 
-    from emend.project_config import resolve_venv_site_packages
+    from emend.project_config import resolve_environment_path
 
-    site_packages = resolve_venv_site_packages(project_root, language)
+    site_packages = resolve_environment_path(project_root, language)
     if site_packages is None:
         return None
 
