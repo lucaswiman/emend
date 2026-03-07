@@ -710,7 +710,7 @@ class KnowledgeBase:
 
         If the mapping points to a GitHub repo and it hasn't been cloned yet,
         clones it via ``gh repo clone`` into *cache_dir* (defaults to
-        ``.emend/cache/repos/<org>/<name>``).
+        ``~/.cache/emend/repo-checkouts/{repo_id}/``).
 
         Returns the resolved directory/file path, or None if no mapping found.
         """
@@ -809,51 +809,124 @@ class KnowledgeBase:
         )
 
 
+def _repo_checkouts_root(cache_dir: str | None = None) -> Path:
+    """Return the global repo-checkouts directory.
+
+    Layout::
+
+        ~/.cache/emend/repo-checkouts/{repo_id}/contents   — bare clone
+        ~/.cache/emend/repo-checkouts/{repo_id}/checkouts/{ref} — worktrees
+    """
+    if cache_dir:
+        return Path(cache_dir)
+    return Path.home() / ".cache" / "emend" / "repo-checkouts"
+
+
+def _repo_id(repo: str) -> str:
+    """Normalize a repo identifier for use as a directory name.
+
+    ``org/name`` → ``org--name`` (avoids nested directories).
+    """
+    return repo.replace("/", "--")
+
+
 def _ensure_repo_cloned(
     repo: str,
     *,
     branch: str = "",
     cache_dir: str | None = None,
-    db_dir: Path | None = None,
+    db_dir: Path | None = None,  # kept for API compat, ignored
 ) -> str:
-    """Clone a GitHub repo via ``gh repo clone`` if not already present.
+    """Clone a GitHub repo and check out a worktree for the requested ref.
 
-    Returns the local path to the cloned repo.
+    Layout::
+
+        ~/.cache/emend/repo-checkouts/{repo_id}/contents        — bare clone
+        ~/.cache/emend/repo-checkouts/{repo_id}/checkouts/{ref}  — worktree
+
+    Returns the path to the worktree (or ``contents`` if no ref requested).
     """
     import subprocess
 
-    if cache_dir:
-        repos_dir = Path(cache_dir)
-    elif db_dir:
-        repos_dir = db_dir / "repos"
+    root = _repo_checkouts_root(cache_dir)
+    rid = _repo_id(repo)
+    contents_dir = root / rid / "contents"
+
+    # --- Step 1: bare clone into contents/ if not already present ---
+    if not (contents_dir / "HEAD").exists():
+        contents_dir.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["gh", "repo", "clone", repo, str(contents_dir), "--", "--bare"]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "'gh' CLI not found. Install GitHub CLI to clone external repos: "
+                "https://cli.github.com/"
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to clone {repo}: {e.stderr.strip()}")
     else:
-        repos_dir = Path(".emend/cache/repos")
+        # Fetch latest refs.
+        try:
+            subprocess.run(
+                ["git", "fetch", "--all"],
+                cwd=str(contents_dir),
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+        except Exception:
+            pass  # best-effort update
 
-    # Normalize repo: "org/name" -> repos_dir/org/name
-    repo_dir = repos_dir / repo
-    if repo_dir.is_dir() and (repo_dir / ".git").exists():
-        # Already cloned — optionally pull latest.
-        return str(repo_dir)
+    # --- Step 2: determine the ref to check out ---
+    ref = branch or _default_branch(contents_dir)
+    if not ref:
+        ref = "main"
 
-    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    # --- Step 3: create or reuse a worktree for this ref ---
+    checkouts_dir = root / rid / "checkouts"
+    # Sanitize ref for directory name (e.g. "v1.2.3", "feature/foo" → safe name).
+    safe_ref = ref.replace("/", "--")
+    worktree_dir = checkouts_dir / safe_ref
 
-    cmd = ["gh", "repo", "clone", repo, str(repo_dir)]
-    if branch:
-        cmd.extend(["--", "--branch", branch])
+    if worktree_dir.is_dir():
+        return str(worktree_dir)
 
+    checkouts_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ["git", "worktree", "add", str(worktree_dir), ref]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"'gh' CLI not found. Install GitHub CLI to clone external repos: "
-            f"https://cli.github.com/"
+        subprocess.run(
+            cmd, cwd=str(contents_dir),
+            check=True, capture_output=True, text=True, timeout=60,
         )
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Failed to clone {repo}: {e.stderr.strip()}"
-        )
+        # ref might be a remote branch — try origin/{ref}.
+        cmd2 = ["git", "worktree", "add", str(worktree_dir), f"origin/{ref}"]
+        try:
+            subprocess.run(
+                cmd2, cwd=str(contents_dir),
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.CalledProcessError as e2:
+            raise RuntimeError(
+                f"Failed to create worktree for {repo}@{ref}: {e2.stderr.strip()}"
+            )
 
-    return str(repo_dir)
+    return str(worktree_dir)
+
+
+def _default_branch(bare_dir: Path) -> str:
+    """Read the default branch from a bare repo's HEAD."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=str(bare_dir),
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _fts_escape(query: str) -> str:

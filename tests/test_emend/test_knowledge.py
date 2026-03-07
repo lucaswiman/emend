@@ -421,6 +421,98 @@ class TestModuleMappings:
 
 
 # ---------------------------------------------------------------------------
+# Repo checkout layout
+# ---------------------------------------------------------------------------
+
+
+def _make_test_repo(path, branch="main"):
+    """Create a minimal git repo for testing (with signing disabled)."""
+    import os
+    import subprocess
+    path.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    run = lambda cmd, **kw: subprocess.run(
+        cmd, cwd=str(path), check=True, capture_output=True, env=env, **kw
+    )
+    run(["git", "init"])
+    run(["git", "checkout", "-b", branch])
+    run(["git", "config", "commit.gpgsign", "false"])
+    (path / "hello.py").write_text("print('hello')\n")
+    run(["git", "add", "."])
+    run(["git", "commit", "--no-gpg-sign", "-m", "init"])
+
+
+class TestRepoCheckouts:
+    def test_repo_id_normalizes_slashes(self):
+        from emend.knowledge import _repo_id
+        assert _repo_id("org/repo-name") == "org--repo-name"
+        assert _repo_id("deep/nested/repo") == "deep--nested--repo"
+
+    def test_repo_checkouts_root_default(self, monkeypatch, tmp_path):
+        from pathlib import Path as _Path
+        from emend.knowledge import _repo_checkouts_root
+        monkeypatch.setattr(_Path, "home", staticmethod(lambda: tmp_path))
+        root = _repo_checkouts_root()
+        assert root == tmp_path / ".cache" / "emend" / "repo-checkouts"
+
+    def test_repo_checkouts_root_override(self):
+        from pathlib import Path as _Path
+        from emend.knowledge import _repo_checkouts_root
+        root = _repo_checkouts_root(cache_dir="/custom/cache")
+        assert root == _Path("/custom/cache")
+
+    def test_ensure_repo_cloned_worktree_layout(self, tmp_path):
+        """Test the full clone+worktree flow using a local git repo as source."""
+        import subprocess
+        from emend.knowledge import _ensure_repo_cloned, _repo_id
+
+        src_repo = tmp_path / "source-repo"
+        _make_test_repo(src_repo)
+
+        # Create a bare clone (what _ensure_repo_cloned does internally via gh).
+        cache = tmp_path / "cache"
+        rid = _repo_id("test/repo")
+        contents_dir = cache / rid / "contents"
+        contents_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "clone", "--bare", str(src_repo), str(contents_dir)],
+                       check=True, capture_output=True)
+
+        # Now test worktree creation (bare repo already in place, skips gh clone).
+        result = _ensure_repo_cloned(
+            "test/repo", branch="main", cache_dir=str(cache),
+        )
+
+        # Verify the worktree layout.
+        expected = cache / rid / "checkouts" / "main"
+        assert result == str(expected)
+        assert expected.is_dir()
+        assert (expected / "hello.py").is_file()
+
+    def test_ensure_repo_cloned_reuses_worktree(self, tmp_path):
+        """Calling _ensure_repo_cloned twice returns the same worktree dir."""
+        import subprocess
+        from emend.knowledge import _ensure_repo_cloned, _repo_id
+
+        src_repo = tmp_path / "source"
+        _make_test_repo(src_repo)
+
+        cache = tmp_path / "cache"
+        rid = _repo_id("org/proj")
+        contents_dir = cache / rid / "contents"
+        contents_dir.parent.mkdir(parents=True)
+        subprocess.run(["git", "clone", "--bare", str(src_repo), str(contents_dir)],
+                       check=True, capture_output=True)
+
+        r1 = _ensure_repo_cloned("org/proj", branch="main", cache_dir=str(cache))
+        r2 = _ensure_repo_cloned("org/proj", branch="main", cache_dir=str(cache))
+        assert r1 == r2
+
+
+# ---------------------------------------------------------------------------
 # Editor-server RPC integration
 # ---------------------------------------------------------------------------
 
