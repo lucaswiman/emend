@@ -60,8 +60,6 @@ def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool
         from emend import emend_core
         abs_path = str(path_obj.resolve())
         exts = get_extensions(language)
-        if not exts and language == "python":
-            exts = ["py", "pyi"]
         return [Path(f) for f in emend_core.collect_files(abs_path, exts)], True
     elif "*" in path or "?" in path:
         return [Path(f) for f in glob_mod.glob(path, recursive=True)
@@ -598,14 +596,20 @@ def search(
                 files, _ = resolve_files(file_for_summary, language=_lang)
                 from emend import emend_core
                 from emend.transform import _find_source_root
-                from emend.language_registry import get_extensions, load_config
-                
-                # Single resolver for batch
-                proj_root = _find_source_root(
-                    str(file_path_obj.parent if file_path_obj.is_file() else file_path_obj),
-                    language=_lang
-                )
-                
+                from emend.language_registry import get_extensions, get_module_separator
+
+                # Single resolver for batch — extract the directory portion
+                # (for globs like "src/*.py", use the literal parent directory)
+                if '*' in file_for_summary or '?' in file_for_summary:
+                    _base_dir = str(Path(file_for_summary.split('*')[0].split('?')[0]).parent)
+                    if not Path(_base_dir).is_dir():
+                        _base_dir = "."
+                elif file_path_obj.is_file():
+                    _base_dir = str(file_path_obj.parent)
+                else:
+                    _base_dir = str(file_path_obj)
+                proj_root = _find_source_root(_base_dir, language=_lang)
+
                 # Use the first file's extension if available, or first extension from language
                 ext = None
                 if files:
@@ -614,10 +618,9 @@ def search(
                     exts = get_extensions(_lang)
                     if exts:
                         ext = exts[0]
-                
+
                 resolver = emend_core.PyScopeResolver(str(proj_root), extension=ext)
-                config = load_config(_lang)
-                sep = config.get("qualified_names", {}).get("module_separator", ".")
+                sep = get_module_separator(_lang)
                 
                 for fp in files:
                     file_str = str(fp)

@@ -261,12 +261,11 @@ def collect_symbols(
     """Collect symbols from a file using the unified PyScopeResolver."""
     from emend import emend_core
     from pathlib import Path
-    from emend.language_registry import detect_language, load_config
+    from emend.language_registry import detect_language, get_module_separator
 
     ext = Path(file).suffix.lstrip('.')
     language = detect_language(file) or "python"
-    config = load_config(language)
-    sep = config.get("qualified_names", {}).get("module_separator", ".")
+    sep = get_module_separator(language)
 
     # Initialize resolver for the file's project root
     resolver = emend_core.PyScopeResolver(str(Path(file).parent), extension=ext)
@@ -290,21 +289,11 @@ def collect_symbols(
             if parts and parts[0] == "src":
                 parts.pop(0)
             if parts:
-                # Remove any known extension
-                from emend.language_registry import get_extensions
-                all_exts = get_extensions(language)
-                stem = rel_path.stem
-                # rel_path.stem might already have it removed if it's a simple extension
-                # but let's be safe
-                parts[-1] = stem
+                parts[-1] = rel_path.stem
 
-            # Handle __init__ / mod equivalent for package root
-            if parts and parts[-1] in ("__init__", "lib", "mod"):
-                # This is heuristic and might need more language-specific refinement
-                if language == "python" and parts[-1] == "__init__":
-                    parts.pop()
-                elif language == "rust" and parts[-1] in ("lib", "mod"):
-                    parts.pop()
+            # Handle package-root entry files (e.g. __init__.py, lib.rs, mod.rs, index.ts)
+            if parts and parts[-1] in ("__init__", "lib", "mod", "index"):
+                parts.pop()
 
             module_path = sep.join(parts)
         except ValueError:

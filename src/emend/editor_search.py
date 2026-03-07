@@ -666,6 +666,7 @@ class EditorSearchEngine:
         file_scope: str | None = None,
     ) -> SearchResult:
         """Search project files using rg or grep with a PCRE regex."""
+        t0 = time.monotonic()
         scope = file_scope or self.project_root
 
         rg = shutil.which("rg")
@@ -696,9 +697,11 @@ class EditorSearchEngine:
             )
             raw_lines = proc.stdout.splitlines()
         except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logging.getLogger("emend.editor").warning("grep search failed: %s", exc)
             return SearchResult(
-                items=[{"error": str(exc)}],
-                elapsed_ms=0, mode="grep",
+                items=[],
+                elapsed_ms=(time.monotonic() - t0) * 1000,
+                mode="grep",
             )
 
         items: list[dict] = []
@@ -727,7 +730,7 @@ class EditorSearchEngine:
 
         return SearchResult(
             items=items,
-            elapsed_ms=0,
+            elapsed_ms=(time.monotonic() - t0) * 1000,
             mode="grep",
             truncated=len(items) >= limit,
         )

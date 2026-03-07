@@ -18,7 +18,6 @@ to delegate through the plugin system.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -321,22 +320,6 @@ _COMMENT_PREFIXES: dict[str, str] = {
 }
 
 
-def _find_languages_dir() -> Path | None:
-    """Return the ``languages/`` config directory shipped with emend, or None."""
-    # Installed layout: languages/ may be bundled inside the package
-    candidate = Path(__file__).parent / "languages"
-    if candidate.is_dir():
-        return candidate
-
-    # Dev layout: languages/ sits at the repo root, three levels above
-    # src/emend/language_plugins.py → src/emend → src → repo_root
-    candidate = Path(__file__).parent.parent.parent / "languages"
-    if candidate.is_dir():
-        return candidate
-
-    return None
-
-
 def load_plugin(language: str) -> LanguagePlugin:
     """Return a ``LanguagePlugin`` for *language*.
 
@@ -346,6 +329,7 @@ def load_plugin(language: str) -> LanguagePlugin:
         from emend.python_plugin import create_python_plugin
         return create_python_plugin()
 
+    from emend.language_registry import _find_languages_dir
     lang_dir = _find_languages_dir()
     if lang_dir:
         plugin_py = lang_dir / language / "plugin.py"

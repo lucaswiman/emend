@@ -18,6 +18,7 @@ pub const SKIP_DIRS: &[&str] = &[
 pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let dotted: Vec<String> = extensions.iter().map(|ext| format!(".{}", ext)).collect();
 
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -61,7 +62,7 @@ pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
                     stack.push(entry.path());
                 }
             } else if is_file {
-                if extensions.iter().any(|ext| name_str.ends_with(&format!(".{}", ext))) {
+                if dotted.iter().any(|d| name_str.ends_with(d.as_str())) {
                     files.push(entry.path());
                 }
             }

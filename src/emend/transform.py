@@ -1740,10 +1740,9 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
     Uses the language-specific separator from config.toml.
     """
-    from emend.language_registry import detect_language, load_config
+    from emend.language_registry import detect_language, get_module_separator
     language = detect_language(file_path) or "python"
-    config = load_config(language)
-    sep = config.get("qualified_names", {}).get("module_separator", ".")
+    sep = get_module_separator(language)
 
     abs_file = Path(file_path).resolve()
     proj_root = Path(project_path or _find_project_root(file_path)).resolve()
@@ -1774,8 +1773,6 @@ def _collect_source_files_scandir(root_path: str, language: str = "python") -> l
     """Walk a directory tree using the Rust emend_core module."""
     from emend.language_registry import get_extensions
     exts = get_extensions(language)
-    if not exts and language == "python":
-        exts = ["py", "pyi"]
     return _rust.collect_files(root_path, exts)
 
 
@@ -1784,8 +1781,6 @@ def _collect_git_tracked_source_files(project_root: str, language: str = "python
     import subprocess
     from emend.language_registry import get_extensions
     exts = get_extensions(language)
-    if not exts and language == "python":
-        exts = ["py", "pyi"]
 
     resolved = str(Path(project_root).resolve())
     try:
@@ -4365,9 +4360,8 @@ def _rename_module_references(
     """Update all imports from old_module to new_module across the project."""
     diffs = {}
 
-    from emend.language_registry import load_config
-    config = load_config(language)
-    sep = config.get("qualified_names", {}).get("module_separator", ".")
+    from emend.language_registry import get_module_separator
+    sep = get_module_separator(language)
 
     # hint for structural filter
     name_hint = old_module.rsplit(sep, 1)[-1]
@@ -4486,10 +4480,9 @@ def rename_module(
     """
     project_root = _find_project_root(project_path or file_path)
     old_module = _file_to_module(file_path, project_root)
-    from emend.language_registry import detect_language, load_config
+    from emend.language_registry import detect_language, get_module_separator
     language = detect_language(file_path) or "python"
-    config = load_config(language)
-    sep = config.get("qualified_names", {}).get("module_separator", ".")
+    sep = get_module_separator(language)
 
     parts = old_module.rsplit(sep, 1)
     new_module = f"{parts[0]}{sep}{new_name}" if len(parts) > 1 else new_name

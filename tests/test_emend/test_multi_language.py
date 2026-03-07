@@ -51,10 +51,8 @@ def test_find_pattern_typescript(tmp_path):
 
 def test_find_pattern_rust(tmp_path):
     f = tmp_path / "test.rs"
-    f.write_text("println!(\"hello\"); println!(\"world\");")
-    
-    # We use a neutral pattern
-    # Note: println! might be tricky if it's not a call in tree-sitter-rust (it's a macro_invocation)
-    # But let's try
-    matches = find_pattern("println!($X)", str(f))
-    assert len(matches) >= 0 # Just check it doesn't crash for now
+    f.write_text("let x = 1;\nlet y = 2;\nlet z = x;")
+
+    # Simple identifier pattern (metavar patterns not yet supported for Rust)
+    matches = find_pattern("x", str(f))
+    assert len(matches) == 2  # declaration + use
