@@ -15,9 +15,12 @@ WAL mode) and indexed with FTS5 trigram for instant substring search.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass, field, asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -724,7 +727,6 @@ class KnowledgeBase:
         elif mm.repo:
             local_root = _ensure_repo_cloned(
                 mm.repo, branch=mm.branch, cache_dir=cache_dir,
-                db_dir=self._db_path.parent,
             )
         else:
             return None
@@ -809,13 +811,13 @@ class KnowledgeBase:
         )
 
 
+@lru_cache(maxsize=1)
 def _global_cache_dir() -> Path:
     """Return the global emend cache directory.
 
     Checks ``EMEND_CACHE_DIR`` environment variable first, then falls back
     to ``~/.cache/emend``.
     """
-    import os
     env = os.environ.get("EMEND_CACHE_DIR")
     if env:
         return Path(env)
@@ -848,19 +850,16 @@ def _ensure_repo_cloned(
     *,
     branch: str = "",
     cache_dir: str | None = None,
-    db_dir: Path | None = None,  # kept for API compat, ignored
 ) -> str:
     """Clone a GitHub repo and check out a worktree for the requested ref.
 
     Layout::
 
-        ~/.cache/emend/repo-checkouts/{repo_id}/contents        — bare clone
-        ~/.cache/emend/repo-checkouts/{repo_id}/checkouts/{ref}  — worktree
+        {EMEND_CACHE_DIR}/repo-checkouts/{repo_id}/contents        — bare clone
+        {EMEND_CACHE_DIR}/repo-checkouts/{repo_id}/checkouts/{ref}  — worktree
 
-    Returns the path to the worktree (or ``contents`` if no ref requested).
+    Returns the path to the worktree.
     """
-    import subprocess
-
     root = _repo_checkouts_root(cache_dir)
     rid = _repo_id(repo)
     contents_dir = root / rid / "contents"
@@ -878,16 +877,6 @@ def _ensure_repo_cloned(
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to clone {repo}: {e.stderr.strip()}")
-    else:
-        # Fetch latest refs.
-        try:
-            subprocess.run(
-                ["git", "fetch", "--all"],
-                cwd=str(contents_dir),
-                check=True, capture_output=True, text=True, timeout=60,
-            )
-        except Exception:
-            pass  # best-effort update
 
     # --- Step 2: determine the ref to check out ---
     ref = branch or _default_branch(contents_dir)
@@ -928,7 +917,6 @@ def _ensure_repo_cloned(
 
 def _default_branch(bare_dir: Path) -> str:
     """Read the default branch from a bare repo's HEAD."""
-    import subprocess
     try:
         result = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],

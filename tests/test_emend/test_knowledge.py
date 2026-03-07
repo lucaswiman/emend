@@ -446,6 +446,21 @@ def _make_test_repo(path, branch="main"):
     run(["git", "commit", "--no-gpg-sign", "-m", "init"])
 
 
+def _setup_bare_clone(tmp_path, repo_id):
+    """Create a source repo and bare-clone it into the cache layout for testing."""
+    import subprocess
+    from emend.knowledge import _repo_id
+    src_repo = tmp_path / "source"
+    _make_test_repo(src_repo)
+    cache = tmp_path / "cache"
+    rid = _repo_id(repo_id)
+    contents_dir = cache / rid / "contents"
+    contents_dir.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "--bare", str(src_repo), str(contents_dir)],
+                   check=True, capture_output=True)
+    return cache
+
+
 class TestRepoCheckouts:
     def test_repo_id_normalizes_slashes(self):
         from emend.knowledge import _repo_id
@@ -454,15 +469,17 @@ class TestRepoCheckouts:
 
     def test_repo_checkouts_root_default(self, monkeypatch, tmp_path):
         from pathlib import Path as _Path
-        from emend.knowledge import _repo_checkouts_root
+        from emend.knowledge import _global_cache_dir, _repo_checkouts_root
         monkeypatch.delenv("EMEND_CACHE_DIR", raising=False)
+        _global_cache_dir.cache_clear()
         monkeypatch.setattr(_Path, "home", staticmethod(lambda: tmp_path))
         root = _repo_checkouts_root()
         assert root == tmp_path / ".cache" / "emend" / "repo-checkouts"
 
     def test_repo_checkouts_root_env_var(self, monkeypatch, tmp_path):
-        from emend.knowledge import _repo_checkouts_root
+        from emend.knowledge import _global_cache_dir, _repo_checkouts_root
         monkeypatch.setenv("EMEND_CACHE_DIR", str(tmp_path / "custom"))
+        _global_cache_dir.cache_clear()
         root = _repo_checkouts_root()
         assert root == tmp_path / "custom" / "repo-checkouts"
 
@@ -474,46 +491,23 @@ class TestRepoCheckouts:
 
     def test_ensure_repo_cloned_worktree_layout(self, tmp_path):
         """Test the full clone+worktree flow using a local git repo as source."""
-        import subprocess
         from emend.knowledge import _ensure_repo_cloned, _repo_id
 
-        src_repo = tmp_path / "source-repo"
-        _make_test_repo(src_repo)
-
-        # Create a bare clone (what _ensure_repo_cloned does internally via gh).
-        cache = tmp_path / "cache"
-        rid = _repo_id("test/repo")
-        contents_dir = cache / rid / "contents"
-        contents_dir.parent.mkdir(parents=True)
-        subprocess.run(["git", "clone", "--bare", str(src_repo), str(contents_dir)],
-                       check=True, capture_output=True)
-
-        # Now test worktree creation (bare repo already in place, skips gh clone).
+        cache = _setup_bare_clone(tmp_path, "test/repo")
         result = _ensure_repo_cloned(
             "test/repo", branch="main", cache_dir=str(cache),
         )
 
-        # Verify the worktree layout.
-        expected = cache / rid / "checkouts" / "main"
+        expected = cache / _repo_id("test/repo") / "checkouts" / "main"
         assert result == str(expected)
         assert expected.is_dir()
         assert (expected / "hello.py").is_file()
 
     def test_ensure_repo_cloned_reuses_worktree(self, tmp_path):
         """Calling _ensure_repo_cloned twice returns the same worktree dir."""
-        import subprocess
-        from emend.knowledge import _ensure_repo_cloned, _repo_id
+        from emend.knowledge import _ensure_repo_cloned
 
-        src_repo = tmp_path / "source"
-        _make_test_repo(src_repo)
-
-        cache = tmp_path / "cache"
-        rid = _repo_id("org/proj")
-        contents_dir = cache / rid / "contents"
-        contents_dir.parent.mkdir(parents=True)
-        subprocess.run(["git", "clone", "--bare", str(src_repo), str(contents_dir)],
-                       check=True, capture_output=True)
-
+        cache = _setup_bare_clone(tmp_path, "org/proj")
         r1 = _ensure_repo_cloned("org/proj", branch="main", cache_dir=str(cache))
         r2 = _ensure_repo_cloned("org/proj", branch="main", cache_dir=str(cache))
         assert r1 == r2
