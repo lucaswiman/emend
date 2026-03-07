@@ -52,8 +52,8 @@ Call the grammar_and_cookbook tool for full syntax reference.
 ## Knowledge base
 
 emend includes a persistent knowledge base for cross-service identifier
-mappings and free-form notes. Use kb_* tools to store/retrieve notes
-and mapping_* tools for cross-service identifier relationships.
+mappings, free-form notes, and module-to-repo mappings.
+Use kb_read to query and kb_write to add/update/delete entries.
 
 ## Quick reference
 
@@ -657,322 +657,263 @@ def lint(
 
 
 # ---------------------------------------------------------------------------
-# Knowledge base: notes
+# Knowledge base (consolidated: kb_read + kb_write)
 # ---------------------------------------------------------------------------
 
 
 @mcp_app.tool()
-def kb_search(
-    query: Annotated[str, Field(description="Search query (substring match via FTS5 trigram).")],
-    category: Annotated[str | None, Field(description="Filter by category: note, architecture, convention, mapping, decision, pattern.")] = None,
-    project: Annotated[str | None, Field(description="Filter by project name.")] = None,
-    file_path: Annotated[str | None, Field(description="Filter by related file path.")] = None,
-    symbol: Annotated[str | None, Field(description="Filter by related symbol name.")] = None,
-    source: Annotated[str | None, Field(description="Filter by source: user, llm, heuristic.")] = None,
+def kb_read(
+    kind: Annotated[str, Field(description="What to read: 'note', 'mapping', 'module', or 'tag'.")] = "note",
+    query: Annotated[str, Field(description="Search query (FTS substring match). Omit to list.")] = "",
+    id: Annotated[int | None, Field(description="Get a single entry by ID.")] = None,
+    identifier: Annotated[str | None, Field(description="Exact identifier lookup (mapping kind only).")] = None,
+    module: Annotated[str | None, Field(description="Module name to resolve (module kind only).")] = None,
+    category: Annotated[str | None, Field(description="Filter notes by category.")] = None,
+    project: Annotated[str | None, Field(description="Filter by project.")] = None,
+    source_project: Annotated[str | None, Field(description="Filter mappings by source project.")] = None,
+    target_project: Annotated[str | None, Field(description="Filter mappings by target project.")] = None,
+    relationship: Annotated[str | None, Field(description="Filter mappings by relationship.")] = None,
+    direction: Annotated[str, Field(description="Identifier lookup direction: source, target, both.")] = "both",
     limit: Annotated[int, Field(description="Max results.")] = 50,
 ) -> str:
-    """Search the knowledge base for notes.
+    """Read from the knowledge base.
 
-    Uses FTS5 trigram indexing for fast substring matching.
-    Returns JSON array of matching notes.
+    kind controls what is returned:
+    - note: search/list knowledge notes (returns id, title, tags, content, category)
+    - mapping: search/list/lookup identifier mappings
+    - module: list module mappings, or resolve a module name to a local path
+    - tag: list all distinct note tags
     """
-    from emend.knowledge import KnowledgeBase, note_to_dict
+    from emend.knowledge import KnowledgeBase, note_to_dict, mapping_to_dict, module_mapping_to_dict
 
     kb = KnowledgeBase(".")
     try:
-        results = kb.search_notes(
-            query, category=category, project=project,
-            file_path=file_path, symbol=symbol, source=source, limit=limit,
-        )
-        return json.dumps([note_to_dict(n) for n in results], indent=2)
+        if kind == "tag":
+            return json.dumps(kb.list_tags())
+
+        if kind == "note":
+            if id is not None:
+                n = kb.get_note(id)
+                if n is None:
+                    return json.dumps({"error": f"Note {id} not found."})
+                return json.dumps(note_to_dict(n), indent=2)
+            if query:
+                results = kb.search_notes(query, category=category, project=project, limit=limit)
+            else:
+                results = kb.list_notes(category=category, project=project, limit=limit)
+            return json.dumps([note_to_dict(n) for n in results], indent=2)
+
+        if kind == "mapping":
+            if id is not None:
+                m = kb.get_mapping(id)
+                if m is None:
+                    return json.dumps({"error": f"Mapping {id} not found."})
+                return json.dumps(mapping_to_dict(m), indent=2)
+            if identifier is not None:
+                results = kb.find_mappings_for(identifier, project=project, direction=direction)
+                return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+            if query:
+                results = kb.search_mappings(
+                    query, source_project=source_project,
+                    target_project=target_project, relationship=relationship, limit=limit,
+                )
+            else:
+                results = kb.list_mappings(
+                    source_project=source_project,
+                    target_project=target_project, relationship=relationship, limit=limit,
+                )
+            return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+
+        if kind == "module":
+            if module is not None:
+                mm = kb.resolve_module(module)
+                if mm is None:
+                    return json.dumps({"error": f"No module mapping found for '{module}'."})
+                result = module_mapping_to_dict(mm)
+                resolved = kb.resolve_module_to_path(module)
+                if resolved:
+                    result["resolved_path"] = resolved
+                return json.dumps(result, indent=2)
+            results = kb.list_module_mappings()
+            return json.dumps([module_mapping_to_dict(m) for m in results], indent=2)
+
+        return json.dumps({"error": f"Unknown kind '{kind}'. Use: note, mapping, module, tag."})
     finally:
         kb.close()
 
 
 @mcp_app.tool()
-def kb_add(
-    title: Annotated[str, Field(description="Short title for the note.")],
-    content: Annotated[str, Field(description="Note content (free-form text, markdown, etc).")],
-    category: Annotated[str, Field(description="Category: note, architecture, convention, mapping, decision, pattern.")] = "note",
-    tags: Annotated[str, Field(description="Comma-separated tags for filtering.")] = "",
-    source: Annotated[str, Field(description="Who created this: user, llm, heuristic.")] = "llm",
-    project: Annotated[str, Field(description="Project/repo name this note relates to.")] = "",
-    file_path: Annotated[str, Field(description="Related file path (optional).")] = "",
-    symbol: Annotated[str, Field(description="Related symbol name (optional).")] = "",
-    metadata: Annotated[str, Field(description="Additional JSON metadata.")] = "{}",
+def kb_write(
+    kind: Annotated[str, Field(description="Entry type: 'note', 'mapping', or 'module'.")],
+    op: Annotated[str, Field(description="Operation: 'add', 'update', or 'delete'.")],
+    id: Annotated[int | None, Field(description="Entry ID (required for update/delete).")] = None,
+    title: Annotated[str | None, Field(description="Note title (add/update note).")] = None,
+    content: Annotated[str | None, Field(description="Note content (add/update note).")] = None,
+    category: Annotated[str | None, Field(description="Note category (add/update note).")] = None,
+    tags: Annotated[str | None, Field(description="Comma-separated tags (add/update note).")] = None,
+    source: Annotated[str | None, Field(description="Source: user, llm, heuristic.")] = None,
+    project: Annotated[str | None, Field(description="Project name.")] = None,
+    file_path: Annotated[str | None, Field(description="Related file path.")] = None,
+    symbol: Annotated[str | None, Field(description="Related symbol.")] = None,
+    source_project: Annotated[str | None, Field(description="Mapping source project.")] = None,
+    source_identifier: Annotated[str | None, Field(description="Mapping source identifier.")] = None,
+    source_kind: Annotated[str | None, Field(description="Mapping source kind.")] = None,
+    target_project: Annotated[str | None, Field(description="Mapping target project.")] = None,
+    target_identifier: Annotated[str | None, Field(description="Mapping target identifier.")] = None,
+    target_kind: Annotated[str | None, Field(description="Mapping target kind.")] = None,
+    relationship: Annotated[str | None, Field(description="Mapping relationship: equivalent, calls, implements, produces, consumes.")] = None,
+    confidence: Annotated[float | None, Field(description="Mapping confidence 0–1.")] = None,
+    provenance: Annotated[str | None, Field(description="Provenance: manual, llm, heuristic.")] = None,
+    evidence: Annotated[str | None, Field(description="Mapping evidence text.")] = None,
+    module_prefix: Annotated[str | None, Field(description="Module prefix (module kind).")] = None,
+    repo: Annotated[str | None, Field(description="GitHub repo org/name (module kind).")] = None,
+    local_path: Annotated[str | None, Field(description="Local path (module kind).")] = None,
+    branch: Annotated[str | None, Field(description="Branch/tag (module kind).")] = None,
+    subpath: Annotated[str | None, Field(description="Subpath within repo (module kind).")] = None,
+    metadata: Annotated[str | None, Field(description="Additional JSON metadata.")] = None,
 ) -> str:
-    """Add a note to the knowledge base.
+    """Write to the knowledge base: add, update, or delete entries.
 
-    Use this to record architectural decisions, conventions, patterns,
-    or any information that should be retrievable later.
+    kind + op selects the operation:
+    - note + add: requires title, content
+    - note + update: requires id, plus fields to change
+    - note + delete: requires id
+    - mapping + add: requires source_project, source_identifier, target_project, target_identifier
+    - mapping + update: requires id, plus fields to change
+    - mapping + delete: requires id
+    - module + add: requires module_prefix, and one of repo or local_path
+    - module + update: requires id, plus fields to change
+    - module + delete: requires id
     """
-    from emend.knowledge import KnowledgeBase, KnowledgeNote, note_to_dict
+    from emend.knowledge import (
+        KnowledgeBase, KnowledgeNote, IdentifierMapping, ModuleMapping,
+        note_to_dict, mapping_to_dict, module_mapping_to_dict,
+    )
 
     kb = KnowledgeBase(".")
     try:
-        note = KnowledgeNote(
-            title=title, content=content, category=category, tags=tags,
-            source=source, project=project, file_path=file_path, symbol=symbol,
-            metadata=json.loads(metadata),
-        )
-        note_id = kb.add_note(note)
-        saved = kb.get_note(note_id)
-        return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
-    finally:
-        kb.close()
+        if kind == "note":
+            if op == "add":
+                if not title or content is None:
+                    return json.dumps({"error": "title and content are required."})
+                note = KnowledgeNote(
+                    title=title, content=content,
+                    category=category or "note", tags=tags or "",
+                    source=source or "llm", project=project or "",
+                    file_path=file_path or "", symbol=symbol or "",
+                    metadata=json.loads(metadata) if metadata else {},
+                )
+                nid = kb.add_note(note)
+                saved = kb.get_note(nid)
+                return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "update":
+                if id is None:
+                    return json.dumps({"error": "id is required for update."})
+                kwargs: dict[str, Any] = {}
+                for k, v in [("title", title), ("content", content), ("category", category),
+                              ("tags", tags), ("source", source), ("project", project),
+                              ("file_path", file_path), ("symbol", symbol)]:
+                    if v is not None:
+                        kwargs[k] = v
+                if metadata is not None:
+                    kwargs["metadata"] = json.loads(metadata)
+                ok = kb.update_note(id, **kwargs)
+                if not ok:
+                    return json.dumps({"error": f"Note {id} not found."})
+                saved = kb.get_note(id)
+                return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "delete":
+                if id is None:
+                    return json.dumps({"error": "id is required for delete."})
+                ok = kb.delete_note(id)
+                return json.dumps({"deleted": ok, "id": id})
 
+        elif kind == "mapping":
+            if op == "add":
+                if not source_project or not source_identifier or not target_project or not target_identifier:
+                    return json.dumps({"error": "source_project, source_identifier, target_project, target_identifier required."})
+                m = IdentifierMapping(
+                    source_project=source_project,
+                    source_identifier=source_identifier,
+                    source_kind=source_kind or "",
+                    target_project=target_project,
+                    target_identifier=target_identifier,
+                    target_kind=target_kind or "",
+                    relationship=relationship or "equivalent",
+                    confidence=confidence if confidence is not None else 1.0,
+                    provenance=provenance or "llm",
+                    evidence=evidence or "",
+                    metadata=json.loads(metadata) if metadata else {},
+                )
+                mid = kb.add_mapping(m)
+                saved = kb.get_mapping(mid)
+                return json.dumps(mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "update":
+                if id is None:
+                    return json.dumps({"error": "id is required for update."})
+                kwargs = {}
+                for k, v in [("source_project", source_project), ("source_identifier", source_identifier),
+                              ("source_kind", source_kind), ("target_project", target_project),
+                              ("target_identifier", target_identifier), ("target_kind", target_kind),
+                              ("relationship", relationship), ("confidence", confidence),
+                              ("provenance", provenance), ("evidence", evidence)]:
+                    if v is not None:
+                        kwargs[k] = v
+                if metadata is not None:
+                    kwargs["metadata"] = json.loads(metadata)
+                ok = kb.update_mapping(id, **kwargs)
+                if not ok:
+                    return json.dumps({"error": f"Mapping {id} not found."})
+                saved = kb.get_mapping(id)
+                return json.dumps(mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "delete":
+                if id is None:
+                    return json.dumps({"error": "id is required for delete."})
+                ok = kb.delete_mapping(id)
+                return json.dumps({"deleted": ok, "id": id})
 
-@mcp_app.tool()
-def kb_update(
-    note_id: Annotated[int, Field(description="ID of the note to update.")],
-    title: Annotated[str | None, Field(description="New title.")] = None,
-    content: Annotated[str | None, Field(description="New content.")] = None,
-    category: Annotated[str | None, Field(description="New category.")] = None,
-    tags: Annotated[str | None, Field(description="New tags.")] = None,
-) -> str:
-    """Update an existing knowledge note."""
-    from emend.knowledge import KnowledgeBase, note_to_dict
+        elif kind == "module":
+            if op == "add":
+                if not module_prefix:
+                    return json.dumps({"error": "module_prefix is required."})
+                if not repo and not local_path:
+                    return json.dumps({"error": "Either repo or local_path is required."})
+                m = ModuleMapping(
+                    module_prefix=module_prefix,
+                    repo=repo or "", local_path=local_path or "",
+                    branch=branch or "", subpath=subpath or "",
+                    provenance=provenance or "llm",
+                    metadata=json.loads(metadata) if metadata else {},
+                )
+                mid = kb.add_module_mapping(m)
+                saved = kb.get_module_mapping(mid)
+                return json.dumps(module_mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "update":
+                if id is None:
+                    return json.dumps({"error": "id is required for update."})
+                kwargs = {}
+                for k, v in [("module_prefix", module_prefix), ("repo", repo),
+                              ("local_path", local_path), ("branch", branch),
+                              ("subpath", subpath), ("provenance", provenance)]:
+                    if v is not None:
+                        kwargs[k] = v
+                if metadata is not None:
+                    kwargs["metadata"] = json.loads(metadata)
+                ok = kb.update_module_mapping(id, **kwargs)
+                if not ok:
+                    return json.dumps({"error": f"Module mapping {id} not found."})
+                saved = kb.get_module_mapping(id)
+                return json.dumps(module_mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+            if op == "delete":
+                if id is None:
+                    return json.dumps({"error": "id is required for delete."})
+                ok = kb.delete_module_mapping(id)
+                return json.dumps({"deleted": ok, "id": id})
 
-    kb = KnowledgeBase(".")
-    try:
-        kwargs = {}
-        if title is not None:
-            kwargs["title"] = title
-        if content is not None:
-            kwargs["content"] = content
-        if category is not None:
-            kwargs["category"] = category
-        if tags is not None:
-            kwargs["tags"] = tags
-        ok = kb.update_note(note_id, **kwargs)
-        if not ok:
-            return json.dumps({"error": f"Note {note_id} not found."})
-        saved = kb.get_note(note_id)
-        return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
-    finally:
-        kb.close()
+        else:
+            return json.dumps({"error": f"Unknown kind '{kind}'. Use: note, mapping, module."})
 
-
-@mcp_app.tool()
-def kb_delete(
-    note_id: Annotated[int, Field(description="ID of the note to delete.")],
-) -> str:
-    """Delete a knowledge note by ID."""
-    from emend.knowledge import KnowledgeBase
-
-    kb = KnowledgeBase(".")
-    try:
-        ok = kb.delete_note(note_id)
-        return json.dumps({"deleted": ok, "id": note_id})
-    finally:
-        kb.close()
-
-
-# ---------------------------------------------------------------------------
-# Knowledge base: identifier mappings
-# ---------------------------------------------------------------------------
-
-
-@mcp_app.tool()
-def mapping_search(
-    query: Annotated[str, Field(description="Search query (matches source_identifier, target_identifier, evidence).")],
-    source_project: Annotated[str | None, Field(description="Filter by source project.")] = None,
-    target_project: Annotated[str | None, Field(description="Filter by target project.")] = None,
-    relationship: Annotated[str | None, Field(description="Filter by relationship type: equivalent, calls, implements, produces, consumes.")] = None,
-    limit: Annotated[int, Field(description="Max results.")] = 50,
-) -> str:
-    """Search cross-service identifier mappings.
-
-    Finds mappings where the query matches source identifiers, target
-    identifiers, or evidence text.  Uses FTS5 trigram for fast substring
-    matching.
-    """
-    from emend.knowledge import KnowledgeBase, mapping_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.search_mappings(
-            query, source_project=source_project,
-            target_project=target_project, relationship=relationship, limit=limit,
-        )
-        return json.dumps([mapping_to_dict(m) for m in results], indent=2)
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def mapping_add(
-    source_project: Annotated[str, Field(description="Source project/repo name.")],
-    source_identifier: Annotated[str, Field(description="Qualified name in source (e.g. 'users.UserService.create').")],
-    target_project: Annotated[str, Field(description="Target project/repo name.")],
-    target_identifier: Annotated[str, Field(description="Qualified name in target (e.g. 'POST /api/v1/users').")],
-    source_kind: Annotated[str, Field(description="Kind of source: function, class, endpoint, model, field, module.")] = "",
-    target_kind: Annotated[str, Field(description="Kind of target: function, class, endpoint, model, field, module.")] = "",
-    relationship: Annotated[str, Field(description="Relationship type: equivalent, calls, implements, produces, consumes.")] = "equivalent",
-    confidence: Annotated[float, Field(description="Confidence 0.0–1.0 (1.0 for manual, lower for heuristic/LLM).")] = 1.0,
-    provenance: Annotated[str, Field(description="How this mapping was created: manual, heuristic, llm.")] = "llm",
-    evidence: Annotated[str, Field(description="Why this mapping exists (human-readable).")] = "",
-    metadata: Annotated[str, Field(description="Additional JSON metadata.")] = "{}",
-) -> str:
-    """Record a cross-service identifier mapping.
-
-    Use this when you discover that an identifier in one service/repo
-    corresponds to an identifier in another.  The mapping is persisted
-    in the knowledge DB and searchable via mapping_search.
-    """
-    from emend.knowledge import KnowledgeBase, IdentifierMapping, mapping_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        m = IdentifierMapping(
-            source_project=source_project,
-            source_identifier=source_identifier,
-            source_kind=source_kind,
-            target_project=target_project,
-            target_identifier=target_identifier,
-            target_kind=target_kind,
-            relationship=relationship,
-            confidence=confidence,
-            provenance=provenance,
-            evidence=evidence,
-            metadata=json.loads(metadata),
-        )
-        mid = kb.add_mapping(m)
-        saved = kb.get_mapping(mid)
-        return json.dumps(mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def mapping_lookup(
-    identifier: Annotated[str, Field(description="The identifier to look up (exact match).")],
-    project: Annotated[str | None, Field(description="Scope lookup to a specific project.")] = None,
-    direction: Annotated[str, Field(description="Which side to match: source, target, or both.")] = "both",
-) -> str:
-    """Look up all mappings for a specific identifier (exact match).
-
-    Useful for answering "what does X in project A correspond to elsewhere?"
-    """
-    from emend.knowledge import KnowledgeBase, mapping_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.find_mappings_for(identifier, project=project, direction=direction)
-        return json.dumps([mapping_to_dict(m) for m in results], indent=2)
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def mapping_delete(
-    mapping_id: Annotated[int, Field(description="ID of the mapping to delete.")],
-) -> str:
-    """Delete an identifier mapping by ID."""
-    from emend.knowledge import KnowledgeBase
-
-    kb = KnowledgeBase(".")
-    try:
-        ok = kb.delete_mapping(mapping_id)
-        return json.dumps({"deleted": ok, "id": mapping_id})
-    finally:
-        kb.close()
-
-
-# ---------------------------------------------------------------------------
-# Knowledge base: module mappings (coarse module -> repo/dir)
-# ---------------------------------------------------------------------------
-
-
-@mcp_app.tool()
-def module_map_add(
-    module_prefix: Annotated[str, Field(description="Python module prefix (e.g. 'payments', 'users.models').")],
-    repo: Annotated[str, Field(description="GitHub repo (org/name). Cloned on demand via gh.")] = "",
-    local_path: Annotated[str, Field(description="Alternative: local directory path.")] = "",
-    branch: Annotated[str, Field(description="Branch/tag for gh clone.")] = "",
-    subpath: Annotated[str, Field(description="Subdirectory within the repo (e.g. 'src/payments').")] = "",
-    provenance: Annotated[str, Field(description="How this mapping was created: manual, llm, heuristic.")] = "llm",
-) -> str:
-    """Register a coarse module mapping: module prefix -> external repo or directory.
-
-    Use this when you learn that a Python module prefix lives in a different
-    repo or directory. For example:
-    - ``payments.*`` -> ``org/payments-service`` (GitHub repo, cloned via gh)
-    - ``shared.utils.*`` -> ``/home/user/shared-utils`` (local directory)
-
-    The repo is cloned on demand when a symbol is resolved.
-    """
-    from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
-
-    if not repo and not local_path:
-        return json.dumps({"error": "Either repo or local_path is required."})
-
-    kb = KnowledgeBase(".")
-    try:
-        m = ModuleMapping(
-            module_prefix=module_prefix,
-            repo=repo,
-            local_path=local_path,
-            branch=branch,
-            subpath=subpath,
-            provenance=provenance,
-        )
-        mid = kb.add_module_mapping(m)
-        saved = kb.get_module_mapping(mid)
-        return json.dumps(module_mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def module_map_list() -> str:
-    """List all registered module mappings (module prefix -> repo/directory)."""
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.list_module_mappings()
-        return json.dumps([module_mapping_to_dict(m) for m in results], indent=2)
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def module_resolve(
-    module: Annotated[str, Field(description="Python module name to resolve (e.g. 'payments.models.Order').")],
-) -> str:
-    """Resolve a module name to a local path using registered module mappings.
-
-    If the mapping points to a GitHub repo, clones it via ``gh repo clone``
-    on first access. Returns the resolved local path.
-    """
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        mm = kb.resolve_module(module)
-        if mm is None:
-            return json.dumps({"error": f"No module mapping found for '{module}'."})
-        resolved = kb.resolve_module_to_path(module)
-        result = module_mapping_to_dict(mm)
-        if resolved:
-            result["resolved_path"] = resolved
-        return json.dumps(result, indent=2)
-    finally:
-        kb.close()
-
-
-@mcp_app.tool()
-def module_map_delete(
-    mapping_id: Annotated[int, Field(description="ID of the module mapping to delete.")],
-) -> str:
-    """Delete a module mapping by ID."""
-    from emend.knowledge import KnowledgeBase
-
-    kb = KnowledgeBase(".")
-    try:
-        ok = kb.delete_module_mapping(mapping_id)
-        return json.dumps({"deleted": ok, "id": mapping_id})
+        return json.dumps({"error": f"Unknown op '{op}'. Use: add, update, delete."})
     finally:
         kb.close()
 
