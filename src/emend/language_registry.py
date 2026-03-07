@@ -146,7 +146,7 @@ def get_extensions(language: str) -> list[str]:
         get_extensions("cobol")        # []
     """
     _, lang_to_exts = _registry()
-    return lang_to_exts.get(language, [])
+    return lang_to_exts.get(language, []) or _BUILTIN.get(language, [])
 
 
 def get_all_languages() -> list[str]:
@@ -163,6 +163,12 @@ def matches_language(path: str | Path, language: str) -> bool:
 def is_source_file(path: str | Path) -> bool:
     """Return ``True`` if *path* has an extension known to any registered language."""
     return detect_language(path) is not None
+
+
+def get_module_separator(language: str) -> str:
+    """Return the qualified-name separator for *language* (e.g. ``"."`` or ``"::"``)."""
+    config = load_config(language)
+    return config.get("qualified_names", {}).get("module_separator", ".")
 
 
 @lru_cache(maxsize=16)
