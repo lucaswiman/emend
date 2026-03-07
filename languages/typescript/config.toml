@@ -143,6 +143,19 @@ recurse_into = [
     "catch_clause", "finally_clause", "switch_body", "switch_case",
 ]
 
+# ---------------------------------------------------------------------------
+# Environment path symbol lookup
+# ---------------------------------------------------------------------------
+[environment_lookup]
+# Enable looking up symbols in node_modules when they are not found in the project.
+# When a symbol cannot be found in the project, emend will search these
+# directories (relative to project root) for installed package sources.
+enabled = true
+# Directories to probe (first match wins). node_modules is the standard location
+# for npm packages, and it's skipped by default file scanning, so this is the
+# only way to reach installed package sources.
+paths = ["node_modules"]
+
 [builtins]
 names = [
     "console", "window", "document", "process", "require", "module", "exports",

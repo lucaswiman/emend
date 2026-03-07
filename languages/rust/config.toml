@@ -130,6 +130,20 @@ recurse_into = [
     "block", "source_file", "else_clause",
 ]
 
+# ---------------------------------------------------------------------------
+# Environment path symbol lookup
+# ---------------------------------------------------------------------------
+[environment_lookup]
+# Enable looking up symbols in Cargo build artifacts when they are not found
+# in the project. When a symbol cannot be found in the project, emend will
+# search these directories (relative to project root) for compiled dependency
+# and workspace crate sources.
+enabled = true
+# Directories to probe (first match wins). The target/ directory is the standard
+# location for Cargo build outputs, and it's skipped by default file scanning,
+# so this is the only way to reach dependency sources.
+paths = ["target"]
+
 [builtins]
 names = [
     "String", "Vec", "Option", "Result", "Some", "None", "Ok", "Err",

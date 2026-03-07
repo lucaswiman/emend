@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+#### Multi-Language Environment Lookup
+
+- **Environment lookup generalization**: Renamed `venv_lookup` to `environment_lookup` to support all languages
+- **TypeScript/JavaScript support**: `node_modules` directory lookup for installed npm packages
+- **Rust support**: `target/` directory lookup for Cargo build artifacts and workspace crates
+- **Language-specific defaults**: Each language (`languages/python/config.toml`, `languages/typescript/config.toml`, `languages/rust/config.toml`) now includes environment lookup configuration with appropriate default paths
+
+### Configuration Changes
+
+- Renamed project config section from `[venv_lookup]` to `[environment_lookup]`
+  - Old function names (`get_venv_lookup_config`, `resolve_venv_site_packages`) deprecated but remain for backward compatibility
+  - New functions: `get_environment_lookup_config()`, `resolve_environment_path()` in `project_config.py`
+
+---
+
 ## 0.2.0
 
 ### Features
