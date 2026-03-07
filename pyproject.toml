@@ -21,11 +21,11 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["typer", "lark", "pyyaml"]
+dependencies = ["typer", "lark", "pyyaml", "pyrefly"]
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
-dev = ["pytest", "pytest-xdist", "sphinx", "furo", "pyright", "ty", "pyrefly"]
+dev = ["pytest", "pytest-xdist", "sphinx", "furo", "pyright", "ty"]
 
 [project.urls]
 Homepage = "https://github.com/lucaswiman/emend"

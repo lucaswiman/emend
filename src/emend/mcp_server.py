@@ -770,7 +770,7 @@ def kb_write(
     local_path: Annotated[str | None, Field(description="Local path (module kind).")] = None,
     branch: Annotated[str | None, Field(description="Branch/tag (module kind).")] = None,
     subpath: Annotated[str | None, Field(description="Subpath within repo (module kind).")] = None,
-    metadata: Annotated[str | None, Field(description="Additional JSON metadata.")] = None,
+    metadata: Annotated[dict | None, Field(description="Additional metadata dict.")] = None,
 ) -> str:
     """Write to the knowledge base: add, update, or delete entries.
 
@@ -801,7 +801,7 @@ def kb_write(
                     category=category or "note", tags=tags or "",
                     source=source or "llm", project=project or "",
                     file_path=file_path or "", symbol=symbol or "",
-                    metadata=json.loads(metadata) if metadata else {},
+                    metadata=metadata or {},
                 )
                 nid = kb.add_note(note)
                 saved = kb.get_note(nid)
@@ -816,7 +816,7 @@ def kb_write(
                     if v is not None:
                         kwargs[k] = v
                 if metadata is not None:
-                    kwargs["metadata"] = json.loads(metadata)
+                    kwargs["metadata"] = metadata
                 ok = kb.update_note(id, **kwargs)
                 if not ok:
                     return json.dumps({"error": f"Note {id} not found."})
@@ -843,7 +843,7 @@ def kb_write(
                     confidence=confidence if confidence is not None else 1.0,
                     provenance=provenance or "llm",
                     evidence=evidence or "",
-                    metadata=json.loads(metadata) if metadata else {},
+                    metadata=metadata or {},
                 )
                 mid = kb.add_mapping(m)
                 saved = kb.get_mapping(mid)
@@ -860,7 +860,7 @@ def kb_write(
                     if v is not None:
                         kwargs[k] = v
                 if metadata is not None:
-                    kwargs["metadata"] = json.loads(metadata)
+                    kwargs["metadata"] = metadata
                 ok = kb.update_mapping(id, **kwargs)
                 if not ok:
                     return json.dumps({"error": f"Mapping {id} not found."})
@@ -883,7 +883,7 @@ def kb_write(
                     repo=repo or "", local_path=local_path or "",
                     branch=branch or "", subpath=subpath or "",
                     provenance=provenance or "llm",
-                    metadata=json.loads(metadata) if metadata else {},
+                    metadata=metadata or {},
                 )
                 mid = kb.add_module_mapping(m)
                 saved = kb.get_module_mapping(mid)
@@ -898,7 +898,7 @@ def kb_write(
                     if v is not None:
                         kwargs[k] = v
                 if metadata is not None:
-                    kwargs["metadata"] = json.loads(metadata)
+                    kwargs["metadata"] = metadata
                 ok = kb.update_module_mapping(id, **kwargs)
                 if not ok:
                     return json.dumps({"error": f"Module mapping {id} not found."})
