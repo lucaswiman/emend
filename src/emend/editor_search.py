@@ -508,6 +508,30 @@ class EditorSearchEngine:
         if kind:
             items = [c for c in items if c["kind"] == kind]
 
+        # Venv fallback: if no candidates from the project index, try venv
+        if not items and not file_scope:
+            try:
+                from emend.transform import lookup_venv_symbol
+                venv_results = lookup_venv_symbol(
+                    self.project_root,
+                    name_pattern=query if "*" in query or "?" in query else None,
+                    qualified_name=query if "." in query else None,
+                    limit=limit,
+                )
+                # For bare names, also try name_pattern
+                if not venv_results and "." not in query:
+                    venv_results = lookup_venv_symbol(
+                        self.project_root,
+                        name_pattern=query,
+                        limit=limit,
+                    )
+                for vr in venv_results:
+                    qn = vr.get("qualified_name", vr["name"])
+                    score = round(_score_symbol(vr["name"], qn, query), 1)
+                    items.append({**vr, "score": score})
+            except Exception:
+                logger.debug("Venv symbol lookup failed", exc_info=True)
+
         # Score and rank
         scored = [
             (round(_score_symbol(c["name"], c["qualified_name"], query), 1), c)
