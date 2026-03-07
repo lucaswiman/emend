@@ -985,6 +985,16 @@ def compile_pattern_to_rust_ir(pattern_str: str, language: str = "python") -> di
     return _compile_python_pattern_to_rust_ir(pattern_str)
 
 
+_DEF_CLASS_RE = _re.compile(
+    r"^(\s*(?:async\s+)?(?:def|class)\s+)"  # keyword prefix
+    r"(\w*[*?]\w*)"                          # name with glob wildcard(s)
+)
+
+_DEF_CLASS_NO_COLON_RE = _re.compile(
+    r"^\s*(?:async\s+)?(?:def|class)\s+\w"
+)
+
+
 def _compile_python_pattern_to_rust_ir(pattern_str: str) -> dict | None:
     """Legacy Python-specific pattern compilation using ast.parse."""
     import ast as _ast
@@ -992,6 +1002,26 @@ def _compile_python_pattern_to_rust_ir(pattern_str: str) -> dict | None:
     try:
         pattern = parse_pattern(pattern_str)
         temp_code, metavar_map = _build_metavar_map_and_replace(pattern)
+
+        # --- glob wildcard in def/class name ----------------------------------
+        # e.g. "def print*" or "def test_*_encounter($...X):"
+        glob_name = None
+        m_glob = _DEF_CLASS_RE.match(temp_code)
+        if m_glob:
+            glob_name = m_glob.group(2)
+            rest = temp_code[m_glob.end():]
+            temp_code = m_glob.group(1) + "__GLOB_NAME__" + rest
+            # If no params given (e.g. bare "def print*"), add catch-all params
+            if not rest.lstrip().startswith("("):
+                temp_code = m_glob.group(1) + "__GLOB_NAME__(__META__GLOB_ELLIPSIS__)" + rest
+                metavar_map["__META__GLOB_ELLIPSIS__"] = MetaVar(
+                    name="_GLOB_ELLIPSIS", ellipsis=True
+                )
+
+        # --- auto-add trailing colon for def/class without one ----------------
+        if (_DEF_CLASS_NO_COLON_RE.match(temp_code)
+                and not temp_code.rstrip().endswith(":")):
+            temp_code = temp_code.rstrip() + ":"
 
         is_except_header = _is_except_header(temp_code)
         is_compound_header = _is_compound_statement_header(temp_code)
@@ -1022,7 +1052,17 @@ def _compile_python_pattern_to_rust_ir(pattern_str: str) -> dict | None:
             except SyntaxError:
                 return None
 
-        return _ast_to_rust_ir(expr, metavar_map)
+        ir = _ast_to_rust_ir(expr, metavar_map)
+
+        # Patch the IR to replace placeholder name with a name_glob node.
+        if ir is not None and glob_name is not None:
+            name_node = ir.get("name")
+            if (isinstance(name_node, dict)
+                    and name_node.get("type") == "name"
+                    and name_node.get("value") == "__GLOB_NAME__"):
+                ir["name"] = {"type": "name_glob", "value": glob_name}
+
+        return ir
 
     except Exception:
         return None

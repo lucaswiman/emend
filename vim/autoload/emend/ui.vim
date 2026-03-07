@@ -20,6 +20,37 @@ let s:query = ''
 let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
 let s:is_interactive = 0
 let s:search_timer = -1
+let s:focus = 'list'
+
+" Namespace for extmark highlights in the result list.
+let s:ns_id = -1
+
+function! s:get_ns() abort
+  if s:ns_id < 0
+    let s:ns_id = nvim_create_namespace('emend_ui')
+  endif
+  return s:ns_id
+endfunction
+
+" Highlight groups for color-coded results.
+highlight default EmendKindClass guifg=#ffc600 gui=bold ctermfg=220 cterm=bold
+highlight default EmendKindFunc guifg=#3ad900 ctermfg=76
+highlight default EmendKindMethod guifg=#80fcff ctermfg=123
+highlight default EmendKindAsync guifg=#cc99ff ctermfg=183
+highlight default EmendKindVar guifg=#ff9d00 ctermfg=208
+highlight default EmendName guifg=#e1efff gui=bold ctermfg=255 cterm=bold
+highlight default EmendFilePath guifg=#7e8a93 ctermfg=102
+highlight default EmendSelected guibg=#1d4e7a gui=bold ctermbg=24 cterm=bold
+highlight default EmendHeader guifg=#7e8a93 gui=italic ctermfg=102
+
+let s:KIND_HIGHLIGHTS = {
+      \ 'class': 'EmendKindClass',
+      \ 'function': 'EmendKindFunc',
+      \ 'method': 'EmendKindMethod',
+      \ 'async_function': 'EmendKindAsync',
+      \ 'async_method': 'EmendKindAsync',
+      \ 'variable': 'EmendKindVar',
+      \ }
 
 " Kind abbreviations (hoisted to avoid per-call allocation).
 let s:KIND_ICONS = {
@@ -295,7 +326,7 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'title': ' results ',
         \ 'title_pos': 'center',
         \ })
-  call nvim_win_set_option(s:list_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
+  call nvim_win_set_option(s:list_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder,CursorLine:EmendSelected')
 
   let s:preview_win = nvim_open_win(s:preview_buf, v:false, {
         \ 'relative': 'editor',
@@ -441,8 +472,18 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('n', 'gg',        '<Cmd>call emend#ui#goto_first()<CR>')
     call s:map_current_buf('n', 'G',         '<Cmd>call emend#ui#goto_last()<CR>')
     call s:map_current_buf('n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
+    call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
   endif
-  
+
+  " Preview buffer maps
+  if s:preview_win >= 0
+    call win_gotoid(s:preview_win)
+    call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
+    call s:map_current_buf('n', '<Esc>',     '<Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', 'q',         '<Cmd>call emend#ui#close()<CR>')
+    call s:map_current_buf('n', '<CR>',      '<Cmd>call emend#ui#accept()<CR>')
+  endif
+
   " Input buffer maps (if interactive)
   if s:input_win >= 0
     call win_gotoid(s:input_win)
@@ -457,7 +498,9 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('i', '<C-p>',     '<Cmd>call emend#ui#move(-1)<CR>')
     call s:map_current_buf('i', '<Down>',    '<Cmd>call emend#ui#move(1)<CR>')
     call s:map_current_buf('i', '<Up>',      '<Cmd>call emend#ui#move(-1)<CR>')
-    
+    call s:map_current_buf('i', '<Tab>',     '<Esc><Cmd>call emend#ui#toggle_focus()<CR>')
+    call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
+
     " Trigger search on change
     augroup emend_input
       autocmd! * <buffer>
@@ -568,6 +611,20 @@ function! emend#ui#new_search() abort
   call emend#ui#prompt()
 endfunction
 
+function! emend#ui#toggle_focus() abort
+  if s:focus ==# 'list' && s:preview_win >= 0
+    let s:focus = 'preview'
+    call win_gotoid(s:preview_win)
+  else
+    let s:focus = 'list'
+    if s:is_interactive && s:input_win >= 0
+      call win_gotoid(s:input_win)
+    elseif s:list_win >= 0
+      call win_gotoid(s:list_win)
+    endif
+  endif
+endfunction
+
 " ---------------------------------------------------------------------------
 " Rendering
 " ---------------------------------------------------------------------------
@@ -591,47 +648,92 @@ function! s:render_list() abort
   " Compute cwd prefix once for all items.
   let l:cwd = getcwd() . '/'
 
+  let l:all_hl = []
   for l:i in range(len(s:results))
-    call add(l:lines, s:format_result_line(s:results[l:i], l:i, l:cwd))
+    let [l:text, l:hl] = s:format_result_line(s:results[l:i], l:i, l:cwd)
+    call add(l:lines, l:text)
+    call add(l:all_hl, l:hl)
   endfor
 
   call s:set_buf_lines(s:list_buf, l:lines)
+  call s:apply_list_highlights(l:all_hl)
   call s:highlight_selected()
 endfunction
 
 function! s:format_result_line(item, index, cwd) abort
+  let l:hl = []
   let l:name = get(a:item, 'name', get(a:item, 'matched_text', '?'))
   let l:kind = get(a:item, 'kind', '')
   let l:file = get(a:item, 'file_path', '')
-  let l:line = get(a:item, 'line', '')
+  let l:line_no = get(a:item, 'line', '')
   let l:end_line = get(a:item, 'end_line', '')
 
   let l:prefix = a:index == s:selected ? ' > ' : '   '
   let l:text = l:prefix
+  let l:col = len(l:prefix)
 
   if l:kind !=# ''
-    let l:text .= get(s:KIND_ICONS, l:kind, '·') . ' '
+    let l:icon = get(s:KIND_ICONS, l:kind, '·') . ' '
+    let l:hl_group = get(s:KIND_HIGHLIGHTS, l:kind, 'EmendKindFunc')
+    call add(l:hl, [l:col, l:col + len(l:icon) - 1, l:hl_group])
+    let l:text .= l:icon
+    let l:col += len(l:icon)
   endif
 
+  " Symbol name
+  let l:name_start = l:col
   let l:text .= l:name
+  let l:col += len(l:name)
+  call add(l:hl, [l:name_start, l:col, 'EmendName'])
 
   if l:file !=# ''
-    " Shorten path relative to cwd.
     let l:short = l:file
     if stridx(l:short, a:cwd) == 0
       let l:short = strpart(l:short, len(a:cwd))
     endif
+    let l:sep = '  '
+    let l:text .= l:sep
+    let l:col += len(l:sep)
     let l:loc = l:short
-    if l:line !=# '' && l:line isnot v:null
-      let l:loc .= ':' . l:line
-      if l:end_line !=# '' && l:end_line isnot v:null && l:end_line != l:line
+    if l:line_no !=# '' && l:line_no isnot v:null
+      let l:loc .= ':' . l:line_no
+      if l:end_line !=# '' && l:end_line isnot v:null && l:end_line != l:line_no
         let l:loc .= '-' . l:end_line
       endif
     endif
-    let l:text .= '  ' . l:loc
+    call add(l:hl, [l:col, l:col + len(l:loc), 'EmendFilePath'])
+    let l:text .= l:loc
   endif
 
-  return l:text
+  return [l:text, l:hl]
+endfunction
+
+function! s:apply_list_highlights(all_hl) abort
+  if !has('nvim') || s:list_buf < 0 || !bufexists(s:list_buf)
+    return
+  endif
+  let l:ns = s:get_ns()
+  call nvim_buf_clear_namespace(s:list_buf, l:ns, 0, -1)
+
+  " Header line highlight
+  let l:hdr = getbufline(s:list_buf, 1)
+  if !empty(l:hdr)
+    call nvim_buf_set_extmark(s:list_buf, l:ns, 0, 0, {
+          \ 'end_col': len(l:hdr[0]),
+          \ 'hl_group': 'EmendHeader',
+          \ })
+  endif
+
+  " Result line highlights (offset by 2 for header + separator)
+  for l:i in range(len(a:all_hl))
+    let l:row = l:i + 2
+    for [l:start, l:end, l:group] in a:all_hl[l:i]
+      call nvim_buf_set_extmark(s:list_buf, l:ns, l:row, l:start, {
+            \ 'end_col': l:end,
+            \ 'hl_group': l:group,
+            \ })
+    endfor
+  endfor
 endfunction
 
 function! s:highlight_selected() abort
@@ -660,9 +762,10 @@ function! s:render_preview() abort
   if s:preview_buf < 0 || !bufexists(s:preview_buf)
     return
   endif
-  
+
   if empty(s:results) || s:selected >= len(s:results)
     call s:set_buf_lines(s:preview_buf, [])
+    call s:set_preview_title(' preview ')
     return
   endif
 
@@ -672,57 +775,64 @@ function! s:render_preview() abort
   let l:end_line = get(l:item, 'end_line', l:start_line)
   let l:matched_text = get(l:item, 'matched_text', '')
 
+  " Compute short file path for title.
+  let l:cwd = getcwd() . '/'
+  let l:short = l:file
+  if stridx(l:short, l:cwd) == 0
+    let l:short = strpart(l:short, len(l:cwd))
+  endif
+
   " Pattern mode: show matched_text directly.
   if l:matched_text !=# ''
-    let l:cwd = getcwd() . '/'
-    let l:short = l:file
-    if stridx(l:short, l:cwd) == 0
-      let l:short = strpart(l:short, len(l:cwd))
-    endif
     let l:lines = ['  File: ' . l:short, '  Lines: ' . l:start_line . '-' . l:end_line, '']
     let l:lines += split(l:matched_text, "\n")
     call s:set_buf_lines(s:preview_buf, l:lines)
     call s:set_preview_ft('python')
+    call s:set_preview_title(' ' . l:short . ' ')
     return
   endif
 
   if l:file ==# '' || !filereadable(l:file)
     call s:set_buf_lines(s:preview_buf, ['  (file not available)'])
+    call s:set_preview_title(' preview ')
     return
   endif
 
-  " Read only as many lines as needed (avoid reading entire large files).
-  let l:ctx = 5
-  let l:max_line = l:end_line + l:ctx
-  let l:all_lines = readfile(l:file, '', l:max_line)
+  " Read full file for proper syntax highlighting context.
+  let l:all_lines = readfile(l:file, '', 10000)
   if empty(l:all_lines)
     call s:set_buf_lines(s:preview_buf, ['  (empty file)'])
     return
   endif
 
-  let l:from = max([0, l:start_line - 1 - l:ctx])
-  let l:to = min([len(l:all_lines), l:max_line])
-  let l:preview_lines = l:all_lines[l:from : l:to - 1]
+  call s:set_buf_lines(s:preview_buf, l:all_lines)
 
-  call s:set_buf_lines(s:preview_buf, l:preview_lines)
-
-  " Set filetype only when it changes (avoids re-triggering autocommands).
+  " Set filetype for syntax highlighting.
   let l:ext = fnamemodify(l:file, ':e')
   let l:ft = l:ext ==# 'py' ? 'python' : l:ext
   call s:set_preview_ft(l:ft)
 
-  " Scroll to the match.
-  let l:preview_target = l:start_line - l:from
+  " Update preview title with file name.
+  call s:set_preview_title(' ' . l:short . ' ')
+
+  " Scroll to the match line, centered.
   try
     if has('nvim')
       if nvim_win_is_valid(s:preview_win)
-        call nvim_win_set_cursor(s:preview_win, [max([1, l:preview_target]), 0])
+        call nvim_win_set_cursor(s:preview_win, [max([1, l:start_line]), 0])
       endif
     else
-      call win_execute(s:preview_win, 'call cursor(' . max([1, l:preview_target]) . ', 1)')
+      call win_execute(s:preview_win, 'call cursor(' . max([1, l:start_line]) . ', 1)')
     endif
+    call win_execute(s:preview_win, 'normal! zz')
   catch
   endtry
+endfunction
+
+function! s:set_preview_title(title) abort
+  if has('nvim') && s:preview_win >= 0 && nvim_win_is_valid(s:preview_win)
+    call nvim_win_set_config(s:preview_win, {'title': a:title, 'title_pos': 'center'})
+  endif
 endfunction
 
 function! s:set_preview_ft(ft) abort
