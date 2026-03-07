@@ -13,6 +13,8 @@ mod symbols;
 mod matcher;
 mod scope;
 mod scope_py;
+mod transform;
+mod transform_py;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -246,10 +248,14 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_from_str, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::get_symbol_component_range, m)?)?;
+    m.add_function(wrap_pyfunction!(symbols::get_symbol_component_list_items, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::compile_pattern_treesitter, m)?)?;
     m.add_class::<scope_py::PyScopeResolver>()?;
+    m.add_class::<transform_py::PyFileTransform>()?;
     Ok(())
 }

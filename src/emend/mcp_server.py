@@ -225,7 +225,6 @@ def search(
     # --- Pattern mode ---
     if is_pattern_mode:
         target_path = files or "."
-        import libcst as cst
 
         resolved_files, is_multi_file = resolve_files(target_path)
         all_matches: list[tuple[str, Any]] = []
@@ -253,17 +252,10 @@ def search(
         elif json_output:
             serialized = []
             for file_path_str, match in all_matches:
-                if match.matched_text is not None:
-                    code_str = match.matched_text.strip()
-                else:
-                    code_str = cst.Module([]).code_for_node(match.node).strip()
+                code_str = (match.matched_text or match.node_text or "").strip()
                 captures = {}
                 for cap_name, captured in match.captures.items():
-                    if isinstance(captured, tuple):
-                        items = [cst.Module([]).code_for_node(item).strip() for item in captured]
-                        captures[cap_name] = ", ".join(items)
-                    else:
-                        captures[cap_name] = cst.Module([]).code_for_node(captured).strip()
+                    captures[cap_name] = captured.strip() if isinstance(captured, str) else str(captured)
                 serialized.append(
                     {"file": file_path_str, "line": match.line, "code": code_str, "captures": captures}
                 )

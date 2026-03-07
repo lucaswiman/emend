@@ -201,12 +201,11 @@ class TestVisitProjectRefactorRenameSymbol:
 
 
 class TestVisitProjectHelper:
-    """Test the visit_project() helper directly."""
+    """Test the visit_project_ts() helper directly."""
 
-    def test_visit_project_yields_results(self, tmp_path):
-        """visit_project iterates over matching files."""
-        from emend.transform import visit_project
-        import libcst as cst
+    def test_visit_project_ts_yields_results(self, tmp_path):
+        """visit_project_ts iterates over matching files."""
+        from emend.transform import visit_project_ts
 
         project = tmp_path / "project"
         project.mkdir()
@@ -217,25 +216,17 @@ class TestVisitProjectHelper:
         file_b = project / "file_b.py"
         file_b.write_text("y = 2\n")
 
-        class SimpleVisitor(cst.CSTVisitor):
-            def __init__(self):
-                self.found = False
-            def visit_Name(self, node):
-                self.found = True
-
-        results = list(visit_project(
+        results = list(visit_project_ts(
             name_hint="x",
-            visitor_factory=lambda fp, is_def: SimpleVisitor(),
             project_path=str(project),
         ))
         # Should find file_a (contains "x") but not file_b
         assert len(results) == 1
         assert "file_a.py" in results[0][0]
 
-    def test_visit_project_skips_non_matching(self, tmp_path):
-        """visit_project skips files that don't contain name_hint."""
-        from emend.transform import visit_project
-        import libcst as cst
+    def test_visit_project_ts_skips_non_matching(self, tmp_path):
+        """visit_project_ts skips files that don't contain name_hint."""
+        from emend.transform import visit_project_ts
 
         project = tmp_path / "project"
         project.mkdir()
@@ -246,12 +237,8 @@ class TestVisitProjectHelper:
         file_b = project / "file_b.py"
         file_b.write_text("def bar(): pass\n")
 
-        class NullVisitor(cst.CSTVisitor):
-            pass
-
-        results = list(visit_project(
+        results = list(visit_project_ts(
             name_hint="nonexistent",
-            visitor_factory=lambda fp, is_def: NullVisitor(),
             project_path=str(project),
         ))
         assert len(results) == 0

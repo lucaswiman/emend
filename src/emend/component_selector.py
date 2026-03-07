@@ -62,14 +62,18 @@ class ExtendedSelector:
         """Check if file_path contains glob wildcards (* or ?)."""
         return '*' in self.file_path or '?' in self.file_path
 
-    def expand_file_glob(self) -> list[str]:
-        """Expand file_path glob, returning matching .py files.
+    def expand_file_glob(self, language: str = "python") -> list[str]:
+        """Expand file_path glob, returning matching source files.
+
+        Args:
+            language: Source language to filter by (default: "python").
 
         Raises FileNotFoundError if no files match.
         """
+        from emend.language_registry import matches_language
         matches = [
             f for f in glob_mod.glob(self.file_path, recursive=True)
-            if f.endswith('.py')
+            if matches_language(f, language)
         ]
         if not matches:
             raise FileNotFoundError(f"No files match: {self.file_path}")

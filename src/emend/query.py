@@ -273,7 +273,8 @@ def _collect_symbols(
         return remapped
 
     from emend import emend_core
-    rust_syms = emend_core.collect_symbols_from_str(source)
+    ext = Path(filepath).suffix.lstrip('.') or 'py'
+    rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
     symbols = _rust_dict_to_symbol_info_list(rust_syms, str(filepath))
 
     if len(_symbol_cache) >= _SYMBOL_CACHE_MAX:

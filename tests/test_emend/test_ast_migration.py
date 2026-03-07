@@ -1,8 +1,7 @@
-"""Regression tests for the ast->LibCST migration.
+"""Regression tests for AST backend migration.
 
 Validates that find_nested_definitions, query symbol collection,
-and list-symbols produce identical output after migrating from
-stdlib ast to LibCST.
+and list-symbols produce correct output across AST backend changes.
 """
 
 import subprocess
@@ -312,12 +311,12 @@ class TestSelectorUnification:
 
 
 # ---------------------------------------------------------------------------
-# list-symbols LibCST regression tests
+# list-symbols tree-sitter regression tests
 # ---------------------------------------------------------------------------
 
-class TestListSymbolsLibCST:
+class TestListSymbolsTreeSitter:
     def test_basic_output(self, tmp_path):
-        """list-symbols produces correct output after LibCST migration."""
+        """list-symbols produces correct output after tree-sitter migration."""
         code = '''\
 def foo(x: int) -> str:
     return str(x)

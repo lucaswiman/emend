@@ -44,28 +44,45 @@ def _reject_file_glob(selector_str: str, command_name: str) -> None:
         )
 
 
-def resolve_files(path: str) -> tuple[list[Path], bool]:
-    """Resolve a path argument to a list of Python files.
+def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool]:
+    """Resolve a path argument to a list of source files.
 
     Args:
         path: A file path, directory, or glob pattern.
+        language: Source language to filter by (default: "python").
 
     Returns:
         (files, is_multi_file) tuple.
     """
+    from emend.language_registry import get_extensions, matches_language
     path_obj = Path(path)
     if path_obj.is_dir():
-        from emend import emend_core
-        abs_path = str(path_obj.resolve())
-        return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
+        if language == "python":
+            from emend import emend_core
+            abs_path = str(path_obj.resolve())
+            return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
+        else:
+            exts = set(get_extensions(language))
+            files = [p for p in path_obj.rglob("*") if p.suffix.lstrip(".") in exts]
+            return sorted(files), True
     elif "*" in path or "?" in path:
-        return [Path(f) for f in glob_mod.glob(path, recursive=True) if f.endswith('.py')], True
+        return [Path(f) for f in glob_mod.glob(path, recursive=True)
+                if matches_language(f, language)], True
     else:
         return [path_obj], False
 
 
 
 import re as _re_module
+
+# Module-level state for options set in the app callback (e.g. --language).
+_state: dict = {"language": "python"}
+
+
+def _is_source_file_query(query: str) -> bool:
+    """Return True if *query* ends with a known source file extension."""
+    from emend.language_registry import is_source_file
+    return is_source_file(query)
 
 
 @dataclass
@@ -186,6 +203,10 @@ def _app_callback(
         int,
         typer.Option("-v", "--verbose", count=True, help="Verbose output (-v info, -vv debug with timestamps)."),
     ] = 0,
+    language: Annotated[
+        Optional[str],
+        typer.Option("--language", "-L", help="Source language (python, typescript, etc.). Default: python."),
+    ] = None,
 ) -> None:
     if verbose >= 2:
         logging.basicConfig(
@@ -201,6 +222,8 @@ def _app_callback(
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
+    if language is not None:
+        _state["language"] = language
 
 
 # ============================================================================
@@ -222,7 +245,6 @@ def _print_pattern_match_code(
     file_lines_cache: dict[str, list[str]],
     *,
     is_tty: bool = False,
-    module_for_node=None,
 ) -> None:
     """Print a pattern match with a file:line header followed by matched source lines.
 
@@ -482,7 +504,7 @@ def search(
             _query_path = Path(query)
             if (not _query_path.exists()
                     and '/' not in query
-                    and not query.endswith('.py')
+                    and not _is_source_file_query(query)
                     and not ('*' in query or '?' in query)):
                 if path:
                     _p = Path(path)
@@ -573,18 +595,40 @@ def search(
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
                 files, _ = resolve_files(file_for_summary)
                 from emend import emend_core
-                file_strs = [str(fp) for fp in files]
-                batch_results = emend_core.collect_symbols_batch(
-                    file_strs, max_depth=tree_depth, selector=selector_for_summary,
-                )
-                for file_path_str, symbol_dicts in batch_results:
-                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
-                    print(f"\nModule: {file_path_str}")
-                    if symbols:
-                        if flat_output:
-                            ast_commands._print_symbol_flat(symbols)
-                        else:
-                            ast_commands._print_symbol_tree(symbols, indent=1)
+                from emend.transform import _find_python_source_root
+                
+                # Single resolver for batch
+                proj_root = _find_python_source_root(file_path_obj.parent if file_path_obj.is_file() else file_path_obj)
+                resolver = emend_core.PyScopeResolver(str(proj_root))
+                
+                for fp in files:
+                    file_str = str(fp)
+                    try:
+                        source = fp.read_text()
+                        resolver.index_file(file_str, source)
+                        
+                        symbol_dicts = resolver.get_symbols(file_str)
+                        
+                        # Derive module path
+                        rel_path = fp.relative_to(proj_root)
+                        parts = list(rel_path.parts)
+                        if parts and parts[0] == "src":
+                            parts.pop(0)
+                        if parts:
+                            parts[-1] = parts[-1].replace(".py", "").replace(".pyi", "")
+                        if parts and parts[-1] == "__init__":
+                            parts.pop()
+                        module_path = ".".join(parts)
+
+                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path)
+                        print(f"\nModule: {file_str}")
+                        if symbols:
+                            if flat_output:
+                                ast_commands._print_symbol_flat(symbols, max_depth=tree_depth)
+                            else:
+                                ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
+                    except Exception as e:
+                        logging.getLogger("emend.cli").warning("Failed to index %s: %s", file_str, e)
             else:
                 if not file_path_obj.exists():
                     raise FileNotFoundError(f"No such file or directory: {file_for_summary!r}")
@@ -594,9 +638,9 @@ def search(
                 print(f"\nModule: {file_for_summary}")
                 if symbols:
                     if flat_output:
-                        ast_commands._print_symbol_flat(symbols)
+                        ast_commands._print_symbol_flat(symbols, max_depth=tree_depth)
                     else:
-                        ast_commands._print_symbol_tree(symbols, indent=1)
+                        ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
             return
 
         # ---- PATTERN MODE ----
@@ -605,17 +649,17 @@ def search(
             _t_search_start = _time.monotonic()
             _logger = logging.getLogger("emend.search")
             target_path = path or "."
-            import libcst as cst
-            from emend import emend_core
+            _lang = _state["language"]
 
             _t0 = _time.monotonic()
             target_obj = Path(target_path)
-            if target_obj.is_dir():
+            if target_obj.is_dir() and _lang == "python":
                 # Fast path: get string list directly from Rust, skip Path creation
+                from emend import emend_core
                 file_strs = emend_core.collect_python_files(str(target_obj.resolve()))
                 is_multi_file = True
             else:
-                files, is_multi_file = resolve_files(target_path)
+                files, is_multi_file = resolve_files(target_path, language=_lang)
                 file_strs = [str(f) for f in files]
             _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, target_path)
 
@@ -630,6 +674,7 @@ def search(
                     imported_from=imported_from,
                     scope_local=scope_local,
                     type_oracle=oracle,
+                    language=_lang,
                 )
                 for pm in project_matches:
                     yield (pm.file_path, pm.match)
@@ -643,24 +688,12 @@ def search(
                 all_matches = list(_iter_matches())
                 serialized_matches = []
                 for file_path_str, match in all_matches:
-                    if match.matched_text is not None:
-                        code_str = match.matched_text.strip()
-                    else:
-                        code_str = cst.Module([]).code_for_node(match.node).strip()
-                    captures = {}
-                    for cap_name, captured in match.captures.items():
-                        if isinstance(captured, tuple):
-                            items = []
-                            for item in captured:
-                                items.append(cst.Module([]).code_for_node(item).strip())
-                            captures[cap_name] = ", ".join(items)
-                        else:
-                            captures[cap_name] = cst.Module([]).code_for_node(captured).strip()
+                    code_str = (match.matched_text or "").strip()
                     serialized_matches.append({
                         "file": file_path_str,
                         "line": match.line,
                         "code": code_str,
-                        "captures": captures
+                        "captures": match.captures
                     })
                 print(json.dumps({"count": len(all_matches), "matches": serialized_matches}))
                 _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
@@ -700,7 +733,7 @@ def search(
                         n_total += 1
                         _print_pattern_match_code(
                             file_path_str, match, _file_lines_cache,
-                            is_tty=is_tty, module_for_node=cst.Module([]),
+                            is_tty=is_tty,
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             return
@@ -1028,10 +1061,11 @@ def replace_cmd(
             oracle = _maybe_create_oracle(type_engine)
 
         search_path = path
-        files, is_multi_file = resolve_files(search_path)
+        _lang = _state["language"]
+        files, is_multi_file = resolve_files(search_path, language=_lang)
 
         # Pre-filter: use Rust matcher to find which files actually have
-        # matches, so we only LibCST-parse those files.
+        # matches, so we only need to process those files.
         file_strs = [str(f) for f in files]
         if is_multi_file and len(file_strs) > 1:
             import time as _time
@@ -1046,10 +1080,10 @@ def replace_cmd(
             _logger.info("read_and_filter: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
 
             # Second: try structural pre-filter via Rust tree-sitter matcher
-            pattern_ir = compile_pattern_to_rust_ir(pattern)
+            pattern_ir = compile_pattern_to_rust_ir(pattern, language=_lang)
             if pattern_ir is not None:
-                inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
-                not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+                inside_ir = compile_constraint_to_rust_ir(inside, language=_lang) if inside else None
+                not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=_lang) if not_inside else None
                 if (inside is None or inside_ir is not None) and \
                    (not_inside is None or not_inside_ir is not None):
                     _t0 = _time.monotonic()
@@ -1079,6 +1113,7 @@ def replace_cmd(
                     scope=scope, apply=apply,
                     inside=inside, not_inside=not_inside,
                     type_oracle=oracle,
+                    language=_lang,
                 )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)
@@ -1143,12 +1178,14 @@ def lint_cmd(
 
         rules, macros, deadcode_config = load_rules(str(config_path))
 
-        resolved, _ = resolve_files(path)
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
         violations = run_lint(
             rules, files, fix=fix, rule_filter=rule,
             deadcode_config=deadcode_config, project_path=path,
+            language=_lang,
         )
 
         for v in violations:
@@ -1201,7 +1238,7 @@ def refs_cmd(
 ):
     """Find all references to a symbol across the project.
 
-    Uses LibCST to find usages, not just text matches.
+    Uses tree-sitter and Rust scope resolver for scope-aware reference finding.
     With --calls-only, only returns actual call sites (not mere references or imports).
 
     Examples:
@@ -1571,13 +1608,15 @@ def batch_cmd(
                         "'replacement', and 'path'"
                     )
 
-                files, _ = resolve_files(target_path)
+                _lang = _state["language"]
+                files, _ = resolve_files(target_path, language=_lang)
 
                 op_diffs = []
                 for fp in files:
                     try:
                         diff, cnt = replace_pattern(
-                            pattern, replacement, str(fp), apply=apply
+                            pattern, replacement, str(fp), apply=apply,
+                            language=_lang,
                         )
                         if diff:
                             op_diffs.append(diff)
@@ -1917,7 +1956,7 @@ def index_cmd(
     """Pre-build caches for faster cross-project operations.
 
     Parses every Python file in the project and builds:
-    - LibCST parse cache (speeds up all pattern operations)
+    - Parse cache (speeds up all pattern operations)
     - Qualified-name index (speeds up refs, rename, callers)
     - Symbol index (instant symbol lookup, typeahead, file outline)
     - Import graph (fast import-based file filtering)
@@ -1998,20 +2037,20 @@ def index_cmd(
 
     elapsed = _time.monotonic() - t0
     skipped = stats.get("skipped", 0)
-    new_parse = stats["parse_cached"]
+    new_indexed = stats["indexed"]
     new_qn = stats["qn_cached"]
     new_sym = stats.get("sym_cached", 0)
     new_ref = stats.get("ref_cached", 0)
     new_types = int(stats.get("type_cached", 0))
     engine_name = str(stats.get("type_engine", ""))
 
-    parse_qn = f"parse: {new_parse}, qn: {new_qn}"
-    if skipped and not new_parse and not new_qn:
+    indexed_qn = f"indexed: {new_indexed}, qn: {new_qn}"
+    if skipped and not new_indexed and not new_qn:
         detail = f"all {skipped} already cached"
     elif skipped:
-        detail = f"{parse_qn}, already cached: {skipped}"
+        detail = f"{indexed_qn}, already cached: {skipped}"
     else:
-        detail = parse_qn
+        detail = indexed_qn
     if new_sym:
         detail += f", symbols: {new_sym}"
     if new_ref:

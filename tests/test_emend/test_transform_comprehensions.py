@@ -1,7 +1,6 @@
 """Tests for comprehension patterns (Phase 3a)."""
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern
 

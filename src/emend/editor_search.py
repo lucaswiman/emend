@@ -564,7 +564,7 @@ class EditorSearchEngine:
         1. Index prefilter (SQLite)
         2. Rust string-contains filter
         3. Rust tree-sitter batch (when applicable)
-        4. Python/LibCST fallback (parallel)
+        4. Pattern matching fallback (parallel)
 
         The SQLite index connection is passed through so the shared
         backend can do the index prefilter without opening a second DB.

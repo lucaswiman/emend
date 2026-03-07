@@ -1,6 +1,6 @@
 # emend
 
-A Python refactoring CLI built on [LibCST](https://github.com/Instagram/LibCST). The name means "to make corrections to a text" — which is what it does, but with AST-aware precision instead of find-and-replace.
+A Python refactoring CLI built on [tree-sitter](https://tree-sitter.github.io/tree-sitter/) with a Rust backend. The name means "to make corrections to a text" — which is what it does, but with AST-aware precision instead of find-and-replace.
 
 Two complementary systems: **structured edits** use selectors like `file.py::func[params][0]` for precise changes to symbol metadata, and **pattern transforms** use capture variables like `print($X)` → `logger.info($X)` for code-pattern search and replace.
 

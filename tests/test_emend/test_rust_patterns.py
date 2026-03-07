@@ -1,7 +1,7 @@
-"""Tests for Rust fast-path pattern matching via compile_pattern_to_rust_ir.
+"""Tests for tree-sitter pattern matching via compile_pattern_to_rust_ir.
 
 Verifies that patterns compile to Rust IR correctly and that the Rust
-tree-sitter matcher produces the same results as the Python LibCST path.
+tree-sitter matcher produces the expected results.
 """
 
 import pytest
@@ -52,7 +52,7 @@ class TestRustIRCompilation:
         assert ir["type"] == "subscript"
         assert ir["value"] == {"type": "name", "value": "Optional"}
         assert len(ir["slices"]) == 1
-        assert ir["slices"][0] == {"type": "any_expr"}
+        assert ir["slices"][0] == {"type": "metavar", "name": "X"}
 
     def test_subscript_multi(self):
         ir = compile_pattern_to_rust_ir("dict[$K, $V]")
@@ -162,52 +162,52 @@ class TestRustIRCompilation:
         ir = compile_pattern_to_rust_ir("$A == $B")
         assert ir is not None
         assert ir["type"] == "compare"
-        assert ir["ops"][0][0] == "=="
+        assert ir["ops"][0]["op"] == "=="
 
     def test_compare_neq(self):
         ir = compile_pattern_to_rust_ir("$A != $B")
         assert ir is not None
-        assert ir["ops"][0][0] == "!="
+        assert ir["ops"][0]["op"] == "!="
 
     def test_compare_lt(self):
         ir = compile_pattern_to_rust_ir("$A < $B")
         assert ir is not None
-        assert ir["ops"][0][0] == "<"
+        assert ir["ops"][0]["op"] == "<"
 
     def test_compare_gt(self):
         ir = compile_pattern_to_rust_ir("$A > $B")
         assert ir is not None
-        assert ir["ops"][0][0] == ">"
+        assert ir["ops"][0]["op"] == ">"
 
     def test_compare_lte(self):
         ir = compile_pattern_to_rust_ir("$A <= $B")
         assert ir is not None
-        assert ir["ops"][0][0] == "<="
+        assert ir["ops"][0]["op"] == "<="
 
     def test_compare_gte(self):
         ir = compile_pattern_to_rust_ir("$A >= $B")
         assert ir is not None
-        assert ir["ops"][0][0] == ">="
+        assert ir["ops"][0]["op"] == ">="
 
     def test_compare_is(self):
         ir = compile_pattern_to_rust_ir("$X is None")
         assert ir is not None
-        assert ir["ops"][0][0] == "is"
+        assert ir["ops"][0]["op"] == "is"
 
     def test_compare_is_not(self):
         ir = compile_pattern_to_rust_ir("$X is not None")
         assert ir is not None
-        assert ir["ops"][0][0] == "is not"
+        assert ir["ops"][0]["op"] == "is not"
 
     def test_compare_in(self):
         ir = compile_pattern_to_rust_ir("$X in $Y")
         assert ir is not None
-        assert ir["ops"][0][0] == "in"
+        assert ir["ops"][0]["op"] == "in"
 
     def test_compare_not_in(self):
         ir = compile_pattern_to_rust_ir("$X not in $Y")
         assert ir is not None
-        assert ir["ops"][0][0] == "not in"
+        assert ir["ops"][0]["op"] == "not in"
 
     def test_unary_not(self):
         ir = compile_pattern_to_rust_ir("not $X")

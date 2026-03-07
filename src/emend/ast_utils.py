@@ -1,6 +1,7 @@
 """AST utilities for traversing and finding symbols in Python code."""
 
 import fnmatch
+from pathlib import Path
 
 from emend.component_selector import NestedSymbol
 
@@ -33,12 +34,14 @@ def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list
     with open(filepath) as f:
         source = f.read()
 
+    ext = Path(filepath).suffix.lstrip('.') or 'py'
     rust_syms = emend_core.collect_symbols_from_str(
         source,
         max_depth=max_depth + 1 if max_depth is not None else None,
+        ext=ext,
     )
-    # Filter out variables and references at the top level to match the
-    # old LibCST behavior (only function/class definitions).
+    # Filter out variables and references at the top level
+    # to return only function/class definitions.
     return [_rust_dict_to_nested_symbol(d) for d in rust_syms
             if d.get("kind") not in ("variable", "reference")]
 

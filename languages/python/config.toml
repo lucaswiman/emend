@@ -12,6 +12,7 @@
 name = "python"
 tree_sitter_grammar = "tree-sitter-python"
 file_extensions = ["py", "pyi"]
+keywords = ["True", "False", "None"]
 
 # ---------------------------------------------------------------------------
 # Scoping rules
@@ -151,6 +152,9 @@ module_field = "module_name"
 name_field = "name"
 alias_field = "alias"
 star_import = "wildcard_import"
+dotted_name = "dotted_name"
+aliased_import = "aliased_import"
+identifier = "identifier"
 
 # Import resolution strategy. Built-in strategies:
 #   "python" -- importlib semantics: sys.path, src/ layout detection,
@@ -190,3 +194,153 @@ public_by_default = true
 private_prefix = "_"
 # Dunder methods are always considered public/entry-points
 dunder_is_public = true
+
+[symbols]
+function_node = "function_definition"
+class_node = "class_definition"
+decorated_node = "decorated_definition"
+definition_field = "definition"
+async_keyword = "async"
+name_field = "name"
+parameters_field = "parameters"
+return_type_field = "return_type"
+body_field = "body"
+superclasses_field = "superclasses"
+decorator_node = "decorator"
+expression_statement_node = "expression_statement"
+
+[[symbols.param_types]]
+node = "identifier"
+name_source = "self"
+[[symbols.param_types]]
+node = "typed_parameter"
+name_source = "child:0"
+[[symbols.param_types]]
+node = "default_parameter"
+name_source = "field:name"
+[[symbols.param_types]]
+node = "typed_default_parameter"
+name_source = "field:name"
+[[symbols.param_types]]
+node = "list_splat_pattern"
+name_source = "child:0"
+prefix = "*"
+[[symbols.param_types]]
+node = "dictionary_splat_pattern"
+name_source = "child:0"
+prefix = "**"
+
+[[symbols.param_separators]]
+node = "positional_separator"
+display = "/"
+[[symbols.param_separators]]
+node = "keyword_separator"
+display = "*"
+
+[symbols.statements]
+simple = [
+    "expression_statement", "return_statement", "delete_statement",
+    "raise_statement", "pass_statement", "break_statement",
+    "continue_statement", "import_statement", "import_from_statement",
+    "future_import_statement", "global_statement", "nonlocal_statement",
+    "assert_statement", "type_alias_statement", "print_statement",
+]
+compound = [
+    "if_statement", "for_statement", "while_statement", "try_statement",
+    "with_statement", "function_definition", "class_definition",
+    "decorated_definition", "match_statement",
+]
+recurse_into = [
+    "block", "module", "elif_clause", "else_clause",
+    "except_clause", "finally_clause", "case_clause",
+]
+
+[builtins]
+names = [
+    "print", "len", "range", "int", "str", "float", "bool", "list",
+    "dict", "set", "tuple", "type", "isinstance", "issubclass",
+    "hasattr", "getattr", "setattr", "delattr", "property",
+    "staticmethod", "classmethod", "super", "object", "Exception",
+    "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError",
+    "AttributeError", "ImportError", "OSError", "IOError", "FileNotFoundError",
+    "NotImplementedError", "StopIteration", "GeneratorExit", "SystemExit",
+    "AssertionError", "NameError", "ZeroDivisionError", "OverflowError",
+    "abs", "all", "any", "bin", "bytes", "callable", "chr", "complex",
+    "dir", "divmod", "enumerate", "eval", "exec", "filter", "format",
+    "frozenset", "globals", "hash", "hex", "id", "input" , "iter",
+    "map", "max", "min", "next", "oct", "open", "ord", "pow",
+    "repr", "reversed", "round", "slice", "sorted", "sum", "vars",
+    "zip", "breakpoint", "memoryview", "bytearray",
+    "__name__", "__file__", "__doc__", "__package__", "__spec__",
+    "__import__", "__build_class__"
+]
+
+[pattern_matching]
+function_def = "function_definition"
+class_def = "class_definition"
+decorated_def = "decorated_definition"
+call = "call"
+attribute = "attribute"
+identifier = "identifier"
+assignment = "assignment"
+augmented_assignment = "augmented_assignment"
+annotated_assignment = "annotated_assignment"
+return_stmt = "return_statement"
+if_stmt = "if_statement"
+while_stmt = "while_statement"
+for_stmt = "for_statement"
+with_stmt = "with_statement"
+try_stmt = "try_statement"
+except_handler = "except_clause"
+for_in_clause = "for_in_clause"
+if_clause = "if_clause"
+pair = "pair"
+import_stmt = "import_statement"
+import_from_stmt = "import_from_statement"
+assert_stmt = "assert_statement"
+raise_stmt = "raise_statement"
+delete_stmt = "delete_statement"
+global_stmt = "global_statement"
+nonlocal_stmt = "nonlocal_statement"
+await_expr = "await"
+yield_expr = "yield"
+lambda = "lambda"
+named_expr = "named_expression"
+integer = "integer"
+float = "float"
+string = "string"
+list = "list"
+tuple = "tuple"
+set = "set"
+dict = "dictionary"
+binary_operator = "binary_operator"
+boolean_operator = "boolean_operator"
+unary_operator = "unary_operator"
+comparison_operator = "comparison_operator"
+subscript = "subscript"
+keyword_argument = "keyword_argument"
+list_splat = "list_splat"
+dictionary_splat = "dictionary_splat"
+statement_nodes = [
+    "expression_statement", "return_statement", "if_statement",
+    "for_statement", "while_statement", "try_statement",
+    "with_statement", "function_definition", "class_definition",
+    "decorated_definition", "assignment", "augmented_assignment",
+    "import_statement", "import_from_statement", "assert_statement",
+    "raise_statement", "delete_statement", "global_statement",
+    "nonlocal_statement",
+]
+func_field = "function"
+args_field = "arguments"
+object_field = "object"
+attr_field = "attribute"
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = "type"
+value_field = "value"
+condition_field = "condition"
+target_field = "left"
+iter_field = "right"
+elt_field = "body"
+

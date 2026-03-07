@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 license = "MPL-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "Lucas Wiman", email = "lucas.wiman@gmail.com"}]
-keywords = ["refactoring", "python", "code-transformation", "libcst"]
+keywords = ["refactoring", "python", "code-transformation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["typer", "libcst", "lark", "pyyaml"]
+dependencies = ["typer", "lark", "pyyaml"]
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]

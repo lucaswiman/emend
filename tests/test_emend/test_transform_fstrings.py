@@ -1,7 +1,6 @@
 """Tests for f-string patterns (Phase 3b)."""
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern
 

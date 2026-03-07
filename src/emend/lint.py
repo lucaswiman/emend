@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import logging
-import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 import yaml
-from emend.transform import find_pattern, replace_pattern, extract_pattern_literals, _NOQA_RE
+from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 
 
 @dataclass
@@ -56,38 +54,18 @@ def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
     all emend rules) or a set of emend rule names extracted from
     ``emend:<rule>`` entries.
     """
-    result: dict[int, set[str] | None] = {}
-    try:
-        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-        for tok_type, tok_string, (srow, _), _, _ in tokens:
-            if tok_type == tokenize.COMMENT:
-                m = _NOQA_RE.search(tok_string)
-                if m:
-                    rules_str = m.group(1)
-                    if rules_str:
-                        rules = set()
-                        for r in rules_str.split(","):
-                            r = r.strip()
-                            if r.startswith("emend:"):
-                                rules.add(r[len("emend:"):])
-                        if rules:
-                            result[srow] = rules
-                        # e.g. "# noqa: E501" with no emend: prefix → no effect
-                    else:
-                        result[srow] = None  # bare noqa suppresses all
-    except tokenize.TokenError:
-        pass
-    return result
+    from emend.language_plugins import load_plugin
+    return load_plugin("python").comment_handler.find_noqa_comments(source)
 
 
-def _build_statement_line_map(source: str) -> dict[int, tuple[int, int]]:
+def _build_statement_line_map(source: str, ext: str = "py") -> dict[int, tuple[int, int]]:
     """Build a mapping from line -> (stmt_start, stmt_end) using Rust tree-sitter.
 
-    Replaces the LibCST ``_StatementRangeMapper`` visitor.
+    Uses emend_core.get_statement_ranges() for statement range mapping.
     """
     from emend import emend_core
     line_to_range: dict[int, tuple[int, int]] = {}
-    for start, end in emend_core.get_statement_ranges(source):
+    for start, end in emend_core.get_statement_ranges(source, ext=ext):
         for line in range(start, end + 1):
             line_to_range[line] = (start, end)
     return line_to_range
@@ -217,6 +195,7 @@ def run_lint(
     rule_filter: str | None = None,
     deadcode_config: DeadCodeConfig | None = None,
     project_path: str | None = None,
+    language: str = "python",
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
@@ -257,24 +236,22 @@ def run_lint(
 
     # --- Rust fast-path: batch process compatible find-only rules ---
     # Rules whose patterns compile to Rust IR are handled here; patterns too
-    # complex for the Rust engine fall through to the LibCST path below.
+    # complex for the batch Rust engine fall through to the single-file path below.
     from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
 
     rust_rules = []
-    libcst_fallback = []
+    fallback_rules = []
     for rule in find_only_rules:
-        ir = compile_pattern_to_rust_ir(rule.find)
+        ir = compile_pattern_to_rust_ir(rule.find, language=language)
         if ir is None:
-            libcst_fallback.append(rule)
+            fallback_rules.append(rule)
             continue
-        ni_ir = compile_constraint_to_rust_ir(rule.not_inside) if rule.not_inside else None
+        ni_ir = compile_constraint_to_rust_ir(rule.not_inside, language=language) if rule.not_inside else None
         if rule.not_inside is not None and ni_ir is None:
-            # not_inside constraint didn't compile to Rust IR — use LibCST
-            libcst_fallback.append(rule)
+            # not_inside constraint didn't compile to batch Rust IR — use single-file path
+            fallback_rules.append(rule)
             continue
         rust_rules.append((rule, ir, ni_ir))
-
-    libcst_rules = libcst_fallback
 
     # Single-pass batched scan: parse each file once, apply all rules.
     # Union of per-rule file sets — extra files cost one extra tree walk
@@ -324,12 +301,12 @@ def run_lint(
                 match_text=text.strip(),
             ))
 
-    # Determine files that need LibCST processing (remaining find rules + fix rules)
+    # Determine files that need single-file processing (remaining find rules + fix rules)
     files_needing_processing: set[str] = set()
-    for rule in libcst_rules:
+    for rule in fallback_rules:
         files_needing_processing |= rule_file_sets.get(rule.name, set())
 
-    # --- LibCST find-only rules ---
+    # --- Single-file find rules ---
     def _process_file_fallback(file_path: str) -> list[LintViolation]:
         source = all_file_contents.get(file_path)
         if source is None:
@@ -339,7 +316,7 @@ def run_lint(
         noqa_ranges: list[tuple[int, int, set[str] | None]] | None = None
         # Build line-offset table lazily for extracting match text from source.
         line_starts: list[int] | None = None
-        for rule in libcst_rules:
+        for rule in fallback_rules:
             if file_path not in rule_file_sets.get(rule.name, set()):
                 continue
             try:
@@ -348,6 +325,7 @@ def run_lint(
                     file_path,
                     not_inside=rule.not_inside,
                     source_override=source,
+                    language=language,
                 )
             except Exception:
                 logger.debug(
@@ -414,6 +392,7 @@ def run_lint(
                     rule.find,
                     file_path,
                     not_inside=rule.not_inside,
+                    language=language,
                 )
             except Exception:
                 logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
@@ -438,6 +417,7 @@ def run_lint(
                 file_path,
                 not_inside=rule.not_inside,
                 apply=True,
+                language=language,
             )
             if count > 0 and suppressed_lines:
                 fixed_lines = Path(file_path).read_text().splitlines(keepends=True)

@@ -1,10 +1,9 @@
 """Tests for pattern find features: negated type constraints, compound statements, decorators, lambdas."""
 
 import pytest
-import libcst as cst
 
 from emend.transform import find_pattern, replace_pattern
-from emend.pattern import parse_pattern, compile_pattern_to_matcher
+from emend.pattern import parse_pattern
 
 
 # ── Feature 1: Negated Type Constraints ──────────────────────────────────────
@@ -31,7 +30,7 @@ class TestNegatedTypeConstraints:
         matches = find_pattern("range($X:!int)", str(test_file))
         # Should match range(n) and range(len(items)), but NOT range(10)
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["X"]) for m_ in matches}
+        captured = {m_.captures["X"] for m_ in matches}
         assert captured == {"n", "len(items)"}
 
     def test_negated_str_matches_non_string(self, tmp_path):
@@ -45,7 +44,7 @@ class TestNegatedTypeConstraints:
         matches = find_pattern("print($X:!str)", str(test_file))
         # Should match print(42) and print(x), not print('hello')
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["X"]) for m_ in matches}
+        captured = {m_.captures["X"] for m_ in matches}
         assert captured == {"42", "x"}
 
     def test_negated_call_matches_non_call(self, tmp_path):
@@ -59,7 +58,7 @@ class TestNegatedTypeConstraints:
         matches = find_pattern("foo($X:!call)", str(test_file))
         # Should match foo(x) and foo(42), not foo(bar())
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["X"]) for m_ in matches}
+        captured = {m_.captures["X"] for m_ in matches}
         assert captured == {"x", "42"}
 
     def test_negated_identifier_matches_non_name(self, tmp_path):
@@ -73,7 +72,7 @@ class TestNegatedTypeConstraints:
         matches = find_pattern("func($X:!identifier)", str(test_file))
         # Should match func(42) and func('hello'), not func(x)
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["X"]) for m_ in matches}
+        captured = {m_.captures["X"] for m_ in matches}
         assert captured == {"42", "'hello'"}
 
 
@@ -96,7 +95,7 @@ class TestCompoundStatementPatterns:
         )
         matches = find_pattern("if $COND:", str(test_file))
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["COND"]) for m_ in matches}
+        captured = {m_.captures["COND"] for m_ in matches}
         assert captured == {"x > 0", "y == 'hello'"}
 
     def test_while_condition_pattern(self, tmp_path):
@@ -112,7 +111,7 @@ class TestCompoundStatementPatterns:
         )
         matches = find_pattern("while $COND:", str(test_file))
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["COND"]) for m_ in matches}
+        captured = {m_.captures["COND"] for m_ in matches}
         assert captured == {"True", "x > 0"}
 
     def test_for_loop_pattern(self, tmp_path):
@@ -128,8 +127,8 @@ class TestCompoundStatementPatterns:
         )
         matches = find_pattern("for $VAR in $ITER:", str(test_file))
         assert len(matches) == 2
-        captured_vars = {cst.Module([]).code_for_node(m_.captures["VAR"]) for m_ in matches}
-        captured_iters = {cst.Module([]).code_for_node(m_.captures["ITER"]) for m_ in matches}
+        captured_vars = {m_.captures["VAR"] for m_ in matches}
+        captured_iters = {m_.captures["ITER"] for m_ in matches}
         assert captured_vars == {"x", "item"}
         assert captured_iters == {"range(10)", "items"}
 
@@ -147,7 +146,7 @@ class TestCompoundStatementPatterns:
         matches = find_pattern("with $CTX as $VAR:", str(test_file))
         # Should match only the two 'with ... as ...' forms
         assert len(matches) == 2
-        captured_ctxs = {cst.Module([]).code_for_node(m_.captures["CTX"]) for m_ in matches}
+        captured_ctxs = {m_.captures["CTX"] for m_ in matches}
         assert captured_ctxs == {"open('file.txt')", "lock"}
 
     def test_with_no_as_pattern(self, tmp_path):
@@ -187,8 +186,8 @@ class TestDecoratorPatterns:
         )
         matches = find_pattern("@$DEC\ndef $FUNC($...ARGS):", str(test_file))
         assert len(matches) == 2
-        captured_decs = {cst.Module([]).code_for_node(m_.captures["DEC"]) for m_ in matches}
-        captured_funcs = {cst.Module([]).code_for_node(m_.captures["FUNC"]) for m_ in matches}
+        captured_decs = {m_.captures["DEC"] for m_ in matches}
+        captured_funcs = {m_.captures["FUNC"] for m_ in matches}
         assert captured_decs == {"property", "staticmethod"}
         assert captured_funcs == {"name", "create"}
 
@@ -206,7 +205,7 @@ class TestDecoratorPatterns:
         )
         matches = find_pattern("@property\ndef $FUNC($...ARGS):", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["FUNC"]) == "name"
+        assert matches[0].captures["FUNC"] == "name"
 
     def test_undecorated_not_matched(self, tmp_path):
         """Decorated function pattern does not match undecorated functions."""
@@ -235,7 +234,7 @@ class TestLambdaPatterns:
         )
         matches = find_pattern("lambda $X: $EXPR", str(test_file))
         assert len(matches) == 2
-        captured_bodies = {cst.Module([]).code_for_node(m_.captures["EXPR"]) for m_ in matches}
+        captured_bodies = {m_.captures["EXPR"] for m_ in matches}
         assert captured_bodies == {"x + 1", "y * 2"}
 
     def test_lambda_specific_body_pattern(self, tmp_path):
@@ -248,7 +247,7 @@ class TestLambdaPatterns:
         matches = find_pattern("lambda $X: $X + 1", str(test_file))
         # Should only match the first one where body is "$X + 1"
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["X"]) == "x"
+        assert matches[0].captures["X"] == "x"
 
     def test_lambda_no_params_pattern(self, tmp_path):
         """'lambda: $EXPR' matches parameterless lambdas."""
@@ -259,7 +258,7 @@ class TestLambdaPatterns:
         )
         matches = find_pattern("lambda: $EXPR", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["EXPR"]) == "42"
+        assert matches[0].captures["EXPR"] == "42"
 
 
 # ── Feature 5: Star Expression Patterns (3.2) ────────────────────────────────
@@ -278,7 +277,7 @@ class TestStarExpressionPatterns:
         )
         matches = find_pattern("func(*$ARGS)", str(test_file))
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["ARGS"]) for m_ in matches}
+        captured = {m_.captures["ARGS"] for m_ in matches}
         assert captured == {"args", "items"}
 
     def test_double_star_kwarg_pattern(self, tmp_path):
@@ -291,7 +290,7 @@ class TestStarExpressionPatterns:
         )
         matches = find_pattern("func(**$KWARGS)", str(test_file))
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["KWARGS"]) for m_ in matches}
+        captured = {m_.captures["KWARGS"] for m_ in matches}
         assert captured == {"kwargs", "options"}
 
     def test_star_and_double_star_pattern(self, tmp_path):
@@ -305,8 +304,8 @@ class TestStarExpressionPatterns:
         )
         matches = find_pattern("func(*$ARGS, **$KWARGS)", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["ARGS"]) == "args"
-        assert cst.Module([]).code_for_node(matches[0].captures["KWARGS"]) == "kwargs"
+        assert matches[0].captures["ARGS"] == "args"
+        assert matches[0].captures["KWARGS"] == "kwargs"
 
     def test_star_does_not_match_regular_args(self, tmp_path):
         """'func(*$ARGS)' does NOT match regular positional args."""
@@ -328,8 +327,8 @@ class TestStarExpressionPatterns:
         )
         matches = find_pattern("func($X, *$ARGS)", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["X"]) == "1"
-        assert cst.Module([]).code_for_node(matches[0].captures["ARGS"]) == "rest"
+        assert matches[0].captures["X"] == "1"
+        assert matches[0].captures["ARGS"] == "rest"
 
 
 # ── Feature 6: Async Compound Statement Patterns (3.3) ───────────────────────
@@ -349,8 +348,8 @@ class TestAsyncCompoundStatementPatterns:
         )
         matches = find_pattern("async for $VAR in $ITER:", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["VAR"]) == "x"
-        assert cst.Module([]).code_for_node(matches[0].captures["ITER"]) == "aiter"
+        assert matches[0].captures["VAR"] == "x"
+        assert matches[0].captures["ITER"] == "aiter"
 
     def test_async_with_pattern(self, tmp_path):
         """'async with $CTX as $VAR:' matches only async with statements."""
@@ -363,8 +362,8 @@ class TestAsyncCompoundStatementPatterns:
         )
         matches = find_pattern("async with $CTX as $VAR:", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["CTX"]) == "ctx()"
-        assert cst.Module([]).code_for_node(matches[0].captures["VAR"]) == "v"
+        assert matches[0].captures["CTX"] == "ctx()"
+        assert matches[0].captures["VAR"] == "v"
 
     def test_async_with_no_as_pattern(self, tmp_path):
         """'async with $CTX:' matches async with without 'as' clause."""
@@ -377,7 +376,7 @@ class TestAsyncCompoundStatementPatterns:
         )
         matches = find_pattern("async with $CTX:", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["CTX"]) == "lock()"
+        assert matches[0].captures["CTX"] == "lock()"
 
     def test_regular_for_matches_both_sync_and_async(self, tmp_path):
         """'for $VAR in $ITER:' matches both sync and async for loops."""
@@ -425,9 +424,9 @@ class TestMultipleDecoratorPatterns:
         )
         matches = find_pattern("@$DEC1\n@$DEC2\ndef $FUNC($...ARGS):", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["DEC1"]) == "dec1"
-        assert cst.Module([]).code_for_node(matches[0].captures["DEC2"]) == "dec2"
-        assert cst.Module([]).code_for_node(matches[0].captures["FUNC"]) == "func"
+        assert matches[0].captures["DEC1"] == "dec1"
+        assert matches[0].captures["DEC2"] == "dec2"
+        assert matches[0].captures["FUNC"] == "func"
 
     def test_async_decorated_function_pattern(self, tmp_path):
         """'@$DEC\\nasync def $FUNC($...ARGS):' matches only async decorated functions."""
@@ -443,7 +442,7 @@ class TestMultipleDecoratorPatterns:
         )
         matches = find_pattern("@$DEC\nasync def $FUNC($...ARGS):", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["FUNC"]) == "handler"
+        assert matches[0].captures["FUNC"] == "handler"
 
     def test_specific_decorator_with_call_pattern(self, tmp_path):
         """'@app.route($PATH)\\ndef $FUNC($...ARGS):' matches decorator with call args."""
@@ -459,8 +458,8 @@ class TestMultipleDecoratorPatterns:
         )
         matches = find_pattern("@app.route($PATH)\ndef $FUNC($...ARGS):", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["PATH"]) == "'/api'"
-        assert cst.Module([]).code_for_node(matches[0].captures["FUNC"]) == "handler"
+        assert matches[0].captures["PATH"] == "'/api'"
+        assert matches[0].captures["FUNC"] == "handler"
 
 
 # ── Feature 8: Lambda Star Args (3.5) ────────────────────────────────────────
@@ -479,8 +478,8 @@ class TestLambdaStarArgs:
         )
         matches = find_pattern("lambda *$ARGS: $EXPR", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["ARGS"]) == "args"
-        assert cst.Module([]).code_for_node(matches[0].captures["EXPR"]) == "sum(args)"
+        assert matches[0].captures["ARGS"] == "args"
+        assert matches[0].captures["EXPR"] == "sum(args)"
 
     def test_lambda_star_and_double_star_pattern(self, tmp_path):
         """'lambda *$ARGS, **$KWARGS: $EXPR' matches lambdas with both."""
@@ -491,8 +490,8 @@ class TestLambdaStarArgs:
         )
         matches = find_pattern("lambda *$ARGS, **$KWARGS: $EXPR", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["ARGS"]) == "a"
-        assert cst.Module([]).code_for_node(matches[0].captures["KWARGS"]) == "kw"
+        assert matches[0].captures["ARGS"] == "a"
+        assert matches[0].captures["KWARGS"] == "kw"
 
     def test_lambda_star_does_not_match_regular_params(self, tmp_path):
         """'lambda *$ARGS: $EXPR' does NOT match regular-param lambdas."""
@@ -520,8 +519,8 @@ class TestDictLiteralKeyPatterns:
         )
         matches = find_pattern("{'name': $NAME, 'age': $AGE}", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["NAME"]) == "'Alice'"
-        assert cst.Module([]).code_for_node(matches[0].captures["AGE"]) == "30"
+        assert matches[0].captures["NAME"] == "'Alice'"
+        assert matches[0].captures["AGE"] == "30"
 
     def test_partial_dict_pattern_with_spread(self, tmp_path):
         """'{'type': $TYPE, ...}' matches dicts containing 'type' key plus others."""
@@ -533,7 +532,7 @@ class TestDictLiteralKeyPatterns:
         )
         matches = find_pattern("{'type': $TYPE, ...}", str(test_file))
         assert len(matches) == 2
-        captured = {cst.Module([]).code_for_node(m_.captures["TYPE"]) for m_ in matches}
+        captured = {m_.captures["TYPE"] for m_ in matches}
         assert captured == {"'user'", "'admin'"}
 
     def test_partial_dict_with_literal_value(self, tmp_path):
@@ -566,7 +565,7 @@ class TestDictLiteralKeyPatterns:
         matches = find_pattern("{'name': $NAME}", str(test_file))
         # Only matches exact single-key dict
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["NAME"]) == "'Bob'"
+        assert matches[0].captures["NAME"] == "'Bob'"
 
     def test_partial_dict_multiple_required_keys(self, tmp_path):
         """'{'type': $TYPE, 'name': $NAME, ...}' requires both keys."""
@@ -578,7 +577,7 @@ class TestDictLiteralKeyPatterns:
         )
         matches = find_pattern("{'type': $TYPE, 'name': $NAME, ...}", str(test_file))
         assert len(matches) == 2
-        captured_types = {cst.Module([]).code_for_node(m_.captures["TYPE"]) for m_ in matches}
+        captured_types = {m_.captures["TYPE"] for m_ in matches}
         assert captured_types == {"'user'", "'guest'"}
 
 
@@ -598,7 +597,7 @@ class TestChainedComparisonPatterns:
         )
         matches = find_pattern("$A < $B < $C", str(test_file))
         assert len(matches) == 2
-        captured_bs = {cst.Module([]).code_for_node(m_.captures["B"]) for m_ in matches}
+        captured_bs = {m_.captures["B"] for m_ in matches}
         assert captured_bs == {"a", "x"}
 
     def test_mixed_operators(self, tmp_path):
@@ -611,9 +610,9 @@ class TestChainedComparisonPatterns:
         )
         matches = find_pattern("$A <= $B < $C", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["A"]) == "0"
-        assert cst.Module([]).code_for_node(matches[0].captures["B"]) == "a"
-        assert cst.Module([]).code_for_node(matches[0].captures["C"]) == "10"
+        assert matches[0].captures["A"] == "0"
+        assert matches[0].captures["B"] == "a"
+        assert matches[0].captures["C"] == "10"
 
     def test_chained_comparison_replacement(self, tmp_path):
         """Replace chained comparison pattern."""
@@ -646,8 +645,8 @@ class TestWalrusPatterns:
         )
         matches = find_pattern("if ($VAR := $EXPR):", str(test_file))
         assert len(matches) == 2
-        captured_vars = {cst.Module([]).code_for_node(m_.captures["VAR"]) for m_ in matches}
-        captured_exprs = {cst.Module([]).code_for_node(m_.captures["EXPR"]) for m_ in matches}
+        captured_vars = {m_.captures["VAR"] for m_ in matches}
+        captured_exprs = {m_.captures["EXPR"] for m_ in matches}
         assert captured_vars == {"x", "result"}
         assert captured_exprs == {"func()", "compute(data)"}
 
@@ -662,9 +661,9 @@ class TestWalrusPatterns:
             "[$X for $VAR in $ITER if ($TARGET := $EXPR)]", str(test_file)
         )
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["X"]) == "x"
-        assert cst.Module([]).code_for_node(matches[0].captures["TARGET"]) == "z"
-        assert cst.Module([]).code_for_node(matches[0].captures["EXPR"]) == "f(y)"
+        assert matches[0].captures["X"] == "x"
+        assert matches[0].captures["TARGET"] == "z"
+        assert matches[0].captures["EXPR"] == "f(y)"
 
     def test_walrus_in_while(self, tmp_path):
         """Walrus in while condition matches correctly."""
@@ -677,8 +676,8 @@ class TestWalrusPatterns:
         )
         matches = find_pattern("while ($VAR := $EXPR):", str(test_file))
         assert len(matches) == 1
-        assert cst.Module([]).code_for_node(matches[0].captures["VAR"]) == "chunk"
-        assert cst.Module([]).code_for_node(matches[0].captures["EXPR"]) == "read()"
+        assert matches[0].captures["VAR"] == "chunk"
+        assert matches[0].captures["EXPR"] == "read()"
 
     def test_standalone_walrus_pattern(self, tmp_path):
         """'($VAR := $EXPR)' matches walrus operator expressions anywhere."""
@@ -690,5 +689,5 @@ class TestWalrusPatterns:
         )
         matches = find_pattern("($VAR := $EXPR)", str(test_file))
         assert len(matches) == 2
-        captured_vars = {cst.Module([]).code_for_node(m_.captures["VAR"]) for m_ in matches}
+        captured_vars = {m_.captures["VAR"] for m_ in matches}
         assert captured_vars == {"val", "result"}
