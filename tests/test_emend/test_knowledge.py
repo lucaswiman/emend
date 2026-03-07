@@ -455,9 +455,16 @@ class TestRepoCheckouts:
     def test_repo_checkouts_root_default(self, monkeypatch, tmp_path):
         from pathlib import Path as _Path
         from emend.knowledge import _repo_checkouts_root
+        monkeypatch.delenv("EMEND_CACHE_DIR", raising=False)
         monkeypatch.setattr(_Path, "home", staticmethod(lambda: tmp_path))
         root = _repo_checkouts_root()
         assert root == tmp_path / ".cache" / "emend" / "repo-checkouts"
+
+    def test_repo_checkouts_root_env_var(self, monkeypatch, tmp_path):
+        from emend.knowledge import _repo_checkouts_root
+        monkeypatch.setenv("EMEND_CACHE_DIR", str(tmp_path / "custom"))
+        root = _repo_checkouts_root()
+        assert root == tmp_path / "custom" / "repo-checkouts"
 
     def test_repo_checkouts_root_override(self):
         from pathlib import Path as _Path

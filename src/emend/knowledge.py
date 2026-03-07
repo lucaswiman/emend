@@ -809,17 +809,30 @@ class KnowledgeBase:
         )
 
 
+def _global_cache_dir() -> Path:
+    """Return the global emend cache directory.
+
+    Checks ``EMEND_CACHE_DIR`` environment variable first, then falls back
+    to ``~/.cache/emend``.
+    """
+    import os
+    env = os.environ.get("EMEND_CACHE_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / ".cache" / "emend"
+
+
 def _repo_checkouts_root(cache_dir: str | None = None) -> Path:
     """Return the global repo-checkouts directory.
 
     Layout::
 
-        ~/.cache/emend/repo-checkouts/{repo_id}/contents   — bare clone
-        ~/.cache/emend/repo-checkouts/{repo_id}/checkouts/{ref} — worktrees
+        {EMEND_CACHE_DIR}/repo-checkouts/{repo_id}/contents   — bare clone
+        {EMEND_CACHE_DIR}/repo-checkouts/{repo_id}/checkouts/{ref} — worktrees
     """
     if cache_dir:
         return Path(cache_dir)
-    return Path.home() / ".cache" / "emend" / "repo-checkouts"
+    return _global_cache_dir() / "repo-checkouts"
 
 
 def _repo_id(repo: str) -> str:

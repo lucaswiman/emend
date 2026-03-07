@@ -16,6 +16,7 @@ A Python refactoring CLI built on `LibCST <https://github.com/Instagram/LibCST>`
    commands
    patterns
    linting
+   knowledge
    recipes
    grammar_and_cookbook
    technical_details
