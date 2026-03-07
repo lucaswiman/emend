@@ -282,12 +282,6 @@ class KnowledgeBase:
         conn = self._conn
         conn.executescript(_DDL)
 
-        # Migrate: add 'deleted' columns if missing (v1 → v2).
-        for table in ("identifier_mapping", "knowledge_note", "module_mapping"):
-            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            if "deleted" not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
-
         if _fts5_available(conn):
             conn.executescript(_FTS_DDL)
             conn.executescript(_TRIGGER_DDL)
