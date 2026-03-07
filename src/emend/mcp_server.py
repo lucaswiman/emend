@@ -49,6 +49,12 @@ emend is a Python refactoring tool. All write operations default to dry-run
 
 Call the grammar_and_cookbook tool for full syntax reference.
 
+## Knowledge base
+
+emend includes a persistent knowledge base for cross-service identifier
+mappings and free-form notes. Use kb_* tools to store/retrieve notes
+and mapping_* tools for cross-service identifier relationships.
+
 ## Quick reference
 
 Selectors: file.py::func, file.py::Class.method, file.py::func[params][x],
@@ -648,6 +654,229 @@ def lint(
     return "\n".join(lines)
 
 
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base: notes
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def kb_search(
+    query: Annotated[str, Field(description="Search query (substring match via FTS5 trigram).")],
+    category: Annotated[str | None, Field(description="Filter by category: note, architecture, convention, mapping, decision, pattern.")] = None,
+    project: Annotated[str | None, Field(description="Filter by project name.")] = None,
+    file_path: Annotated[str | None, Field(description="Filter by related file path.")] = None,
+    symbol: Annotated[str | None, Field(description="Filter by related symbol name.")] = None,
+    source: Annotated[str | None, Field(description="Filter by source: user, llm, heuristic.")] = None,
+    limit: Annotated[int, Field(description="Max results.")] = 50,
+) -> str:
+    """Search the knowledge base for notes.
+
+    Uses FTS5 trigram indexing for fast substring matching.
+    Returns JSON array of matching notes.
+    """
+    from emend.knowledge import KnowledgeBase, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.search_notes(
+            query, category=category, project=project,
+            file_path=file_path, symbol=symbol, source=source, limit=limit,
+        )
+        return json.dumps([note_to_dict(n) for n in results], indent=2)
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def kb_add(
+    title: Annotated[str, Field(description="Short title for the note.")],
+    content: Annotated[str, Field(description="Note content (free-form text, markdown, etc).")],
+    category: Annotated[str, Field(description="Category: note, architecture, convention, mapping, decision, pattern.")] = "note",
+    tags: Annotated[str, Field(description="Comma-separated tags for filtering.")] = "",
+    source: Annotated[str, Field(description="Who created this: user, llm, heuristic.")] = "llm",
+    project: Annotated[str, Field(description="Project/repo name this note relates to.")] = "",
+    file_path: Annotated[str, Field(description="Related file path (optional).")] = "",
+    symbol: Annotated[str, Field(description="Related symbol name (optional).")] = "",
+    metadata: Annotated[str, Field(description="Additional JSON metadata.")] = "{}",
+) -> str:
+    """Add a note to the knowledge base.
+
+    Use this to record architectural decisions, conventions, patterns,
+    or any information that should be retrievable later.
+    """
+    from emend.knowledge import KnowledgeBase, KnowledgeNote, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        note = KnowledgeNote(
+            title=title, content=content, category=category, tags=tags,
+            source=source, project=project, file_path=file_path, symbol=symbol,
+            metadata=json.loads(metadata),
+        )
+        note_id = kb.add_note(note)
+        saved = kb.get_note(note_id)
+        return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def kb_update(
+    note_id: Annotated[int, Field(description="ID of the note to update.")],
+    title: Annotated[str | None, Field(description="New title.")] = None,
+    content: Annotated[str | None, Field(description="New content.")] = None,
+    category: Annotated[str | None, Field(description="New category.")] = None,
+    tags: Annotated[str | None, Field(description="New tags.")] = None,
+) -> str:
+    """Update an existing knowledge note."""
+    from emend.knowledge import KnowledgeBase, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        kwargs = {}
+        if title is not None:
+            kwargs["title"] = title
+        if content is not None:
+            kwargs["content"] = content
+        if category is not None:
+            kwargs["category"] = category
+        if tags is not None:
+            kwargs["tags"] = tags
+        ok = kb.update_note(note_id, **kwargs)
+        if not ok:
+            return json.dumps({"error": f"Note {note_id} not found."})
+        saved = kb.get_note(note_id)
+        return json.dumps(note_to_dict(saved), indent=2)  # type: ignore[arg-type]
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def kb_delete(
+    note_id: Annotated[int, Field(description="ID of the note to delete.")],
+) -> str:
+    """Delete a knowledge note by ID."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_note(note_id)
+        return json.dumps({"deleted": ok, "id": note_id})
+    finally:
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base: identifier mappings
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def mapping_search(
+    query: Annotated[str, Field(description="Search query (matches source_identifier, target_identifier, evidence).")],
+    source_project: Annotated[str | None, Field(description="Filter by source project.")] = None,
+    target_project: Annotated[str | None, Field(description="Filter by target project.")] = None,
+    relationship: Annotated[str | None, Field(description="Filter by relationship type: equivalent, calls, implements, produces, consumes.")] = None,
+    limit: Annotated[int, Field(description="Max results.")] = 50,
+) -> str:
+    """Search cross-service identifier mappings.
+
+    Finds mappings where the query matches source identifiers, target
+    identifiers, or evidence text.  Uses FTS5 trigram for fast substring
+    matching.
+    """
+    from emend.knowledge import KnowledgeBase, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.search_mappings(
+            query, source_project=source_project,
+            target_project=target_project, relationship=relationship, limit=limit,
+        )
+        return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def mapping_add(
+    source_project: Annotated[str, Field(description="Source project/repo name.")],
+    source_identifier: Annotated[str, Field(description="Qualified name in source (e.g. 'users.UserService.create').")],
+    target_project: Annotated[str, Field(description="Target project/repo name.")],
+    target_identifier: Annotated[str, Field(description="Qualified name in target (e.g. 'POST /api/v1/users').")],
+    source_kind: Annotated[str, Field(description="Kind of source: function, class, endpoint, model, field, module.")] = "",
+    target_kind: Annotated[str, Field(description="Kind of target: function, class, endpoint, model, field, module.")] = "",
+    relationship: Annotated[str, Field(description="Relationship type: equivalent, calls, implements, produces, consumes.")] = "equivalent",
+    confidence: Annotated[float, Field(description="Confidence 0.0–1.0 (1.0 for manual, lower for heuristic/LLM).")] = 1.0,
+    provenance: Annotated[str, Field(description="How this mapping was created: manual, heuristic, llm.")] = "llm",
+    evidence: Annotated[str, Field(description="Why this mapping exists (human-readable).")] = "",
+    metadata: Annotated[str, Field(description="Additional JSON metadata.")] = "{}",
+) -> str:
+    """Record a cross-service identifier mapping.
+
+    Use this when you discover that an identifier in one service/repo
+    corresponds to an identifier in another.  The mapping is persisted
+    in the knowledge DB and searchable via mapping_search.
+    """
+    from emend.knowledge import KnowledgeBase, IdentifierMapping, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        m = IdentifierMapping(
+            source_project=source_project,
+            source_identifier=source_identifier,
+            source_kind=source_kind,
+            target_project=target_project,
+            target_identifier=target_identifier,
+            target_kind=target_kind,
+            relationship=relationship,
+            confidence=confidence,
+            provenance=provenance,
+            evidence=evidence,
+            metadata=json.loads(metadata),
+        )
+        mid = kb.add_mapping(m)
+        saved = kb.get_mapping(mid)
+        return json.dumps(mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def mapping_lookup(
+    identifier: Annotated[str, Field(description="The identifier to look up (exact match).")],
+    project: Annotated[str | None, Field(description="Scope lookup to a specific project.")] = None,
+    direction: Annotated[str, Field(description="Which side to match: source, target, or both.")] = "both",
+) -> str:
+    """Look up all mappings for a specific identifier (exact match).
+
+    Useful for answering "what does X in project A correspond to elsewhere?"
+    """
+    from emend.knowledge import KnowledgeBase, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.find_mappings_for(identifier, project=project, direction=direction)
+        return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def mapping_delete(
+    mapping_id: Annotated[int, Field(description="ID of the mapping to delete.")],
+) -> str:
+    """Delete an identifier mapping by ID."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_mapping(mapping_id)
+        return json.dumps({"deleted": ok, "id": mapping_id})
+    finally:
+        kb.close()
 
 
 # ---------------------------------------------------------------------------
