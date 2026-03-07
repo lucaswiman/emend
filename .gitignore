@@ -16,3 +16,4 @@ benchmark-results/
 tags
 uv.lock
 *dylib*
+.claude/
