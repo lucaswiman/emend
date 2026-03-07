@@ -79,6 +79,9 @@ module_field = "source"
 name_field = "import_clause"
 # Node.js resolution strategy
 resolution = "node"
+dotted_name = "identifier"
+aliased_import = "import_alias"
+identifier = "identifier"
 
 [qualified_names]
 module_separator = "/"
@@ -93,7 +96,7 @@ private_prefix = "_"
 
 [symbols]
 function_node = "function_declaration"
-class_node = "class_declaration"
+class_node = "class_definition"
 # TypeScript has no decorated_definition wrapper; decorators are direct children
 decorated_node = ""
 definition_field = ""
@@ -146,3 +149,70 @@ names = [
     "Array", "Object", "String", "Number", "Boolean", "Math", "JSON", "Promise",
     "Error", "Set", "Map", "setTimeout", "setInterval", "clearTimeout", "clearInterval"
 ]
+
+[pattern_matching]
+function_def = "function_declaration"
+class_def = "class_declaration"
+decorated_def = ""
+call = "call_expression"
+attribute = "member_expression"
+identifier = "identifier"
+assignment = "assignment_expression"
+augmented_assignment = "augmented_assignment_expression"
+annotated_assignment = "variable_declarator"
+return_stmt = "return_statement"
+if_stmt = "if_statement"
+while_stmt = "while_statement"
+for_stmt = "for_statement"
+with_stmt = ""
+try_stmt = "try_statement"
+except_handler = "catch_clause"
+for_in_clause = "for_in_statement"
+if_clause = ""
+pair = "pair"
+import_stmt = "import_statement"
+import_from_stmt = "import_statement"
+assert_stmt = ""
+raise_stmt = "throw_statement"
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = "await_expression"
+yield_expr = "yield_expression"
+lambda = "arrow_function"
+named_expr = ""
+integer = "number"
+float = "number"
+string = "string"
+list = "array"
+tuple = "array"
+set = ""
+dict = "object"
+binary_operator = "binary_expression"
+boolean_operator = "binary_expression"
+unary_operator = "unary_expression"
+comparison_operator = "binary_expression"
+subscript = "subscript_expression"
+keyword_argument = ""
+list_splat = "spread_element"
+dictionary_splat = "spread_element"
+statement_nodes = [
+    "expression_statement", "return_statement", "if_statement",
+    "for_statement", "while_statement", "try_statement",
+    "with_statement", "function_declaration", "class_declaration",
+    "assignment_expression", "augmented_assignment_expression",
+    "import_statement", "throw_statement",
+]
+func_field = "function"
+args_field = "arguments"
+object_field = "object"
+attr_field = "property"
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = "type"
+value_field = "value"
+condition_field = "condition"
+target_field = "left"
+iter_field = "right"
+elt_field = "body"

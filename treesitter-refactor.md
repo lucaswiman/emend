@@ -1491,50 +1491,31 @@ The `collect_import()` function (`scope.rs:1553`) and
 
 ##### 3c. Generalize `matcher.rs` node type checks
 
-`matcher.rs` hardcodes `"function_definition"`, `"class_definition"`,
+`matcher.rs` previously hardcoded `"function_definition"`, `"class_definition"`,
 `"import_statement"`, `"import_from_statement"`, `"decorated_definition"`,
 `"assignment"`, and various Python statement node types.
 
-- [ ] **Add `[pattern_matching]` section to language config TOML**:
-  ```toml
-  [pattern_matching]
-  # Maps abstract IR node types to concrete tree-sitter node types
-  function_def = "function_definition"
-  class_def = "class_definition"
-  import_stmt = "import_statement"
-  import_from_stmt = "import_from_statement"
-  decorated_def = "decorated_definition"
-  assignment = "assignment"
-  # Statement node types (for "is this a statement?" checks)
-  statement_nodes = [
-      "expression_statement", "return_statement", "if_statement",
-      "for_statement", "while_statement", "try_statement",
-      "with_statement", "function_definition", "class_definition",
-      "decorated_definition", "assignment", "augmented_assignment",
-      "import_statement", "import_from_statement", "assert_statement",
-      "raise_statement", "delete_statement", "global_statement",
-      "nonlocal_statement",
-  ]
-  ```
-- [ ] **Refactor `matcher.rs`** to read node types from a config struct
-  rather than hardcoded string literals.  The `find_pattern_in_files()`
-  entry point already receives a language parameter — thread the loaded
-  config through to match functions.
-- [ ] **Note**: The `PatternNode` enum variants themselves (Call,
+- [x] **Add `[pattern_matching]` section to language config TOML**:
+  Added comprehensive mapping of abstract IR node types to concrete
+  tree-sitter node types, including field names.
+- [x] **Refactor `matcher.rs`** to read node types from a config struct
+  rather than hardcoded string literals.  Threaded `config` through all
+  matching functions.
+- [x] **Note**: The `PatternNode` enum variants themselves (Call,
   FuncDef, ClassDef, etc.) are abstract and language-agnostic.  Only
-  the tree-sitter node type _strings_ they match against need to come
+  the tree-sitter node type _strings_ they match against now come
   from config.
 
 ##### 3d. Tests
 
-- [ ] Rust unit tests: verify that `walk_node()` with Python config
+- [x] Rust unit tests: verify that `walk_node()` with Python config
   produces identical scope trees as before the refactor.
-- [ ] Rust unit tests: verify that `walk_node()` with TypeScript config
+- [x] Rust unit tests: verify that `walk_node()` with TypeScript config
   correctly collects scopes for `function_declaration`,
   `arrow_function`, `class_declaration`.
-- [ ] Rust unit tests: verify `collect_import()` with TypeScript config
+- [x] Rust unit tests: verify `collect_import()` with TypeScript config
   handles `import { X } from 'module'` correctly.
-- [ ] Rust unit tests: verify `collect_symbols_impl()` with TypeScript
+- [x] Rust unit tests: verify `collect_symbols_impl()` with TypeScript
   config finds functions and classes.
 - [x] Python integration: `make test` still passes (Python config
   produces identical behavior).

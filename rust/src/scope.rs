@@ -233,6 +233,143 @@ pub struct LanguageConfig {
     pub builtins: BuiltinsSection,
     #[serde(default)]
     pub symbols: SymbolsSection,
+    #[serde(default)]
+    pub pattern_matching: PatternMatchingSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PatternMatchingSection {
+    #[serde(default)]
+    pub function_def: String,
+    #[serde(default)]
+    pub class_def: String,
+    #[serde(default)]
+    pub decorated_def: String,
+    #[serde(default)]
+    pub call: String,
+    #[serde(default)]
+    pub attribute: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub assignment: String,
+    #[serde(default)]
+    pub augmented_assignment: String,
+    #[serde(default)]
+    pub annotated_assignment: String,
+    #[serde(default)]
+    pub return_stmt: String,
+    #[serde(default)]
+    pub if_stmt: String,
+    #[serde(default)]
+    pub while_stmt: String,
+    #[serde(default)]
+    pub for_stmt: String,
+    #[serde(default)]
+    pub with_stmt: String,
+    #[serde(default)]
+    pub try_stmt: String,
+    #[serde(default)]
+    pub except_handler: String,
+    #[serde(default)]
+    pub for_in_clause: String,
+    #[serde(default)]
+    pub if_clause: String,
+    #[serde(default)]
+    pub pair: String,
+    #[serde(default)]
+    pub parenthesized_expression: String,
+    #[serde(default)]
+    pub not_operator: String,
+    #[serde(default)]
+    pub conditional_expression: String,
+    #[serde(default)]
+    pub true_literal: String,
+    #[serde(default)]
+    pub false_literal: String,
+    #[serde(default)]
+    pub none_literal: String,
+    #[serde(default)]
+    pub as_pattern: String,
+    #[serde(default)]
+    pub import_stmt: String,
+    #[serde(default)]
+    pub import_from_stmt: String,
+    #[serde(default)]
+    pub assert_stmt: String,
+    #[serde(default)]
+    pub raise_stmt: String,
+    #[serde(default)]
+    pub delete_stmt: String,
+    #[serde(default)]
+    pub global_stmt: String,
+    #[serde(default)]
+    pub nonlocal_stmt: String,
+    #[serde(default)]
+    pub await_expr: String,
+    #[serde(default)]
+    pub lambda: String,
+    #[serde(default)]
+    pub named_expr: String,
+    #[serde(default)]
+    pub integer: String,
+    #[serde(default)]
+    pub float: String,
+    #[serde(default)]
+    pub string: String,
+    #[serde(default)]
+    pub list: String,
+    #[serde(default)]
+    pub tuple: String,
+    #[serde(default)]
+    pub set: String,
+    #[serde(default)]
+    pub dict: String,
+    #[serde(default)]
+    pub binary_operator: String,
+    #[serde(default)]
+    pub boolean_operator: String,
+    #[serde(default)]
+    pub unary_operator: String,
+    #[serde(default)]
+    pub comparison_operator: String,
+    #[serde(default)]
+    pub subscript: String,
+    #[serde(default)]
+    pub keyword_argument: String,
+    #[serde(default)]
+    pub list_splat: String,
+    #[serde(default)]
+    pub dictionary_splat: String,
+    #[serde(default)]
+    pub statement_nodes: Vec<String>,
+    // Field names
+    #[serde(default)]
+    pub func_field: String,
+    #[serde(default)]
+    pub args_field: String,
+    #[serde(default)]
+    pub object_field: String,
+    #[serde(default)]
+    pub attr_field: String,
+    #[serde(default)]
+    pub left_field: String,
+    #[serde(default)]
+    pub right_field: String,
+    #[serde(default)]
+    pub operator_field: String,
+    #[serde(default)]
+    pub annotation_field: String,
+    #[serde(default)]
+    pub value_field: String,
+    #[serde(default)]
+    pub condition_field: String,
+    #[serde(default)]
+    pub target_field: String,
+    #[serde(default)]
+    pub iter_field: String,
+    #[serde(default)]
+    pub elt_field: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2268,6 +2405,94 @@ impl LanguageConfig {
                 ].into_iter().map(String::from).collect(),
             },
             symbols: SymbolsSection::python_default(),
+            pattern_matching: PatternMatchingSection {
+                function_def: "function_definition".to_string(),
+                class_def: "class_definition".to_string(),
+                decorated_def: "decorated_definition".to_string(),
+                call: "call".to_string(),
+                attribute: "attribute".to_string(),
+                identifier: "identifier".to_string(),
+                assignment: "assignment".to_string(),
+                augmented_assignment: "augmented_assignment".to_string(),
+                annotated_assignment: "annotated_assignment".to_string(),
+                return_stmt: "return_statement".to_string(),
+                if_stmt: "if_statement".to_string(),
+                while_stmt: "while_statement".to_string(),
+                for_stmt: "for_statement".to_string(),
+                with_stmt: "with_statement".to_string(),
+                try_stmt: "try_statement".to_string(),
+                except_handler: "except_clause".to_string(),
+                for_in_clause: "for_in_clause".to_string(),
+                if_clause: "if_clause".to_string(),
+                pair: "pair".to_string(),
+                parenthesized_expression: "parenthesized_expression".to_string(),
+                not_operator: "not_operator".to_string(),
+                conditional_expression: "conditional_expression".to_string(),
+                true_literal: "true".to_string(),
+                false_literal: "false".to_string(),
+                none_literal: "none".to_string(),
+                as_pattern: "as_pattern".to_string(),
+                import_stmt: "import_statement".to_string(),
+                import_from_stmt: "import_from_statement".to_string(),
+                assert_stmt: "assert_statement".to_string(),
+                raise_stmt: "raise_statement".to_string(),
+                delete_stmt: "delete_statement".to_string(),
+                global_stmt: "global_statement".to_string(),
+                nonlocal_stmt: "nonlocal_statement".to_string(),
+                await_expr: "await".to_string(),
+                yield_expr: "yield".to_string(),
+                lambda: "lambda".to_string(),
+                named_expr: "named_expression".to_string(),
+                integer: "integer".to_string(),
+                float: "float".to_string(),
+                string: "string".to_string(),
+                list: "list".to_string(),
+                tuple: "tuple".to_string(),
+                set: "set".to_string(),
+                dict: "dictionary".to_string(),
+                binary_operator: "binary_operator".to_string(),
+                boolean_operator: "boolean_operator".to_string(),
+                unary_operator: "unary_operator".to_string(),
+                comparison_operator: "comparison_operator".to_string(),
+                subscript: "subscript".to_string(),
+                keyword_argument: "keyword_argument".to_string(),
+                list_splat: "list_splat".to_string(),
+                dictionary_splat: "dictionary_splat".to_string(),
+                statement_nodes: vec![
+                    "expression_statement".to_string(),
+                    "return_statement".to_string(),
+                    "if_statement".to_string(),
+                    "for_statement".to_string(),
+                    "while_statement".to_string(),
+                    "try_statement".to_string(),
+                    "with_statement".to_string(),
+                    "function_definition".to_string(),
+                    "class_definition".to_string(),
+                    "decorated_definition".to_string(),
+                    "assignment".to_string(),
+                    "augmented_assignment".to_string(),
+                    "import_statement".to_string(),
+                    "import_from_statement".to_string(),
+                    "assert_statement".to_string(),
+                    "raise_statement".to_string(),
+                    "delete_statement".to_string(),
+                    "global_statement".to_string(),
+                    "nonlocal_statement".to_string(),
+                ],
+                func_field: "function".to_string(),
+                args_field: "arguments".to_string(),
+                object_field: "object".to_string(),
+                attr_field: "attribute".to_string(),
+                left_field: "left".to_string(),
+                right_field: "right".to_string(),
+                operator_field: "operator".to_string(),
+                annotation_field: "type".to_string(),
+                value_field: "value".to_string(),
+                condition_field: "condition".to_string(),
+                target_field: "left".to_string(),
+                iter_field: "right".to_string(),
+                elt_field: "body".to_string(),
+            },
         }
     }
 }

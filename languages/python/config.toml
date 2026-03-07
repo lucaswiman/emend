@@ -274,3 +274,73 @@ names = [
     "__name__", "__file__", "__doc__", "__package__", "__spec__",
     "__import__", "__build_class__"
 ]
+
+[pattern_matching]
+function_def = "function_definition"
+class_def = "class_definition"
+decorated_def = "decorated_definition"
+call = "call"
+attribute = "attribute"
+identifier = "identifier"
+assignment = "assignment"
+augmented_assignment = "augmented_assignment"
+annotated_assignment = "annotated_assignment"
+return_stmt = "return_statement"
+if_stmt = "if_statement"
+while_stmt = "while_statement"
+for_stmt = "for_statement"
+with_stmt = "with_statement"
+try_stmt = "try_statement"
+except_handler = "except_clause"
+for_in_clause = "for_in_clause"
+if_clause = "if_clause"
+pair = "pair"
+import_stmt = "import_statement"
+import_from_stmt = "import_from_statement"
+assert_stmt = "assert_statement"
+raise_stmt = "raise_statement"
+delete_stmt = "delete_statement"
+global_stmt = "global_statement"
+nonlocal_stmt = "nonlocal_statement"
+await_expr = "await"
+yield_expr = "yield"
+lambda = "lambda"
+named_expr = "named_expression"
+integer = "integer"
+float = "float"
+string = "string"
+list = "list"
+tuple = "tuple"
+set = "set"
+dict = "dictionary"
+binary_operator = "binary_operator"
+boolean_operator = "boolean_operator"
+unary_operator = "unary_operator"
+comparison_operator = "comparison_operator"
+subscript = "subscript"
+keyword_argument = "keyword_argument"
+list_splat = "list_splat"
+dictionary_splat = "dictionary_splat"
+statement_nodes = [
+    "expression_statement", "return_statement", "if_statement",
+    "for_statement", "while_statement", "try_statement",
+    "with_statement", "function_definition", "class_definition",
+    "decorated_definition", "assignment", "augmented_assignment",
+    "import_statement", "import_from_statement", "assert_statement",
+    "raise_statement", "delete_statement", "global_statement",
+    "nonlocal_statement",
+]
+func_field = "function"
+args_field = "arguments"
+object_field = "object"
+attr_field = "attribute"
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = "type"
+value_field = "value"
+condition_field = "condition"
+target_field = "left"
+iter_field = "right"
+elt_field = "body"
+
