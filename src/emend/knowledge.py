@@ -68,6 +68,32 @@ class KnowledgeNote:
     updated_at: str = ""
 
 
+@dataclass
+class ModuleMapping:
+    """A coarse mapping from a Python module prefix to an external repo/directory.
+
+    Examples::
+
+        # "anything under payments.* lives in the payments repo"
+        ModuleMapping(module_prefix="payments", repo="org/payments-service")
+
+        # "utils.* lives in this local directory"
+        ModuleMapping(module_prefix="utils", local_path="/home/user/shared-utils")
+    """
+
+    module_prefix: str  # e.g. "payments", "users.models"
+    repo: str = ""  # GitHub repo (org/name), cloned on demand via gh
+    local_path: str = ""  # alternative: a local directory
+    branch: str = ""  # optional branch/tag for gh clone
+    subpath: str = ""  # subdirectory within the repo (e.g. "src/payments")
+    provenance: str = "manual"  # manual, llm, heuristic
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # set by DB
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -130,6 +156,23 @@ CREATE INDEX IF NOT EXISTS idx_note_cat ON knowledge_note(category);
 CREATE INDEX IF NOT EXISTS idx_note_proj ON knowledge_note(project);
 CREATE INDEX IF NOT EXISTS idx_note_file ON knowledge_note(file_path);
 CREATE INDEX IF NOT EXISTS idx_note_symbol ON knowledge_note(symbol);
+
+-- Module mappings (coarse: module prefix -> repo/directory) -----------------
+
+CREATE TABLE IF NOT EXISTS module_mapping (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    module_prefix TEXT NOT NULL UNIQUE,
+    repo          TEXT NOT NULL DEFAULT '',
+    local_path    TEXT NOT NULL DEFAULT '',
+    branch        TEXT NOT NULL DEFAULT '',
+    subpath       TEXT NOT NULL DEFAULT '',
+    provenance    TEXT NOT NULL DEFAULT 'manual',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_modmap_prefix ON module_mapping(module_prefix);
 """
 
 # FTS5 tables live separately so we can rebuild without touching data.
@@ -569,7 +612,165 @@ class KnowledgeBase:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_note(r) for r in rows]
 
+    # -- Module mappings -----------------------------------------------------
+
+    def add_module_mapping(self, m: ModuleMapping) -> int:
+        """Insert a module mapping, returning its row id."""
+        now = _now_iso()
+        cur = self._conn.execute(
+            "INSERT INTO module_mapping "
+            "(module_prefix, repo, local_path, branch, subpath, "
+            " provenance, metadata_json, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                m.module_prefix,
+                m.repo,
+                m.local_path,
+                m.branch,
+                m.subpath,
+                m.provenance,
+                json.dumps(m.metadata),
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_module_mapping(self, mapping_id: int) -> ModuleMapping | None:
+        row = self._conn.execute(
+            "SELECT * FROM module_mapping WHERE id = ?", (mapping_id,)
+        ).fetchone()
+        return self._row_to_module_mapping(row) if row else None
+
+    def update_module_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
+        """Update fields on an existing module mapping."""
+        row = self._conn.execute(
+            "SELECT id FROM module_mapping WHERE id = ?", (mapping_id,)
+        ).fetchone()
+        if not row:
+            return False
+        sets = []
+        vals: list[Any] = []
+        for col in (
+            "module_prefix", "repo", "local_path", "branch",
+            "subpath", "provenance",
+        ):
+            if col in kwargs:
+                sets.append(f"{col} = ?")
+                vals.append(kwargs[col])
+        if "metadata" in kwargs:
+            sets.append("metadata_json = ?")
+            vals.append(json.dumps(kwargs["metadata"]))
+        if not sets:
+            return True
+        sets.append("updated_at = ?")
+        vals.append(_now_iso())
+        vals.append(mapping_id)
+        self._conn.execute(
+            f"UPDATE module_mapping SET {', '.join(sets)} WHERE id = ?", vals
+        )
+        self._conn.commit()
+        return True
+
+    def delete_module_mapping(self, mapping_id: int) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM module_mapping WHERE id = ?", (mapping_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_module_mappings(self) -> list[ModuleMapping]:
+        """List all module mappings ordered by prefix length (longest first)."""
+        rows = self._conn.execute(
+            "SELECT * FROM module_mapping ORDER BY length(module_prefix) DESC"
+        ).fetchall()
+        return [self._row_to_module_mapping(r) for r in rows]
+
+    def resolve_module(self, module_name: str) -> ModuleMapping | None:
+        """Find the best (longest-prefix) module mapping for *module_name*.
+
+        For example, if there are mappings for ``payments`` and
+        ``payments.models``, and *module_name* is ``payments.models.User``,
+        the ``payments.models`` mapping wins.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM module_mapping ORDER BY length(module_prefix) DESC"
+        ).fetchall()
+        for row in rows:
+            prefix = row["module_prefix"]
+            if module_name == prefix or module_name.startswith(prefix + "."):
+                return self._row_to_module_mapping(row)
+        return None
+
+    def resolve_module_to_path(
+        self, module_name: str, *, cache_dir: str | None = None
+    ) -> str | None:
+        """Resolve a module name to a local file path.
+
+        If the mapping points to a GitHub repo and it hasn't been cloned yet,
+        clones it via ``gh repo clone`` into *cache_dir* (defaults to
+        ``.emend/cache/repos/<org>/<name>``).
+
+        Returns the resolved directory/file path, or None if no mapping found.
+        """
+        mm = self.resolve_module(module_name)
+        if mm is None:
+            return None
+
+        # Determine the local root for this mapping.
+        if mm.local_path:
+            local_root = mm.local_path
+        elif mm.repo:
+            local_root = _ensure_repo_cloned(
+                mm.repo, branch=mm.branch, cache_dir=cache_dir,
+                db_dir=self._db_path.parent,
+            )
+        else:
+            return None
+
+        # Convert the remaining module suffix to a path.
+        suffix = module_name
+        if suffix == mm.module_prefix:
+            suffix = ""
+        elif suffix.startswith(mm.module_prefix + "."):
+            suffix = suffix[len(mm.module_prefix) + 1:]
+
+        base = Path(local_root)
+        if mm.subpath:
+            base = base / mm.subpath
+
+        if suffix:
+            parts = suffix.split(".")
+            # Try as a package (directory with __init__.py) first, then module.
+            candidate_dir = base / "/".join(parts)
+            if candidate_dir.is_dir():
+                return str(candidate_dir)
+            candidate_file = base / "/".join(parts[:-1]) / (parts[-1] + ".py")
+            if candidate_file.is_file():
+                return str(candidate_file)
+            # Fall back to the directory for the dotted prefix.
+            candidate_dir = base / "/".join(parts)
+            return str(candidate_dir)
+        else:
+            return str(base)
+
     # -- Helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_module_mapping(row: sqlite3.Row) -> ModuleMapping:
+        return ModuleMapping(
+            id=row["id"],
+            module_prefix=row["module_prefix"],
+            repo=row["repo"],
+            local_path=row["local_path"],
+            branch=row["branch"],
+            subpath=row["subpath"],
+            provenance=row["provenance"],
+            metadata=json.loads(row["metadata_json"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     @staticmethod
     def _row_to_mapping(row: sqlite3.Row) -> IdentifierMapping:
@@ -608,6 +809,53 @@ class KnowledgeBase:
         )
 
 
+def _ensure_repo_cloned(
+    repo: str,
+    *,
+    branch: str = "",
+    cache_dir: str | None = None,
+    db_dir: Path | None = None,
+) -> str:
+    """Clone a GitHub repo via ``gh repo clone`` if not already present.
+
+    Returns the local path to the cloned repo.
+    """
+    import subprocess
+
+    if cache_dir:
+        repos_dir = Path(cache_dir)
+    elif db_dir:
+        repos_dir = db_dir / "repos"
+    else:
+        repos_dir = Path(".emend/cache/repos")
+
+    # Normalize repo: "org/name" -> repos_dir/org/name
+    repo_dir = repos_dir / repo
+    if repo_dir.is_dir() and (repo_dir / ".git").exists():
+        # Already cloned — optionally pull latest.
+        return str(repo_dir)
+
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["gh", "repo", "clone", repo, str(repo_dir)]
+    if branch:
+        cmd.extend(["--", "--branch", branch])
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"'gh' CLI not found. Install GitHub CLI to clone external repos: "
+            f"https://cli.github.com/"
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to clone {repo}: {e.stderr.strip()}"
+        )
+
+    return str(repo_dir)
+
+
 def _fts_escape(query: str) -> str:
     """Escape a query for FTS5 trigram matching.
 
@@ -633,6 +881,13 @@ def mapping_to_dict(m: IdentifierMapping) -> dict[str, Any]:
 
 def note_to_dict(n: KnowledgeNote) -> dict[str, Any]:
     d = asdict(n)
+    if d["id"] is None:
+        del d["id"]
+    return d
+
+
+def module_mapping_to_dict(m: ModuleMapping) -> dict[str, Any]:
+    d = asdict(m)
     if d["id"] is None:
         del d["id"]
     return d

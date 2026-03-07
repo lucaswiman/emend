@@ -979,8 +979,133 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.status().to_dict()
     elif method == "reindex":
         return engine.reindex().to_dict()
+    # -- Knowledge base methods --
+    elif method == "kb_search":
+        return _kb_search(engine, params)
+    elif method == "kb_add":
+        return _kb_add(engine, params)
+    elif method == "mapping_lookup":
+        return _mapping_lookup(engine, params)
+    elif method == "mapping_goto":
+        return _mapping_goto(engine, params)
+    elif method == "module_resolve":
+        return _module_resolve(engine, params)
     else:
         raise ValueError(f"Unknown method: {method!r}")
+
+
+# -- Knowledge base RPC handlers --
+
+
+def _get_kb(engine: EditorSearchEngine):
+    """Lazy-init a KnowledgeBase on the engine."""
+    from emend.knowledge import KnowledgeBase
+    if not hasattr(engine, '_kb'):
+        engine._kb = KnowledgeBase(engine.project_root)  # type: ignore[attr-defined]
+    return engine._kb  # type: ignore[attr-defined]
+
+
+def _kb_search(engine: EditorSearchEngine, params: dict) -> dict:
+    """Search notes and return results in the standard items format."""
+    import time as _time
+    from emend.knowledge import note_to_dict
+    t0 = _time.monotonic()
+    kb = _get_kb(engine)
+    query = params.get("query", "")
+    results = kb.search_notes(
+        query,
+        category=params.get("category"),
+        project=params.get("project"),
+        file_path=params.get("file_path"),
+        symbol=params.get("symbol"),
+        limit=params.get("limit", 50),
+    )
+    items = [note_to_dict(n) for n in results]
+    elapsed = (_time.monotonic() - t0) * 1000
+    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "kb_search"}
+
+
+def _kb_add(engine: EditorSearchEngine, params: dict) -> dict:
+    """Add a knowledge note via RPC."""
+    from emend.knowledge import KnowledgeNote, note_to_dict
+    kb = _get_kb(engine)
+    note = KnowledgeNote(
+        title=params.get("title", ""),
+        content=params.get("content", ""),
+        category=params.get("category", "note"),
+        tags=params.get("tags", ""),
+        source=params.get("source", "user"),
+        project=params.get("project", ""),
+        file_path=params.get("file_path", ""),
+        symbol=params.get("symbol", ""),
+    )
+    nid = kb.add_note(note)
+    saved = kb.get_note(nid)
+    return {"item": note_to_dict(saved), "mode": "kb_add"}  # type: ignore[arg-type]
+
+
+def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
+    """Look up identifier mappings for a symbol."""
+    import time as _time
+    from emend.knowledge import mapping_to_dict
+    t0 = _time.monotonic()
+    kb = _get_kb(engine)
+    identifier = params.get("identifier", params.get("query", ""))
+    project = params.get("project")
+    direction = params.get("direction", "both")
+    results = kb.find_mappings_for(identifier, project=project, direction=direction)
+    items = [mapping_to_dict(m) for m in results]
+    elapsed = (_time.monotonic() - t0) * 1000
+    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_lookup"}
+
+
+def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
+    """Resolve an identifier mapping to a file location in an external repo.
+
+    Combines mapping_lookup with module_resolve: finds what the identifier
+    maps to, then resolves the target to a local path (cloning if needed).
+    """
+    import time as _time
+    from emend.knowledge import mapping_to_dict
+    t0 = _time.monotonic()
+    kb = _get_kb(engine)
+    identifier = params.get("identifier", params.get("query", ""))
+
+    results = kb.find_mappings_for(identifier, direction="source")
+    items = []
+    for m in results:
+        entry = mapping_to_dict(m)
+        # Try to resolve the target identifier to a local path.
+        resolved = kb.resolve_module_to_path(m.target_identifier)
+        if resolved:
+            entry["resolved_path"] = resolved
+        items.append(entry)
+
+    elapsed = (_time.monotonic() - t0) * 1000
+    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto"}
+
+
+def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:
+    """Resolve a module name to a local path via module mappings.
+
+    Clones the repo via gh if needed.
+    """
+    import time as _time
+    from emend.knowledge import module_mapping_to_dict
+    t0 = _time.monotonic()
+    kb = _get_kb(engine)
+    module_name = params.get("module", params.get("query", ""))
+    mm = kb.resolve_module(module_name)
+    if mm is None:
+        elapsed = (_time.monotonic() - t0) * 1000
+        return {"items": [], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
+
+    resolved_path = kb.resolve_module_to_path(module_name)
+    item = module_mapping_to_dict(mm)
+    if resolved_path:
+        item["resolved_path"] = resolved_path
+    elapsed = (_time.monotonic() - t0) * 1000
+    return {"items": [item], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
 
 
 def _write_json(obj: dict, stream=None) -> None:

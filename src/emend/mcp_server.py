@@ -880,6 +880,104 @@ def mapping_delete(
 
 
 # ---------------------------------------------------------------------------
+# Knowledge base: module mappings (coarse module -> repo/dir)
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def module_map_add(
+    module_prefix: Annotated[str, Field(description="Python module prefix (e.g. 'payments', 'users.models').")],
+    repo: Annotated[str, Field(description="GitHub repo (org/name). Cloned on demand via gh.")] = "",
+    local_path: Annotated[str, Field(description="Alternative: local directory path.")] = "",
+    branch: Annotated[str, Field(description="Branch/tag for gh clone.")] = "",
+    subpath: Annotated[str, Field(description="Subdirectory within the repo (e.g. 'src/payments').")] = "",
+    provenance: Annotated[str, Field(description="How this mapping was created: manual, llm, heuristic.")] = "llm",
+) -> str:
+    """Register a coarse module mapping: module prefix -> external repo or directory.
+
+    Use this when you learn that a Python module prefix lives in a different
+    repo or directory. For example:
+    - ``payments.*`` -> ``org/payments-service`` (GitHub repo, cloned via gh)
+    - ``shared.utils.*`` -> ``/home/user/shared-utils`` (local directory)
+
+    The repo is cloned on demand when a symbol is resolved.
+    """
+    from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
+
+    if not repo and not local_path:
+        return json.dumps({"error": "Either repo or local_path is required."})
+
+    kb = KnowledgeBase(".")
+    try:
+        m = ModuleMapping(
+            module_prefix=module_prefix,
+            repo=repo,
+            local_path=local_path,
+            branch=branch,
+            subpath=subpath,
+            provenance=provenance,
+        )
+        mid = kb.add_module_mapping(m)
+        saved = kb.get_module_mapping(mid)
+        return json.dumps(module_mapping_to_dict(saved), indent=2)  # type: ignore[arg-type]
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def module_map_list() -> str:
+    """List all registered module mappings (module prefix -> repo/directory)."""
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.list_module_mappings()
+        return json.dumps([module_mapping_to_dict(m) for m in results], indent=2)
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def module_resolve(
+    module: Annotated[str, Field(description="Python module name to resolve (e.g. 'payments.models.Order').")],
+) -> str:
+    """Resolve a module name to a local path using registered module mappings.
+
+    If the mapping points to a GitHub repo, clones it via ``gh repo clone``
+    on first access. Returns the resolved local path.
+    """
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        mm = kb.resolve_module(module)
+        if mm is None:
+            return json.dumps({"error": f"No module mapping found for '{module}'."})
+        resolved = kb.resolve_module_to_path(module)
+        result = module_mapping_to_dict(mm)
+        if resolved:
+            result["resolved_path"] = resolved
+        return json.dumps(result, indent=2)
+    finally:
+        kb.close()
+
+
+@mcp_app.tool()
+def module_map_delete(
+    mapping_id: Annotated[int, Field(description="ID of the module mapping to delete.")],
+) -> str:
+    """Delete a module mapping by ID."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_module_mapping(mapping_id)
+        return json.dumps({"deleted": ok, "id": mapping_id})
+    finally:
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
 # grammar_and_cookbook
 # ---------------------------------------------------------------------------
 

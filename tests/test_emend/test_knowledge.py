@@ -10,7 +10,9 @@ from emend.knowledge import (
     IdentifierMapping,
     KnowledgeBase,
     KnowledgeNote,
+    ModuleMapping,
     mapping_to_dict,
+    module_mapping_to_dict,
     note_to_dict,
 )
 
@@ -294,6 +296,202 @@ class TestMappings:
         d = mapping_to_dict(saved)
         assert d["id"] == mid
         assert d["metadata"] == {"api_version": "v2"}
+
+
+# ---------------------------------------------------------------------------
+# Module mappings
+# ---------------------------------------------------------------------------
+
+
+class TestModuleMappings:
+    def test_add_and_get(self, kb):
+        m = ModuleMapping(
+            module_prefix="payments",
+            repo="org/payments-service",
+            subpath="src/payments",
+        )
+        mid = kb.add_module_mapping(m)
+        assert mid >= 1
+
+        saved = kb.get_module_mapping(mid)
+        assert saved is not None
+        assert saved.module_prefix == "payments"
+        assert saved.repo == "org/payments-service"
+        assert saved.subpath == "src/payments"
+
+    def test_list(self, kb):
+        kb.add_module_mapping(ModuleMapping(module_prefix="a", local_path="/a"))
+        kb.add_module_mapping(ModuleMapping(module_prefix="b.c", local_path="/bc"))
+        kb.add_module_mapping(ModuleMapping(module_prefix="b", local_path="/b"))
+
+        results = kb.list_module_mappings()
+        assert len(results) == 3
+        # Longest prefix first
+        assert results[0].module_prefix == "b.c"
+
+    def test_resolve_module_exact(self, kb):
+        kb.add_module_mapping(ModuleMapping(module_prefix="payments", local_path="/pay"))
+        mm = kb.resolve_module("payments")
+        assert mm is not None
+        assert mm.module_prefix == "payments"
+
+    def test_resolve_module_prefix(self, kb):
+        kb.add_module_mapping(ModuleMapping(module_prefix="payments", local_path="/pay"))
+        mm = kb.resolve_module("payments.models.Order")
+        assert mm is not None
+        assert mm.module_prefix == "payments"
+
+    def test_resolve_module_longest_prefix_wins(self, kb):
+        kb.add_module_mapping(ModuleMapping(module_prefix="payments", local_path="/pay"))
+        kb.add_module_mapping(ModuleMapping(module_prefix="payments.models", local_path="/pay-models"))
+
+        mm = kb.resolve_module("payments.models.Order")
+        assert mm.module_prefix == "payments.models"
+
+        mm2 = kb.resolve_module("payments.api")
+        assert mm2.module_prefix == "payments"
+
+    def test_resolve_module_no_match(self, kb):
+        kb.add_module_mapping(ModuleMapping(module_prefix="payments", local_path="/pay"))
+        assert kb.resolve_module("users.models") is None
+
+    def test_resolve_module_to_path_local(self, kb, tmp_path):
+        # Create a local directory structure.
+        # local_path points directly to the package directory.
+        pay_dir = tmp_path / "payments"
+        pay_dir.mkdir(parents=True)
+        (pay_dir / "models.py").write_text("class Order: pass\n")
+        (pay_dir / "__init__.py").write_text("")
+
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="payments",
+            local_path=str(pay_dir),
+        ))
+
+        # Resolve the prefix itself -> the package dir
+        path = kb.resolve_module_to_path("payments")
+        assert path == str(pay_dir)
+
+        # Resolve to submodule file
+        path = kb.resolve_module_to_path("payments.models")
+        assert path.endswith("models.py")
+
+    def test_resolve_module_to_path_with_subpath(self, kb, tmp_path):
+        repo_dir = tmp_path / "repo"
+        src_dir = repo_dir / "src" / "payments"
+        src_dir.mkdir(parents=True)
+        (src_dir / "api.py").write_text("")
+
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="payments",
+            local_path=str(repo_dir),
+            subpath="src/payments",
+        ))
+
+        path = kb.resolve_module_to_path("payments.api")
+        assert path.endswith("api.py")
+
+    def test_delete(self, kb):
+        mid = kb.add_module_mapping(ModuleMapping(module_prefix="x", local_path="/x"))
+        assert kb.delete_module_mapping(mid) is True
+        assert kb.get_module_mapping(mid) is None
+
+    def test_update(self, kb):
+        mid = kb.add_module_mapping(ModuleMapping(module_prefix="x", local_path="/x"))
+        ok = kb.update_module_mapping(mid, repo="org/new-repo", local_path="")
+        assert ok is True
+        saved = kb.get_module_mapping(mid)
+        assert saved.repo == "org/new-repo"
+
+    def test_module_mapping_to_dict(self, kb):
+        mid = kb.add_module_mapping(ModuleMapping(
+            module_prefix="test", repo="org/test",
+            metadata={"env": "staging"},
+        ))
+        saved = kb.get_module_mapping(mid)
+        d = module_mapping_to_dict(saved)
+        assert d["module_prefix"] == "test"
+        assert d["metadata"] == {"env": "staging"}
+
+    def test_unique_prefix(self, kb):
+        """module_prefix has UNIQUE constraint."""
+        kb.add_module_mapping(ModuleMapping(module_prefix="dup", local_path="/a"))
+        with pytest.raises(Exception):
+            kb.add_module_mapping(ModuleMapping(module_prefix="dup", local_path="/b"))
+
+
+# ---------------------------------------------------------------------------
+# Editor-server RPC integration
+# ---------------------------------------------------------------------------
+
+
+class TestEditorServerRPC:
+    def test_kb_search_rpc(self, kb):
+        """Test the kb_search RPC handler via _dispatch."""
+        from emend.editor_search import _kb_search
+
+        # We need a mock engine with project_root
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+        engine = FakeEngine()
+
+        kb.add_note(KnowledgeNote(title="Auth flow", content="OAuth2 based auth"))
+        # Attach the kb to the engine (simulating _get_kb)
+        engine._kb = kb
+
+        result = _kb_search(engine, {"query": "OAuth2"})
+        assert result["mode"] == "kb_search"
+        assert len(result["items"]) == 1
+        assert result["items"][0]["title"] == "Auth flow"
+
+    def test_mapping_lookup_rpc(self, kb):
+        from emend.editor_search import _mapping_lookup
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+        engine = FakeEngine()
+        engine._kb = kb
+
+        kb.add_mapping(IdentifierMapping(
+            source_project="a", source_identifier="Foo.bar",
+            source_kind="method",
+            target_project="b", target_identifier="handle_bar",
+            target_kind="function",
+        ))
+
+        result = _mapping_lookup(engine, {"identifier": "Foo.bar"})
+        assert result["mode"] == "mapping_lookup"
+        assert len(result["items"]) == 1
+
+    def test_module_resolve_rpc(self, kb, tmp_path):
+        from emend.editor_search import _module_resolve
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+        engine = FakeEngine()
+        engine._kb = kb
+
+        pay_dir = tmp_path / "external"
+        pay_dir.mkdir()
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="payments", local_path=str(pay_dir),
+        ))
+
+        result = _module_resolve(engine, {"module": "payments"})
+        assert result["mode"] == "module_resolve"
+        assert len(result["items"]) == 1
+        assert result["items"][0]["resolved_path"] == str(pay_dir)
+
+    def test_module_resolve_no_match(self, kb):
+        from emend.editor_search import _module_resolve
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _module_resolve(engine, {"module": "nonexistent"})
+        assert result["items"] == []
 
 
 # ---------------------------------------------------------------------------

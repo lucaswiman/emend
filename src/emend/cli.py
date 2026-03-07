@@ -2418,6 +2418,128 @@ def map_rm_cmd(
         kb.close()
 
 
+# ---------------------------------------------------------------------------
+# Module mapping commands (coarse: module prefix -> repo/directory)
+# ---------------------------------------------------------------------------
+
+modmap_app = typer.Typer(help="Module-to-repo mappings (e.g. 'payments' -> org/payments-service).")
+app.add_typer(modmap_app, name="modmap")
+
+
+@modmap_app.command("add")
+def modmap_add_cmd(
+    module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
+    repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
+    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
+    subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
+    provenance: Annotated[str, typer.Option("--provenance")] = "manual",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Register a module prefix -> repo/directory mapping.
+
+    Examples:
+        emend modmap add payments --repo org/payments-service
+        emend modmap add shared.utils --path /home/user/shared-utils
+        emend modmap add gateway --repo org/gateway --subpath src/gateway
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
+
+    if not repo and not local_path:
+        print("Error: specify --repo or --path", file=sys.stderr)
+        raise typer.Exit(1)
+
+    kb = KnowledgeBase(".")
+    try:
+        m = ModuleMapping(
+            module_prefix=module_prefix, repo=repo, local_path=local_path,
+            branch=branch, subpath=subpath, provenance=provenance,
+        )
+        mid = kb.add_module_mapping(m)
+        saved = kb.get_module_mapping(mid)
+        if json_output:
+            print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        else:
+            target = repo if repo else local_path
+            print(f"Added module mapping #{mid}: {module_prefix} -> {target}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("list")
+def modmap_list_cmd(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """List all module mappings."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.list_module_mappings()
+        if json_output:
+            print(_json.dumps([module_mapping_to_dict(m) for m in results], indent=2))
+        elif not results:
+            print("No module mappings registered.")
+        else:
+            for m in results:
+                target = m.repo if m.repo else m.local_path
+                sub = f" (subpath: {m.subpath})" if m.subpath else ""
+                print(f"#{m.id} {m.module_prefix} -> {target}{sub}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("resolve")
+def modmap_resolve_cmd(
+    module: Annotated[str, typer.Argument(help="Module to resolve (e.g. 'payments.models.Order').")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Resolve a module name to a local path (clones repo via gh if needed)."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        mm = kb.resolve_module(module)
+        if mm is None:
+            print(f"No module mapping for '{module}'.", file=sys.stderr)
+            raise typer.Exit(1)
+        resolved = kb.resolve_module_to_path(module)
+        if json_output:
+            d = module_mapping_to_dict(mm)
+            if resolved:
+                d["resolved_path"] = resolved
+            print(_json.dumps(d, indent=2))
+        else:
+            target = mm.repo if mm.repo else mm.local_path
+            print(f"Module '{module}' -> {target}")
+            if resolved:
+                print(f"Local path: {resolved}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("rm")
+def modmap_rm_cmd(
+    mapping_id: Annotated[int, typer.Argument(help="Mapping ID to delete.")],
+):
+    """Delete a module mapping."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_module_mapping(mapping_id)
+        if ok:
+            print(f"Deleted module mapping #{mapping_id}.")
+        else:
+            print(f"Module mapping #{mapping_id} not found.", file=sys.stderr)
+            raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
 @app.command("mcp")
 def mcp_cmd(
     transport: Annotated[
