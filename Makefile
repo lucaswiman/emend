@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 TESTS ?=
 
-.PHONY: venv test test-ci deadcode docs docs-html benchmark clean
+.PHONY: venv test test-ci test-mcp deadcode docs docs-html benchmark clean
 
 RUST_SOURCES := $(wildcard rust/src/*.rs)
 
@@ -32,6 +32,22 @@ test-ci: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	cargo test --manifest-path rust/Cargo.toml
 	$(VENV)/bin/pytest -n 8 --tb=short $(if $(TESTS),$(TESTS),tests/)
 
+PYTHON_VERSION ?= 3.14t
+MCP_VENV := .venv-mcp
+
+$(MCP_VENV)/bin/activate: pyproject.toml rust/Cargo.toml
+	uv venv $(MCP_VENV) --python $(PYTHON_VERSION)
+	uv pip install --python $(MCP_VENV) maturin
+	@touch $@
+
+$(MCP_VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(MCP_VENV)/bin/activate
+	VIRTUAL_ENV=$(CURDIR)/$(MCP_VENV) PATH=$(CURDIR)/$(MCP_VENV)/bin:$$PATH \
+		$(MCP_VENV)/bin/maturin develop --extras dev,mcp
+	@mkdir -p $(@D) && touch $@
+
+test-mcp: $(MCP_VENV)/lib/emend_core
+	$(MCP_VENV)/bin/pytest --tb=short -k TestMCPTools tests/test_emend/test_knowledge.py
+
 deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	$(VENV)/bin/emend deadcode src/emend/ --exclude-references-from tests/ --no-last-reference
 
@@ -47,4 +63,4 @@ benchmark: $(VENV)/bin/activate
 	$(PYTHON) benchmarks/bench_django.py --json --save benchmark-results/$$(date +%Y%m%d-%H%M%S).json --label "$(BENCH_LABEL)" $(BENCH_ARGS)
 
 clean:
-	rm -rf $(VENV) build *.egg-info src/*.egg-info docs/_build
+	rm -rf $(VENV) $(MCP_VENV) build *.egg-info src/*.egg-info docs/_build

@@ -26,6 +26,22 @@ jobs:
       - name: Check for dead code
         run: make deadcode
 
+  test-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run MCP integration tests
+        run: make test-mcp PYTHON_VERSION=3.13
+
   vim-tests:
     runs-on: ubuntu-latest
     steps:

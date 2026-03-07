@@ -232,7 +232,7 @@ class TestRustIRCompilation:
         assert len(ir["elements"]) == 3
 
     def test_none_literal_in_call(self):
-        """None in patterns should map to 'none' type, not 'name'."""
+        """None in patterns should map to 'none_literal' type, not 'name'."""
         ir = compile_pattern_to_rust_ir("print(None)")
         assert ir is not None
         assert ir["args"][0] == {"type": "none_literal"}

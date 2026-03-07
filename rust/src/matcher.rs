@@ -2117,37 +2117,35 @@ fn matches_node<'a>(
         }
 
         PatternNode::Return { value } => {
-            println!("DEBUG: checking Return node kind={} vs config={}", node.kind(), config.pattern_matching.return_stmt);
-            if node.kind() == config.pattern_matching.return_stmt {
-                match value {
-                    Some(val_pattern) => {
-                        let val_node = node.child_by_field_name(&config.pattern_matching.value_field)
-                            .or_else(|| node.named_child(0));
-                        match val_node {
-                            Some(vn) => {
-                                if matches_node(vn, source, val_pattern, captures, config).is_some() {
-                                    Some(node)
-                                } else {
-                                    None
-                                }
+            // Check if it's an expression_statement wrapping a return_statement (TS compatibility)
+            if node.kind() == config.symbols.expression_statement_node() {
+                if let Some(child) = node.named_child(0) {
+                    if child.kind() == config.pattern_matching.return_stmt {
+                        // Recurse using the same PatternNode::Return
+                        return matches_node(child, source, pattern, captures, config);
+                    }
+                }
+            }
+            if node.kind() != config.pattern_matching.return_stmt {
+                return None;
+            }
+            match value {
+                Some(val_pattern) => {
+                    // Find the value child using config.value_field, or fallback to first named child
+                    let val_node = node.child_by_field_name(&config.pattern_matching.value_field)
+                        .or_else(|| node.named_child(0));
+                    match val_node {
+                        Some(vn) => {
+                            if matches_node(vn, source, val_pattern, captures, config).is_some() {
+                                Some(node)
+                            } else {
+                                None
                             }
-                            None => None,
                         }
-                    }
-                    None => Some(node),
-                }
-            } else {
-                // Check if it's an expression_statement wrapping a return_statement (not typical for TS but just in case)
-                if node.kind() == config.symbols.expression_statement_node() {
-                    if let Some(child) = node.named_child(0) {
-                        if child.kind() == config.pattern_matching.return_stmt {
-                             // We found the return_statement inside the expression_statement
-                             // Now match it recursively using THE SAME PatternNode::Return
-                             return matches_node(child, source, pattern, captures, config);
-                        }
+                        None => None,
                     }
                 }
-                None
+                None => Some(node),
             }
         }
 

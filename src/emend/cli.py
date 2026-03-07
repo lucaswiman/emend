@@ -2189,6 +2189,376 @@ def editor_server_cmd(
     run_editor_server(path)
 
 
+# ---------------------------------------------------------------------------
+# Knowledge base commands
+# ---------------------------------------------------------------------------
+
+kb_app = typer.Typer(help="Knowledge base: notes and cross-service mappings.")
+app.add_typer(kb_app, name="kb")
+
+
+@kb_app.command("add")
+def kb_add_cmd(
+    title: Annotated[str, typer.Argument(help="Short title for the note.")],
+    content: Annotated[str, typer.Argument(help="Note content.")],
+    category: Annotated[str, typer.Option("--category", "-c", help="Category: note, architecture, convention, decision, pattern.")] = "note",
+    tags: Annotated[str, typer.Option("--tags", help="Comma-separated tags.")] = "",
+    source: Annotated[str, typer.Option("--source", help="Creator: user, llm, heuristic.")] = "user",
+    project: Annotated[str, typer.Option("--project", help="Related project name.")] = "",
+    file_path: Annotated[str, typer.Option("--file", help="Related file path.")] = "",
+    symbol: Annotated[str, typer.Option("--symbol", help="Related symbol.")] = "",
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """Add a note to the knowledge base."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, KnowledgeNote, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        note = KnowledgeNote(
+            title=title, content=content, category=category, tags=tags,
+            source=source, project=project, file_path=file_path, symbol=symbol,
+        )
+        nid = kb.add_note(note)
+        saved = kb.get_note(nid)
+        if json_output:
+            print(_json.dumps(note_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        else:
+            print(f"Added note #{nid}: {saved.title}")  # type: ignore[union-attr]
+    finally:
+        kb.close()
+
+
+@kb_app.command("search")
+def kb_search_cmd(
+    query: Annotated[str, typer.Argument(help="Search query (substring match).")],
+    category: Annotated[Optional[str], typer.Option("--category", "-c")] = None,
+    project: Annotated[Optional[str], typer.Option("--project")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """Search knowledge notes (FTS5 trigram)."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.search_notes(query, category=category, project=project, limit=limit)
+        if json_output:
+            print(_json.dumps([note_to_dict(n) for n in results], indent=2))
+        elif not results:
+            print("No matching notes.")
+        else:
+            for n in results:
+                tags = f" [{n.tags}]" if n.tags else ""
+                print(f"#{n.id} [{n.category}]{tags} {n.title}")
+                # Show first line of content
+                first_line = n.content.split("\n", 1)[0]
+                if len(first_line) > 100:
+                    first_line = first_line[:97] + "..."
+                print(f"  {first_line}")
+    finally:
+        kb.close()
+
+
+@kb_app.command("show")
+def kb_show_cmd(
+    note_id: Annotated[int, typer.Argument(help="Note ID to show.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
+):
+    """Show a knowledge note by ID."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, note_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        note = kb.get_note(note_id)
+        if not note:
+            print(f"Note #{note_id} not found.", file=sys.stderr)
+            raise typer.Exit(1)
+        if json_output:
+            print(_json.dumps(note_to_dict(note), indent=2))
+        else:
+            print(f"#{note.id} [{note.category}] {note.title}")
+            if note.tags:
+                print(f"Tags: {note.tags}")
+            if note.file_path:
+                print(f"File: {note.file_path}")
+            if note.symbol:
+                print(f"Symbol: {note.symbol}")
+            print(f"Source: {note.source} | Updated: {note.updated_at}")
+            print()
+            print(note.content)
+    finally:
+        kb.close()
+
+
+@kb_app.command("rm")
+def kb_rm_cmd(
+    note_id: Annotated[int, typer.Argument(help="Note ID to delete.")],
+):
+    """Delete a knowledge note."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_note(note_id)
+        if ok:
+            print(f"Deleted note #{note_id}.")
+        else:
+            print(f"Note #{note_id} not found.", file=sys.stderr)
+            raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
+# Mapping commands
+# ---------------------------------------------------------------------------
+
+map_app = typer.Typer(help="Cross-service identifier mappings.")
+app.add_typer(map_app, name="map")
+
+
+@map_app.command("add")
+def map_add_cmd(
+    source_project: Annotated[str, typer.Argument(help="Source project/repo.")],
+    source_id: Annotated[str, typer.Argument(help="Source identifier (e.g. 'users.UserService.create').")],
+    target_project: Annotated[str, typer.Argument(help="Target project/repo.")],
+    target_id: Annotated[str, typer.Argument(help="Target identifier (e.g. 'POST /api/v1/users').")],
+    relationship: Annotated[str, typer.Option("--rel", help="Relationship: equivalent, calls, implements, produces, consumes.")] = "equivalent",
+    confidence: Annotated[float, typer.Option("--confidence")] = 1.0,
+    provenance: Annotated[str, typer.Option("--provenance", help="manual, heuristic, llm.")] = "manual",
+    evidence: Annotated[str, typer.Option("--evidence", help="Why this mapping exists.")] = "",
+    source_kind: Annotated[str, typer.Option("--source-kind")] = "",
+    target_kind: Annotated[str, typer.Option("--target-kind")] = "",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Add a cross-service identifier mapping."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, IdentifierMapping, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        m = IdentifierMapping(
+            source_project=source_project,
+            source_identifier=source_id,
+            source_kind=source_kind,
+            target_project=target_project,
+            target_identifier=target_id,
+            target_kind=target_kind,
+            relationship=relationship,
+            confidence=confidence,
+            provenance=provenance,
+            evidence=evidence,
+        )
+        mid = kb.add_mapping(m)
+        saved = kb.get_mapping(mid)
+        if json_output:
+            print(_json.dumps(mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        else:
+            print(f"Added mapping #{mid}: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
+    finally:
+        kb.close()
+
+
+@map_app.command("search")
+def map_search_cmd(
+    query: Annotated[str, typer.Argument(help="Search query.")],
+    source_project: Annotated[Optional[str], typer.Option("--source-project")] = None,
+    target_project: Annotated[Optional[str], typer.Option("--target-project")] = None,
+    relationship: Annotated[Optional[str], typer.Option("--rel")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Search identifier mappings (FTS5 trigram)."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.search_mappings(
+            query, source_project=source_project,
+            target_project=target_project, relationship=relationship, limit=limit,
+        )
+        if json_output:
+            print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+        elif not results:
+            print("No matching mappings.")
+        else:
+            for m in results:
+                conf = f" ({m.confidence:.0%})" if m.confidence < 1.0 else ""
+                print(f"#{m.id} {m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]{conf}")
+    finally:
+        kb.close()
+
+
+@map_app.command("lookup")
+def map_lookup_cmd(
+    identifier: Annotated[str, typer.Argument(help="Identifier to look up (exact match).")],
+    project: Annotated[Optional[str], typer.Option("--project")] = None,
+    direction: Annotated[str, typer.Option("--direction", help="source, target, or both.")] = "both",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Look up mappings for a specific identifier."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.find_mappings_for(identifier, project=project, direction=direction)
+        if json_output:
+            print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+        elif not results:
+            print(f"No mappings found for '{identifier}'.")
+        else:
+            for m in results:
+                print(f"#{m.id} {m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]")
+    finally:
+        kb.close()
+
+
+@map_app.command("rm")
+def map_rm_cmd(
+    mapping_id: Annotated[int, typer.Argument(help="Mapping ID to delete.")],
+):
+    """Delete an identifier mapping."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_mapping(mapping_id)
+        if ok:
+            print(f"Deleted mapping #{mapping_id}.")
+        else:
+            print(f"Mapping #{mapping_id} not found.", file=sys.stderr)
+            raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
+# ---------------------------------------------------------------------------
+# Module mapping commands (coarse: module prefix -> repo/directory)
+# ---------------------------------------------------------------------------
+
+modmap_app = typer.Typer(help="Module-to-repo mappings (e.g. 'payments' -> org/payments-service).")
+app.add_typer(modmap_app, name="modmap")
+
+
+@modmap_app.command("add")
+def modmap_add_cmd(
+    module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
+    repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
+    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
+    subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
+    provenance: Annotated[str, typer.Option("--provenance")] = "manual",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Register a module prefix -> repo/directory mapping.
+
+    Examples:
+        emend modmap add payments --repo org/payments-service
+        emend modmap add shared.utils --path /home/user/shared-utils
+        emend modmap add gateway --repo org/gateway --subpath src/gateway
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
+
+    if not repo and not local_path:
+        print("Error: specify --repo or --path", file=sys.stderr)
+        raise typer.Exit(1)
+
+    kb = KnowledgeBase(".")
+    try:
+        m = ModuleMapping(
+            module_prefix=module_prefix, repo=repo, local_path=local_path,
+            branch=branch, subpath=subpath, provenance=provenance,
+        )
+        mid = kb.add_module_mapping(m)
+        saved = kb.get_module_mapping(mid)
+        if json_output:
+            print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        else:
+            target = repo if repo else local_path
+            print(f"Added module mapping #{mid}: {module_prefix} -> {target}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("list")
+def modmap_list_cmd(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """List all module mappings."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        results = kb.list_module_mappings()
+        if json_output:
+            print(_json.dumps([module_mapping_to_dict(m) for m in results], indent=2))
+        elif not results:
+            print("No module mappings registered.")
+        else:
+            for m in results:
+                target = m.repo if m.repo else m.local_path
+                sub = f" (subpath: {m.subpath})" if m.subpath else ""
+                print(f"#{m.id} {m.module_prefix} -> {target}{sub}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("resolve")
+def modmap_resolve_cmd(
+    module: Annotated[str, typer.Argument(help="Module to resolve (e.g. 'payments.models.Order').")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Resolve a module name to a local path (clones repo via gh if needed)."""
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        mm = kb.resolve_module(module)
+        if mm is None:
+            print(f"No module mapping for '{module}'.", file=sys.stderr)
+            raise typer.Exit(1)
+        resolved = kb.resolve_module_to_path(module)
+        if json_output:
+            d = module_mapping_to_dict(mm)
+            if resolved:
+                d["resolved_path"] = resolved
+            print(_json.dumps(d, indent=2))
+        else:
+            target = mm.repo if mm.repo else mm.local_path
+            print(f"Module '{module}' -> {target}")
+            if resolved:
+                print(f"Local path: {resolved}")
+    finally:
+        kb.close()
+
+
+@modmap_app.command("rm")
+def modmap_rm_cmd(
+    mapping_id: Annotated[int, typer.Argument(help="Mapping ID to delete.")],
+):
+    """Delete a module mapping."""
+    from emend.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(".")
+    try:
+        ok = kb.delete_module_mapping(mapping_id)
+        if ok:
+            print(f"Deleted module mapping #{mapping_id}.")
+        else:
+            print(f"Module mapping #{mapping_id} not found.", file=sys.stderr)
+            raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
 @app.command("mcp")
 def mcp_cmd(
     transport: Annotated[
