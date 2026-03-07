@@ -255,6 +255,19 @@ recurse_into = [
     "except_clause", "finally_clause", "case_clause",
 ]
 
+# ---------------------------------------------------------------------------
+# Virtual environment symbol lookup
+# ---------------------------------------------------------------------------
+[venv_lookup]
+# Enable looking up symbols in virtual environment site-packages.
+# When a symbol cannot be found in the project, emend will search these
+# venv directories (relative to project root) for installed package sources.
+enabled = true
+# Directories to probe (first match wins). Dot-prefixed dirs like .venv
+# are skipped by the normal file scanner, so this is the only way to
+# reach installed package sources.
+paths = [".venv", "venv"]
+
 [builtins]
 names = [
     "print", "len", "range", "int", "str", "float", "bool", "list",
