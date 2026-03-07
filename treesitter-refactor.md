@@ -1585,21 +1585,21 @@ pattern string with Python's `ast.parse()`.  This means patterns like
 
 ##### 5a. Tree-sitter pattern parser
 
-- [ ] **Implement `TreeSitterPatternCompiler`** that:
+- [x] **Implement `TreeSitterPatternCompiler`** that:
   1. Substitutes metavar placeholders (`$X` → `__EMEND_META_X__`)
   2. Parses the munged string with tree-sitter for the target language
   3. Walks the tree-sitter CST, converting nodes to Rust IR dicts
   4. Replaces placeholder identifiers back to `Metavar` IR nodes
-- [ ] This provides a "universal" pattern compilation path that works
+- [x] This provides a "universal" pattern compilation path that works
   for any language with a tree-sitter grammar, without needing a
   language-specific AST module.
 
 ##### 5b. Wire into plugin system
 
-- [ ] **Default behavior**: when `language != "python"` and no
+- [x] **Default behavior**: when `language != "python"` and no
   language-specific `PatternCompiler` is registered, use
   `TreeSitterPatternCompiler`.
-- [ ] **Python keeps current behavior**: `PythonPatternCompiler`
+- [x] **Python keeps current behavior**: `PythonPatternCompiler`
   (wrapping `ast.parse()`) remains the default for Python patterns
   since it has the most mature metavar/constraint handling.
 - [ ] **Add `--pattern-syntax` flag** (optional) to let users explicitly
@@ -1607,11 +1607,11 @@ pattern string with Python's `ast.parse()`.  This means patterns like
 
 ##### 5c. Tests
 
-- [ ] Test that `TreeSitterPatternCompiler` compiles `$X.foo($Y)` to
+- [x] Test that `TreeSitterPatternCompiler` compiles `$X.foo($Y)` to
   correct IR for Python, TypeScript, Rust, Go.
 - [ ] Test that `TreeSitterPatternCompiler` compiles
   `fn $NAME($...PARAMS) -> $RET` to FuncDef IR for Rust.
-- [ ] Test that compound statement patterns work:
+- [x] Test that compound statement patterns work:
   `if $COND { $...BODY }` matches TypeScript `if` blocks.
 - [ ] Test error messages when pattern doesn't parse in target language.
 
