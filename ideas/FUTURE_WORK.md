@@ -2,27 +2,12 @@
 
 ## Easy Wins
 
-### `$X:stmt` Type Constraint
-
-Currently accepted by the grammar but not fully implemented. The pattern compiler
-replaces `$X` with `__META_X__` (a valid identifier) to parse as Python code, but
-this is an expression and cannot appear at statement-level positions. Fix: use a
-template-based approach where `$BODY:stmt` is restricted to compound statement
-body positions and matched against `body: Sequence[BaseStatement]` directly by
-the compound statement matcher.
-
 ### `FullRepoManager` + `FullyQualifiedNameProvider`
 
-The `graph`, `callers`, and `refs` commands currently use per-file
-`QualifiedNameProvider`. Switching to `FullRepoManager` with
-`FullyQualifiedNameProvider` would improve cross-file name resolution accuracy
-(e.g. resolving re-exported names through intermediate modules).
-
-### `--calls-only` Optimization for `refs`
-
-The `refs --calls-only` flag exists but still scans all reference types
-internally. Could short-circuit by only checking `Call` parent nodes, skipping
-the full reference collection.
+The `graph`, `callers`, and `refs` commands currently use per-file scope analysis.
+Switching to a full-repository qualified name provider would improve cross-file
+name resolution accuracy (e.g. resolving re-exported names through intermediate
+modules and handling package-level `__init__.py` re-exports).
 
 ## Longer-Term Ideas
 

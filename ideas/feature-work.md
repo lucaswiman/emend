@@ -70,33 +70,6 @@ of thing where "tool does it atomically" is meaningfully more reliable than "age
 in 4 rounds of tool calls."
 
 
-## 2. Structured JSON Output (`--json` for all commands)
-
-**Problem:** `deadcode --json` and `refs --json` exist, but `search`, `edit`, `add`,
-`rename`, `move`, and `replace` output human-formatted text. Agents parse this fine — it's
-not blocking — but each command has a different text format, and the agent spends tokens on
-format-handling that could go toward reasoning.
-
-**Proposed feature:**
-
-Add `--json` to remaining commands. Most useful for `search` (include captures):
-
-```bash
-emend search 'print($X)' src/ --json
-```
-```json
-[{"file": "app.py", "line": 23, "match": "print(result)",
-  "captures": {"X": {"code": "result", "type": "Name"}}}]
-```
-
-The capture metadata is the part agents can't get from text output today: knowing that
-`$X` matched a `Name` node vs. a `Call` node vs. a `BinaryExpression` helps the agent
-decide what replacement is appropriate.
-
-**Being honest:** This is incremental. Agents handle text output. The value is
-consistency, compactness, and capture metadata — not a fundamental capability gap.
-
-
 ---
 
 ## Crazy Ideas
@@ -193,14 +166,12 @@ both agents and humans benefit.
 | # | Feature | Effort | Impact |
 |---|---------|--------|--------|
 | 1 | Safe Delete (cascade) | Medium | High |
-| 2 | JSON output + captures | Low | Low-Medium |
 
 Safe delete is the clear #1 because it turns `deadcode` from a read-only report into an
-action, and the transitive cascade is something agents genuinely struggle with. JSON
-output is worth doing because it's low-effort — but it's incremental, not a reason to
-choose emend.
+action, and the transitive cascade is something agents genuinely struggle with.
 
-The honest takeaway: emend's existing feature set is already strong for agents. The gap
-isn't missing features — it's acting on analysis results (safe delete) and output format
-(JSON). The truly transformative ideas (behavioral diff, daemon/LSP, cross-language
-refactoring) are in the Crazy Ideas section because they're genuinely hard problems.
+The honest takeaway: emend's existing feature set is already strong for agents. JSON
+output has been implemented across all major commands. The remaining gap is acting on
+analysis results (safe delete with cascade). The truly transformative ideas (behavioral
+diff, daemon/LSP, cross-language refactoring) are in the Crazy Ideas section because
+they're genuinely hard problems.
