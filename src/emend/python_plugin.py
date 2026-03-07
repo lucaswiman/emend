@@ -190,11 +190,11 @@ class PythonCommentHandler(CommentHandler):
 
 
 class PythonPatternCompiler(PatternCompiler):
-    """Pattern compiler for Python, delegating to ``compile_pattern_to_rust_ir``."""
+    """Pattern compiler for Python, delegating to ``_compile_python_pattern_to_rust_ir``."""
 
     def compile(self, pattern_str: str) -> dict | None:
-        from emend.pattern import compile_pattern_to_rust_ir
-        return compile_pattern_to_rust_ir(pattern_str)
+        from emend.pattern import _compile_python_pattern_to_rust_ir
+        return _compile_python_pattern_to_rust_ir(pattern_str)
 
 
 def create_python_plugin() -> LanguagePlugin:

@@ -1488,13 +1488,13 @@ def find_pattern_in_project(
             compile_constraint_to_rust_ir,
         )
 
-        pattern_ir = compile_pattern_to_rust_ir(pattern_str)
+        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
         if pattern_ir is not None:
             inside_ir = (
-                compile_constraint_to_rust_ir(inside) if inside else None
+                compile_constraint_to_rust_ir(inside, language=language) if inside else None
             )
             not_inside_ir = (
-                compile_constraint_to_rust_ir(not_inside)
+                compile_constraint_to_rust_ir(not_inside, language=language)
                 if not_inside
                 else None
             )
@@ -2733,12 +2733,12 @@ def find_pattern(
         source_code = file.read_text()
 
     # Compile pattern and constraints to Rust IR
-    rust_ir = compile_pattern_to_rust_ir(pattern_str)
+    rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
     if rust_ir is None:
         raise ValueError(f"Pattern '{pattern_str}' could not be compiled to Rust IR")
 
-    inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
-    not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+    inside_ir = compile_constraint_to_rust_ir(inside, language=language) if inside else None
+    not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=language) if not_inside else None
     
     if inside and inside_ir is None:
         raise ValueError(f"Unknown inside/not_inside constraint: '{inside}'")

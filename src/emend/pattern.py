@@ -970,8 +970,23 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
     return None
 
 
-def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
+def compile_pattern_to_rust_ir(pattern_str: str, language: str = "python") -> dict | None:
     """Compile a pattern string to Rust IR dict for the tree-sitter fast path."""
+    from emend.language_plugins import load_plugin
+
+    if language != "python":
+        plugin = load_plugin(language)
+        if plugin and plugin.pattern_compiler:
+            ir = plugin.pattern_compiler.compile(pattern_str)
+            if ir is not None:
+                return ir
+
+    # Fallback to Python AST path
+    return _compile_python_pattern_to_rust_ir(pattern_str)
+
+
+def _compile_python_pattern_to_rust_ir(pattern_str: str) -> dict | None:
+    """Legacy Python-specific pattern compilation using ast.parse."""
     import ast as _ast
 
     try:
@@ -1013,7 +1028,9 @@ def compile_pattern_to_rust_ir(pattern_str: str) -> dict | None:
         return None
 
 
-def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
+def compile_constraint_to_rust_ir(
+    constraint: str | None, language: str = "python"
+) -> dict | None:
     """Compile an inside/not_inside constraint string to Rust IR dict."""
     if constraint is None:
         return None
@@ -1116,7 +1133,7 @@ def compile_constraint_to_rust_ir(constraint: str | None) -> dict | None:
 
     stripped = constraint.rstrip()
     if stripped.endswith(":"):
-        ir = compile_pattern_to_rust_ir(stripped)
+        ir = compile_pattern_to_rust_ir(stripped, language=language)
         if ir is not None:
             return ir
 

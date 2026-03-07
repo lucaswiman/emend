@@ -254,6 +254,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::compile_pattern_treesitter, m)?)?;
     m.add_class::<scope_py::PyScopeResolver>()?;
     m.add_class::<transform_py::PyFileTransform>()?;
     Ok(())

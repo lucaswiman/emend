@@ -174,6 +174,140 @@ class NoOpPatternCompiler(PatternCompiler):
         return None
 
 
+class TreeSitterPatternCompiler(PatternCompiler):
+    """Universal pattern compiler using tree-sitter for any language.
+
+    This compiler works by:
+    1. Replacing metavariables ($X, $...ARGS) with valid placeholders.
+    2. Parsing the munged string with tree-sitter for the target language.
+    3. Converting the tree-sitter CST to the Rust IR dict.
+    4. Mapping placeholder nodes back to Metavar and Ellipsis nodes.
+    """
+
+    def __init__(self, language: str) -> None:
+        self.language = language
+
+    def compile(self, pattern_str: str) -> dict | None:
+        from emend import emend_core
+        from emend.language_registry import get_extensions
+        from emend.pattern import parse_pattern, MetaVar
+
+        # 1. Parse metavariables using existing Lark grammar
+        try:
+            pattern = parse_pattern(pattern_str)
+        except Exception:
+            return None
+
+        # 2. Replace metavariables with placeholders
+        # We use _build_metavar_map_and_replace logic but we need the map
+        # to fixup the result.
+        metavar_map: dict[str, MetaVar] = {}
+        temp_code = pattern_str
+
+        # Sort by length descending to avoid partial matches
+        sorted_mvs = sorted(pattern.metavars, key=lambda mv: (
+            -len(f"$...{mv.name}:{mv.type_constraint or ''}"),
+            -len(f"$...{mv.name}"),
+            -len(f"${mv.name}:{mv.type_constraint or ''}"),
+            -len(f"${mv.name}")
+        ))
+
+        for mv in sorted_mvs:
+            placeholder = f"__META_{mv.name}__"
+            metavar_map[placeholder] = mv
+
+            if mv.name == "_":
+                pattern_str_meta = "$_"
+            elif mv.ellipsis and mv.type_constraint:
+                pattern_str_meta = f"$...{mv.name}:{mv.type_constraint}"
+            elif mv.ellipsis:
+                pattern_str_meta = f"$...{mv.name}"
+            elif mv.type_constraint:
+                pattern_str_meta = f"${mv.name}:{mv.type_constraint}"
+            else:
+                pattern_str_meta = f"${mv.name}"
+
+            temp_code = temp_code.replace(pattern_str_meta, placeholder)
+
+        # 3. Parse with tree-sitter via emend_core
+        exts = get_extensions(self.language)
+        ext = exts[0] if exts else "py"
+
+        try:
+            ir = emend_core.compile_pattern_treesitter(temp_code, ext)
+        except Exception:
+            return None
+
+        # 4. Recursively replace placeholder nodes with Metavar/Ellipsis nodes
+        return self._fixup_ir(ir, metavar_map)
+
+    def _fixup_ir(self, ir: dict | list | str, metavar_map: dict[str, MetaVar]):
+        if isinstance(ir, list):
+            return [self._fixup_ir(item, metavar_map) for item in ir]
+        if isinstance(ir, str):
+            if ir in metavar_map:
+                mv = metavar_map[ir]
+                return mv.name
+            return ir
+        if not isinstance(ir, dict):
+            return ir
+
+        # If it's a name node, check if it's a placeholder
+        if ir.get("type") == "name":
+            val = ir.get("value")
+            if isinstance(val, str) and val in metavar_map:
+                mv = metavar_map[val]
+                tc = mv.type_constraint
+                if tc in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
+                    return {"type": "type_constraint", "kind": tc, "name": mv.name}
+                if tc and tc.startswith("!"):
+                    inner = tc[1:]
+                    if inner in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
+                        return {"type": "type_constraint", "kind": tc, "name": mv.name}
+
+                if mv.name == "_":
+                    return {"type": "any_expr"}
+
+                if mv.ellipsis:
+                    return {"type": "ellipsis", "name": mv.name}
+                else:
+                    return {"type": "metavar", "name": mv.name}
+
+        # Recursively fixup all fields
+        new_ir = {}
+        for k, v in ir.items():
+            # Special case for import/import_from names which are strings
+            if k == "name" and isinstance(v, str) and v in metavar_map:
+                new_ir[k] = metavar_map[v].name
+            elif k == "module" and isinstance(v, str) and v in metavar_map:
+                new_ir[k] = metavar_map[v].name
+            elif k == "asname" and isinstance(v, str) and v in metavar_map:
+                new_ir[k] = metavar_map[v].name
+            else:
+                new_ir[k] = self._fixup_ir(v, metavar_map)
+
+        # Post-process call args for ellipsis
+        if new_ir.get("type") == "call" and "args" in new_ir:
+            processed_args = []
+            for arg in new_ir["args"]:
+                if isinstance(arg, dict) and arg.get("type") == "arg":
+                    val = arg.get("value")
+                    if isinstance(val, dict) and val.get("type") == "ellipsis":
+                        processed_args.append(val)
+                        continue
+                processed_args.append(arg)
+            new_ir["args"] = processed_args
+
+            has_ellipsis = any(
+                isinstance(arg, dict) and arg.get("type") == "ellipsis"
+                for arg in new_ir["args"]
+            )
+            # In our Rust IR, call has "exact_args" field
+            new_ir["exact_args"] = not has_ellipsis
+
+        return new_ir
+
+
 # ---------------------------------------------------------------------------
 # Plugin registry and loader
 # ---------------------------------------------------------------------------
@@ -198,5 +332,5 @@ def load_plugin(language: str) -> LanguagePlugin:
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),
         comment_handler=RegexCommentHandler(prefix),
-        pattern_compiler=NoOpPatternCompiler(),
+        pattern_compiler=TreeSitterPatternCompiler(language),
     )

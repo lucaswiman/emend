@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-use crate::pattern::parse_python;
+use crate::pattern::parse_by_extension;
 use crate::scope::{LanguageConfig, ScopeResolver};
 
 /// Python-visible scope resolver.

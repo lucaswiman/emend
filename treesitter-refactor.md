@@ -1522,85 +1522,12 @@ The `collect_import()` function (`scope.rs:1553`) and
 
 ---
 
-#### Phase 4: Add Language Config Files & Symbol Queries
-
-**Goals**: Create complete configuration for TypeScript (and templates
-for other languages) so they work end-to-end.
-
-##### 4a. TypeScript
-
-- [ ] **Complete `languages/typescript/config.toml`** — verify all
-  sections match actual `tree-sitter-typescript` node types.  Fixed:
-  `import_from`, `alias_field`, `star_import` now have `#[serde(default)]`
-  so they can be omitted; `locals_marker` added to `[qualified_names]`.
-  Still missing: `[symbols]`, `[pattern_matching]` sections, and correct
-  TS-specific import node types (`named_imports`, `import_clause`, etc.).
-- [ ] **Create `languages/typescript/symbols.scm`** — tree-sitter query
-  for extracting function declarations, class declarations, variable
-  declarations, method definitions, arrow functions.
-- [ ] **Create `languages/typescript/plugin.py`** — with
-  `TypeScriptImportHandler` (parse `import { X } from 'Y'`,
-  `import X from 'Y'`, `require()`) and
-  `RegexCommentHandler("//")`.
-- [ ] **Add `tree-sitter-typescript` test fixtures** — small `.ts` files
-  exercising: functions, classes, arrow functions, imports/exports,
-  nested scopes, type annotations.
-- [ ] **Integration tests**: `emend search '$X($Y)' --in fixtures/ -L typescript`
-- [ ] **Integration tests**: `emend search --output summary fixtures/sample.ts`
-- [ ] **Integration tests**: `emend refs 'fixtures/sample.ts::myFunc'`
-- [ ] **Integration tests**: `emend replace '$OLD($X)' '$NEW($X)' --in fixtures/ -L typescript`
-
-##### 4b. Rust language
-
-- [ ] **Create `languages/rust/config.toml`** — scope creators
-  (`function_item`, `impl_item`, `struct_item`, `enum_item`, `mod_item`,
-  `closure_expression`), binding rules (`let_declaration`,
-  `parameter`), import rules (`use_declaration`), QN rules
-  (`::`  separator).
-- [ ] **Create `languages/rust/symbols.scm`** — function_item,
-  struct_item, enum_item, impl_item, const_item, static_item,
-  type_alias.
-- [ ] **Create `languages/rust/plugin.py`** — `NoOpImportHandler` (or
-  basic `use` statement handler), `RegexCommentHandler("//")`.
-- [ ] **Add `tree-sitter-rust`** to `Cargo.toml` dependencies.
-- [ ] **Basic integration tests** for search, summary, refs.
-
-##### 4c. Go language
-
-- [ ] **Create `languages/go/config.toml`** — scope creators
-  (`function_declaration`, `method_declaration`, `func_literal`),
-  binding rules (`short_var_declaration`, `var_declaration`),
-  import rules (`import_declaration`), QN rules (`/` separator).
-- [ ] **Create `languages/go/symbols.scm`** — function_declaration,
-  method_declaration, type_declaration, const_declaration,
-  var_declaration.
-- [ ] **Create `languages/go/plugin.py`** — `NoOpImportHandler`,
-  `RegexCommentHandler("//")`.
-- [ ] **Add `tree-sitter-go`** to `Cargo.toml` dependencies.
-- [ ] **Basic integration tests** for search, summary.
-
-##### 4d. Language template / documentation
-
-- [ ] **Create `languages/TEMPLATE/` directory** with a skeleton
-  `config.toml` (all sections present with `TODO` placeholders),
-  `symbols.scm` (empty with comments explaining the format), and
-  `plugin.py` (using NoOp/Regex defaults).
-- [ ] **Write `docs/adding-a-language.md`** documenting the process:
-  1. Copy `languages/TEMPLATE/` to `languages/{lang}/`
-  2. Fill in `config.toml` (explain each section)
-  3. Write `symbols.scm` (link to tree-sitter query docs)
-  4. Optionally implement import/comment handlers in `plugin.py`
-  5. Add tree-sitter grammar crate to `Cargo.toml`
-  6. Run tests
-
----
-
-#### Phase 5: Type Oracle Universalization
+#### Phase 4: Type Oracle Universalization
 
 **Goals**: Support `:type[X]` and `:returns[X]` constraints for any
 language with an LSP-compatible type checker.
 
-##### 5a. Generic LSP type oracle
+##### 4a. Generic LSP type oracle
 
 - [ ] **Create `GenericLSPAdapter(TypeOracle)` class** in
   `type_oracle.py` that wraps `LSPClient` with a configurable command
@@ -1625,7 +1552,7 @@ language with an LSP-compatible type checker.
   accept a `language` parameter and instantiate `GenericLSPAdapter` for
   non-Python languages.
 
-##### 5b. Thread language through type constraint filtering
+##### 4b. Thread language through type constraint filtering
 
 - [ ] **`transform.py:_filter_matches_by_type_oracle()`** — pass
   `language` to `create_type_oracle()`.
@@ -1633,7 +1560,7 @@ language with an LSP-compatible type checker.
 - [ ] **`LSPClient.did_open()`** — use correct `languageId` from
   registry instead of hardcoded `"python"`.
 
-##### 5c. Tests
+##### 4c. Tests
 
 - [ ] Test that `GenericLSPAdapter` correctly parses hover responses
   from a mock LSP server.
@@ -1647,7 +1574,7 @@ language with an LSP-compatible type checker.
 
 ---
 
-#### Phase 6: Tree-Sitter-Based Pattern Compilation (Optional)
+#### Phase 5: Tree-Sitter-Based Pattern Compilation (Optional)
 
 **Goals**: Support pattern matching using the target language's native
 syntax instead of requiring patterns to be valid Python.
@@ -1656,7 +1583,7 @@ Currently `compile_pattern_to_rust_ir()` (`pattern.py:973`) parses the
 pattern string with Python's `ast.parse()`.  This means patterns like
 `if x > 0 { println!("{}", x) }` can't be expressed.
 
-##### 6a. Tree-sitter pattern parser
+##### 5a. Tree-sitter pattern parser
 
 - [ ] **Implement `TreeSitterPatternCompiler`** that:
   1. Substitutes metavar placeholders (`$X` → `__EMEND_META_X__`)
@@ -1667,7 +1594,7 @@ pattern string with Python's `ast.parse()`.  This means patterns like
   for any language with a tree-sitter grammar, without needing a
   language-specific AST module.
 
-##### 6b. Wire into plugin system
+##### 5b. Wire into plugin system
 
 - [ ] **Default behavior**: when `language != "python"` and no
   language-specific `PatternCompiler` is registered, use
@@ -1678,7 +1605,7 @@ pattern string with Python's `ast.parse()`.  This means patterns like
 - [ ] **Add `--pattern-syntax` flag** (optional) to let users explicitly
   choose `python`, `native`, or `treesitter` compilation.
 
-##### 6c. Tests
+##### 5c. Tests
 
 - [ ] Test that `TreeSitterPatternCompiler` compiles `$X.foo($Y)` to
   correct IR for Python, TypeScript, Rust, Go.
@@ -1687,6 +1614,79 @@ pattern string with Python's `ast.parse()`.  This means patterns like
 - [ ] Test that compound statement patterns work:
   `if $COND { $...BODY }` matches TypeScript `if` blocks.
 - [ ] Test error messages when pattern doesn't parse in target language.
+
+---
+
+#### Phase 6: Add Language Config Files & Symbol Queries (Optional)
+
+**Goals**: Create complete configuration for TypeScript (and templates
+for other languages) so they work end-to-end.
+
+##### 6a. TypeScript
+
+- [ ] **Complete `languages/typescript/config.toml`** — verify all
+  sections match actual `tree-sitter-typescript` node types.  Fixed:
+  `import_from`, `alias_field`, `star_import` now have `#[serde(default)]`
+  so they can be omitted; `locals_marker` added to `[qualified_names]`.
+  Still missing: `[symbols]`, `[pattern_matching]` sections, and correct
+  TS-specific import node types (`named_imports`, `import_clause`, etc.).
+- [ ] **Create `languages/typescript/symbols.scm`** — tree-sitter query
+  for extracting function declarations, class declarations, variable
+  declarations, method definitions, arrow functions.
+- [ ] **Create `languages/typescript/plugin.py`** — with
+  `TypeScriptImportHandler` (parse `import { X } from 'Y'`,
+  `import X from 'Y'`, `require()`) and
+  `RegexCommentHandler("//")`.
+- [ ] **Add `tree-sitter-typescript` test fixtures** — small `.ts` files
+  exercising: functions, classes, arrow functions, imports/exports,
+  nested scopes, type annotations.
+- [ ] **Integration tests**: `emend search '$X($Y)' --in fixtures/ -L typescript`
+- [ ] **Integration tests**: `emend search --output summary fixtures/sample.ts`
+- [ ] **Integration tests**: `emend refs 'fixtures/sample.ts::myFunc'`
+- [ ] **Integration tests**: `emend replace '$OLD($X)' '$NEW($X)' --in fixtures/ -L typescript`
+
+##### 6b. Rust language
+
+- [ ] **Create `languages/rust/config.toml`** — scope creators
+  (`function_item`, `impl_item`, `struct_item`, `enum_item`, `mod_item`,
+  `closure_expression`), binding rules (`let_declaration`,
+  `parameter`), import rules (`use_declaration`), QN rules
+  (`::`  separator).
+- [ ] **Create `languages/rust/symbols.scm`** — function_item,
+  struct_item, enum_item, impl_item, const_item, static_item,
+  type_alias.
+- [ ] **Create `languages/rust/plugin.py`** — `NoOpImportHandler` (or
+  basic `use` statement handler), `RegexCommentHandler("//")`.
+- [ ] **Add `tree-sitter-rust`** to `Cargo.toml` dependencies.
+- [ ] **Basic integration tests** for search, summary, refs.
+
+##### 6c. Go language
+
+- [ ] **Create `languages/go/config.toml`** — scope creators
+  (`function_declaration`, `method_declaration`, `func_literal`),
+  binding rules (`short_var_declaration`, `var_declaration`),
+  import rules (`import_declaration`), QN rules (`/` separator).
+- [ ] **Create `languages/go/symbols.scm`** — function_declaration,
+  method_declaration, type_declaration, const_declaration,
+  var_declaration.
+- [ ] **Create `languages/go/plugin.py`** — `NoOpImportHandler`,
+  `RegexCommentHandler("//")`.
+- [ ] **Add `tree-sitter-go`** to `Cargo.toml` dependencies.
+- [ ] **Basic integration tests** for search, summary.
+
+##### 6d. Language template / documentation
+
+- [ ] **Create `languages/TEMPLATE/` directory** with a skeleton
+  `config.toml` (all sections present with `TODO` placeholders),
+  `symbols.scm` (empty with comments explaining the format), and
+  `plugin.py` (using NoOp/Regex defaults).
+- [ ] **Write `docs/adding-a-language.md`** documenting the process:
+  1. Copy `languages/TEMPLATE/` to `languages/{lang}/`
+  2. Fill in `config.toml` (explain each section)
+  3. Write `symbols.scm` (link to tree-sitter query docs)
+  4. Optionally implement import/comment handlers in `plugin.py`
+  5. Add tree-sitter grammar crate to `Cargo.toml`
+  6. Run tests
 
 ---
 

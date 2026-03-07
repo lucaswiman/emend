@@ -308,9 +308,13 @@ pub struct PatternMatchingSection {
     #[serde(default)]
     pub await_expr: String,
     #[serde(default)]
+    pub yield_expr: String,
+    #[serde(default)]
     pub lambda: String,
     #[serde(default)]
     pub named_expr: String,
+    #[serde(default)]
+    pub dict_comprehension: String,
     #[serde(default)]
     pub integer: String,
     #[serde(default)]
@@ -462,6 +466,7 @@ pub struct SymbolsSection {
     #[serde(default)] pub superclasses_field: Option<String>,
     #[serde(default)] pub decorator_node: Option<String>,
     #[serde(default)] pub expression_statement_node: Option<String>,
+    #[serde(default)] pub key_field: Option<String>,
     /// Extra function-like node used inside class bodies (TypeScript: "method_definition").
     #[serde(default)] pub method_node: Option<String>,
     #[serde(default)] pub param_types: Vec<ParamTypeConfig>,
@@ -499,6 +504,9 @@ impl SymbolsSection {
     }
     pub fn superclasses_field(&self) -> &str {
         self.superclasses_field.as_deref().unwrap_or("superclasses")
+    }
+    pub fn key_field(&self) -> &str {
+        self.key_field.as_deref().unwrap_or("key")
     }
     pub fn decorator_node(&self) -> &str {
         self.decorator_node.as_deref().unwrap_or("decorator")
@@ -558,6 +566,7 @@ impl SymbolsSection {
             return_type_field: Some("return_type".to_string()),
             body_field: Some("body".to_string()),
             superclasses_field: Some("superclasses".to_string()),
+            key_field: Some("key".to_string()),
             decorator_node: Some("decorator".to_string()),
             expression_statement_node: Some("expression_statement".to_string()),
             method_node: None,
@@ -2443,7 +2452,9 @@ impl LanguageConfig {
                 yield_expr: "yield".to_string(),
                 lambda: "lambda".to_string(),
                 named_expr: "named_expression".to_string(),
+                dict_comprehension: "dictionary_comprehension".to_string(),
                 integer: "integer".to_string(),
+
                 float: "float".to_string(),
                 string: "string".to_string(),
                 list: "list".to_string(),
