@@ -256,9 +256,9 @@ recurse_into = [
 ]
 
 # ---------------------------------------------------------------------------
-# Virtual environment symbol lookup
+# Environment path symbol lookup
 # ---------------------------------------------------------------------------
-[venv_lookup]
+[environment_lookup]
 # Enable looking up symbols in virtual environment site-packages.
 # When a symbol cannot be found in the project, emend will search these
 # venv directories (relative to project root) for installed package sources.

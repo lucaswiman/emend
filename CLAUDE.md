@@ -140,6 +140,17 @@ Pattern constraints `:type[X]` and `:returns[X]` are parsed by the `ORACLE_TYPE_
 
 Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the shared `.emend/cache/parse.db` database (`type_cache` table, keyed by file content hash).  All oracle calls check this cache before invoking the underlying type engine.
 
+### Environment Path Lookup
+
+`project_config.py` provides environment-aware symbol lookup via `environment_lookup` configuration:
+- **Python**: searches `.venv/venv` site-packages directories for installed package sources (enables "go to definition" for dependencies)
+- **TypeScript/JavaScript**: searches `node_modules` for installed package sources
+- **Rust**: searches `target/` for compiled dependency and workspace crate sources
+- Configuration via `[environment_lookup]` section in language config or project config (`.emend/config.toml`, `pyproject.toml` `[tool.emend]`)
+- `enabled` (bool) — toggle environment lookup; `paths` (list[str]) — directories to probe
+- Fallback integration in `query_symbol_index()` and `EditorSearchEngine` when symbol not found in project index
+- Separate cache per language in `parse.db` (`environment_cache` table), keyed by environment mtime
+
 ### Dead Code Detection
 
 `transform.py` contains `find_dead_code()`:
@@ -150,6 +161,26 @@ Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the sha
 - String literal scanning for dynamic references (getattr, serialization)
 - `git log -S` integration for last-reference tracking
 - `# noqa: emend:deadcode` inline suppression
+
+## Configuration
+
+Project-level settings are loaded from (in priority order, highest wins):
+1. ``.emend/config.toml`` in the project root
+2. ``pyproject.toml`` under ``[tool.emend]``
+3. Language-level defaults from ``languages/<lang>/config.toml``
+
+### Environment Lookup Configuration
+
+Enable symbol lookup in environment paths (venv, node_modules, Cargo build artifacts):
+
+```toml
+# pyproject.toml or .emend/config.toml
+[environment_lookup]
+enabled = true
+paths = [".venv", "venv"]  # For Python
+paths = ["node_modules"]   # For TypeScript/JavaScript
+paths = ["target"]         # For Rust
+```
 
 ## Running Tests
 

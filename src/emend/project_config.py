@@ -6,8 +6,8 @@ Loads settings from (in priority order, highest wins):
 3. Language-level defaults from ``languages/<lang>/config.toml``
 
 Currently supports:
-- ``venv_lookup.enabled`` (bool) — whether to search venv for symbols
-- ``venv_lookup.paths`` (list[str]) — venv directory names to probe
+- ``environment_lookup.enabled`` (bool) — whether to search environment paths for symbols
+- ``environment_lookup.paths`` (list[str]) — environment directory names to probe
 """
 from __future__ import annotations
 
@@ -19,8 +19,14 @@ from typing import Any
 
 
 @dataclass
-class VenvLookupConfig:
-    """Configuration for virtual-environment symbol lookup."""
+class EnvironmentLookupConfig:
+    """Configuration for environment path symbol lookup.
+
+    Supports looking up symbols in environment-specific package directories:
+    - Python: .venv/venv site-packages
+    - TypeScript/JavaScript: node_modules
+    - Rust: target/debug/deps or target/release/deps
+    """
     enabled: bool = True
     paths: list[str] = field(default_factory=lambda: [".venv", "venv"])
 
@@ -43,8 +49,8 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _merge_venv_lookup(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Merge venv_lookup dicts; override wins for each key present."""
+def _merge_environment_lookup(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge environment_lookup dicts; override wins for each key present."""
     merged = dict(base)
     for key in ("enabled", "paths"):
         if key in override:
@@ -68,60 +74,78 @@ def load_project_config(project_root: str, language: str = "python") -> dict[str
 
     # Layer 1: language defaults
     result: dict[str, Any] = {}
-    if "venv_lookup" in lang_config:
-        result["venv_lookup"] = dict(lang_config["venv_lookup"])
+    if "environment_lookup" in lang_config:
+        result["environment_lookup"] = dict(lang_config["environment_lookup"])
 
     # Layer 2: pyproject.toml [tool.emend]
     pyproject_data = _load_toml(root / "pyproject.toml")
     tool_emend = pyproject_data.get("tool", {}).get("emend", {})
-    if "venv_lookup" in tool_emend:
-        base = result.get("venv_lookup", {})
-        result["venv_lookup"] = _merge_venv_lookup(base, tool_emend["venv_lookup"])
+    if "environment_lookup" in tool_emend:
+        base = result.get("environment_lookup", {})
+        result["environment_lookup"] = _merge_environment_lookup(base, tool_emend["environment_lookup"])
 
     # Layer 3: .emend/config.toml
     emend_config = _load_toml(root / ".emend" / "config.toml")
-    if "venv_lookup" in emend_config:
-        base = result.get("venv_lookup", {})
-        result["venv_lookup"] = _merge_venv_lookup(base, emend_config["venv_lookup"])
+    if "environment_lookup" in emend_config:
+        base = result.get("environment_lookup", {})
+        result["environment_lookup"] = _merge_environment_lookup(base, emend_config["environment_lookup"])
 
     return result
 
 
-def get_venv_lookup_config(project_root: str, language: str = "python") -> VenvLookupConfig:
-    """Return the resolved VenvLookupConfig for a project."""
+def get_environment_lookup_config(project_root: str, language: str = "python") -> EnvironmentLookupConfig:
+    """Return the resolved EnvironmentLookupConfig for a project."""
     config = load_project_config(project_root, language)
-    venv_section = config.get("venv_lookup", {})
-    return VenvLookupConfig(
-        enabled=venv_section.get("enabled", True),
-        paths=list(venv_section.get("paths", [".venv", "venv"])),
+    env_section = config.get("environment_lookup", {})
+    return EnvironmentLookupConfig(
+        enabled=env_section.get("enabled", True),
+        paths=list(env_section.get("paths", [".venv", "venv"])),
     )
 
 
-def resolve_venv_site_packages(project_root: str, language: str = "python") -> Path | None:
-    """Find the first existing venv site-packages directory.
+def resolve_environment_path(project_root: str, language: str = "python") -> Path | None:
+    """Find the first existing environment path directory.
 
-    Returns the ``site-packages`` path inside the first matching venv,
-    or ``None`` if venv lookup is disabled or no venv is found.
+    For Python: Returns the ``site-packages`` path inside the first matching venv,
+    or ``None`` if environment lookup is disabled or no venv is found.
+
+    For other languages, returns the first matching environment directory.
     """
-    cfg = get_venv_lookup_config(project_root, language)
+    cfg = get_environment_lookup_config(project_root, language)
     if not cfg.enabled:
         return None
 
     root = Path(project_root)
-    for venv_name in cfg.paths:
-        venv_dir = root / venv_name
-        if not venv_dir.is_dir():
+    for env_name in cfg.paths:
+        env_dir = root / env_name
+        if not env_dir.is_dir():
             continue
-        # Find site-packages: lib/python*/site-packages
-        lib_dir = venv_dir / "lib"
-        if lib_dir.is_dir():
-            for child in lib_dir.iterdir():
-                sp = child / "site-packages"
-                if sp.is_dir():
-                    return sp
-        # Windows layout: Lib/site-packages
-        lib_dir_win = venv_dir / "Lib" / "site-packages"
-        if lib_dir_win.is_dir():
-            return lib_dir_win
+
+        if language == "python":
+            # Find site-packages: lib/python*/site-packages
+            lib_dir = env_dir / "lib"
+            if lib_dir.is_dir():
+                for child in lib_dir.iterdir():
+                    sp = child / "site-packages"
+                    if sp.is_dir():
+                        return sp
+            # Windows layout: Lib/site-packages
+            lib_dir_win = env_dir / "Lib" / "site-packages"
+            if lib_dir_win.is_dir():
+                return lib_dir_win
+        else:
+            # For other languages, return the environment directory directly
+            return env_dir
 
     return None
+
+
+# Backward compatibility aliases
+def get_venv_lookup_config(project_root: str, language: str = "python") -> EnvironmentLookupConfig:
+    """Deprecated: use get_environment_lookup_config instead."""
+    return get_environment_lookup_config(project_root, language)
+
+
+def resolve_venv_site_packages(project_root: str, language: str = "python") -> Path | None:
+    """Deprecated: use resolve_environment_path instead."""
+    return resolve_environment_path(project_root, language)

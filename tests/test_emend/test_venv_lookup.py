@@ -21,28 +21,28 @@ class TestProjectConfig:
 
     def test_default_venv_config(self, tmp_path):
         """Default config has venv lookup enabled with ['.venv', 'venv']."""
-        from emend.project_config import get_venv_lookup_config, load_project_config
+        from emend.project_config import get_environment_lookup_config, load_project_config
 
         load_project_config.cache_clear()
-        cfg = get_venv_lookup_config(str(tmp_path))
+        cfg = get_environment_lookup_config(str(tmp_path))
         assert cfg.enabled is True
         assert cfg.paths == [".venv", "venv"]
 
     def test_pyproject_toml_override(self, tmp_path):
-        """pyproject.toml [tool.emend.venv_lookup] overrides defaults."""
+        """pyproject.toml [tool.emend.environment_lookup] overrides defaults."""
         from emend.project_config import load_project_config
 
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(textwrap.dedent("""\
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             enabled = false
             paths = ["my_venv"]
         """))
 
         load_project_config.cache_clear()
         cfg = load_project_config(str(tmp_path))
-        assert cfg["venv_lookup"]["enabled"] is False
-        assert cfg["venv_lookup"]["paths"] == ["my_venv"]
+        assert cfg["environment_lookup"]["enabled"] is False
+        assert cfg["environment_lookup"]["paths"] == ["my_venv"]
 
     def test_emend_config_toml_override(self, tmp_path):
         """`.emend/config.toml` takes priority over pyproject.toml."""
@@ -50,20 +50,20 @@ class TestProjectConfig:
 
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(textwrap.dedent("""\
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             paths = ["from_pyproject"]
         """))
 
         emend_dir = tmp_path / ".emend"
         emend_dir.mkdir()
         (emend_dir / "config.toml").write_text(textwrap.dedent("""\
-            [venv_lookup]
+            [environment_lookup]
             paths = [".custom_venv"]
         """))
 
         load_project_config.cache_clear()
         cfg = load_project_config(str(tmp_path))
-        assert cfg["venv_lookup"]["paths"] == [".custom_venv"]
+        assert cfg["environment_lookup"]["paths"] == [".custom_venv"]
 
     def test_partial_override_preserves_defaults(self, tmp_path):
         """Overriding only 'paths' preserves default 'enabled'."""
@@ -71,14 +71,14 @@ class TestProjectConfig:
 
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(textwrap.dedent("""\
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             paths = ["env"]
         """))
 
         load_project_config.cache_clear()
         cfg = load_project_config(str(tmp_path))
-        assert cfg["venv_lookup"]["enabled"] is True
-        assert cfg["venv_lookup"]["paths"] == ["env"]
+        assert cfg["environment_lookup"]["enabled"] is True
+        assert cfg["environment_lookup"]["paths"] == ["env"]
 
 
 # ---------------------------------------------------------------------------
@@ -91,66 +91,66 @@ class TestResolveVenvSitePackages:
 
     def test_finds_dot_venv(self, tmp_path):
         """Finds site-packages in .venv."""
-        from emend.project_config import resolve_venv_site_packages, load_project_config
+        from emend.project_config import resolve_environment_path, load_project_config
 
         sp = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         sp.mkdir(parents=True)
 
         load_project_config.cache_clear()
-        result = resolve_venv_site_packages(str(tmp_path))
+        result = resolve_environment_path(str(tmp_path))
         assert result == sp
 
     def test_finds_venv(self, tmp_path):
         """Falls back to venv/ if .venv/ doesn't exist."""
-        from emend.project_config import resolve_venv_site_packages, load_project_config
+        from emend.project_config import resolve_environment_path, load_project_config
 
         sp = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
         sp.mkdir(parents=True)
 
         load_project_config.cache_clear()
-        result = resolve_venv_site_packages(str(tmp_path))
+        result = resolve_environment_path(str(tmp_path))
         assert result == sp
 
     def test_returns_none_when_disabled(self, tmp_path):
         """Returns None when venv lookup is disabled."""
-        from emend.project_config import resolve_venv_site_packages, load_project_config
+        from emend.project_config import resolve_environment_path, load_project_config
 
         sp = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         sp.mkdir(parents=True)
 
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(textwrap.dedent("""\
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             enabled = false
         """))
 
         load_project_config.cache_clear()
-        result = resolve_venv_site_packages(str(tmp_path))
+        result = resolve_environment_path(str(tmp_path))
         assert result is None
 
     def test_returns_none_when_no_venv(self, tmp_path):
         """Returns None when no venv directory exists."""
-        from emend.project_config import resolve_venv_site_packages, load_project_config
+        from emend.project_config import resolve_environment_path, load_project_config
 
         load_project_config.cache_clear()
-        result = resolve_venv_site_packages(str(tmp_path))
+        result = resolve_environment_path(str(tmp_path))
         assert result is None
 
     def test_custom_venv_path(self, tmp_path):
         """Finds site-packages using custom venv path from config."""
-        from emend.project_config import resolve_venv_site_packages, load_project_config
+        from emend.project_config import resolve_environment_path, load_project_config
 
         sp = tmp_path / "my_env" / "lib" / "python3.12" / "site-packages"
         sp.mkdir(parents=True)
 
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(textwrap.dedent("""\
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             paths = ["my_env"]
         """))
 
         load_project_config.cache_clear()
-        result = resolve_venv_site_packages(str(tmp_path))
+        result = resolve_environment_path(str(tmp_path))
         assert result == sp
 
 
@@ -311,7 +311,7 @@ class TestLookupVenvSymbol:
             [project]
             name = "test"
 
-            [tool.emend.venv_lookup]
+            [tool.emend.environment_lookup]
             enabled = false
         """))
         load_project_config.cache_clear()
