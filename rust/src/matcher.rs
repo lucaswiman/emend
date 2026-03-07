@@ -2115,8 +2115,9 @@ fn matches_node<'a>(
             }
             match value {
                 Some(val_pattern) => {
-                    // Find the value child using config.value_field
-                    let val_node = node.child_by_field_name(&config.pattern_matching.value_field);
+                    // Find the value child using config.value_field, or fallback to first named child
+                    let val_node = node.child_by_field_name(&config.pattern_matching.value_field)
+                        .or_else(|| node.named_child(0));
                     match val_node {
                         Some(vn) => {
                             if matches_node(vn, source, val_pattern, captures, config).is_some() {
