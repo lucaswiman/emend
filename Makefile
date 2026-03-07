@@ -24,7 +24,7 @@ $(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	cargo test --manifest-path rust/Cargo.toml
-	$(VENV)/bin/pytest --tb=short -n 8 $(if $(TESTS),$(TESTS),tests/)
+	$(VENV)/bin/pytest --tb=short -n 4 $(if $(TESTS),$(TESTS),tests/)
 
 deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	$(VENV)/bin/emend deadcode src/emend/ --exclude-references-from tests/ --no-last-reference
