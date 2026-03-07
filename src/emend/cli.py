@@ -674,6 +674,7 @@ def search(
                     imported_from=imported_from,
                     scope_local=scope_local,
                     type_oracle=oracle,
+                    language=_lang,
                 )
                 for pm in project_matches:
                     yield (pm.file_path, pm.match)
@@ -1060,7 +1061,8 @@ def replace_cmd(
             oracle = _maybe_create_oracle(type_engine)
 
         search_path = path
-        files, is_multi_file = resolve_files(search_path)
+        _lang = _state["language"]
+        files, is_multi_file = resolve_files(search_path, language=_lang)
 
         # Pre-filter: use Rust matcher to find which files actually have
         # matches, so we only need to process those files.
@@ -1078,10 +1080,10 @@ def replace_cmd(
             _logger.info("read_and_filter: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
 
             # Second: try structural pre-filter via Rust tree-sitter matcher
-            pattern_ir = compile_pattern_to_rust_ir(pattern)
+            pattern_ir = compile_pattern_to_rust_ir(pattern, language=_lang)
             if pattern_ir is not None:
-                inside_ir = compile_constraint_to_rust_ir(inside) if inside else None
-                not_inside_ir = compile_constraint_to_rust_ir(not_inside) if not_inside else None
+                inside_ir = compile_constraint_to_rust_ir(inside, language=_lang) if inside else None
+                not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=_lang) if not_inside else None
                 if (inside is None or inside_ir is not None) and \
                    (not_inside is None or not_inside_ir is not None):
                     _t0 = _time.monotonic()
@@ -1111,6 +1113,7 @@ def replace_cmd(
                     scope=scope, apply=apply,
                     inside=inside, not_inside=not_inside,
                     type_oracle=oracle,
+                    language=_lang,
                 )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)
@@ -1175,12 +1178,14 @@ def lint_cmd(
 
         rules, macros, deadcode_config = load_rules(str(config_path))
 
-        resolved, _ = resolve_files(path)
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
         violations = run_lint(
             rules, files, fix=fix, rule_filter=rule,
             deadcode_config=deadcode_config, project_path=path,
+            language=_lang,
         )
 
         for v in violations:
@@ -1603,13 +1608,15 @@ def batch_cmd(
                         "'replacement', and 'path'"
                     )
 
-                files, _ = resolve_files(target_path)
+                _lang = _state["language"]
+                files, _ = resolve_files(target_path, language=_lang)
 
                 op_diffs = []
                 for fp in files:
                     try:
                         diff, cnt = replace_pattern(
-                            pattern, replacement, str(fp), apply=apply
+                            pattern, replacement, str(fp), apply=apply,
+                            language=_lang,
                         )
                         if diff:
                             op_diffs.append(diff)

@@ -280,7 +280,7 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
                 return {"type": "metavar", "name": metavar.name}
         else:
             if node.id == "None":
-                return {"type": "none"}
+                return {"type": "none_literal"}
             if node.id == "True":
                 return {"type": "bool", "value": True}
             if node.id == "False":
@@ -289,7 +289,7 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
 
     elif isinstance(node, _ast.Constant):
         if node.value is None:
-            return {"type": "none"}
+            return {"type": "none_literal"}
         if isinstance(node.value, bool):
             return {"type": "bool", "value": node.value}
         if isinstance(node.value, int):

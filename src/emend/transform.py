@@ -1409,6 +1409,7 @@ def find_pattern_in_project(
     type_oracle: TypeOracle | None = None,
     index_conn: sqlite3.Connection | None = None,
     limit: int | None = None,
+    language: str = "python",
 ) -> list[ProjectPatternMatch]:
     """Search for a pattern across multiple files.
 
@@ -1535,6 +1536,7 @@ def find_pattern_in_project(
             scope=scope, inside=inside, not_inside=not_inside,
             imported_from=imported_from, scope_local=scope_local,
             source_override=content, type_oracle=type_oracle,
+            language=language,
         )
         results = [ProjectPatternMatch(file_path=fp, match=m) for m in matches]
         if limit is not None:
@@ -1550,6 +1552,7 @@ def find_pattern_in_project(
                     scope=scope, inside=inside, not_inside=not_inside,
                     imported_from=imported_from, scope_local=scope_local,
                     source_override=content, type_oracle=type_oracle,
+                    language=language,
                 )
                 return [ProjectPatternMatch(file_path=fp, match=m) for m in matches]
             except Exception:
@@ -2688,6 +2691,7 @@ def find_pattern(
     scope_local: bool = False,
     source_override: str | None = None,
     type_oracle: "TypeOracle | None" = None,
+    language: str = "python",
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -3160,6 +3164,7 @@ def replace_pattern(
     not_inside: str | None = None,
     where: str | None = None,
     type_oracle: TypeOracle | None = None,
+    language: str = "python",
 ) -> tuple[str, int]:
     """Replace pattern matches with replacement template.
 
@@ -3204,7 +3209,7 @@ def replace_pattern(
     matches = find_pattern(
         pattern_str, file_path, scope=scope,
         inside=inside, not_inside=not_inside, where=where,
-        type_oracle=type_oracle,
+        type_oracle=type_oracle, language=language,
         source_override=source_code,
     )
 

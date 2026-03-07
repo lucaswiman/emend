@@ -195,6 +195,7 @@ def run_lint(
     rule_filter: str | None = None,
     deadcode_config: DeadCodeConfig | None = None,
     project_path: str | None = None,
+    language: str = "python",
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
@@ -241,11 +242,11 @@ def run_lint(
     rust_rules = []
     fallback_rules = []
     for rule in find_only_rules:
-        ir = compile_pattern_to_rust_ir(rule.find)
+        ir = compile_pattern_to_rust_ir(rule.find, language=language)
         if ir is None:
             fallback_rules.append(rule)
             continue
-        ni_ir = compile_constraint_to_rust_ir(rule.not_inside) if rule.not_inside else None
+        ni_ir = compile_constraint_to_rust_ir(rule.not_inside, language=language) if rule.not_inside else None
         if rule.not_inside is not None and ni_ir is None:
             # not_inside constraint didn't compile to batch Rust IR — use single-file path
             fallback_rules.append(rule)
@@ -324,6 +325,7 @@ def run_lint(
                     file_path,
                     not_inside=rule.not_inside,
                     source_override=source,
+                    language=language,
                 )
             except Exception:
                 logger.debug(
@@ -390,6 +392,7 @@ def run_lint(
                     rule.find,
                     file_path,
                     not_inside=rule.not_inside,
+                    language=language,
                 )
             except Exception:
                 logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
@@ -414,6 +417,7 @@ def run_lint(
                 file_path,
                 not_inside=rule.not_inside,
                 apply=True,
+                language=language,
             )
             if count > 0 and suppressed_lines:
                 fixed_lines = Path(file_path).read_text().splitlines(keepends=True)

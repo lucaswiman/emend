@@ -653,6 +653,10 @@ expression and statement types, reducing LibCST fallback to <10% of patterns.
    `decorated_definition` nodes to match either the decorators or the
    underlying `function_definition` / `class_definition`.
 
+13. **None Literal Matching**: Fixed `ValueError: Unknown pattern type: none`
+    by ensuring Python IR generator in `pattern.py` uses `none_literal`
+    to match Rust matcher expectations.
+
 ### Phase 2: Mutation Engine & Symbol Edits (COMPLETED)
 
 Implemented the byte-range edit engine in Rust and migrated all symbol component
@@ -1329,7 +1333,8 @@ can operate on non-Python files.
   extensions; fall back to `"python"` for backward compatibility).
 - [x] **Thread `language: str` parameter** through the call stack:
   `cli.py` → `resolve_files()` and `search` pattern mode → language-aware
-  file collection. (Full threading to all transform.py functions deferred.)
+  file collection. Threaded through all `transform.py` functions and CLI commands
+  to ensure correct language-specific pattern compilation and matching.
 - [ ] **Auto-detect in mixed-language projects**: when `--language` is
   not given and the target is a directory, inspect file extensions
   present and choose the most common, or error if ambiguous. (Deferred)
@@ -1344,7 +1349,9 @@ can operate on non-Python files.
   `--language typescript` is passed.
 - [x] Test that `resolve_path("src/")` still defaults to `.py` files
   when no `--language` is given (backward compatibility).
-- [ ] Test that `visit_project_ts()` respects the language parameter. (Deferred)
+- [x] Test that `visit_project_ts()` respects the language parameter.
+- [x] Verified `language` threading fixes `NameError` in `search`, `replace`,
+  `lint`, and `batch` commands.
 
 ---
 
