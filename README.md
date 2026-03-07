@@ -559,6 +559,29 @@ def my_entry_point():  # noqa: emend:deadcode
     ...
 ```
 
+### Knowledge Base
+
+emend includes a built-in knowledge base for cross-service identifier mappings, module-to-repo mappings, and free-form architectural notes. Stored in `.emend/cache/knowledge.db` with FTS5 trigram search.
+
+```bash
+# Notes — searchable scratchpad for decisions, conventions, patterns
+emend kb add "Auth flow" "Uses OAuth2 with PKCE. Tokens in Redis." --category architecture
+emend kb search "oauth"
+
+# Identifier mappings — cross-service relationships
+emend mapping add \
+    --source-project backend --source-id "UserService.create" --source-kind function \
+    --target-project gateway --target-id "POST /api/v1/users" --target-kind endpoint
+emend mapping search "UserService"
+
+# Module mappings — map module prefixes to repos or local dirs
+emend modmap add payments --repo org/payments-service
+emend modmap add shared.utils --path /home/user/shared-utils
+emend modmap resolve payments.models.Order
+```
+
+Module mappings that reference GitHub repos are automatically cloned (via `gh`) and checked out as git worktrees under `~/.cache/emend/repo-checkouts/`. Set `EMEND_CACHE_DIR` to relocate this cache. See [Knowledge Base documentation](https://lucaswiman.github.io/emend/knowledge.html) for full details.
+
 ### pre-commit integration
 
 emend can run as a [pre-commit](https://pre-commit.com/) hook. Add to your `.pre-commit-config.yaml`:

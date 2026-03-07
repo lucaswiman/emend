@@ -352,3 +352,119 @@ function! s:show_reindex(result) abort
   endif
   echo 'emend: reindex complete [' . a:result.elapsed_ms . 'ms]'
 endfunction
+
+" ---------------------------------------------------------------------------
+" Knowledge base / cross-repo goto
+" ---------------------------------------------------------------------------
+
+function! emend#goto(identifier, ...) abort
+  let l:Cb = a:0 > 0 ? a:1 : function('s:on_goto_result')
+  call emend#send('mapping_goto', {'identifier': a:identifier}, l:Cb)
+endfunction
+
+function! s:on_goto_result(result) abort
+  if s:show_rpc_error('emend goto: ', a:result)
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no definition found for this symbol'
+    return
+  endif
+  let l:source = get(a:result, 'source', 'kb')
+
+  " Single result — jump directly.
+  if len(l:items) == 1
+    let l:item = l:items[0]
+    " Local result: has file_path + line from the project index.
+    if has_key(l:item, 'file_path') && has_key(l:item, 'line')
+      execute 'edit ' . fnameescape(l:item.file_path)
+      execute l:item.line
+      normal! zz
+      return
+    endif
+    " KB result: has resolved_path from cross-repo mapping.
+    if has_key(l:item, 'resolved_path')
+      let l:path = l:item.resolved_path
+      if isdirectory(l:path)
+        echo 'emend: mapped to directory: ' . l:path
+      elseif filereadable(l:path)
+        execute 'edit ' . fnameescape(l:path)
+      else
+        echo 'emend: resolved to ' . l:path . ' (not yet available — clone may be in progress)'
+      endif
+      return
+    endif
+  endif
+
+  " Multiple results: show in the search UI.
+  call emend#ui#on_search_result(a:result)
+endfunction
+
+function! emend#kb_search(query, ...) abort
+  let l:Cb = a:0 > 0 ? a:1 : function('s:on_kb_result')
+  call emend#send('kb_search', {'query': a:query}, l:Cb)
+endfunction
+
+function! s:on_kb_result(result) abort
+  if s:show_rpc_error('emend kb: ', a:result)
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no matching knowledge notes'
+    return
+  endif
+
+  " Format notes for display in the quickfix list.
+  let l:entries = []
+  for l:note in l:items
+    let l:text = '[' . get(l:note, 'category', 'note') . '] '
+          \ . get(l:note, 'title', '')
+    let l:file = get(l:note, 'file_path', '')
+    call add(l:entries, {
+          \ 'filename': l:file !=# '' ? l:file : '',
+          \ 'text': l:text . ' — ' . get(l:note, 'content', ''),
+          \ })
+  endfor
+
+  call setqflist(l:entries, 'r')
+  copen
+  echo printf('emend: %d knowledge notes [%gms]',
+        \ len(l:items), get(a:result, 'elapsed_ms', 0))
+endfunction
+
+function! emend#module_resolve(module_name, ...) abort
+  let l:Cb = a:0 > 0 ? a:1 : function('s:on_module_resolve')
+  call emend#send('module_resolve', {'module': a:module_name}, l:Cb)
+endfunction
+
+function! s:on_module_resolve(result) abort
+  if s:show_rpc_error('emend resolve: ', a:result)
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no module mapping found'
+    return
+  endif
+
+  let l:item = l:items[0]
+  let l:path = get(l:item, 'resolved_path', '')
+  if l:path !=# ''
+    if isdirectory(l:path)
+      echo 'emend: module maps to directory: ' . l:path
+    elseif filereadable(l:path)
+      execute 'edit ' . fnameescape(l:path)
+    else
+      echo 'emend: resolved to ' . l:path
+    endif
+  else
+    let l:repo = get(l:item, 'repo', '')
+    if l:repo !=# ''
+      echo 'emend: module maps to repo ' . l:repo . ' (not yet cloned)'
+    else
+      echo 'emend: module mapping has no resolved path'
+    endif
+  endif
+endfunction
