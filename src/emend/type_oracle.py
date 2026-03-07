@@ -1351,9 +1351,9 @@ class TyAdapter(TypeOracle):
 # Config files/sections that indicate a project uses a particular type checker.
 _ENGINE_CONFIG_SIGNALS: list[tuple[str, str | None, str]] = [
     # (filename, pyproject.toml section, engine)
+    ("pyrefly.toml", "tool.pyrefly", "pyrefly"),
     ("pyrightconfig.json", "tool.pyright", "pyright"),
     ("ty.toml", "tool.ty", "ty"),
-    ("pyrefly.toml", "tool.pyrefly", "pyrefly"),
 ]
 
 
@@ -1372,9 +1372,9 @@ def _pyproject_has_section(pyproject: Path, dotted_key: str) -> bool:
 def detect_type_engine(project_root: Path | None = None) -> str:
     """Detect which type checking engine a project is configured for.
 
-    Detection order (per engine, in priority order: pyright → ty → pyrefly):
-    1. Standalone config file in the project root (e.g. ``pyrightconfig.json``,
-       ``ty.toml``, ``pyrefly.toml``).
+    Detection order (per engine, in priority order: pyrefly → pyright → ty):
+    1. Standalone config file in the project root (e.g. ``pyrefly.toml``,
+       ``pyrightconfig.json``, ``ty.toml``).
     2. Matching ``[tool.*]`` section in ``pyproject.toml`` (e.g.
        ``[tool.pyright]``, ``[tool.ty]``, ``[tool.pyrefly]``).
     3. First available tool on PATH (pyrefly → ty → pyright).
