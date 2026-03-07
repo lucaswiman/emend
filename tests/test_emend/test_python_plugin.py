@@ -196,11 +196,12 @@ def test_load_plugin_python_returns_correct_types():
 
 
 def test_load_plugin_other_returns_stubs():
+    from emend.language_plugins import TreeSitterPatternCompiler
     plugin = load_plugin("typescript")
     assert isinstance(plugin, LanguagePlugin)
     assert isinstance(plugin.import_handler, NoOpImportHandler)
     assert isinstance(plugin.comment_handler, RegexCommentHandler)
-    assert isinstance(plugin.pattern_compiler, NoOpPatternCompiler)
+    assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)
 
 
 def test_load_plugin_unknown_returns_stubs():
