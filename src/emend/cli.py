@@ -2040,11 +2040,11 @@ def index_cmd(
             print(f"\r  [{pct:3d}%] {n_done}/{total} files indexed", end="", file=sys.stderr)
 
     # Quick count for progress bar
-    from emend.transform import _collect_python_files_scandir
+    from emend.transform import _collect_source_files_scandir
     from pathlib import Path as _Path
     scan_root = str(_Path(path).resolve())
-    total = len(_collect_python_files_scandir(scan_root))
-    print(f"Indexing {total} Python files in {scan_root}...", file=sys.stderr)
+    total = len(_collect_source_files_scandir(scan_root))
+    print(f"Indexing {total} source files in {scan_root}...", file=sys.stderr)
 
     from emend.type_oracle import TypeEngineUnavailableError
     try:

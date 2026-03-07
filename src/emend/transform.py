@@ -620,8 +620,8 @@ def _scan_manifest(
     project_root = _find_project_root(project_path)
     worktree_id = _get_worktree_id(project_root)
     scan_root = str(Path(project_path).resolve())
-    py_files = _collect_python_files_scandir(scan_root)
-    py_files_resolved = {str(Path(f).resolve()): f for f in py_files}
+    source_files = _collect_source_files_scandir(scan_root)
+    source_files_resolved = {str(Path(f).resolve()): f for f in source_files}
 
     # Open DB (use provided conn or open fresh)
     close_conn = False
@@ -630,14 +630,14 @@ def _scan_manifest(
         db_path = cache_dir / "parse.db"
         if not db_path.exists():
             # No index at all — everything is new
-            result.new_files = py_files
+            result.new_files = source_files
             return result
         try:
             conn = _sql3.connect(str(db_path), timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
             close_conn = True
         except Exception:
-            result.new_files = py_files
+            result.new_files = source_files
             return result
 
     try:
@@ -673,17 +673,17 @@ def _scan_manifest(
                 manifest[row[0]] = (row[1], row[2], row[3])
         except Exception:
             # Table might not exist yet
-            result.new_files = py_files
+            result.new_files = source_files
             return result
 
         manifest_paths = set(manifest.keys())
-        current_paths = set(py_files_resolved.keys())
+        current_paths = set(source_files_resolved.keys())
 
         # Deleted files
         result.deleted = list(manifest_paths - current_paths)
 
         mtime_updates: list[tuple] = []
-        for resolved_path, original_path in py_files_resolved.items():
+        for resolved_path, original_path in source_files_resolved.items():
             if resolved_path not in manifest:
                 result.new_files.append(original_path)
                 continue
@@ -1154,14 +1154,14 @@ def warm_caches(
     # Collect files from the user-specified path (not the project root)
     # so that `emend index src/` only indexes src/, not the entire repo.
     scan_root = str(Path(project_path).resolve())
-    py_files = _collect_python_files_scandir(scan_root)
-    logger.info("warm_caches: %d python files in %s", len(py_files), scan_root)
+    source_files = _collect_source_files_scandir(scan_root)
+    logger.info("warm_caches: %d source files in %s", len(source_files), scan_root)
 
     max_workers = jobs or multiprocessing.cpu_count() or 4
 
     # Phase 1: read all files (Rust parallel I/O)
     t0 = time.monotonic()
-    file_contents = _rust.read_and_filter_files(py_files, [])
+    file_contents = _rust.read_and_filter_files(source_files, [])
     logger.info("warm_caches: read %d files in %.3fs", len(file_contents), time.monotonic() - t0)
 
     stats: dict[str, int | str] = {
@@ -1186,7 +1186,7 @@ def warm_caches(
         pass
 
     # Resolve source root once so _index_batch workers can compute module_qn.
-    source_root = _find_python_source_root(project_root)
+    source_root = _find_source_root(project_root)
 
     # Split files into batches — one batch per worker.
     batch_size = max(1, len(file_contents) // max_workers)
@@ -1847,7 +1847,7 @@ def _collect_source_files(project_root: str, language: str = "python", git_track
     return files
 
 
-def _files_importing_module(project_root: str, module_dotted: str) -> set[str] | None:
+def _files_importing_module(project_root: str, module_dotted: str, language: str = "python") -> set[str] | None:
     """Return the set of files that import from *module_dotted*, or None if unknown.
 
     First tries the cached import_graph (instant).  Falls back to the Rust
@@ -1862,9 +1862,9 @@ def _files_importing_module(project_root: str, module_dotted: str) -> set[str] |
     if cached is not None:
         return set(cached) if cached else set()
 
-    py_files = _collect_python_files(project_root)
+    source_files = _collect_source_files(project_root, language=language)
     try:
-        matching = _rust.files_importing_module(py_files, module_dotted)
+        matching = _rust.files_importing_module(source_files, module_dotted)
         return set(matching)
     except Exception:
         return None
@@ -2776,6 +2776,7 @@ def find_pattern(
 
     # Find matches using Rust engine
     ext = Path(file_path).suffix.lstrip('.') if file_path else None
+    # print(f"DEBUG: find_pattern ext={ext} ir={rust_ir}")
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -3411,7 +3412,8 @@ def find_references(
         return _gen_warm()
 
     # Cold path: full project scan
-    candidates = _files_importing_module(scan_root, target_module)
+    language = selector.language
+    candidates = _files_importing_module(scan_root, target_module, language=language)
     language = selector.language
 
     def _gen() -> Iterator[Reference]:
@@ -3488,10 +3490,10 @@ def find_callers(
     target_module = _file_to_module(selector.file_path, module_root)
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(scan_root, target_module)
+    language = selector.language
+    candidates = _files_importing_module(scan_root, target_module, language=language)
 
     all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
-    language = selector.language
 
     def _gen() -> Iterator[Reference]:
         for py_file, _content, resolver in visit_project_ts(
@@ -3936,7 +3938,7 @@ def _find_dead_code_cached(
 
         if str_names:
             # Use Rust batch-read with name hints for fast file scanning.
-            py_files = _collect_python_files(
+            source_files = _collect_source_files(
                 scan_root, git_tracked_only=not all_files,
             )
 
@@ -3968,7 +3970,7 @@ def _find_dead_code_cached(
             file_cache: dict[str, str] = {}
             try:
                 matched = _rust.read_and_filter_files(
-                    py_files, list(str_names),
+                    source_files, list(str_names),
                 )
                 for fp, content in matched:
                     r = str(Path(fp).resolve())
@@ -4164,8 +4166,8 @@ def rename_symbol(
     target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name
 
     # Use import graph to pre-filter files
-    candidates = _files_importing_module(scan_root, target_module)
     language = selector.language
+    candidates = _files_importing_module(scan_root, target_module, language=language)
 
     diffs = {}
     for py_file, content, resolver in visit_project_ts(

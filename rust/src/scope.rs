@@ -124,6 +124,7 @@ pub enum BindingKind {
     FunctionDef,
     ClassDef,
     Parameter,
+    #[allow(dead_code)]
     Import,
     LoopVariable,
     ContextManager,
@@ -160,6 +161,7 @@ pub struct QualifiedName {
 /// A reference to a name at a specific location.
 #[derive(Debug, Clone)]
 pub struct Reference {
+    #[allow(dead_code)]
     pub file: PathBuf,
     pub line: usize,
     pub column: usize,
@@ -417,7 +419,7 @@ pub struct StatementsConfig {
 }
 
 impl StatementsConfig {
-    pub fn effective_simple(&self) -> std::borrow::Cow<[String]> {
+    pub fn effective_simple(&self) -> std::borrow::Cow<'_, [String]> {
         if self.simple.is_empty() {
             std::borrow::Cow::Owned(Self::python_simple_default())
         } else {
@@ -425,7 +427,7 @@ impl StatementsConfig {
         }
     }
 
-    pub fn effective_recurse_into(&self) -> std::borrow::Cow<[String]> {
+    pub fn effective_recurse_into(&self) -> std::borrow::Cow<'_, [String]> {
         if self.recurse_into.is_empty() {
             std::borrow::Cow::Owned(Self::python_recurse_into_default())
         } else {
@@ -525,7 +527,7 @@ impl SymbolsSection {
     }
 
     /// Returns param type configs; falls back to Python defaults when empty.
-    pub fn effective_param_types(&self) -> std::borrow::Cow<[ParamTypeConfig]> {
+    pub fn effective_param_types(&self) -> std::borrow::Cow<'_, [ParamTypeConfig]> {
         if self.param_types.is_empty() {
             std::borrow::Cow::Owned(Self::python_param_types_default())
         } else {
@@ -534,7 +536,7 @@ impl SymbolsSection {
     }
 
     /// Returns param separator configs; falls back to Python defaults when empty.
-    pub fn effective_param_separators(&self) -> std::borrow::Cow<[ParamSeparatorConfig]> {
+    pub fn effective_param_separators(&self) -> std::borrow::Cow<'_, [ParamSeparatorConfig]> {
         if self.param_separators.is_empty() {
             std::borrow::Cow::Owned(Self::python_param_separators_default())
         } else {
@@ -1042,25 +1044,25 @@ impl ScopeResolver {
         self.file_scopes.insert(path.to_path_buf(), file_scope);
     }
 
-    /// Resolve qualified names for all identifiers in a file.
+    #[allow(dead_code)]
     pub fn qualified_names(&self, path: &Path) -> Vec<(QualifiedName, Location)> {
         let _ = path;
         Vec::new() // TODO
     }
 
-    /// Find all references to a qualified name across the project.
+    #[allow(dead_code)]
     pub fn find_references(&self, qn: &str) -> Vec<Reference> {
         let _ = qn;
         Vec::new() // TODO
     }
 
-    /// Find the definition site for a reference at a given position.
+    #[allow(dead_code)]
     pub fn goto_definition(&self, path: &Path, line: usize, column: usize) -> Option<Location> {
         let _ = (path, line, column);
         None // TODO
     }
 
-    /// Find dead code (unreferenced definitions) across the project.
+    #[allow(dead_code)]
     pub fn find_dead_code(&self) -> Vec<(QualifiedName, Location)> {
         Vec::new() // TODO
     }
@@ -1546,6 +1548,7 @@ impl ScopeResolver {
     }
 
     /// Find the innermost scope containing a byte offset.
+    #[allow(dead_code)]
     fn find_enclosing_scope(&self, byte_offset: usize, scopes: &[Scope]) -> Option<ScopeId> {
         // Search from the end (innermost scopes are added last)
         let mut best: Option<(ScopeId, usize)> = None; // (id, byte_range_size)

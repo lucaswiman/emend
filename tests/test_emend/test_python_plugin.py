@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from emend.language_plugins import load_plugin, LanguagePlugin, NoOpImportHandler, RegexCommentHandler, NoOpPatternCompiler
+from emend.language_plugins import (
+    load_plugin,
+    LanguagePlugin,
+    NoOpImportHandler,
+    RegexCommentHandler,
+    TreeSitterPatternCompiler,
+)
 from emend.python_plugin import (
     PythonCommentHandler,
     PythonImportHandler,
@@ -200,10 +206,12 @@ def test_load_plugin_other_returns_stubs():
     assert isinstance(plugin, LanguagePlugin)
     assert isinstance(plugin.import_handler, NoOpImportHandler)
     assert isinstance(plugin.comment_handler, RegexCommentHandler)
-    assert isinstance(plugin.pattern_compiler, NoOpPatternCompiler)
+    assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)
 
 
 def test_load_plugin_unknown_returns_stubs():
     plugin = load_plugin("cobol")
     assert isinstance(plugin, LanguagePlugin)
     assert isinstance(plugin.import_handler, NoOpImportHandler)
+    assert isinstance(plugin.comment_handler, RegexCommentHandler)
+    assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)

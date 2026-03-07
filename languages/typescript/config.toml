@@ -96,7 +96,7 @@ private_prefix = "_"
 
 [symbols]
 function_node = "function_declaration"
-class_node = "class_definition"
+class_node = "class_declaration"
 # TypeScript has no decorated_definition wrapper; decorators are direct children
 decorated_node = ""
 definition_field = ""

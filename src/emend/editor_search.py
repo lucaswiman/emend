@@ -581,7 +581,7 @@ class EditorSearchEngine:
         """
         from emend.transform import (
             find_pattern_in_project,
-            _collect_python_files_scandir,
+            _collect_source_files_scandir,
         )
 
         scope_path = file_scope or self.project_root
@@ -590,7 +590,7 @@ class EditorSearchEngine:
         if scope_resolved.is_file():
             file_paths = [str(scope_resolved)]
         else:
-            file_paths = _collect_python_files_scandir(str(scope_resolved))
+            file_paths = _collect_source_files_scandir(str(scope_resolved))
 
         project_matches = find_pattern_in_project(
             pattern, file_paths,

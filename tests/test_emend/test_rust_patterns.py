@@ -131,7 +131,7 @@ class TestRustIRCompilation:
         ir = compile_pattern_to_rust_ir("$X = None")
         assert ir is not None
         assert ir["type"] == "assign"
-        assert ir["value"] == {"type": "none"}
+        assert ir["value"] == {"type": "none_literal"}
 
     def test_assign_true(self):
         ir = compile_pattern_to_rust_ir("$X = True")
@@ -235,7 +235,7 @@ class TestRustIRCompilation:
         """None in patterns should map to 'none' type, not 'name'."""
         ir = compile_pattern_to_rust_ir("print(None)")
         assert ir is not None
-        assert ir["args"][0] == {"type": "none"}
+        assert ir["args"][0] == {"type": "none_literal"}
 
     def test_true_literal_in_call(self):
         ir = compile_pattern_to_rust_ir("print(True)")

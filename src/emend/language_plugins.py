@@ -213,7 +213,7 @@ class TreeSitterPatternCompiler(PatternCompiler):
         ))
 
         for mv in sorted_mvs:
-            placeholder = f"__META_{mv.name}__"
+            placeholder = f"_META_{mv.name}_"
             metavar_map[placeholder] = mv
 
             if mv.name == "_":
@@ -257,6 +257,9 @@ class TreeSitterPatternCompiler(PatternCompiler):
             val = ir.get("value")
             if isinstance(val, str) and val in metavar_map:
                 mv = metavar_map[val]
+                if mv.name == "_":
+                    return {"type": "any_expr"}
+
                 tc = mv.type_constraint
                 if tc in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
                     return {"type": "type_constraint", "kind": tc, "name": mv.name}
@@ -264,9 +267,6 @@ class TreeSitterPatternCompiler(PatternCompiler):
                     inner = tc[1:]
                     if inner in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
                         return {"type": "type_constraint", "kind": tc, "name": mv.name}
-
-                if mv.name == "_":
-                    return {"type": "any_expr"}
 
                 if mv.ellipsis:
                     return {"type": "ellipsis", "name": mv.name}
@@ -276,13 +276,13 @@ class TreeSitterPatternCompiler(PatternCompiler):
         # Recursively fixup all fields
         new_ir = {}
         for k, v in ir.items():
-            # Special case for import/import_from names which are strings
-            if k == "name" and isinstance(v, str) and v in metavar_map:
+            if k in ("name", "module", "asname") and isinstance(v, str) and v in metavar_map:
+                # Fields that expect a name string but got a placeholder
                 new_ir[k] = metavar_map[v].name
-            elif k == "module" and isinstance(v, str) and v in metavar_map:
-                new_ir[k] = metavar_map[v].name
-            elif k == "asname" and isinstance(v, str) and v in metavar_map:
-                new_ir[k] = metavar_map[v].name
+            elif k == "value" and isinstance(v, str) and v in metavar_map:
+                # 'value' usually expects an IR dict, but might have got a placeholder string
+                # We fix it up by treating it as a Name node and then fixing that
+                new_ir[k] = self._fixup_ir({"type": "name", "value": v}, metavar_map)
             else:
                 new_ir[k] = self._fixup_ir(v, metavar_map)
 
