@@ -1646,8 +1646,8 @@ def _find_project_root(start_path: str) -> str:
 
 
 @lru_cache(maxsize=64)
-def _find_python_source_root(project_root: str) -> str:
-    """Find the Python source root directory for a project.
+def _find_source_root(project_root: str, language: str = "python") -> str:
+    """Find the source root directory for a project.
 
     Detects ``src/`` layout by checking (in order):
     1. ``pyproject.toml`` settings (maturin, setuptools, hatch)
@@ -1659,82 +1659,95 @@ def _find_python_source_root(project_root: str) -> str:
     """
     root = Path(project_root).resolve()
 
-    # --- pyproject.toml -------------------------------------------------
-    pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
-        try:
-            import tomllib
-        except ModuleNotFoundError:          # Python < 3.11
+    if language == "python":
+        # --- pyproject.toml -------------------------------------------------
+        pyproject = root / "pyproject.toml"
+        if pyproject.is_file():
             try:
-                import tomli as tomllib      # type: ignore[no-redef]
-            except ModuleNotFoundError:
-                tomllib = None               # type: ignore[assignment]
-        if tomllib is not None:
+                import tomllib
+            except ModuleNotFoundError:          # Python < 3.11
+                try:
+                    import tomli as tomllib      # type: ignore[no-redef]
+                except ModuleNotFoundError:
+                    tomllib = None               # type: ignore[assignment]
+            if tomllib is not None:
+                try:
+                    data = tomllib.loads(pyproject.read_text())
+                    # maturin: python-source = "src"
+                    ps = (data.get("tool", {}).get("maturin", {})
+                          .get("python-source"))
+                    if ps:
+                        candidate = root / ps
+                        if candidate.is_dir():
+                            return str(candidate)
+                    # setuptools: [tool.setuptools.packages.find] where = ["src"]
+                    where = (data.get("tool", {}).get("setuptools", {})
+                             .get("packages", {}).get("find", {}).get("where"))
+                    if isinstance(where, list) and where:
+                        candidate = root / where[0]
+                        if candidate.is_dir():
+                            return str(candidate)
+                    # hatch / hatchling
+                    where = (data.get("tool", {}).get("hatch", {})
+                             .get("build", {}).get("sources", {}).get("src"))
+                    if isinstance(where, str):
+                        candidate = root / where
+                        if candidate.is_dir():
+                            return str(candidate)
+                except Exception:
+                    pass
+
+        # --- setup.cfg ------------------------------------------------------
+        setup_cfg = root / "setup.cfg"
+        if setup_cfg.is_file():
             try:
-                data = tomllib.loads(pyproject.read_text())
-                # maturin: python-source = "src"
-                ps = (data.get("tool", {}).get("maturin", {})
-                      .get("python-source"))
-                if ps:
-                    candidate = root / ps
-                    if candidate.is_dir():
-                        return str(candidate)
-                # setuptools: [tool.setuptools.packages.find] where = ["src"]
-                where = (data.get("tool", {}).get("setuptools", {})
-                         .get("packages", {}).get("find", {}).get("where"))
-                if isinstance(where, list) and where:
-                    candidate = root / where[0]
-                    if candidate.is_dir():
-                        return str(candidate)
-                # hatch / hatchling
-                where = (data.get("tool", {}).get("hatch", {})
-                         .get("build", {}).get("sources", {}).get("src"))
-                if isinstance(where, str):
-                    candidate = root / where
-                    if candidate.is_dir():
-                        return str(candidate)
+                import configparser
+                cfg = configparser.ConfigParser()
+                cfg.read(str(setup_cfg))
+                pkg_dir = cfg.get("options", "package_dir", fallback=None)
+                if pkg_dir:
+                    # Format: "= src" or "\n= src"
+                    for part in pkg_dir.splitlines():
+                        part = part.strip()
+                        if part.startswith("="):
+                            src_dir = part[1:].strip()
+                            candidate = root / src_dir
+                            if candidate.is_dir():
+                                return str(candidate)
             except Exception:
                 pass
 
-    # --- setup.cfg ------------------------------------------------------
-    setup_cfg = root / "setup.cfg"
-    if setup_cfg.is_file():
-        try:
-            import configparser
-            cfg = configparser.ConfigParser()
-            cfg.read(str(setup_cfg))
-            pkg_dir = cfg.get("options", "package_dir", fallback=None)
-            if pkg_dir:
-                # Format: "= src" or "\n= src"
-                for part in pkg_dir.splitlines():
-                    part = part.strip()
-                    if part.startswith("="):
-                        src_dir = part[1:].strip()
-                        candidate = root / src_dir
-                        if candidate.is_dir():
-                            return str(candidate)
-        except Exception:
-            pass
+        # --- Heuristic: src/ with an __init__.py package --------------------
+        src_dir = root / "src"
+        if src_dir.is_dir():
+            for child in src_dir.iterdir():
+                if child.is_dir() and (child / "__init__.py").is_file():
+                    return str(src_dir)
 
-    # --- Heuristic: src/ with an __init__.py package --------------------
-    src_dir = root / "src"
-    if src_dir.is_dir():
-        for child in src_dir.iterdir():
-            if child.is_dir() and (child / "__init__.py").is_file():
-                return str(src_dir)
+    else:
+        # Generic heuristic for other languages: src/ exists
+        src_dir = root / "src"
+        if src_dir.is_dir():
+            return str(src_dir)
 
     return str(root)
 
 
 def _file_to_module(file_path: str, project_path: str | None) -> str:
-    """Convert file path to Python module name.
+    """Convert file path to module name.
 
     Detects ``src/`` layout automatically so that
     ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
+    Uses the language-specific separator from config.toml.
     """
+    from emend.language_registry import detect_language, load_config
+    language = detect_language(file_path) or "python"
+    config = load_config(language)
+    sep = config.get("qualified_names", {}).get("module_separator", ".")
+
     abs_file = Path(file_path).resolve()
     proj_root = Path(project_path or _find_project_root(file_path)).resolve()
-    source_root = Path(_find_python_source_root(str(proj_root)))
+    source_root = Path(_find_source_root(str(proj_root), language=language))
 
     # Use the source root if the file lives under it; otherwise fall
     # back to the project root (e.g. for test files outside src/).
@@ -1744,7 +1757,7 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
         rel_path = abs_file.relative_to(proj_root)
 
     module_parts = list(rel_path.parts[:-1]) + [rel_path.stem]
-    return '.'.join(module_parts)
+    return sep.join(module_parts)
 
 
 # Non-dot directories to skip.  All directories starting with '.' are
@@ -1753,22 +1766,32 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
 # Python and Rust always agree.
 _SKIP_DIRS = frozenset(_rust.skip_dirs())
 
-# Module-level file-list cache: maps resolved project root to (mtime_ns, file_list)
-_file_list_cache: dict[str, tuple[int, list[str]]] = {}
+# Module-level file-list cache: maps (resolved project root, language) to (mtime_ns, file_list)
+_file_list_cache: dict[tuple[str, str], tuple[int, list[str]]] = {}
 
 
-def _collect_python_files_scandir(root_path: str) -> list[str]:
+def _collect_source_files_scandir(root_path: str, language: str = "python") -> list[str]:
     """Walk a directory tree using the Rust emend_core module."""
-    return _rust.collect_python_files(root_path)
+    from emend.language_registry import get_extensions
+    exts = get_extensions(language)
+    if not exts and language == "python":
+        exts = ["py", "pyi"]
+    return _rust.collect_files(root_path, exts)
 
 
-def _collect_git_tracked_python_files(project_root: str) -> list[str] | None:
-    """Return git-tracked .py files, or None if not in a git repo."""
+def _collect_git_tracked_source_files(project_root: str, language: str = "python") -> list[str] | None:
+    """Return git-tracked source files, or None if not in a git repo."""
     import subprocess
+    from emend.language_registry import get_extensions
+    exts = get_extensions(language)
+    if not exts and language == "python":
+        exts = ["py", "pyi"]
+
     resolved = str(Path(project_root).resolve())
     try:
+        pathspecs = [f"*.{ext}" for ext in exts]
         result = subprocess.run(
-            ['git', 'ls-files', '-z', '*.py'],
+            ['git', 'ls-files', '-z'] + pathspecs,
             capture_output=True, timeout=10,
             cwd=resolved,
         )
@@ -1789,8 +1812,8 @@ def _collect_git_tracked_python_files(project_root: str) -> list[str] | None:
         return None
 
 
-def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> list[str]:
-    """Collect all Python files in project, with caching.
+def _collect_source_files(project_root: str, language: str = "python", git_tracked_only: bool = False) -> list[str]:
+    """Collect all source files for *language* in project, with caching.
 
     Uses os.scandir for speed. Caches the file list per project root,
     invalidated when the root directory's mtime changes (which happens
@@ -1801,9 +1824,9 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
     git repository.
     """
     if git_tracked_only:
-        tracked = _collect_git_tracked_python_files(project_root)
+        tracked = _collect_git_tracked_source_files(project_root, language=language)
         if tracked is not None:
-            logger.info("collect_python_files: %d git-tracked files in %s", len(tracked), project_root)
+            logger.info("collect_source_files: %d git-tracked files in %s", len(tracked), project_root)
             return tracked
 
     import os
@@ -1812,19 +1835,20 @@ def _collect_python_files(project_root: str, git_tracked_only: bool = False) -> 
         root_mtime = os.stat(resolved).st_mtime_ns
     except OSError:
         t0 = time.monotonic()
-        files = _collect_python_files_scandir(resolved)
-        logger.info("collect_python_files: %d files in %.3fs (scandir, %s)", len(files), time.monotonic() - t0, resolved)
+        files = _collect_source_files_scandir(resolved, language=language)
+        logger.info("collect_source_files: %d files in %.3fs (scandir, %s)", len(files), time.monotonic() - t0, resolved)
         return files
 
-    cached = _file_list_cache.get(resolved)
+    cache_key = (resolved, language)
+    cached = _file_list_cache.get(cache_key)
     if cached is not None and cached[0] == root_mtime:
-        logger.debug("collect_python_files: %d files (cached, %s)", len(cached[1]), resolved)
+        logger.debug("collect_source_files: %d files (cached, %s)", len(cached[1]), resolved)
         return cached[1]
 
     t0 = time.monotonic()
-    files = _collect_python_files_scandir(resolved)
-    logger.info("collect_python_files: %d files in %.3fs (%s)", len(files), time.monotonic() - t0, resolved)
-    _file_list_cache[resolved] = (root_mtime, files)
+    files = _collect_source_files_scandir(resolved, language=language)
+    logger.info("collect_source_files: %d files in %.3fs (%s)", len(files), time.monotonic() - t0, resolved)
+    _file_list_cache[cache_key] = (root_mtime, files)
     return files
 
 
@@ -1865,29 +1889,30 @@ def visit_project_ts(
     target_file: str | None = None,
     candidate_files: set[str] | None = None,
     target_qnames: set[str] | None = None,
+    language: str = "python",
 ) -> Iterator[tuple[str, str, _rust.PyScopeResolver]]:
-    """Iterate over Python files using tree-sitter + PyScopeResolver.
+    """Iterate over source files using tree-sitter + PyScopeResolver.
 
     Yields (file_path, content, resolver).
     The same resolver instance is used for all files in the batch.
     """
     t_start = time.monotonic()
     project_root = project_path
-    py_files = _collect_python_files(project_root)
+    source_files = _collect_source_files(project_root, language=language)
 
     if candidate_files is not None:
-        py_files = [f for f in py_files
-                    if f in candidate_files
-                    or (target_file and str(Path(f).resolve()) == target_file)]
+        source_files = [f for f in source_files
+                        if f in candidate_files
+                        or (target_file and str(Path(f).resolve()) == target_file)]
 
     # Structural pre-filter
     if name_hint:
-        py_files = prefilter_files_structural(py_files, name_hint)
-        if target_file and target_file not in py_files:
-            py_files.append(target_file)
+        source_files = prefilter_files_structural(source_files, name_hint)
+        if target_file and target_file not in source_files:
+            source_files.append(target_file)
 
     # Read and filter files
-    file_contents = _rust.read_and_filter_files(py_files, [name_hint] if name_hint else [])
+    file_contents = _rust.read_and_filter_files(source_files, [name_hint] if name_hint else [])
 
     # QN-index pre-filter
     if target_qnames:
@@ -2736,6 +2761,11 @@ def find_pattern(
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
 
+    # Detect language from file extension if not provided
+    if language == "python" and file_path:
+        from emend.language_registry import detect_language
+        language = detect_language(file_path) or "python"
+
     # Compile pattern and constraints to Rust IR
     rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
     if rust_ir is None:
@@ -2750,8 +2780,10 @@ def find_pattern(
         raise ValueError(f"Unknown inside/not_inside constraint: '{not_inside}'")
 
     # Find matches using Rust engine
+    ext = Path(file_path).suffix.lstrip('.') if file_path else None
     raw_matches = _rust.find_pattern_in_files(
-        [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir
+        [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
+        extension=ext
     )
 
 
@@ -3385,6 +3417,7 @@ def find_references(
 
     # Cold path: full project scan
     candidates = _files_importing_module(scan_root, target_module)
+    language = selector.language
 
     def _gen() -> Iterator[Reference]:
         for py_file, _content, resolver in visit_project_ts(
@@ -3393,6 +3426,7 @@ def find_references(
             target_file=resolved_target,
             candidate_files=candidates,
             target_qnames=all_target_qns,
+            language=language,
         ):
             for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns:
@@ -3462,6 +3496,7 @@ def find_callers(
     candidates = _files_importing_module(scan_root, target_module)
 
     all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+    language = selector.language
 
     def _gen() -> Iterator[Reference]:
         for py_file, _content, resolver in visit_project_ts(
@@ -3470,6 +3505,7 @@ def find_callers(
             target_file=resolved_target,
             candidate_files=candidates,
             target_qnames=all_target_qns,
+            language=language,
         ):
             for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
                 if qn in all_target_qns and kind == "call":
@@ -4134,6 +4170,7 @@ def rename_symbol(
 
     # Use import graph to pre-filter files
     candidates = _files_importing_module(scan_root, target_module)
+    language = selector.language
 
     diffs = {}
     for py_file, content, resolver in visit_project_ts(
@@ -4142,6 +4179,7 @@ def rename_symbol(
         target_file=resolved_target,
         candidate_files=candidates,
         target_qnames={target_qn},
+        language=language,
     ):
         references = resolver.references_in_file(py_file)
         transform = _rust.PyFileTransform(content)
@@ -4256,10 +4294,13 @@ def _update_imports_for_move(
     proj_root = _find_project_root(project_path or source_file)
 
     target_qn = f"{source_module}.{symbol_name}"
+    from emend.language_registry import detect_language
+    language = detect_language(source_file) or "python"
 
     for py_file, content, resolver in visit_project_ts(
         name_hint=symbol_name,
         project_path=proj_root,
+        language=language,
     ):
         resolved_py = str(Path(py_file).resolve())
         if resolved_py == resolved_source or resolved_py == resolved_dest:
@@ -4319,16 +4360,22 @@ def _rename_module_references(
     old_module: str,
     new_module: str,
     apply: bool,
+    language: str = "python",
 ) -> dict[str, str]:
     """Update all imports from old_module to new_module across the project."""
     diffs = {}
 
+    from emend.language_registry import load_config
+    config = load_config(language)
+    sep = config.get("qualified_names", {}).get("module_separator", ".")
+
     # hint for structural filter
-    name_hint = old_module.rsplit('.', 1)[-1]
+    name_hint = old_module.rsplit(sep, 1)[-1]
 
     for py_file, content, resolver in visit_project_ts(
         name_hint=name_hint,
         project_path=project_root,
+        language=language,
     ):
         transform = _rust.PyFileTransform(content)
         changed = False
@@ -4342,7 +4389,7 @@ def _rename_module_references(
                 transform.replace_range(offset, end_offset, new_module)
                 changed = True
             # Prefix match: import old_module.sub or from old_module.sub import ...
-            elif qn.startswith(old_module + "."):
+            elif qn.startswith(old_module + sep):
                 prefix_len = len(old_module)
                 # Verify that the source at offset matches old_module
                 if content[offset : offset + prefix_len] == old_module:
@@ -4405,7 +4452,9 @@ def move_module(
     new_module = _file_to_module(str(new_path), project_root)
 
     # Update all imports across project
-    diffs = _rename_module_references(project_root, old_module, new_module, apply)
+    from emend.language_registry import detect_language
+    language = detect_language(source_path) or "python"
+    diffs = _rename_module_references(project_root, old_module, new_module, apply, language=language)
 
     if apply:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -4437,18 +4486,24 @@ def rename_module(
     """
     project_root = _find_project_root(project_path or file_path)
     old_module = _file_to_module(file_path, project_root)
-    parts = old_module.rsplit('.', 1)
-    new_module = f"{parts[0]}.{new_name}" if len(parts) > 1 else new_name
+    from emend.language_registry import detect_language, load_config
+    language = detect_language(file_path) or "python"
+    config = load_config(language)
+    sep = config.get("qualified_names", {}).get("module_separator", ".")
 
-    diffs = _rename_module_references(project_root, old_module, new_module, apply)
+    parts = old_module.rsplit(sep, 1)
+    new_module = f"{parts[0]}{sep}{new_name}" if len(parts) > 1 else new_name
 
+    diffs = _rename_module_references(project_root, old_module, new_module, apply, language=language)
+
+    ext = Path(file_path).suffix
     if apply:
-        new_path = Path(file_path).parent / f"{new_name}.py"
+        new_path = Path(file_path).parent / f"{new_name}{ext}"
         Path(file_path).rename(new_path)
         return {}
 
     # For dry-run, describe the file rename
-    new_path = Path(file_path).parent / f"{new_name}.py"
+    new_path = Path(file_path).parent / f"{new_name}{ext}"
     description = f"Rename {file_path} -> {new_path}"
     diffs["__description__"] = description
     return diffs

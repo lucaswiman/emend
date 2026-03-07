@@ -482,6 +482,13 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             })
         }
 
+        "arg" => {
+            let value_obj = d.get_item("value")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Arg pattern missing 'value'")
+            })?;
+            deserialize_pattern(&value_obj)
+        }
+
         "attr" => {
             let value_obj = d.get_item("value")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Attr pattern missing 'value'")

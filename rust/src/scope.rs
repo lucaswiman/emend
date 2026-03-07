@@ -23,12 +23,14 @@ use std::sync::OnceLock;
 
 const PYTHON_CONFIG_TOML: &str = include_str!("../../languages/python/config.toml");
 const TS_CONFIG_TOML: &str = include_str!("../../languages/typescript/config.toml");
+const RUST_CONFIG_TOML: &str = include_str!("../../languages/rust/config.toml");
 
 /// Return a cached `&'static LanguageConfig` for the given file extension.
 /// Defaults to Python config for unknown extensions.
 pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
     static PY_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     static TS_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static RUST_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     match ext {
         "py" | "pyi" => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -37,6 +39,10 @@ pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
         "ts" | "tsx" | "js" | "jsx" => TS_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(TS_CONFIG_TOML)
                 .expect("Failed to parse TypeScript config")
+        }),
+        "rs" => RUST_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(RUST_CONFIG_TOML)
+                .expect("Failed to parse Rust config")
         }),
         _ => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -814,6 +820,7 @@ pub struct ScopeResolver {
 impl FileScope {
     pub fn to_rust_symbols(&self, config: &LanguageConfig) -> Vec<crate::symbols::RustSymbol> {
         let mut result = Vec::new();
+        let sep = &config.qualified_names.module_separator;
         
         // Map scope IDs to their qualified names for nesting references
         let mut scope_qns: HashMap<ScopeId, String> = HashMap::new();
@@ -837,7 +844,7 @@ impl FileScope {
                             if let Some(name) = find_scope_name(parent, scope, BindingKind::FunctionDef)
                                 .or_else(|| find_scope_name(parent, scope, BindingKind::ClassDef))
                             {
-                                scope_qns.insert(scope.id, format!("{}.{}", parent_qn, name));
+                                scope_qns.insert(scope.id, format!("{}{}{}", parent_qn, sep, name));
                                 changed = true;
                             }
                         }
@@ -856,7 +863,7 @@ impl FileScope {
             let mut type_annotation = None;
             let mut returns = None;
 
-            let parts: Vec<&str> = qn.name.split('.').collect();
+            let parts: Vec<&str> = qn.name.split(sep).collect();
             let last_name = parts.last().unwrap_or(&"");
 
             // Search for the definition in the scopes
@@ -910,8 +917,8 @@ impl FileScope {
                 end_line,
                 col_offset,
                 children: Vec::new(),
-                path: qn.name.split('.').map(|s| s.to_string()).collect(),
-                depth: qn.name.split('.').count() - 1,
+                path: qn.name.split(sep).map(|s| s.to_string()).collect(),
+                depth: qn.name.split(sep).count() - 1,
                 decorators: Vec::new(),
                 decorator_line_start: None,
                 param_names: Vec::new(),
@@ -935,32 +942,32 @@ impl FileScope {
                 }
                 
                 let enclosing_scope = self.scopes.iter().find(|s| s.id == enclosing_scope_id).unwrap();
-                let parts: Vec<&str> = r.qn.name.split('.').collect();
+                let parts: Vec<&str> = r.qn.name.split(sep).collect();
                 let last_name = parts.last().unwrap_or(&"");
                 
                 // Only include if it's NOT bound in the immediate scope
                 if !enclosing_scope.bindings.contains_key(*last_name) {
                      let enclosing_qn = scope_qns.get(&enclosing_scope_id).cloned().unwrap_or(self.module_path.clone());
-                     let mut path: Vec<String> = enclosing_qn.split('.').map(|s| s.to_string()).collect();
+                     let mut path: Vec<String> = enclosing_qn.split(sep).map(|s| s.to_string()).collect();
                      path.push(last_name.to_string());
-
+                     
                      result.push(crate::symbols::RustSymbol {
-                        name: last_name.to_string(),
-                        kind: "reference".to_string(),
-                        signature: None,
-                        type_annotation: None,
-                        returns: None,
-                        is_public: true,
-                        line: r.line,
-                        end_line: r.line,
-                        col_offset: r.column,
-                        children: Vec::new(),
-                        path: path.clone(),
-                        depth: path.len() - 1,
-                        decorators: Vec::new(),
-                        decorator_line_start: None,
-                        param_names: Vec::new(),
-                    });
+                         name: r.qn.name.clone(),
+                         kind: "reference".to_string(),
+                         signature: None,
+                         type_annotation: None,
+                         returns: None,
+                         is_public: false,
+                         line: r.line,
+                         end_line: r.line,
+                         col_offset: r.column,
+                         children: Vec::new(),
+                         depth: path.len() - 1,
+                         path,
+                         decorators: Vec::new(),
+                         decorator_line_start: None,
+                         param_names: Vec::new(),
+                     });
                 }
             }
         }
@@ -2284,12 +2291,12 @@ impl LanguageConfig {
     }
 
     pub fn load_for_extension(ext: &str, project_root: &Path) -> Result<Self, String> {
-        // Try to load from languages/<name>/config.toml
-        // For now, hardcode the mapping or look in a specific directory
+        // Try to load from languages/<name>/config.toml in the project root
         let lang_dir = project_root.join("languages");
         let lang_name = match ext {
             "py" | "pyi" => "python",
             "ts" | "tsx" | "js" | "jsx" => "typescript",
+            "rs" => "rust",
             _ => return Err(format!("Unsupported extension: {}", ext)),
         };
         let config_path = lang_dir.join(lang_name).join("config.toml");
@@ -2298,9 +2305,11 @@ impl LanguageConfig {
             return Self::from_toml(&toml_str);
         }
 
-        // Fallback to defaults
+        // Fallback to embedded configs
         match lang_name {
-            "python" => Ok(Self::python_default()),
+            "python" => Ok(Self::from_toml(PYTHON_CONFIG_TOML).unwrap_or_else(|_| Self::python_default())),
+            "typescript" => Ok(Self::from_toml(TS_CONFIG_TOML).expect("Failed to parse embedded TypeScript config")),
+            "rust" => Ok(Self::from_toml(RUST_CONFIG_TOML).expect("Failed to parse embedded Rust config")),
             _ => Err(format!("No config found for {}", lang_name)),
         }
     }

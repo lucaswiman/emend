@@ -18,6 +18,7 @@ to delegate through the plugin system.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -320,6 +321,22 @@ _COMMENT_PREFIXES: dict[str, str] = {
 }
 
 
+def _find_languages_dir() -> Path | None:
+    """Return the ``languages/`` config directory shipped with emend, or None."""
+    # Installed layout: languages/ may be bundled inside the package
+    candidate = Path(__file__).parent / "languages"
+    if candidate.is_dir():
+        return candidate
+
+    # Dev layout: languages/ sits at the repo root, three levels above
+    # src/emend/language_plugins.py → src/emend → src → repo_root
+    candidate = Path(__file__).parent.parent.parent / "languages"
+    if candidate.is_dir():
+        return candidate
+
+    return None
+
+
 def load_plugin(language: str) -> LanguagePlugin:
     """Return a ``LanguagePlugin`` for *language*.
 
@@ -328,6 +345,21 @@ def load_plugin(language: str) -> LanguagePlugin:
     if language == "python":
         from emend.python_plugin import create_python_plugin
         return create_python_plugin()
+
+    lang_dir = _find_languages_dir()
+    if lang_dir:
+        plugin_py = lang_dir / language / "plugin.py"
+        if plugin_py.is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                f"emend.plugins.{language}", plugin_py
+            )
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "create_plugin"):
+                    return mod.create_plugin()
+
     prefix = _COMMENT_PREFIXES.get(language, "#")
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),

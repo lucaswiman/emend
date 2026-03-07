@@ -48,6 +48,15 @@ class ExtendedSelector:
     type_filter: str | None = None  # e.g. "returns[str]" or "type[Connection]"
 
     @property
+    def language(self) -> str:
+        """Return the source language for this selector's file_path.
+
+        Defaults to 'python' if extension is unknown.
+        """
+        from emend.language_registry import detect_language
+        return detect_language(self.file_path) or "python"
+
+    @property
     def line_range(self) -> tuple[int, int] | None:
         """Return (line_start, line_end) tuple if both are set, else None."""
         if self.line_start is not None and self.line_end is not None:

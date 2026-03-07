@@ -57,14 +57,12 @@ def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool
     from emend.language_registry import get_extensions, matches_language
     path_obj = Path(path)
     if path_obj.is_dir():
-        if language == "python":
-            from emend import emend_core
-            abs_path = str(path_obj.resolve())
-            return [Path(f) for f in emend_core.collect_python_files(abs_path)], True
-        else:
-            exts = set(get_extensions(language))
-            files = [p for p in path_obj.rglob("*") if p.suffix.lstrip(".") in exts]
-            return sorted(files), True
+        from emend import emend_core
+        abs_path = str(path_obj.resolve())
+        exts = get_extensions(language)
+        if not exts and language == "python":
+            exts = ["py", "pyi"]
+        return [Path(f) for f in emend_core.collect_files(abs_path, exts)], True
     elif "*" in path or "?" in path:
         return [Path(f) for f in glob_mod.glob(path, recursive=True)
                 if matches_language(f, language)], True
@@ -595,14 +593,31 @@ def search(
                 selector_for_summary = parts[1] or None
 
             file_path_obj = Path(file_for_summary)
+            _lang = _state["language"]
             if file_path_obj.is_dir() or '*' in file_for_summary or '?' in file_for_summary:
-                files, _ = resolve_files(file_for_summary)
+                files, _ = resolve_files(file_for_summary, language=_lang)
                 from emend import emend_core
-                from emend.transform import _find_python_source_root
+                from emend.transform import _find_source_root
+                from emend.language_registry import get_extensions, load_config
                 
                 # Single resolver for batch
-                proj_root = _find_python_source_root(file_path_obj.parent if file_path_obj.is_file() else file_path_obj)
-                resolver = emend_core.PyScopeResolver(str(proj_root))
+                proj_root = _find_source_root(
+                    str(file_path_obj.parent if file_path_obj.is_file() else file_path_obj),
+                    language=_lang
+                )
+                
+                # Use the first file's extension if available, or first extension from language
+                ext = None
+                if files:
+                    ext = files[0].suffix.lstrip('.')
+                if not ext:
+                    exts = get_extensions(_lang)
+                    if exts:
+                        ext = exts[0]
+                
+                resolver = emend_core.PyScopeResolver(str(proj_root), extension=ext)
+                config = load_config(_lang)
+                sep = config.get("qualified_names", {}).get("module_separator", ".")
                 
                 for fp in files:
                     file_str = str(fp)
@@ -613,21 +628,22 @@ def search(
                         symbol_dicts = resolver.get_symbols(file_str)
                         
                         # Derive module path
-                        rel_path = fp.relative_to(proj_root)
-                        parts = list(rel_path.parts)
-                        if parts and parts[0] == "src":
-                            parts.pop(0)
-                        if parts:
-                            parts[-1] = parts[-1].replace(".py", "").replace(".pyi", "")
-                        if parts and parts[-1] == "__init__":
-                            parts.pop()
-                        module_path = ".".join(parts)
+                        try:
+                            rel_path = fp.relative_to(proj_root)
+                            parts = list(rel_path.parts)
+                            if parts and parts[0] == "src":
+                                parts.pop(0)
+                            if parts:
+                                parts[-1] = fp.stem
+                            module_path = sep.join(parts)
+                        except ValueError:
+                            module_path = fp.stem
 
-                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path)
+                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path, separator=sep)
                         print(f"\nModule: {file_str}")
                         if symbols:
                             if flat_output:
-                                ast_commands._print_symbol_flat(symbols, max_depth=tree_depth)
+                                ast_commands._print_symbol_flat(symbols, max_depth=tree_depth, separator=sep)
                             else:
                                 ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
                     except Exception as e:

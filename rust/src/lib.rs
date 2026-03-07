@@ -43,6 +43,16 @@ fn collect_python_files(root: &str) -> PyResult<Vec<String>> {
     Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
+/// Collect all files under `root` with specific extensions, skipping non-project dirs.
+///
+/// Extensions should NOT include the leading dot.
+#[pyfunction]
+fn collect_files(root: &str, extensions: Vec<String>) -> PyResult<Vec<String>> {
+    let exts_ref: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+    let files = scanner::collect_files(Path::new(root), &exts_ref);
+    Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
 /// Return the list of non-dot directory names that are skipped during scanning.
 ///
 /// All directories starting with '.' are also skipped automatically.
@@ -237,6 +247,7 @@ fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, us
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_function(wrap_pyfunction!(collect_python_files, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_files, m)?)?;
     m.add_function(wrap_pyfunction!(skip_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(filter_files_by_content, m)?)?;
     m.add_function(wrap_pyfunction!(find_name_in_files, m)?)?;

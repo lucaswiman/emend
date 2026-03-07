@@ -163,7 +163,7 @@ def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0, max_depth: in
             _print_symbol_tree(sym.children, indent + 1, max_depth, current_display_depth + 1)
 
 
-def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_depth: int | None = None, current_display_depth: int = 1):
+def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_depth: int | None = None, current_display_depth: int = 1, separator: str = "."):
     """Print symbols in flat format with full paths and full Python keywords."""
     if max_depth is not None and current_display_depth > max_depth:
         return
@@ -178,7 +178,7 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
         "reference": "ref",
     }
     for sym in symbols:
-        full_path = f"{parent_path}.{sym.name}" if parent_path else sym.name
+        full_path = f"{parent_path}{separator}{sym.name}" if parent_path else sym.name
         kind_keyword = KIND_KEYWORD.get(sym.kind, sym.kind[:3])
 
         if sym.line and sym.end_line and sym.line != sym.end_line:
@@ -198,15 +198,15 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
             print(f"{kind_keyword} {full_path}{line_suffix}")
         # Skip variables and references in flat mode
 
-        _print_symbol_flat(sym.children, full_path, max_depth, current_display_depth + 1)
+        _print_symbol_flat(sym.children, full_path, max_depth, current_display_depth + 1, separator=separator)
 
 
-def dicts_to_tree_symbols(dicts: list[dict], module_path: str) -> list[TreeSymbol]:
+def dicts_to_tree_symbols(dicts: list[dict], module_path: str, separator: str = ".") -> list[TreeSymbol]:
     """Build a TreeSymbol hierarchy from flat definitions with paths."""
     root_symbols = []
     symbol_map = {} # path_tuple -> TreeSymbol
     
-    mod_parts = tuple(module_path.split('.'))
+    mod_parts = tuple(module_path.split(separator))
 
     # First pass: create all symbols
     for d in dicts:
@@ -247,7 +247,7 @@ def dicts_to_tree_symbols(dicts: list[dict], module_path: str) -> list[TreeSymbo
             if parent_path in symbol_map:
                 symbol_map[parent_path].children.append(sym)
             else:
-                # Parent not in definitions (e.g. from an import)
+                # Parent not in definitions (e.g. from an import or outside module)
                 root_symbols.append(sym)
 
     return root_symbols
@@ -261,22 +261,28 @@ def collect_symbols(
     """Collect symbols from a file using the unified PyScopeResolver."""
     from emend import emend_core
     from pathlib import Path
-    
+    from emend.language_registry import detect_language, load_config
+
+    ext = Path(file).suffix.lstrip('.')
+    language = detect_language(file) or "python"
+    config = load_config(language)
+    sep = config.get("qualified_names", {}).get("module_separator", ".")
+
     # Initialize resolver for the file's project root
-    resolver = emend_core.PyScopeResolver(str(Path(file).parent))
-    
+    resolver = emend_core.PyScopeResolver(str(Path(file).parent), extension=ext)
+
     # Read and index the file
     source = Path(file).read_text()
     resolver.index_file(file, source)
-    
+
     # Get symbols from the unified resolver
     result_dicts = resolver.get_symbols(file)
-    
+
     if result_dicts:
         # Get module path to correctly strip it from symbol paths
-        from emend.transform import _find_python_source_root
-        root = _find_python_source_root(Path(file).parent)
-        
+        from emend.transform import _find_source_root
+        root = _find_source_root(Path(file).parent, language=language)
+
         # Crude module path derivation (matches derive_module_path in Rust)
         try:
             rel_path = Path(file).relative_to(root)
@@ -284,15 +290,28 @@ def collect_symbols(
             if parts and parts[0] == "src":
                 parts.pop(0)
             if parts:
-                parts[-1] = parts[-1].replace(".py", "").replace(".pyi", "")
-            if parts and parts[-1] == "__init__":
-                parts.pop()
-            module_path = ".".join(parts)
+                # Remove any known extension
+                from emend.language_registry import get_extensions
+                all_exts = get_extensions(language)
+                stem = rel_path.stem
+                # rel_path.stem might already have it removed if it's a simple extension
+                # but let's be safe
+                parts[-1] = stem
+
+            # Handle __init__ / mod equivalent for package root
+            if parts and parts[-1] in ("__init__", "lib", "mod"):
+                # This is heuristic and might need more language-specific refinement
+                if language == "python" and parts[-1] == "__init__":
+                    parts.pop()
+                elif language == "rust" and parts[-1] in ("lib", "mod"):
+                    parts.pop()
+
+            module_path = sep.join(parts)
         except ValueError:
             # Not under root, use filename
             module_path = Path(file).stem
 
-        symbols = dicts_to_tree_symbols(result_dicts, module_path)
+        symbols = dicts_to_tree_symbols(result_dicts, module_path, separator=sep)
         
         # Filter by selector if provided
         if selector:
