@@ -493,6 +493,92 @@ class TestEditorServerRPC:
         result = _module_resolve(engine, {"module": "nonexistent"})
         assert result["items"] == []
 
+    def test_mapping_goto_local_first(self, kb):
+        """mapping_goto returns local results when symbol exists in project index."""
+        from emend.editor_search import SearchResult, _mapping_goto
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+
+            def search_symbols(self, query, *, limit=10):
+                return SearchResult(
+                    items=[{
+                        "name": "MyClass",
+                        "qualified_name": "mymod.MyClass",
+                        "kind": "class",
+                        "file_path": "/proj/mymod.py",
+                        "line": 10,
+                        "end_line": 50,
+                    }],
+                    elapsed_ms=1.0,
+                    mode="symbol",
+                )
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _mapping_goto(engine, {"identifier": "mymod.MyClass"})
+        assert result["source"] == "local"
+        assert len(result["items"]) == 1
+        assert result["items"][0]["file_path"] == "/proj/mymod.py"
+        assert result["items"][0]["line"] == 10
+
+    def test_mapping_goto_falls_back_to_kb(self, kb):
+        """mapping_goto falls back to KB when no local match is found."""
+        from emend.editor_search import SearchResult, _mapping_goto
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+
+            def search_symbols(self, query, *, limit=10):
+                # Return a result whose name doesn't match the identifier.
+                return SearchResult(items=[], elapsed_ms=1.0, mode="symbol")
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        kb.add_mapping(IdentifierMapping(
+            source_project="a", source_identifier="OrderService.create",
+            source_kind="method",
+            target_project="b", target_identifier="order_handler.create",
+            target_kind="function",
+        ))
+
+        result = _mapping_goto(engine, {"identifier": "OrderService.create"})
+        assert result["source"] == "kb"
+        assert len(result["items"]) == 1
+        assert result["items"][0]["source_identifier"] == "OrderService.create"
+
+    def test_mapping_goto_filters_fuzzy_local_hits(self, kb):
+        """mapping_goto only returns local results that match the identifier exactly."""
+        from emend.editor_search import SearchResult, _mapping_goto
+
+        class FakeEngine:
+            project_root = str(kb.db_path.parent.parent.parent)
+
+            def search_symbols(self, query, *, limit=10):
+                # Return a fuzzy hit that doesn't exactly match.
+                return SearchResult(
+                    items=[{
+                        "name": "MyClassHelper",
+                        "qualified_name": "mymod.MyClassHelper",
+                        "kind": "class",
+                        "file_path": "/proj/mymod.py",
+                        "line": 10,
+                        "end_line": 50,
+                    }],
+                    elapsed_ms=1.0,
+                    mode="symbol",
+                )
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _mapping_goto(engine, {"identifier": "MyClass"})
+        # Fuzzy hit filtered out, falls back to KB (empty since no mapping).
+        assert result["source"] == "kb"
+        assert len(result["items"]) == 0
+
 
 # ---------------------------------------------------------------------------
 # MCP tool integration

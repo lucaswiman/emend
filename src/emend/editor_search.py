@@ -1060,17 +1060,38 @@ def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
 
 
 def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
-    """Resolve an identifier mapping to a file location in an external repo.
+    """Go to definition: try local symbol lookup first, then KB mappings.
 
-    Combines mapping_lookup with module_resolve: finds what the identifier
-    maps to, then resolves the target to a local path (cloning if needed).
+    1. Search the local project index for the identifier (most common case).
+    2. If no local results, check the KB identifier_mapping table and resolve
+       targets to local paths (cloning external repos via gh if needed).
     """
     import time as _time
-    from emend.knowledge import mapping_to_dict
     t0 = _time.monotonic()
-    kb = _get_kb(engine)
     identifier = params.get("identifier", params.get("query", ""))
 
+    # --- 1. Local in-repo symbol lookup (fast, common case) ---
+    local_result = engine.search_symbols(identifier, limit=10)
+    local_items = []
+    for item in local_result.items:
+        # Prefer exact qualified_name or name match over fuzzy hits.
+        qn = item.get("qualified_name", "")
+        name = item.get("name", "")
+        if identifier in (qn, name) or qn.endswith("." + identifier):
+            local_items.append(item)
+
+    if local_items:
+        elapsed = (_time.monotonic() - t0) * 1000
+        return {
+            "items": local_items,
+            "elapsed_ms": round(elapsed, 2),
+            "mode": "mapping_goto",
+            "source": "local",
+        }
+
+    # --- 2. KB cross-service mapping lookup (fallback) ---
+    from emend.knowledge import mapping_to_dict
+    kb = _get_kb(engine)
     results = kb.find_mappings_for(identifier, direction="source")
     items = []
     for m in results:
@@ -1082,7 +1103,7 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
         items.append(entry)
 
     elapsed = (_time.monotonic() - t0) * 1000
-    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto"}
+    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto", "source": "kb"}
 
 
 def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:

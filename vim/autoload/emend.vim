@@ -368,23 +368,33 @@ function! s:on_goto_result(result) abort
   endif
   let l:items = get(a:result, 'items', [])
   if empty(l:items)
-    echo 'emend: no cross-service mappings for this symbol'
+    echo 'emend: no definition found for this symbol'
     return
   endif
+  let l:source = get(a:result, 'source', 'kb')
 
-  " If there's exactly one result with a resolved path, jump to it.
-  if len(l:items) == 1 && has_key(l:items[0], 'resolved_path')
-    let l:path = l:items[0].resolved_path
-    if filereadable(l:path) || isdirectory(l:path)
+  " Single result — jump directly.
+  if len(l:items) == 1
+    let l:item = l:items[0]
+    " Local result: has file_path + line from the project index.
+    if has_key(l:item, 'file_path') && has_key(l:item, 'line')
+      execute 'edit ' . fnameescape(l:item.file_path)
+      execute l:item.line
+      normal! zz
+      return
+    endif
+    " KB result: has resolved_path from cross-repo mapping.
+    if has_key(l:item, 'resolved_path')
+      let l:path = l:item.resolved_path
       if isdirectory(l:path)
         echo 'emend: mapped to directory: ' . l:path
-      else
+      elseif filereadable(l:path)
         execute 'edit ' . fnameescape(l:path)
+      else
+        echo 'emend: resolved to ' . l:path . ' (not yet available — clone may be in progress)'
       endif
-    else
-      echo 'emend: resolved to ' . l:path . ' (not yet available — clone may be in progress)'
+      return
     endif
-    return
   endif
 
   " Multiple results: show in the search UI.
