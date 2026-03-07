@@ -101,7 +101,7 @@ class ModuleMapping:
 # Schema
 # ---------------------------------------------------------------------------
 
-_KNOWLEDGE_SCHEMA_VERSION = "1"
+_KNOWLEDGE_SCHEMA_VERSION = "2"
 
 _DDL = """\
 PRAGMA journal_mode=WAL;
@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS identifier_mapping (
     provenance        TEXT NOT NULL DEFAULT 'manual',
     evidence          TEXT NOT NULL DEFAULT '',
     metadata_json     TEXT NOT NULL DEFAULT '{}',
+    deleted           INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS knowledge_note (
     file_path     TEXT NOT NULL DEFAULT '',
     symbol        TEXT NOT NULL DEFAULT '',
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    deleted       INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -171,6 +173,7 @@ CREATE TABLE IF NOT EXISTS module_mapping (
     subpath       TEXT NOT NULL DEFAULT '',
     provenance    TEXT NOT NULL DEFAULT 'manual',
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    deleted       INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -333,14 +336,14 @@ class KnowledgeBase:
 
     def get_mapping(self, mapping_id: int) -> IdentifierMapping | None:
         row = self._conn.execute(
-            "SELECT * FROM identifier_mapping WHERE id = ?", (mapping_id,)
+            "SELECT * FROM identifier_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
         ).fetchone()
         return self._row_to_mapping(row) if row else None
 
     def update_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
         """Update fields on an existing mapping. Returns True if found."""
         row = self._conn.execute(
-            "SELECT id FROM identifier_mapping WHERE id = ?", (mapping_id,)
+            "SELECT id FROM identifier_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
         ).fetchone()
         if not row:
             return False
@@ -370,7 +373,8 @@ class KnowledgeBase:
 
     def delete_mapping(self, mapping_id: int) -> bool:
         cur = self._conn.execute(
-            "DELETE FROM identifier_mapping WHERE id = ?", (mapping_id,)
+            "UPDATE identifier_mapping SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
+            (_now_iso(), mapping_id),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -392,13 +396,13 @@ class KnowledgeBase:
             sql = (
                 "SELECT m.* FROM identifier_mapping m "
                 "JOIN mapping_fts f ON m.id = f.rowid "
-                "WHERE mapping_fts MATCH ?"
+                "WHERE mapping_fts MATCH ? AND m.deleted = 0"
             )
             params: list[Any] = [_fts_escape(query)]
         else:
             like = f"%{query}%"
             sql = (
-                "SELECT m.* FROM identifier_mapping m WHERE "
+                "SELECT m.* FROM identifier_mapping m WHERE m.deleted = 0 AND "
                 "(m.source_identifier LIKE ? OR m.target_identifier LIKE ? OR m.evidence LIKE ?)"
             )
             params = [like, like, like]
@@ -428,7 +432,7 @@ class KnowledgeBase:
         limit: int = 100,
     ) -> list[IdentifierMapping]:
         """List mappings with optional filters (no full-text search)."""
-        sql = "SELECT * FROM identifier_mapping WHERE 1=1"
+        sql = "SELECT * FROM identifier_mapping WHERE deleted = 0"
         params: list[Any] = []
         if source_project:
             sql += " AND source_project = ?"
@@ -469,7 +473,7 @@ class KnowledgeBase:
                 clauses.append("target_identifier = ?")
                 params.append(identifier)
 
-        sql = f"SELECT * FROM identifier_mapping WHERE {' OR '.join(clauses)} ORDER BY confidence DESC"
+        sql = f"SELECT * FROM identifier_mapping WHERE deleted = 0 AND ({' OR '.join(clauses)}) ORDER BY confidence DESC"
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_mapping(r) for r in rows]
 
@@ -502,14 +506,14 @@ class KnowledgeBase:
 
     def get_note(self, note_id: int) -> KnowledgeNote | None:
         row = self._conn.execute(
-            "SELECT * FROM knowledge_note WHERE id = ?", (note_id,)
+            "SELECT * FROM knowledge_note WHERE id = ? AND deleted = 0", (note_id,)
         ).fetchone()
         return self._row_to_note(row) if row else None
 
     def update_note(self, note_id: int, **kwargs: Any) -> bool:
         """Update fields on an existing note. Returns True if found."""
         row = self._conn.execute(
-            "SELECT id FROM knowledge_note WHERE id = ?", (note_id,)
+            "SELECT id FROM knowledge_note WHERE id = ? AND deleted = 0", (note_id,)
         ).fetchone()
         if not row:
             return False
@@ -538,7 +542,8 @@ class KnowledgeBase:
 
     def delete_note(self, note_id: int) -> bool:
         cur = self._conn.execute(
-            "DELETE FROM knowledge_note WHERE id = ?", (note_id,)
+            "UPDATE knowledge_note SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
+            (_now_iso(), note_id),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -561,13 +566,13 @@ class KnowledgeBase:
             sql = (
                 "SELECT n.* FROM knowledge_note n "
                 "JOIN note_fts f ON n.id = f.rowid "
-                "WHERE note_fts MATCH ?"
+                "WHERE note_fts MATCH ? AND n.deleted = 0"
             )
             params: list[Any] = [_fts_escape(query)]
         else:
             like = f"%{query}%"
             sql = (
-                "SELECT n.* FROM knowledge_note n WHERE "
+                "SELECT n.* FROM knowledge_note n WHERE n.deleted = 0 AND "
                 "(n.title LIKE ? OR n.content LIKE ? OR n.tags LIKE ? OR n.symbol LIKE ?)"
             )
             params = [like, like, like, like]
@@ -602,7 +607,7 @@ class KnowledgeBase:
         limit: int = 100,
     ) -> list[KnowledgeNote]:
         """List notes with optional filters."""
-        sql = "SELECT * FROM knowledge_note WHERE 1=1"
+        sql = "SELECT * FROM knowledge_note WHERE deleted = 0"
         params: list[Any] = []
         if category:
             sql += " AND category = ?"
@@ -614,6 +619,19 @@ class KnowledgeBase:
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_note(r) for r in rows]
+
+    def list_tags(self) -> list[str]:
+        """Return all distinct tags across non-deleted notes."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT tags FROM knowledge_note WHERE deleted = 0 AND tags != ''"
+        ).fetchall()
+        seen: set[str] = set()
+        for row in rows:
+            for tag in row["tags"].split(","):
+                tag = tag.strip()
+                if tag:
+                    seen.add(tag)
+        return sorted(seen)
 
     # -- Module mappings -----------------------------------------------------
 
@@ -642,14 +660,14 @@ class KnowledgeBase:
 
     def get_module_mapping(self, mapping_id: int) -> ModuleMapping | None:
         row = self._conn.execute(
-            "SELECT * FROM module_mapping WHERE id = ?", (mapping_id,)
+            "SELECT * FROM module_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
         ).fetchone()
         return self._row_to_module_mapping(row) if row else None
 
     def update_module_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
         """Update fields on an existing module mapping."""
         row = self._conn.execute(
-            "SELECT id FROM module_mapping WHERE id = ?", (mapping_id,)
+            "SELECT id FROM module_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
         ).fetchone()
         if not row:
             return False
@@ -678,7 +696,8 @@ class KnowledgeBase:
 
     def delete_module_mapping(self, mapping_id: int) -> bool:
         cur = self._conn.execute(
-            "DELETE FROM module_mapping WHERE id = ?", (mapping_id,)
+            "UPDATE module_mapping SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
+            (_now_iso(), mapping_id),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -686,7 +705,7 @@ class KnowledgeBase:
     def list_module_mappings(self) -> list[ModuleMapping]:
         """List all module mappings ordered by prefix length (longest first)."""
         rows = self._conn.execute(
-            "SELECT * FROM module_mapping ORDER BY length(module_prefix) DESC"
+            "SELECT * FROM module_mapping WHERE deleted = 0 ORDER BY length(module_prefix) DESC"
         ).fetchall()
         return [self._row_to_module_mapping(r) for r in rows]
 
@@ -698,7 +717,7 @@ class KnowledgeBase:
         the ``payments.models`` mapping wins.
         """
         rows = self._conn.execute(
-            "SELECT * FROM module_mapping ORDER BY length(module_prefix) DESC"
+            "SELECT * FROM module_mapping WHERE deleted = 0 ORDER BY length(module_prefix) DESC"
         ).fetchall()
         for row in rows:
             prefix = row["module_prefix"]
@@ -877,6 +896,16 @@ def _ensure_repo_cloned(
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to clone {repo}: {e.stderr.strip()}")
+
+    # Fetch tags — bare clones and gh may not include them by default.
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "--tags"],
+            cwd=str(contents_dir),
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass  # best-effort; tags may already be present
 
     # --- Step 2: determine the ref to check out ---
     ref = branch or _default_branch(contents_dir)

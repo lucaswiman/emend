@@ -73,6 +73,16 @@ class TestNotes:
         assert kb.delete_note(nid) is True
         assert kb.get_note(nid) is None
 
+    def test_delete_is_soft(self, kb):
+        """Deleted notes are soft-deleted (row still exists with deleted=1)."""
+        nid = kb.add_note(KnowledgeNote(title="Soft", content="..."))
+        kb.delete_note(nid)
+        row = kb._conn.execute(
+            "SELECT deleted FROM knowledge_note WHERE id = ?", (nid,)
+        ).fetchone()
+        assert row is not None
+        assert row["deleted"] == 1
+
     def test_delete_nonexistent(self, kb):
         assert kb.delete_note(9999) is False
 
@@ -119,6 +129,19 @@ class TestNotes:
         nid = kb.add_note(note)
         saved = kb.get_note(nid)
         assert saved.metadata == {"version": 2, "reviewed": True}
+
+    def test_list_tags(self, kb):
+        kb.add_note(KnowledgeNote(title="A", content="x", tags="auth,oauth"))
+        kb.add_note(KnowledgeNote(title="B", content="y", tags="auth,db"))
+        kb.add_note(KnowledgeNote(title="C", content="z", tags=""))
+
+        tags = kb.list_tags()
+        assert tags == ["auth", "db", "oauth"]
+
+    def test_list_tags_excludes_deleted(self, kb):
+        nid = kb.add_note(KnowledgeNote(title="D", content="w", tags="secret"))
+        kb.delete_note(nid)
+        assert "secret" not in kb.list_tags()
 
     def test_note_to_dict(self, kb):
         nid = kb.add_note(KnowledgeNote(title="T", content="C"))
@@ -186,6 +209,20 @@ class TestMappings:
         ))
         assert kb.delete_mapping(mid) is True
         assert kb.get_mapping(mid) is None
+
+    def test_delete_is_soft(self, kb):
+        """Deleted mappings are soft-deleted."""
+        mid = kb.add_mapping(IdentifierMapping(
+            source_project="a", source_identifier="x",
+            source_kind="", target_project="b",
+            target_identifier="y", target_kind="",
+        ))
+        kb.delete_mapping(mid)
+        row = kb._conn.execute(
+            "SELECT deleted FROM identifier_mapping WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row is not None
+        assert row["deleted"] == 1
 
     def test_delete_nonexistent(self, kb):
         assert kb.delete_mapping(9999) is False
@@ -412,6 +449,16 @@ class TestModuleMappings:
         d = module_mapping_to_dict(saved)
         assert d["module_prefix"] == "test"
         assert d["metadata"] == {"env": "staging"}
+
+    def test_delete_is_soft(self, kb):
+        """Deleted module mappings are soft-deleted."""
+        mid = kb.add_module_mapping(ModuleMapping(module_prefix="soft", local_path="/s"))
+        kb.delete_module_mapping(mid)
+        row = kb._conn.execute(
+            "SELECT deleted FROM module_mapping WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row is not None
+        assert row["deleted"] == 1
 
     def test_unique_prefix(self, kb):
         """module_prefix has UNIQUE constraint."""
@@ -688,13 +735,14 @@ def _has_pydantic():
 
 @pytest.mark.skipif(not _has_pydantic(), reason="pydantic not installed (MCP optional dep)")
 class TestMCPTools:
-    def test_kb_add_and_search(self, tmp_path, monkeypatch):
+    def test_kb_write_add_and_read_note(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".emend" / "cache").mkdir(parents=True)
 
-        from emend.mcp_server import kb_add, kb_search
+        from emend.mcp_server import kb_read, kb_write
 
-        result = kb_add(
+        result = kb_write(
+            kind="note", op="add",
             title="Test note",
             content="This is a test knowledge note about authentication.",
             category="architecture",
@@ -704,18 +752,19 @@ class TestMCPTools:
         assert data["title"] == "Test note"
         assert "id" in data
 
-        search_result = kb_search(query="authentication")
+        search_result = kb_read(kind="note", query="authentication")
         results = json.loads(search_result)
         assert len(results) >= 1
         assert results[0]["title"] == "Test note"
 
-    def test_mapping_add_and_search(self, tmp_path, monkeypatch):
+    def test_kb_write_add_and_read_mapping(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".emend" / "cache").mkdir(parents=True)
 
-        from emend.mcp_server import mapping_add, mapping_search, mapping_lookup
+        from emend.mcp_server import kb_read, kb_write
 
-        result = mapping_add(
+        result = kb_write(
+            kind="mapping", op="add",
             source_project="user-svc",
             source_identifier="UserService.create_user",
             target_project="gateway",
@@ -726,10 +775,37 @@ class TestMCPTools:
         data = json.loads(result)
         assert data["source_identifier"] == "UserService.create_user"
 
-        search_result = mapping_search(query="create_user")
+        search_result = kb_read(kind="mapping", query="create_user")
         results = json.loads(search_result)
         assert len(results) >= 1
 
-        lookup_result = mapping_lookup(identifier="UserService.create_user")
+        lookup_result = kb_read(kind="mapping", identifier="UserService.create_user")
         results = json.loads(lookup_result)
         assert len(results) >= 1
+
+    def test_kb_read_tags(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".emend" / "cache").mkdir(parents=True)
+
+        from emend.mcp_server import kb_read, kb_write
+
+        kb_write(kind="note", op="add", title="A", content="x", tags="auth,db")
+        kb_write(kind="note", op="add", title="B", content="y", tags="auth,api")
+
+        tags = json.loads(kb_read(kind="tag"))
+        assert "auth" in tags
+        assert "db" in tags
+        assert "api" in tags
+
+    def test_kb_write_delete_is_soft(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".emend" / "cache").mkdir(parents=True)
+
+        from emend.mcp_server import kb_read, kb_write
+
+        result = kb_write(kind="note", op="add", title="Gone", content="bye")
+        nid = json.loads(result)["id"]
+
+        kb_write(kind="note", op="delete", id=nid)
+        got = json.loads(kb_read(kind="note", id=nid))
+        assert "error" in got
