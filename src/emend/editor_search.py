@@ -42,7 +42,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -371,9 +373,17 @@ class EditorSearchEngine:
         """Auto-detect mode and dispatch."""
         t0 = time.monotonic()
 
-        if "::" in query:
+        if query.startswith("/") and query.endswith("/") and len(query) > 2:
+            result = self._search_grep(
+                query[1:-1], limit=limit, file_scope=file_scope
+            )
+        elif "::" in query:
             result = self._search_selector(query, limit=limit)
         elif "$" in query:
+            result = self._search_pattern(
+                query, limit=limit, file_scope=file_scope
+            )
+        elif re.match(r'\s*(?:async\s+)?(?:def|class)\s+\w*[*?]', query):
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
@@ -646,6 +656,82 @@ class EditorSearchEngine:
             truncated=len(items) > limit,
         )
 
+    # -- grep (regex) search ------------------------------------------------
+
+    def _search_grep(
+        self,
+        pattern: str,
+        *,
+        limit: int = 50,
+        file_scope: str | None = None,
+    ) -> SearchResult:
+        """Search project files using rg or grep with a PCRE regex."""
+        scope = file_scope or self.project_root
+
+        rg = shutil.which("rg")
+        if rg:
+            cmd = [
+                rg, "--pcre2", "--no-heading", "--line-number",
+                "--color", "never", "--max-count", str(limit * 2),
+                pattern, scope,
+            ]
+        else:
+            # Use git ls-files piped to grep for speed and .gitignore respect.
+            grep = shutil.which("ggrep") or shutil.which("grep") or "grep"
+            git = shutil.which("git")
+            if git and Path(scope).joinpath(".git").exists():
+                # git grep supports PCRE with -P
+                cmd = [git, "-C", scope, "grep", "-Pn", "--no-color", pattern]
+            else:
+                cmd = [
+                    grep, "-rPn", "--color=never",
+                    "--exclude-dir=.git", "--exclude-dir=.venv",
+                    "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
+                    pattern, scope,
+                ]
+
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+            )
+            raw_lines = proc.stdout.splitlines()
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return SearchResult(
+                items=[{"error": str(exc)}],
+                elapsed_ms=0, mode="grep",
+            )
+
+        items: list[dict] = []
+        for line in raw_lines:
+            if len(items) >= limit:
+                break
+            # Format: file:line:matched_text  (git grep omits the leading path)
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            file_path, line_no_str, matched_text = parts
+            try:
+                line_no = int(line_no_str)
+            except ValueError:
+                continue
+            # Resolve relative paths from git grep to absolute.
+            abs_path = str(Path(scope).joinpath(file_path).resolve())
+            items.append({
+                "file_path": abs_path,
+                "line": line_no,
+                "end_line": line_no,
+                "matched_text": matched_text.strip(),
+                "name": matched_text.strip()[:60],
+                "kind": "",
+            })
+
+        return SearchResult(
+            items=items,
+            elapsed_ms=0,
+            mode="grep",
+            truncated=len(items) >= limit,
+        )
+
     # -- selector resolution ------------------------------------------------
 
     @_timed
@@ -880,6 +966,9 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.search_pattern(**params).to_dict()
     elif method == "references":
         return engine.search_references(**params).to_dict()
+    elif method == "grep":
+        pat = params.pop("pattern", params.pop("query", ""))
+        return engine._search_grep(pat, **params).to_dict()
     elif method == "selector":
         sel = params.pop("selector", params.pop("query", ""))
         return engine.resolve_selector(sel, **params).to_dict()

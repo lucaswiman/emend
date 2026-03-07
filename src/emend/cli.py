@@ -131,6 +131,9 @@ def detect_query_shape(query: str, path: str | None = None) -> QueryShape:
                     path = _file_scope
     elif '$' in query:
         is_pattern_mode = True
+    elif _re_module.match(r'\s*(?:async\s+)?(?:def|class)\s+\w*[*?]', query):
+        # Glob wildcards in def/class name → pattern mode
+        is_pattern_mode = True
 
     if has_selector and query.startswith('::'):
         query = '**' + query
