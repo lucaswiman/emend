@@ -487,7 +487,7 @@ def search(
     has_selector = _shape.has_selector
     is_line_selector = _shape.is_line_selector
 
-    if include_map:
+    if include_map and "::" not in query:
         from emend.knowledge import KnowledgeBase
         kb = KnowledgeBase(project or ".")
         try:
@@ -2546,7 +2546,7 @@ def map_update_module_cmd(
         emend map update-module payments --fetch
     """
     import json as _json
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict, _ensure_repo_cloned, _repo_id, _repo_checkouts_root, _maybe_fetch_branch
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
 
     kb = KnowledgeBase(".")
     try:
@@ -2558,16 +2558,12 @@ def map_update_module_cmd(
         kwargs: dict[str, str] = {}
         if repo:
             kwargs["repo"] = repo
-            mm.repo = repo
         if path:
             kwargs["local_path"] = path
-            mm.local_path = path
         if branch:
             kwargs["branch"] = branch
-            mm.branch = branch
         if subpath:
             kwargs["subpath"] = subpath
-            mm.subpath = subpath
 
         if not kwargs and not fetch:
             print("Nothing to update (provide --repo, --path, --branch, --subpath, or --fetch).", file=sys.stderr)
@@ -2575,15 +2571,11 @@ def map_update_module_cmd(
 
         if kwargs:
             kb.update_module_mapping(mm.id, **kwargs)  # type: ignore[arg-type]
-        
-        if fetch and mm.repo:
-            # Force a re-fetch of the branch
-            local_root = _ensure_repo_cloned(mm.repo, branch=mm.branch)
-            root = _repo_checkouts_root()
-            rid = _repo_id(mm.repo)
-            contents_dir = root / rid / "contents"
-            ref = mm.branch or "main" # Best guess if not specified
-            _maybe_fetch_branch(contents_dir, Path(local_root), ref, force=True)
+
+        if fetch:
+            result = kb.fetch_module_repo(module_prefix)
+            if result is None:
+                print(f"Module mapping '{module_prefix}' has no repo to fetch.", file=sys.stderr)
 
         saved = kb.get_module_mapping(mm.id)  # type: ignore[arg-type]
         if json_output:
@@ -2676,21 +2668,11 @@ def map_resolve_cmd(
                 raise typer.Exit(1)
 
             # Follow re-exports if the symbol isn't defined in the file.
-            def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
-                if level > 0:
-                    current_path = Path(current_file).resolve().parent
-                    for _ in range(level - 1): current_path = current_path.parent
-                    if not module: return str(current_path)
-                    target = current_path
-                    for p in module.split('.'): target = target / p
-                    if target.with_suffix('.py').is_file(): return str(target.with_suffix('.py'))
-                    if target.is_dir(): return str(target)
-                    return None
-                try: return kb.resolve_module_to_path(module)
-                except Exception: return None
+            from emend.knowledge import make_resolve_module_cb
+            resolve_cb = make_resolve_module_cb(kb)
 
             if symbol_parts:
-                res = resolve_through_reexports(file_path, symbol_parts[0], resolve_module_cb)
+                res = resolve_through_reexports(file_path, symbol_parts[0], resolve_cb)
                 if res:
                     file_path, _ = res
 

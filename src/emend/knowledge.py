@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from .transform import _cache_db_dir, _knowledge_db_dir
 
@@ -260,6 +260,37 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def make_resolve_module_cb(
+    kb: "KnowledgeBase",
+) -> Callable[[str, int, str], Optional[str]]:
+    """Create a resolve_module_cb suitable for resolve_through_reexports().
+
+    Handles relative imports by walking up directories, and absolute imports
+    by delegating to kb.resolve_module_to_path().
+    """
+    def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
+        if level > 0:
+            current_path = Path(current_file).resolve().parent
+            for _ in range(level - 1):
+                current_path = current_path.parent
+            if not module:
+                return str(current_path) if current_path.is_dir() else None
+            target = current_path
+            for p in module.split('.'):
+                target = target / p
+            if target.with_suffix('.py').is_file():
+                return str(target.with_suffix('.py'))
+            if target.is_dir():
+                return str(target)
+            return None
+        try:
+            return kb.resolve_module_to_path(module)
+        except Exception:
+            return None
+
+    return resolve_module_cb
+
+
 def resolve_dotted_path_to_selector(
     resolved_base: str,
     rem_parts: list[str],
@@ -321,21 +352,8 @@ def resolve_dotted_path_to_selector(
             if init_file.is_file():
                 from emend.ast_utils import resolve_through_reexports
 
-                # We need a more complete resolve_module_cb for re-exports
-                def full_resolve_cb(module: str, level: int, current_file: str) -> str | None:
-                    if level > 0:
-                        current_path_obj = Path(current_file).resolve().parent
-                        for _ in range(level - 1): current_path_obj = current_path_obj.parent
-                        if not module: return str(current_path_obj)
-                        target = current_path_obj
-                        for p in module.split('.'): target = target / p
-                        if target.with_suffix('.py').is_file(): return str(target.with_suffix('.py'))
-                        if target.is_dir(): return str(target)
-                        return None
-                    return resolve_module_cb(module, level, current_file)
-
                 res = resolve_through_reexports(
-                    str(init_file), part, full_resolve_cb
+                    str(init_file), part, resolve_module_cb
                 )
                 if res:
                     target_file, _ = res
@@ -986,38 +1004,29 @@ class KnowledgeBase:
             prefix_parts = mm.module_prefix.split('.')
             rem_parts = parts[len(prefix_parts):]
 
-            def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
-                if level > 0:
-                    current_path = Path(current_file).resolve().parent
-                    for _ in range(level - 1):
-                        current_path = current_path.parent
-                    
-                    if not module:
-                        return str(current_path) if current_path.is_dir() else None
-                    
-                    parts = module.split('.')
-                    target = current_path
-                    for p in parts:
-                        target = target / p
-                    
-                    if target.with_suffix('.py').is_file():
-                        return str(target.with_suffix('.py'))
-                    if target.is_dir():
-                        return str(target)
-                    return None
-                
-                try:
-                    return self.resolve_module_to_path(module)
-                except Exception:
-                    return None
-
             return resolve_dotted_path_to_selector(
-                resolved_base, 
-                rem_parts, 
-                resolve_module_cb=resolve_module_cb
+                resolved_base,
+                rem_parts,
+                resolve_module_cb=make_resolve_module_cb(self)
             )
         except Exception:
             return None
+
+    def fetch_module_repo(self, module_prefix: str) -> str | None:
+        """Force-fetch the latest commits for a module mapping's repo.
+
+        Returns the worktree path, or None if the mapping has no repo.
+        """
+        mm = self.get_module_mapping_by_prefix(module_prefix)
+        if mm is None or not mm.repo:
+            return None
+        local_root = _ensure_repo_cloned(mm.repo, branch=mm.branch)
+        root = _repo_checkouts_root()
+        rid = _repo_id(mm.repo)
+        contents_dir = root / rid / "contents"
+        ref = mm.branch or _default_branch(contents_dir) or "main"
+        _maybe_fetch_branch(contents_dir, Path(local_root), ref, force=True)
+        return local_root
 
     # -- Helpers -------------------------------------------------------------
 

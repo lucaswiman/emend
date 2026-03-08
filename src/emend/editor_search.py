@@ -1122,38 +1122,11 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
     parts = symbol_path.split(".")
     base_symbol = parts[0]
     
+    from emend.knowledge import make_resolve_module_cb
     kb = _get_kb(engine)
-    
-    def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
-        # 1. Handle relative imports: from .codes import ...
-        if level > 0:
-            current_path = Path(current_file).resolve().parent
-            for _ in range(level - 1):
-                current_path = current_path.parent
-            
-            if not module:
-                return str(current_path) if current_path.is_dir() else None
-            
-            parts = module.split('.')
-            target = current_path
-            for p in parts:
-                target = target / p
-            
-            if target.with_suffix('.py').is_file():
-                return str(target.with_suffix('.py'))
-            if target.is_dir():
-                return str(target)
-            return None
-        
-        # 2. Handle absolute imports via KnowledgeBase (cross-repo or local-mapped)
-        try:
-            # The KnowledgeBase we have might only take 1 or 2 args depending on version
-            # Let's try the simple version first.
-            return kb.resolve_module_to_path(module)
-        except Exception:
-            return None
+    resolve_cb = make_resolve_module_cb(kb)
 
-    res = resolve_through_reexports(file_path, base_symbol, resolve_module_cb)
+    res = resolve_through_reexports(file_path, base_symbol, resolve_cb)
 
     if res:
         resolved_file, line = res
