@@ -926,8 +926,10 @@ class TestEditorServerRPC:
         f = tmp_path / "mod.py"
         f.write_text("class MyClass:\n    pass\n")
         
-        class FakeEngine: pass
-        engine = FakeEngine()
+        class FakeEngine:
+            def __init__(self, root):
+                self.project_root = str(root)
+        engine = FakeEngine(tmp_path)
         
         # Exact match
         res = _resolve_selector_to_goto_item(engine, f"{f}::MyClass")

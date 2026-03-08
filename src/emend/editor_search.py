@@ -1126,7 +1126,11 @@ def _extract_import_binding(file_path: str, identifier: str) -> tuple[str, str] 
 
 
 def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) -> dict | None:
-    """Resolve a file::Symbol selector to a goto result dict with line number."""
+    """Resolve a file::Symbol selector to a goto result dict with line number.
+    
+    Follows re-exports (star imports and explicit imports) to find the actual
+    definition location.
+    """
     if "::" not in selector:
         return None
     
@@ -1134,29 +1138,73 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
     if not Path(file_path).is_file():
         return None
 
-    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            source = f.read()
-        definitions = find_nested_definitions(source)
-        symbol = find_symbol_by_path(definitions, symbol_path.split("."))
-        line = symbol.line if symbol else 1
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path, _resolve_through_reexports
+    
+    # We only handle top-level symbol re-exports for now (e.g. mod.Symbol).
+    # Nested symbols like mod.Class.method are assumed to be defined in mod.py.
+    parts = symbol_path.split(".")
+    base_symbol = parts[0]
+    
+    kb = _get_kb(engine)
+    
+    def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
+        # 1. Handle relative imports: from .codes import ...
+        if level > 0:
+            current_path = Path(current_file).resolve().parent
+            for _ in range(level - 1):
+                current_path = current_path.parent
+            
+            if not module:
+                return str(current_path) if current_path.is_dir() else None
+            
+            parts = module.split('.')
+            target = current_path
+            for p in parts:
+                target = target / p
+            
+            if target.with_suffix('.py').is_file():
+                return str(target.with_suffix('.py'))
+            if target.is_dir():
+                return str(target)
+            return None
         
+        # 2. Handle absolute imports via KnowledgeBase (cross-repo or local-mapped)
+        try:
+            # The KnowledgeBase we have might only take 1 or 2 args depending on version
+            # Let's try the simple version first.
+            return kb.resolve_module_to_path(module)
+        except Exception:
+            return None
+
+    result = _resolve_through_reexports(file_path, base_symbol, resolve_module_cb)
+    if result:
+        resolved_file, line = result
+        # If it was a nested path, we need to find the actual line for the nested part
+        if len(parts) > 1:
+            try:
+                definitions = find_nested_definitions(resolved_file)
+                symbol = find_symbol_by_path(definitions, parts)
+                if symbol:
+                    line = symbol.line_start
+            except Exception:
+                pass
+
         return {
-            "name": symbol_path.split(".")[-1],
+            "name": parts[-1],
             "qualified_name": symbol_path,
-            "location": f"{file_path}:{line}",
-            "file_path": file_path,
+            "location": f"{resolved_file}:{line}",
+            "file_path": str(resolved_file),
             "line": line,
         }
-    except Exception:
-        return {
-            "name": symbol_path.split(".")[-1],
-            "qualified_name": symbol_path,
-            "location": f"{file_path}:1",
-            "file_path": file_path,
-            "line": 1,
-        }
+
+    # Fallback to original logic (line 1 of the initial file) if resolution fails
+    return {
+        "name": parts[-1],
+        "qualified_name": symbol_path,
+        "location": f"{file_path}:1",
+        "file_path": str(file_path),
+        "line": 1,
+    }
 
 
 def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:

@@ -90,4 +90,7 @@ if get(g:, 'emend_default_mappings', 0)
   nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
   nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
   nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
+
+  " Bug 1: \d unmapped for Python files deletes lines.
+  autocmd FileType python nnoremap <buffer> <silent> <Leader>d <Cmd>EmendGoto<CR>
 endif

@@ -1,9 +1,131 @@
 """AST utilities for traversing and finding symbols in Python code."""
 
+import ast
 import fnmatch
 from pathlib import Path
+from typing import Callable, Optional, Tuple
 
 from emend.component_selector import NestedSymbol
+
+
+def get_imports(filepath: str) -> list[dict]:
+    """Extract all imports from a Python file.
+
+    Returns:
+        List of dicts:
+        - { 'module': 'foo.bar', 'name': 'Baz', 'asname': 'B', 'level': 0 }
+        - { 'module': 'foo.bar', 'name': '*', 'level': 0 }  (for star import)
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=filepath)
+    except Exception:
+        return []
+
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append({
+                    "module": alias.name,
+                    "name": None,
+                    "asname": alias.asname,
+                    "level": 0
+                })
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            level = node.level
+            for alias in node.names:
+                imports.append({
+                    "module": module,
+                    "name": alias.name,
+                    "asname": alias.asname,
+                    "level": level
+                })
+    return imports
+
+
+def _resolve_through_reexports(
+    file_path: str,
+    symbol_name: str,
+    resolve_module_cb: Callable[[str, int, str], Optional[str]],
+    visited: Optional[set] = None,
+    depth: int = 0
+) -> Optional[Tuple[str, int]]:
+    """Follow re-exports (star imports or explicit imports) to find the actual definition.
+
+    Args:
+        file_path: Current file to search in.
+        symbol_name: Name of the symbol to find.
+        resolve_module_cb: Callback (module_name, level, current_file) -> file_path.
+        visited: Set of visited file paths to prevent infinite loops.
+        depth: Current recursion depth.
+
+    Returns:
+        Tuple of (file_path, line_number) or None if not found.
+    """
+    if visited is None:
+        visited = set()
+
+    file_path_abs = str(Path(file_path).resolve())
+    if file_path_abs in visited or depth > 10:
+        return None
+    visited.add(file_path_abs)
+
+    if not Path(file_path).is_file():
+        return None
+
+    try:
+        definitions = find_nested_definitions(file_path)
+        symbol = find_symbol_by_path(definitions, [symbol_name])
+        if symbol:
+            return file_path, symbol.line_start
+    except Exception:
+        pass
+
+    # Not defined here. Check imports.
+    imports = get_imports(file_path)
+    
+    # 1. Check explicit re-exports: from module import symbol [as alias]
+    for imp in imports:
+        # Match if either the name or the alias matches what we're looking for
+        if imp["name"] == symbol_name or (imp["asname"] and imp["asname"] == symbol_name):
+            # If it was aliased, we're looking for the original name in the target module
+            target_symbol = imp["name"] if imp["asname"] == symbol_name else symbol_name
+            target_file = resolve_module_cb(imp["module"], imp["level"], file_path)
+            
+            if target_file:
+                # If target_file is a directory, we should check its __init__.py
+                if Path(target_file).is_dir():
+                    init_py = Path(target_file) / "__init__.py"
+                    if init_py.is_file():
+                        target_file = str(init_py)
+                
+                result = _resolve_through_reexports(
+                    target_file, target_symbol, resolve_module_cb, visited, depth + 1
+                )
+                if result:
+                    return result
+
+    # 2. Check star imports: from module import *
+    for imp in imports:
+        if imp["name"] == "*":
+            target_file = resolve_module_cb(imp["module"], imp["level"], file_path)
+            if target_file:
+                if Path(target_file).is_dir():
+                    init_py = Path(target_file) / "__init__.py"
+                    if init_py.is_file():
+                        target_file = str(init_py)
+
+                # Recursively search in the target file.
+                result = _resolve_through_reexports(
+                    target_file, symbol_name, resolve_module_cb, visited, depth + 1
+                )
+                if result:
+                    return result
+
+    return None
 
 
 def _rust_dict_to_nested_symbol(d: dict) -> NestedSymbol:

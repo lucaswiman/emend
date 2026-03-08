@@ -368,12 +368,45 @@ function! emend#goto(identifier, ...) abort
   call emend#send('mapping_goto', {'identifier': a:identifier, 'file': expand('%:p')}, l:Cb)
 endfunction
 
-function! s:jump_to(file, line) abort
+function! emend#jump_to(file, line) abort
   if empty(a:file) || !filereadable(a:file)
     return
   endif
+
+  let l:target = fnamemodify(a:file, ':p')
+  let l:current = expand('%:p')
+
+  " Case 1: Same file — just move the cursor.
+  if l:target ==# l:current
+    " Mark current position in jumplist so Ctrl-O returns here.
+    normal! m'
+    execute a:line
+    normal! zz
+    return
+  endif
+
+  " Case 2: File already open in a tab — switch to it.
+  " Search all tab pages and windows for a buffer matching the target path.
+  for l:tab in range(1, tabpagenr('$'))
+    for l:win in range(1, tabpagewinnr(l:tab, '$'))
+      let l:bufnr = tabpagebuflist(l:tab)[l:win - 1]
+      if fnamemodify(bufname(l:bufnr), ':p') ==# l:target
+        " Found it. Switch tab, switch window, go to line.
+        execute 'tabnext ' . l:tab
+        execute l:win . 'wincmd w'
+        " Mark position in jumplist before moving.
+        normal! m'
+        execute a:line
+        normal! zz
+        return
+      endif
+    endfor
+  endfor
+
+  " Case 3: File not open anywhere — open it in the current window.
+  " normal! m' sets the ' mark so Ctrl-O returns to this position/buffer.
   normal! m'
-  execute 'edit ' . fnameescape(a:file)
+  execute 'edit ' . fnameescape(l:target)
   execute a:line
   normal! zz
 endfunction
@@ -394,7 +427,7 @@ function! s:on_goto_result(result) abort
     let l:item = l:items[0]
     " Local result: has file_path + line from the project index.
     if has_key(l:item, 'file_path') && has_key(l:item, 'line')
-      call s:jump_to(l:item.file_path, l:item.line)
+      call emend#jump_to(l:item.file_path, l:item.line)
       return
     endif
     " KB result: has resolved_path from cross-repo mapping.
@@ -403,7 +436,7 @@ function! s:on_goto_result(result) abort
       if isdirectory(l:path)
         echo 'emend: mapped to directory: ' . l:path
       else
-        call s:jump_to(l:path, get(l:item, 'line', 1))
+        call emend#jump_to(l:path, get(l:item, 'line', 1))
       endif
       return
     endif
@@ -467,7 +500,7 @@ function! s:on_module_resolve(result) abort
     if isdirectory(l:path)
       echo 'emend: module maps to directory: ' . l:path
     else
-      call s:jump_to(l:path, 1)
+      call emend#jump_to(l:path, 1)
     endif
   else
     let l:repo = get(l:item, 'repo', '')

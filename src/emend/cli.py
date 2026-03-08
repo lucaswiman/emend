@@ -2730,6 +2730,26 @@ def map_resolve_file_cmd(
             print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
             raise typer.Exit(1)
 
+        # Follow re-exports if the symbol isn't defined in the file.
+        from emend.ast_utils import _resolve_through_reexports
+        def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
+            if level > 0:
+                current_path = Path(current_file).resolve().parent
+                for _ in range(level - 1): current_path = current_path.parent
+                if not module: return str(current_path)
+                target = current_path
+                for p in module.split('.'): target = target / p
+                if target.with_suffix('.py').is_file(): return str(target.with_suffix('.py'))
+                if target.is_dir(): return str(target)
+                return None
+            try: return kb.resolve_module_to_path(module)
+            except Exception: return None
+
+        if symbol_parts:
+            res = _resolve_through_reexports(file_path, symbol_parts[0], resolve_module_cb)
+            if res:
+                file_path, _ = res
+
         # Now find the symbol in the file to get the line number.
         if symbol_parts:
             symbols = find_nested_definitions(file_path)
