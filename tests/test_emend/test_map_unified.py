@@ -48,8 +48,8 @@ def test_map_resolve_file_command(tmp_path, emend_cmd_list, run_emend_cmd):
     
     os.chdir(str(proj))
     
-    # Use emend map resolve-file
-    result = run_emend_cmd(["map", "resolve-file", "ext.module_b.MySymbol"])
+    # Use emend map resolve --location
+    result = run_emend_cmd(["map", "resolve", "--location", "ext.module_b.MySymbol"])
     
     assert "module_b.py" in result.stdout
     assert "Line: 1" in result.stdout
@@ -153,14 +153,14 @@ def test_map_resolve_file_deep_reexport(tmp_path, emend_cmd_list, run_emend_cmd)
 
     os.chdir(str(proj))
 
-    result = run_emend_cmd(["map", "resolve-file", "pkg.sub1.sub2.Widget"])
+    result = run_emend_cmd(["map", "resolve", "--location", "pkg.sub1.sub2.Widget"])
     assert result.returncode == 0, result.stderr
     assert "widget_impl.py" in result.stdout
     assert "Widget" in result.stdout or "Line:" in result.stdout
 
 
 def test_map_resolve_file_plain_module_path(tmp_path, emend_cmd_list, run_emend_cmd):
-    """map resolve-file with a plain dotted module path (no symbol) should not crash."""
+    """map resolve --location with a plain dotted module path (no symbol) should not crash."""
     proj = tmp_path / "app"
     proj.mkdir()
     (proj / "pyproject.toml").touch()
@@ -179,7 +179,7 @@ def test_map_resolve_file_plain_module_path(tmp_path, emend_cmd_list, run_emend_
     os.chdir(str(proj))
 
     # Should resolve to the package's __init__.py rather than crashing with a parser error.
-    result = run_emend_cmd(["map", "resolve-file", "pkg.db"])
+    result = run_emend_cmd(["map", "resolve", "--location", "pkg.db"])
     assert result.returncode == 0
     assert "__init__.py" in result.stdout
     assert "Unexpected token" not in result.stderr

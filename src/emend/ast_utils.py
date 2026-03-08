@@ -97,14 +97,18 @@ def resolve_through_reexports(
             
             if target_file:
                 # If target_file is a directory, check if the target_symbol matches a file or submodule.
+                is_module = False
                 if Path(target_file).is_dir():
                     candidate = Path(target_file) / (target_symbol + ".py")
                     if candidate.is_file():
                         target_file = str(candidate)
+                        is_module = True
                     else:
                         init_py = Path(target_file) / "__init__.py"
                         if init_py.is_file():
                             target_file = str(init_py)
+                elif Path(target_file).suffix == ".py" and Path(target_file).stem == target_symbol:
+                    is_module = True
                 
                 result = resolve_through_reexports(
                     target_file, target_symbol, resolve_module_cb, visited, depth + 1
@@ -114,7 +118,7 @@ def resolve_through_reexports(
                 
                 # If it didn't find a nested symbol but target_file exists, 
                 # and it's a module we were looking for, return it.
-                if Path(target_file).is_file():
+                if is_module and Path(target_file).is_file():
                     return target_file, 1
 
     # 2. Check star imports: from module import *

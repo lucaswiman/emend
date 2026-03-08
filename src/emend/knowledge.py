@@ -986,10 +986,35 @@ class KnowledgeBase:
             prefix_parts = mm.module_prefix.split('.')
             rem_parts = parts[len(prefix_parts):]
 
+            def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
+                if level > 0:
+                    current_path = Path(current_file).resolve().parent
+                    for _ in range(level - 1):
+                        current_path = current_path.parent
+                    
+                    if not module:
+                        return str(current_path) if current_path.is_dir() else None
+                    
+                    parts = module.split('.')
+                    target = current_path
+                    for p in parts:
+                        target = target / p
+                    
+                    if target.with_suffix('.py').is_file():
+                        return str(target.with_suffix('.py'))
+                    if target.is_dir():
+                        return str(target)
+                    return None
+                
+                try:
+                    return self.resolve_module_to_path(module)
+                except Exception:
+                    return None
+
             return resolve_dotted_path_to_selector(
                 resolved_base, 
                 rem_parts, 
-                resolve_module_cb=lambda m, l, f: self.resolve_module_to_path(m) if l == 0 else None
+                resolve_module_cb=resolve_module_cb
             )
         except Exception:
             return None
@@ -1210,15 +1235,15 @@ def _maybe_fetch_branch(
             pass
 
     try:
-        # 1. Fetch from origin
+        # 1. Fetch from origin into the bare repo
         subprocess.run(
             ["git", "fetch", "origin", f"{ref}:{ref}"],
             cwd=str(bare_dir),
             check=True, capture_output=True, text=True, timeout=60,
         )
-        # 2. Update the worktree (fast-forward only)
+        # 2. Reset the worktree to the new commit
         subprocess.run(
-            ["git", "merge", "--ff-only", f"origin/{ref}"],
+            ["git", "reset", "--hard", ref],
             cwd=str(worktree_dir),
             check=True, capture_output=True, text=True, timeout=30,
         )

@@ -377,9 +377,16 @@ class EditorSearchEngine:
         limit: int = 50,
         file_scope: str | None = None,
         kind: str | None = None,
+        include_map: bool = False,
     ) -> SearchResult:
         """Auto-detect mode and dispatch."""
         t0 = time.monotonic()
+
+        if include_map:
+            kb = _get_kb(self)
+            resolved = kb.resolve_selector(query)
+            if resolved and resolved != query:
+                query = resolved
 
         if query.startswith("/") and query.endswith("/") and len(query) > 2:
             result = self._search_grep(
