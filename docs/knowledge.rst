@@ -3,7 +3,7 @@ Knowledge Base
 
 emend includes a built-in knowledge base for recording cross-service identifier
 mappings, module-to-repo mappings, and free-form architectural notes. Everything
-is stored in a per-project SQLite database at ``.emend/cache/knowledge.db`` with
+is stored in a per-project SQLite database at ``.emend/knowledge.db`` with
 FTS5 trigram indexing for instant substring search.
 
 Three subsystems:

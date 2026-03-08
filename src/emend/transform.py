@@ -81,6 +81,18 @@ def _cache_db_dir(project_root: str | Path) -> Path:
     return main_root / ".emend" / "cache"
 
 
+def _knowledge_db_dir(project_root: str | Path) -> Path:
+    """Return the directory for the knowledge DB (non-cache user data).
+
+    Unlike cache data, the knowledge DB contains user-created content
+    (notes, identifier mappings, module mappings) that cannot be
+    recomputed, so it lives directly in ``.emend/`` rather than
+    ``.emend/cache/``.
+    """
+    main_root = _resolve_cache_root(str(project_root))
+    return main_root / ".emend"
+
+
 @lru_cache(maxsize=4)
 def _get_worktree_id(project_root: str) -> str:
     """Return a stable identifier for the current working tree.
@@ -937,8 +949,15 @@ def query_symbol_index(
             params.append(resolved)
 
         if qualified_name:
-            conditions.append("qualified_name = ?")
-            params.append(qualified_name)
+            # Match against both qualified_name and module_qn (the
+            # fully-qualified module path).  This mirrors the logic in
+            # lookup_venv_symbol and allows lookups like
+            # "common.db.models.Foo" to find a symbol whose module_qn
+            # is "common.db.models" and name is "Foo".
+            conditions.append(
+                "(qualified_name = ? OR module_qn = ? OR module_qn LIKE ?)"
+            )
+            params.extend([qualified_name, qualified_name, qualified_name + ".%"])
 
         where = " AND ".join(conditions) if conditions else "1=1"
         query = (
@@ -980,6 +999,16 @@ def query_symbol_index(
             if venv_results:
                 return venv_results
 
+        # Fallback: if still no results and a qualified_name was given,
+        # try resolving through module mappings (modmap).
+        if not results and not file_path and qualified_name:
+            modmap_results = _lookup_via_modmap(
+                project_root, qualified_name,
+                name_pattern=name_pattern, kind=kind, limit=limit,
+            )
+            if modmap_results:
+                return modmap_results
+
         return results
     except Exception:
         try:
@@ -987,6 +1016,98 @@ def query_symbol_index(
         except Exception:
             pass
         return None
+
+
+def _lookup_via_modmap(
+    project_root: str,
+    qualified_name: str,
+    *,
+    name_pattern: str | None = None,
+    kind: str | None = None,
+    limit: int = 0,
+) -> list[dict]:
+    """Try to resolve a qualified name via module mappings.
+
+    If a modmap entry maps the module prefix to a local path or cloned
+    repo, resolve it and search that directory's symbol index for the
+    target symbol.
+    """
+    try:
+        from emend.knowledge import KnowledgeBase
+    except Exception:
+        return []
+
+    try:
+        kb = KnowledgeBase(project_root)
+    except Exception:
+        return []
+
+    try:
+        resolved = kb.resolve_module_to_path(qualified_name)
+        if resolved is None:
+            return []
+
+        resolved_path = Path(resolved)
+
+        # Determine the symbol name to search for: the part of the
+        # qualified name after the module mapping prefix.
+        mm = kb.resolve_module(qualified_name)
+        if mm is None:
+            return []
+        prefix = mm.module_prefix
+        suffix = qualified_name
+        if qualified_name.startswith(prefix + "."):
+            suffix = qualified_name[len(prefix) + 1:]
+        # The last component is the symbol name.
+        parts = suffix.rsplit(".", 1)
+        sym_name = parts[-1] if parts else suffix
+
+        # resolved_path may be a file or directory; find symbols there.
+        if resolved_path.is_file():
+            search_files = [resolved_path]
+        elif resolved_path.is_dir():
+            search_files = list(resolved_path.rglob("*.py"))
+        else:
+            return []
+
+        from emend import emend_core
+
+        results: list[dict] = []
+        for fpath in search_files:
+            try:
+                source = fpath.read_text()
+                ext = fpath.suffix.lstrip(".") or "py"
+                rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
+                for sym in rust_syms:
+                    if sym.get("name") == sym_name or (name_pattern and sym.get("name") == name_pattern):
+                        if kind and sym.get("kind") != kind:
+                            continue
+                        decs = sym.get("decorators", [])
+                        results.append({
+                            "name": sym.get("name", ""),
+                            "qualified_name": sym.get("qualified_name", ""),
+                            "kind": sym.get("kind", ""),
+                            "file_path": str(fpath),
+                            "line": sym.get("line", 0),
+                            "end_line": sym.get("end_line", 0),
+                            "depth": sym.get("depth", 0),
+                            "parent": sym.get("parent", ""),
+                            "signature": sym.get("signature", ""),
+                            "returns": sym.get("returns", ""),
+                            "decorators": decs if isinstance(decs, list) else decs.split(",") if decs else [],
+                        })
+                        if limit > 0 and len(results) >= limit:
+                            return results
+            except Exception:
+                continue
+        return results
+    except Exception:
+        return []
+    finally:
+        try:
+            kb.close()
+        except Exception:
+            pass
 
 
 def _venv_db_path(project_root: str) -> Path:

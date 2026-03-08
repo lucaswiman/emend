@@ -2540,20 +2540,78 @@ def modmap_resolve_cmd(
         kb.close()
 
 
+@modmap_app.command("update")
+def modmap_update_cmd(
+    module_prefix: Annotated[str, typer.Argument(help="Module prefix to update.")],
+    repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
+    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
+    subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Update an existing module mapping.
+
+    Examples:
+        emend modmap update payments --repo org/payments-v2
+        emend modmap update shared.utils --path /new/path
+        emend modmap update gateway --branch v2 --subpath src/gw
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        mm = kb.get_module_mapping_by_prefix(module_prefix)
+        if mm is None:
+            print(f"No module mapping for '{module_prefix}'.", file=sys.stderr)
+            raise typer.Exit(1)
+
+        kwargs: dict[str, str] = {}
+        if repo:
+            kwargs["repo"] = repo
+        if local_path:
+            kwargs["local_path"] = local_path
+        if branch:
+            kwargs["branch"] = branch
+        if subpath:
+            kwargs["subpath"] = subpath
+
+        if not kwargs:
+            print("Nothing to update (provide --repo, --path, --branch, or --subpath).", file=sys.stderr)
+            raise typer.Exit(1)
+
+        kb.update_module_mapping(mm.id, **kwargs)  # type: ignore[arg-type]
+        saved = kb.get_module_mapping(mm.id)  # type: ignore[arg-type]
+        if json_output:
+            print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        else:
+            target = saved.repo if saved.repo else saved.local_path  # type: ignore[union-attr]
+            print(f"Updated module mapping '{module_prefix}' -> {target}")
+    finally:
+        kb.close()
+
+
 @modmap_app.command("rm")
 def modmap_rm_cmd(
-    mapping_id: Annotated[int, typer.Argument(help="Mapping ID to delete.")],
+    identifier: Annotated[str, typer.Argument(help="Module prefix or numeric mapping ID to delete.")],
 ):
-    """Delete a module mapping."""
+    """Delete a module mapping by prefix name or ID."""
     from emend.knowledge import KnowledgeBase
 
     kb = KnowledgeBase(".")
     try:
-        ok = kb.delete_module_mapping(mapping_id)
+        # Try as numeric ID first, then as module prefix.
+        try:
+            mapping_id = int(identifier)
+            ok = kb.delete_module_mapping(mapping_id)
+            label = f"#{mapping_id}"
+        except ValueError:
+            ok = kb.delete_module_mapping_by_prefix(identifier)
+            label = f"'{identifier}'"
         if ok:
-            print(f"Deleted module mapping #{mapping_id}.")
+            print(f"Deleted module mapping {label}.")
         else:
-            print(f"Module mapping #{mapping_id} not found.", file=sys.stderr)
+            print(f"Module mapping {label} not found.", file=sys.stderr)
             raise typer.Exit(1)
     finally:
         kb.close()

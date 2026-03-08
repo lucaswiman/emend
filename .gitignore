@@ -8,6 +8,9 @@ LibCST
 benchmarks/.django-checkout/
 benchmarks/.django-scaled/
 .emend/cache/
+.emend/knowledge.db
+.emend/knowledge.db-wal
+.emend/knowledge.db-shm
 src/emend/_version.py
 rust/target/
 benchmark-results/

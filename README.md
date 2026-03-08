@@ -561,7 +561,7 @@ def my_entry_point():  # noqa: emend:deadcode
 
 ### Knowledge Base
 
-emend includes a built-in knowledge base for cross-service identifier mappings, module-to-repo mappings, and free-form architectural notes. Stored in `.emend/cache/knowledge.db` with FTS5 trigram search.
+emend includes a built-in knowledge base for cross-service identifier mappings, module-to-repo mappings, and free-form architectural notes. Stored in `.emend/knowledge.db` with FTS5 trigram search.
 
 ```bash
 # Notes — searchable scratchpad for decisions, conventions, patterns

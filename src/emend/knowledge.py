@@ -8,7 +8,7 @@ Provides two capabilities:
    humans or LLMs can record architectural decisions, conventions,
    patterns, or any other information relevant to the codebase.
 
-Both are stored in ``<project>/.emend/cache/knowledge.db`` (SQLite,
+Both are stored in ``<project>/.emend/knowledge.db`` (SQLite,
 WAL mode) and indexed with FTS5 trigram for instant substring search.
 """
 
@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .transform import _cache_db_dir
+from .transform import _cache_db_dir, _knowledge_db_dir
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -271,9 +271,25 @@ class KnowledgeBase:
     """
 
     def __init__(self, project_root: str = ".") -> None:
-        db_dir = _cache_db_dir(project_root)
+        db_dir = _knowledge_db_dir(project_root)
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / "knowledge.db"
+
+        # Migrate from old location (.emend/cache/knowledge.db) if needed.
+        if not self._db_path.exists():
+            old_path = _cache_db_dir(project_root) / "knowledge.db"
+            if old_path.exists():
+                import shutil
+                shutil.move(str(old_path), str(self._db_path))
+                # Also move WAL/SHM sidecar files if present.
+                for suffix in ("-wal", "-shm"):
+                    old_sidecar = old_path.with_name(old_path.name + suffix)
+                    if old_sidecar.exists():
+                        shutil.move(
+                            str(old_sidecar),
+                            str(self._db_path.with_name(self._db_path.name + suffix)),
+                        )
+
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -636,8 +652,34 @@ class KnowledgeBase:
     # -- Module mappings -----------------------------------------------------
 
     def add_module_mapping(self, m: ModuleMapping) -> int:
-        """Insert a module mapping, returning its row id."""
+        """Insert a module mapping, returning its row id.
+
+        If a soft-deleted row with the same ``module_prefix`` exists, it is
+        undeleted and updated with the new values instead of inserting a new
+        row (avoids UNIQUE constraint failure).
+        """
         now = _now_iso()
+
+        # Check for a soft-deleted row with the same prefix.
+        existing = self._conn.execute(
+            "SELECT id FROM module_mapping WHERE module_prefix = ? AND deleted = 1",
+            (m.module_prefix,),
+        ).fetchone()
+        if existing:
+            row_id = existing["id"]
+            self._conn.execute(
+                "UPDATE module_mapping SET "
+                "repo = ?, local_path = ?, branch = ?, subpath = ?, "
+                "provenance = ?, metadata_json = ?, deleted = 0, updated_at = ? "
+                "WHERE id = ?",
+                (
+                    m.repo, m.local_path, m.branch, m.subpath,
+                    m.provenance, json.dumps(m.metadata), now, row_id,
+                ),
+            )
+            self._conn.commit()
+            return row_id
+
         cur = self._conn.execute(
             "INSERT INTO module_mapping "
             "(module_prefix, repo, local_path, branch, subpath, "
@@ -663,6 +705,24 @@ class KnowledgeBase:
             "SELECT * FROM module_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
         ).fetchone()
         return self._row_to_module_mapping(row) if row else None
+
+    def get_module_mapping_by_prefix(self, prefix: str) -> ModuleMapping | None:
+        """Look up a module mapping by its exact prefix string."""
+        row = self._conn.execute(
+            "SELECT * FROM module_mapping WHERE module_prefix = ? AND deleted = 0",
+            (prefix,),
+        ).fetchone()
+        return self._row_to_module_mapping(row) if row else None
+
+    def delete_module_mapping_by_prefix(self, prefix: str) -> bool:
+        """Soft-delete a module mapping identified by its prefix string."""
+        cur = self._conn.execute(
+            "UPDATE module_mapping SET deleted = 1, updated_at = ? "
+            "WHERE module_prefix = ? AND deleted = 0",
+            (_now_iso(), prefix),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     def update_module_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
         """Update fields on an existing module mapping."""
