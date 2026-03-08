@@ -260,6 +260,11 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _to_snake_case(name: str) -> str:
+    """Convert CamelCase to snake_case robustly."""
+    return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)).lower()
+
+
 class KnowledgeBase:
     """Interface to the knowledge DB.
 
@@ -831,7 +836,7 @@ class KnowledgeBase:
             
             # Try original name and snake_case variant for the file
             names_to_try = [parts[-1]]
-            snake = re.sub(r'(?<!^)(?=[A-Z])', '_', parts[-1]).lower()
+            snake = _to_snake_case(parts[-1])
             if snake != parts[-1]:
                 names_to_try.append(snake)
 
@@ -842,10 +847,10 @@ class KnowledgeBase:
                     if candidate_file.is_file():
                         return str(candidate_file)
 
-            # Fall back to the directory for the dotted prefix.
-            return str(candidate_dir)
+            # Fall back to the directory for the dotted prefix if it exists.
+            return str(candidate_dir) if candidate_dir.is_dir() else None
         else:
-            return str(base)
+            return str(base) if base.exists() else None
 
     def resolve_selector(self, selector: str) -> str | None:
         """Resolve a dotted selector using module mappings.
@@ -902,7 +907,7 @@ class KnowledgeBase:
                 for j, part in enumerate(rem_parts):
                     names = [part]
                     # Robust snake_case translation
-                    snake = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', part)).lower()
+                    snake = _to_snake_case(part)
                     if snake != part:
                         names.append(snake)
                     
@@ -962,16 +967,29 @@ class KnowledgeBase:
                     for alias in node.names:
                         if (alias.asname or alias.name) == symbol:
                             # Found it!
+                            target_dir = init_file.parent
+                            level = node.level or 0 # 1 for '.', 2 for '..', etc.
+                            if level > 1:
+                                for _ in range(level - 1):
+                                    target_dir = target_dir.parent
+                            
                             if not node.module:
+                                # Case: 'from . import Submodule'
+                                if level == 0: continue # Should not happen for ImportFrom
+                                
+                                names = [alias.name]
+                                snake = _to_snake_case(alias.name)
+                                if snake != alias.name: names.append(snake)
+                                
+                                for name in names:
+                                    if (target_dir / name).is_dir():
+                                        return self.resolve_selector(f"{target_dir / name}::{'.'.join(rem_parts)}")
+                                    if (target_dir / (name + ".py")).is_file():
+                                        return f"{target_dir / (name + ".py")}::{'.'.join(rem_parts)}"
                                 continue
                             
                             # Resolve module path relative to init_file
                             module_parts = node.module.split('.')
-                            level = node.level # 1 for '.', 2 for '..', etc.
-                            
-                            target_dir = init_file.parent
-                            for _ in range(level - 1):
-                                target_dir = target_dir.parent
                             
                             # Walk module_parts to find the actual file/dir
                             current = target_dir
@@ -979,7 +997,7 @@ class KnowledgeBase:
                                 if not part: continue
                                 # Try both original and snake_case
                                 names = [part]
-                                snake = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', part)).lower()
+                                snake = _to_snake_case(part)
                                 if snake != part: names.append(snake)
                                 
                                 found_next = False
