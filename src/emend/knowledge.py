@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -827,11 +828,21 @@ class KnowledgeBase:
             candidate_dir = base / "/".join(parts)
             if candidate_dir.is_dir():
                 return str(candidate_dir)
-            candidate_file = base / "/".join(parts[:-1]) / (parts[-1] + ".py")
-            if candidate_file.is_file():
-                return str(candidate_file)
+            
+            # Try original name and snake_case variant for the file
+            names_to_try = [parts[-1]]
+            snake = re.sub(r'(?<!^)(?=[A-Z])', '_', parts[-1]).lower()
+            if snake != parts[-1]:
+                names_to_try.append(snake)
+
+            parent_dir = base / "/".join(parts[:-1])
+            if parent_dir.is_dir():
+                for name in names_to_try:
+                    candidate_file = parent_dir / (name + ".py")
+                    if candidate_file.is_file():
+                        return str(candidate_file)
+
             # Fall back to the directory for the dotted prefix.
-            candidate_dir = base / "/".join(parts)
             return str(candidate_dir)
         else:
             return str(base)
@@ -864,19 +875,49 @@ class KnowledgeBase:
                 return None
 
             parts = sel.symbol_path
+            # Try every possible split point for the module prefix
             for i in range(len(parts), 0, -1):
-                module_name = ".".join(parts[:i])
-                mm = self.resolve_module(module_name)
+                module_candidate = ".".join(parts[:i])
+                # Find the mapping for the prefix of our candidate
+                mm = self.resolve_module(module_candidate)
                 if mm:
-                    resolved = self.resolve_module_to_path(module_name)
-                    if resolved:
-                        rel_parts = parts[i:]
-                        if os.path.isfile(resolved):
-                            return f"{resolved}::{'.'.join(rel_parts)}"
-                        elif os.path.isdir(resolved) and rel_parts:
-                            next_file = os.path.join(resolved, rel_parts[0] + ".py")
-                            if os.path.isfile(next_file):
-                                return f"{next_file}::{'.'.join(rel_parts[1:])}"
+                    # Resolve the mapped part to a path
+                    resolved_base = self.resolve_module_to_path(module_candidate)
+                    if resolved_base:
+                        # If the candidate was a file (possibly snake_case resolved),
+                        # the rest are symbols.
+                        if os.path.isfile(resolved_base):
+                            return f"{resolved_base}::{'.'.join(parts[i:])}"
+                        
+                        # If it was a directory, we can try to walk the remaining parts.
+                        if os.path.isdir(resolved_base):
+                            current_path = Path(resolved_base)
+                            rem_parts = parts[i:]
+                            for j, part in enumerate(rem_parts):
+                                names = [part]
+                                snake = re.sub(r'(?<!^)(?=[A-Z])', '_', part).lower()
+                                if snake != part:
+                                    names.append(snake)
+                                
+                                found = False
+                                # Try as directory first
+                                for name in names:
+                                    if (current_path / name).is_dir():
+                                        current_path = current_path / name
+                                        found = True
+                                        break
+                                if found:
+                                    continue
+                                
+                                # Try as file
+                                for name in names:
+                                    if (current_path / (name + ".py")).is_file():
+                                        # found the file! the rest are symbols
+                                        symbol_suffix = ".".join(rem_parts[j+1:])
+                                        return f"{current_path / (name + '.py')}::{symbol_suffix}"
+                                
+                                # Neither file nor dir found
+                                break
             
             return None
         except Exception:
