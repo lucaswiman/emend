@@ -20,10 +20,6 @@ from emend.knowledge import (
 @pytest.fixture
 def kb(tmp_path):
     """Create a KnowledgeBase rooted in a temp directory."""
-    # KnowledgeBase uses _cache_db_dir which expects .emend/cache under root.
-    # We create a minimal structure.
-    cache_dir = tmp_path / ".emend" / "cache"
-    cache_dir.mkdir(parents=True)
     kb = KnowledgeBase(str(tmp_path))
     yield kb
     kb.close()
@@ -461,10 +457,74 @@ class TestModuleMappings:
         assert row["deleted"] == 1
 
     def test_unique_prefix(self, kb):
-        """module_prefix has UNIQUE constraint."""
+        """module_prefix has UNIQUE constraint (for non-deleted rows)."""
         kb.add_module_mapping(ModuleMapping(module_prefix="dup", local_path="/a"))
         with pytest.raises(Exception):
             kb.add_module_mapping(ModuleMapping(module_prefix="dup", local_path="/b"))
+
+    def test_add_undeletes_soft_deleted(self, kb):
+        """Adding a mapping with a soft-deleted prefix undeletes it."""
+        mid = kb.add_module_mapping(ModuleMapping(module_prefix="revive", local_path="/old"))
+        kb.delete_module_mapping(mid)
+        assert kb.get_module_mapping(mid) is None
+
+        mid2 = kb.add_module_mapping(ModuleMapping(module_prefix="revive", local_path="/new"))
+        assert mid2 == mid  # same row reused
+        saved = kb.get_module_mapping(mid2)
+        assert saved is not None
+        assert saved.local_path == "/new"
+
+    def test_get_by_prefix(self, kb):
+        """get_module_mapping_by_prefix looks up by exact prefix."""
+        kb.add_module_mapping(ModuleMapping(module_prefix="byprefix", local_path="/bp"))
+        result = kb.get_module_mapping_by_prefix("byprefix")
+        assert result is not None
+        assert result.module_prefix == "byprefix"
+        assert kb.get_module_mapping_by_prefix("nonexistent") is None
+
+    def test_delete_by_prefix(self, kb):
+        """delete_module_mapping_by_prefix soft-deletes by prefix string."""
+        kb.add_module_mapping(ModuleMapping(module_prefix="delpfx", local_path="/dp"))
+        assert kb.delete_module_mapping_by_prefix("delpfx") is True
+        assert kb.get_module_mapping_by_prefix("delpfx") is None
+        assert kb.delete_module_mapping_by_prefix("delpfx") is False  # already deleted
+
+
+class TestKnowledgeDbLocation:
+    def test_db_in_emend_dir(self, tmp_path):
+        """knowledge.db should live in .emend/, not .emend/cache/."""
+        kb = KnowledgeBase(str(tmp_path))
+        try:
+            assert kb.db_path == tmp_path / ".emend" / "knowledge.db"
+            assert kb.db_path.exists()
+        finally:
+            kb.close()
+
+    def test_migration_from_cache(self, tmp_path):
+        """If knowledge.db exists in .emend/cache/, it gets migrated."""
+        import sqlite3
+
+        # Create an old-location DB with some data.
+        old_dir = tmp_path / ".emend" / "cache"
+        old_dir.mkdir(parents=True)
+        old_path = old_dir / "knowledge.db"
+        conn = sqlite3.connect(str(old_path))
+        conn.execute("CREATE TABLE test_marker (val TEXT)")
+        conn.execute("INSERT INTO test_marker VALUES ('migrated')")
+        conn.commit()
+        conn.close()
+
+        # Opening KnowledgeBase should migrate it.
+        kb = KnowledgeBase(str(tmp_path))
+        try:
+            new_path = tmp_path / ".emend" / "knowledge.db"
+            assert new_path.exists()
+            assert not old_path.exists()  # moved, not copied
+            # Verify migrated data survived.
+            row = kb._conn.execute("SELECT val FROM test_marker").fetchone()
+            assert row[0] == "migrated"
+        finally:
+            kb.close()
 
 
 # ---------------------------------------------------------------------------
