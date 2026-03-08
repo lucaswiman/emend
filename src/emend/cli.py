@@ -2721,6 +2721,10 @@ def map_resolve_file_cmd(
                 symbol_parts = parsed.symbol_path
             elif resolved_sel and os.path.isfile(resolved_sel):
                 file_path = resolved_sel
+            elif resolved_sel and os.path.isdir(resolved_sel):
+                init_py = os.path.join(resolved_sel, "__init__.py")
+                if os.path.isfile(init_py):
+                    file_path = init_py
 
         if not file_path or not os.path.isfile(file_path):
             print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)

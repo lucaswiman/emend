@@ -178,11 +178,11 @@ def test_map_resolve_file_plain_module_path(tmp_path, emend_cmd_list, run_emend_
 
     os.chdir(str(proj))
 
-    # Should fail cleanly (it's a directory, not a file) without crashing with a parser error.
-    result = run_emend_cmd(["map", "resolve-file", "pkg.db"], check=False)
-    assert result.returncode != 0
+    # Should resolve to the package's __init__.py rather than crashing with a parser error.
+    result = run_emend_cmd(["map", "resolve-file", "pkg.db"])
+    assert result.returncode == 0
+    assert "__init__.py" in result.stdout
     assert "Unexpected token" not in result.stderr
-    assert "Could not resolve" in result.stderr
 
 
 def test_map_resolve_directory(tmp_path, emend_cmd_list, run_emend_cmd):
