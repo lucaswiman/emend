@@ -78,3 +78,15 @@ class TestExtendedSelectorParsing:
         assert sel.line_start == 10
         assert sel.line_end == 20
         assert sel.pseudo_class is None
+
+    def test_dotted_selector(self):
+        sel = parse_extended_selector("path.to.file.SomeSymbol")
+        assert sel.file_path == ""
+        assert sel.symbol_path == ["path", "to", "file", "SomeSymbol"]
+
+    def test_dotted_selector_with_component(self):
+        sel = parse_extended_selector("path.to.file.SomeSymbol[params][0]")
+        assert sel.file_path == ""
+        assert sel.symbol_path == ["path", "to", "file", "SomeSymbol"]
+        assert sel.component == "params"
+        assert sel.accessor == 0

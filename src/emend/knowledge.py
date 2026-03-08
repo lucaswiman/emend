@@ -836,6 +836,52 @@ class KnowledgeBase:
         else:
             return str(base)
 
+    def resolve_selector(self, selector: str) -> str | None:
+        """Resolve a dotted selector using module mappings.
+
+        If the selector is already an explicit selector (contains ::) or
+        a file path, it is returned as-is.
+
+        If it's a dotted selector like 'a.b.C', it tries to find a module
+        mapping for 'a.b' or 'a', and returns an explicit selector like
+        'path/to/a/b.py::C'.
+
+        Returns the resolved selector string, or None if no mapping found
+        and it wasn't already an explicit selector.
+        """
+        from emend.component_selector import parse_extended_selector
+        import os
+
+        if "::" in selector:
+            return selector
+
+        try:
+            sel = parse_extended_selector(selector)
+            if sel.file_path:
+                return selector
+            
+            if not sel.symbol_path:
+                return None
+
+            parts = sel.symbol_path
+            for i in range(len(parts), 0, -1):
+                module_name = ".".join(parts[:i])
+                mm = self.resolve_module(module_name)
+                if mm:
+                    resolved = self.resolve_module_to_path(module_name)
+                    if resolved:
+                        rel_parts = parts[i:]
+                        if os.path.isfile(resolved):
+                            return f"{resolved}::{'.'.join(rel_parts)}"
+                        elif os.path.isdir(resolved) and rel_parts:
+                            next_file = os.path.join(resolved, rel_parts[0] + ".py")
+                            if os.path.isfile(next_file):
+                                return f"{next_file}::{'.'.join(rel_parts[1:])}"
+            
+            return None
+        except Exception:
+            return None
+
     # -- Helpers -------------------------------------------------------------
 
     @staticmethod

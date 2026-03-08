@@ -384,6 +384,10 @@ def search(
         Optional[str],
         typer.Option("--project", help="Project root for index-based queries")
     ] = None,
+    include_map: Annotated[
+        bool,
+        typer.Option("--include-map", help="Take symbol / module mappings into account for resolution")
+    ] = False,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -482,6 +486,23 @@ def search(
     is_pattern_mode = _shape.is_pattern_mode
     has_selector = _shape.has_selector
     is_line_selector = _shape.is_line_selector
+
+    if include_map:
+        from emend.knowledge import KnowledgeBase
+        kb = KnowledgeBase(project or ".")
+        try:
+            resolved_query = kb.resolve_selector(query)
+            if resolved_query and resolved_query != query:
+                # Re-detect shape with resolved query
+                query = resolved_query
+                _shape = detect_query_shape(query, path)
+                query = _shape.query
+                path = _shape.path
+                is_pattern_mode = _shape.is_pattern_mode
+                has_selector = _shape.has_selector
+                is_line_selector = _shape.is_line_selector
+        finally:
+            kb.close()
 
     # If query looks like a file path/glob/directory (no $ or ::) but --where
     # provides a pattern (has $), the user likely intended:
@@ -2316,7 +2337,7 @@ def kb_rm_cmd(
 # Mapping commands
 # ---------------------------------------------------------------------------
 
-map_app = typer.Typer(help="Cross-service identifier mappings.")
+map_app = typer.Typer(help="Identifier and module mappings.")
 app.add_typer(map_app, name="map")
 
 
@@ -2437,19 +2458,14 @@ def map_rm_cmd(
         kb.close()
 
 
-# ---------------------------------------------------------------------------
-# Module mapping commands (coarse: module prefix -> repo/directory)
-# ---------------------------------------------------------------------------
-
-modmap_app = typer.Typer(help="Module-to-repo mappings (e.g. 'payments' -> org/payments-service).")
-app.add_typer(modmap_app, name="modmap")
+# Module mapping commands
 
 
-@modmap_app.command("add")
-def modmap_add_cmd(
+@map_app.command("add-module")
+def map_add_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
-    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
     provenance: Annotated[str, typer.Option("--provenance")] = "manual",
@@ -2458,21 +2474,21 @@ def modmap_add_cmd(
     """Register a module prefix -> repo/directory mapping.
 
     Examples:
-        emend modmap add payments --repo org/payments-service
-        emend modmap add shared.utils --path /home/user/shared-utils
-        emend modmap add gateway --repo org/gateway --subpath src/gateway
+        emend map add-module payments --repo org/payments-service
+        emend map add-module shared.utils --path /home/user/shared-utils
+        emend map add-module gateway --repo org/gateway --subpath src/gateway
     """
     import json as _json
     from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
 
-    if not repo and not local_path:
+    if not repo and not path:
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
 
     kb = KnowledgeBase(".")
     try:
         m = ModuleMapping(
-            module_prefix=module_prefix, repo=repo, local_path=local_path,
+            module_prefix=module_prefix, repo=repo, local_path=path,
             branch=branch, subpath=subpath, provenance=provenance,
         )
         mid = kb.add_module_mapping(m)
@@ -2480,14 +2496,14 @@ def modmap_add_cmd(
         if json_output:
             print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
         else:
-            target = repo if repo else local_path
+            target = repo if repo else path
             print(f"Added module mapping #{mid}: {module_prefix} -> {target}")
     finally:
         kb.close()
 
 
-@modmap_app.command("list")
-def modmap_list_cmd(
+@map_app.command("list-modules")
+def map_list_modules_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """List all module mappings."""
@@ -2510,8 +2526,8 @@ def modmap_list_cmd(
         kb.close()
 
 
-@modmap_app.command("resolve")
-def modmap_resolve_cmd(
+@map_app.command("resolve-module")
+def map_resolve_module_cmd(
     module: Annotated[str, typer.Argument(help="Module to resolve (e.g. 'payments.models.Order').")],
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
@@ -2540,11 +2556,11 @@ def modmap_resolve_cmd(
         kb.close()
 
 
-@modmap_app.command("update")
-def modmap_update_cmd(
+@map_app.command("update-module")
+def map_update_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix to update.")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
-    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
     json_output: Annotated[bool, typer.Option("--json")] = False,
@@ -2552,9 +2568,9 @@ def modmap_update_cmd(
     """Update an existing module mapping.
 
     Examples:
-        emend modmap update payments --repo org/payments-v2
-        emend modmap update shared.utils --path /new/path
-        emend modmap update gateway --branch v2 --subpath src/gw
+        emend map update-module payments --repo org/payments-v2
+        emend map update-module shared.utils --path /new/path
+        emend map update-module gateway --branch v2 --subpath src/gw
     """
     import json as _json
     from emend.knowledge import KnowledgeBase, module_mapping_to_dict
@@ -2569,8 +2585,8 @@ def modmap_update_cmd(
         kwargs: dict[str, str] = {}
         if repo:
             kwargs["repo"] = repo
-        if local_path:
-            kwargs["local_path"] = local_path
+        if path:
+            kwargs["local_path"] = path
         if branch:
             kwargs["branch"] = branch
         if subpath:
@@ -2591,8 +2607,8 @@ def modmap_update_cmd(
         kb.close()
 
 
-@modmap_app.command("rm")
-def modmap_rm_cmd(
+@map_app.command("rm-module")
+def map_rm_module_cmd(
     identifier: Annotated[str, typer.Argument(help="Module prefix or numeric mapping ID to delete.")],
 ):
     """Delete a module mapping by prefix name or ID."""
@@ -2615,6 +2631,190 @@ def modmap_rm_cmd(
             raise typer.Exit(1)
     finally:
         kb.close()
+
+
+# Unified resolution commands
+
+
+@map_app.command("resolve")
+def map_resolve_cmd(
+    selector: Annotated[str, typer.Argument(help="Selector or module to resolve (e.g. 'payments.models.Order' or 'payments::Order').")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Unified resolution for modules and selectors.
+
+    If the input is a module prefix, it resolves to the mapped repo/directory.
+    If it's a dotted selector like 'a.b.C', it uses module mappings to find
+    where 'a.b' lives, then treats 'C' as a symbol.
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+
+    kb = KnowledgeBase(".")
+    try:
+        # First, try resolving as a pure module.
+        mm = kb.resolve_module(selector)
+        if mm and mm.module_prefix == selector:
+            # Exact module match
+            resolved = kb.resolve_module_to_path(selector)
+            if json_output:
+                d = module_mapping_to_dict(mm)
+                if resolved: d["resolved_path"] = resolved
+                print(_json.dumps(d, indent=2))
+            else:
+                print(f"Module '{selector}' -> {mm.repo or mm.local_path}")
+                if resolved: print(f"Local path: {resolved}")
+            return
+
+        # Use unified resolve_selector logic
+        resolved_sel = kb.resolve_selector(selector)
+        if resolved_sel:
+            if json_output:
+                from emend.component_selector import parse_extended_selector
+                sel = parse_extended_selector(resolved_sel)
+                print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
+            else:
+                print(resolved_sel)
+            return
+
+        print(f"Could not resolve '{selector}'.", file=sys.stderr)
+        raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
+@map_app.command("resolve-file")
+def map_resolve_file_cmd(
+    selector: Annotated[str, typer.Argument(help="Selector or module to resolve to a file/line (e.g. 'payments.models.Order').")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Resolve a selector to a file path and line number.
+
+    Useful for editor integration to find the exact location of a symbol
+    referenced via cross-project mappings.
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase
+    from emend.component_selector import parse_extended_selector
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
+    import os
+
+    kb = KnowledgeBase(".")
+    try:
+        # Resolve to a selector with an explicit file path first.
+        file_path = None
+        symbol_parts = []
+        
+        sel = parse_extended_selector(selector)
+        if sel.file_path:
+            file_path = sel.file_path
+            symbol_parts = sel.symbol_path
+        else:
+            parts = sel.symbol_path
+            for i in range(len(parts), 0, -1):
+                module_name = ".".join(parts[:i])
+                resolved = kb.resolve_module_to_path(module_name)
+                if resolved:
+                    rel_parts = parts[i:]
+                    if os.path.isfile(resolved):
+                        file_path = resolved
+                        symbol_parts = rel_parts
+                        break
+                    elif os.path.isdir(resolved) and rel_parts:
+                        next_file = os.path.join(resolved, rel_parts[0] + ".py")
+                        if os.path.isfile(next_file):
+                            file_path = next_file
+                            symbol_parts = rel_parts[1:]
+                            break
+        
+        if not file_path or not os.path.isfile(file_path):
+            print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # Now find the symbol in the file to get the line number.
+        if symbol_parts:
+            symbols = find_nested_definitions(file_path)
+            target = find_symbol_by_path(symbols, symbol_parts)
+            if target:
+                if json_output:
+                    print(_json.dumps({
+                        "file": file_path,
+                        "line": target.line_start,
+                        "kind": target.kind
+                    }, indent=2))
+                else:
+                    print(f"File: {file_path}")
+                    print(f"Line: {target.line_start}")
+                    print(f"Kind: {target.kind}")
+                return
+        
+        # If no symbol parts or symbol not found, just return the file.
+        if json_output:
+            print(_json.dumps({"file": file_path, "line": 1}, indent=2))
+        else:
+            print(f"File: {file_path}")
+            print("Line: 1")
+    finally:
+        kb.close()
+
+
+# Deprecated modmap app for backward compatibility
+modmap_app = typer.Typer(help="[Deprecated] use 'emend map' instead.")
+app.add_typer(modmap_app, name="modmap", hidden=True)
+
+@modmap_app.command("add")
+def modmap_add_alias(
+    module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
+    repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
+    path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
+    subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
+    provenance: Annotated[str, typer.Option("--provenance")] = "manual",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Alias for 'emend map add-module'."""
+    map_add_module_cmd(
+        module_prefix=module_prefix, repo=repo, path=path,
+        branch=branch, subpath=subpath, provenance=provenance,
+        json_output=json_output
+    )
+
+@modmap_app.command("list")
+def modmap_list_alias(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Alias for 'emend map list-modules'."""
+    map_list_modules_cmd(json_output=json_output)
+
+@modmap_app.command("resolve")
+def modmap_resolve_alias(
+    module: Annotated[str, typer.Argument(help="Module to resolve.")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Alias for 'emend map resolve-module'."""
+    map_resolve_module_cmd(module=module, json_output=json_output)
+
+@modmap_app.command("update")
+def modmap_update_alias(
+    module_prefix: Annotated[str, typer.Argument(help="Module prefix to update.")],
+    repo: Annotated[str, typer.Option("--repo")] = "",
+    path: Annotated[str, typer.Option("--path")] = "",
+    branch: Annotated[str, typer.Option("--branch")] = "",
+    subpath: Annotated[str, typer.Option("--subpath")] = "",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Alias for 'emend map update-module'."""
+    map_update_module_cmd(
+        module_prefix=module_prefix, repo=repo, path=path,
+        branch=branch, subpath=subpath, json_output=json_output
+    )
+
+@modmap_app.command("rm")
+def modmap_rm_alias(
+    identifier: Annotated[str, typer.Argument(help="Module prefix or ID.")],
+):
+    """Alias for 'emend map rm-module'."""
+    map_rm_module_cmd(identifier=identifier)
 
 
 @app.command("mcp")
