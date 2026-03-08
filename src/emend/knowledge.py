@@ -861,7 +861,6 @@ class KnowledgeBase:
         and it wasn't already an explicit selector.
         """
         from emend.component_selector import parse_extended_selector
-        import os
 
         if "::" in selector:
             return selector
@@ -875,53 +874,144 @@ class KnowledgeBase:
                 return None
 
             parts = sel.symbol_path
-            # Try every possible split point for the module prefix
-            for i in range(len(parts), 0, -1):
-                module_candidate = ".".join(parts[:i])
-                # Find the mapping for the prefix of our candidate
-                mm = self.resolve_module(module_candidate)
-                if mm:
-                    # Resolve the mapped part to a path
-                    resolved_base = self.resolve_module_to_path(module_candidate)
-                    if resolved_base:
-                        # If the candidate was a file (possibly snake_case resolved),
-                        # the rest are symbols.
-                        if os.path.isfile(resolved_base):
-                            return f"{resolved_base}::{'.'.join(parts[i:])}"
-                        
-                        # If it was a directory, we can try to walk the remaining parts.
-                        if os.path.isdir(resolved_base):
-                            current_path = Path(resolved_base)
-                            rem_parts = parts[i:]
-                            for j, part in enumerate(rem_parts):
-                                names = [part]
-                                snake = re.sub(r'(?<!^)(?=[A-Z])', '_', part).lower()
-                                if snake != part:
-                                    names.append(snake)
-                                
-                                found = False
-                                # Try as directory first
-                                for name in names:
-                                    if (current_path / name).is_dir():
-                                        current_path = current_path / name
-                                        found = True
-                                        break
-                                if found:
-                                    continue
-                                
-                                # Try as file
-                                for name in names:
-                                    if (current_path / (name + ".py")).is_file():
-                                        # found the file! the rest are symbols
-                                        symbol_suffix = ".".join(rem_parts[j+1:])
-                                        return f"{current_path / (name + '.py')}::{symbol_suffix}"
-                                
-                                # Neither file nor dir found
-                                break
+            # Find the best (longest-prefix) module mapping for the whole path
+            mm = self.resolve_module(selector)
+            if not mm:
+                return None
+
+            # Resolve the mapped part to a path
+            resolved_base = self.resolve_module_to_path(mm.module_prefix)
+            if not resolved_base:
+                return None
+
+            # Determine remaining parts after the mapped prefix
+            prefix_parts = mm.module_prefix.split('.')
+            rem_parts = parts[len(prefix_parts):]
+
+            # If the mapped part is a file, the rest are symbols
+            if os.path.isfile(resolved_base):
+                return f"{resolved_base}::{'.'.join(rem_parts)}"
+            
+            # If it was a directory, walk the remaining parts recursively.
+            if os.path.isdir(resolved_base):
+                current_path = Path(resolved_base)
+                
+                if not rem_parts:
+                    return str(current_path)
+
+                for j, part in enumerate(rem_parts):
+                    names = [part]
+                    # Robust snake_case translation
+                    snake = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', part)).lower()
+                    if snake != part:
+                        names.append(snake)
+                    
+                    found = False
+                    # 1. Try as directory first
+                    for name in names:
+                        if (current_path / name).is_dir():
+                            current_path = current_path / name
+                            found = True
+                            break
+                    if found:
+                        if j == len(rem_parts) - 1:
+                            # Consumed all parts as directories
+                            return str(current_path)
+                        continue
+                    
+                    # 2. Try as file
+                    for name in names:
+                        candidate_file = current_path / (name + ".py")
+                        if candidate_file.is_file():
+                            # Found the file! 
+                            symbol_parts = rem_parts[j+1:]
+                            # Heuristic: if we matched a snake_case name and there are no remaining parts,
+                            # the original part might be a symbol in this file.
+                            if name != part and not symbol_parts:
+                                symbol_parts = [part]
+                            
+                            symbol_suffix = ".".join(symbol_parts)
+                            return f"{candidate_file}::{symbol_suffix}"
+                    
+                    # 3. Neither file nor dir found - check for re-export in __init__.py
+                    init_file = current_path / "__init__.py"
+                    if init_file.is_file():
+                        resolved = self._follow_reexport(init_file, part, rem_parts[j+1:])
+                        if resolved:
+                            return resolved
+                        # Fallback: just point to __init__.py with symbols
+                        return f"{init_file}::{'.'.join(rem_parts[j:])}"
+                    
+                    # Completely stuck
+                    break
             
             return None
         except Exception:
             return None
+
+    def _follow_reexport(self, init_file: Path, symbol: str, rem_parts: list[str]) -> str | None:
+        """Scan __init__.py for a re-export of symbol and return a resolved selector."""
+        try:
+            import ast
+            with open(init_file) as f:
+                tree = ast.parse(f.read())
+            
+            for node in tree.body:
+                if isinstance(node, ast.ImportFrom):
+                    # Check for 'from .module import Symbol [as Alias]'
+                    for alias in node.names:
+                        if (alias.asname or alias.name) == symbol:
+                            # Found it!
+                            if not node.module:
+                                continue
+                            
+                            # Resolve module path relative to init_file
+                            module_parts = node.module.split('.')
+                            level = node.level # 1 for '.', 2 for '..', etc.
+                            
+                            target_dir = init_file.parent
+                            for _ in range(level - 1):
+                                target_dir = target_dir.parent
+                            
+                            # Walk module_parts to find the actual file/dir
+                            current = target_dir
+                            for part in module_parts:
+                                if not part: continue
+                                # Try both original and snake_case
+                                names = [part]
+                                snake = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', part)).lower()
+                                if snake != part: names.append(snake)
+                                
+                                found_next = False
+                                for name in names:
+                                    if (current / name).is_dir():
+                                        current = current / name
+                                        found_next = True
+                                        break
+                                    elif (current / (name + ".py")).is_file():
+                                        current = current / (name + ".py")
+                                        found_next = True
+                                        break
+                                if not found_next:
+                                    break
+                            
+                            actual_symbol = alias.name
+                            final_symbols = [actual_symbol] + rem_parts
+                            symbol_suffix = ".".join(final_symbols)
+
+                            # If we found a file, return it
+                            if current.is_file():
+                                return f"{current}::{symbol_suffix}"
+                            
+                            # If it's a directory, return __init__.py in that dir if it exists
+                            if current.is_dir() and (current / "__init__.py").is_file():
+                                return f"{current / '__init__.py'}::{symbol_suffix}"
+                            
+                            # Else just return the path we reached
+                            return f"{current}::{symbol_suffix}"
+        except Exception:
+            pass
+        return None
 
     # -- Helpers -------------------------------------------------------------
 
