@@ -128,6 +128,37 @@ def test_map_resolve_init_reexport(tmp_path, emend_cmd_list, run_emend_cmd):
     result = run_emend_cmd(["map", "resolve", "common.models.MySymbol"])
     assert "the_source.py::MySymbol" in result.stdout
 
+def test_map_resolve_file_deep_reexport(tmp_path, emend_cmd_list, run_emend_cmd):
+    """map resolve-file should follow re-exports in __init__.py at any depth."""
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+
+    external_root = tmp_path / "external_root"
+    (external_root / "sub1" / "sub2").mkdir(parents=True)
+    # Widget is defined in sub1/sub2/widget_impl.py but re-exported via __init__.py
+    (external_root / "sub1" / "sub2" / "widget_impl.py").write_text(
+        "class Widget:\n    pass\n"
+    )
+    (external_root / "sub1" / "sub2" / "__init__.py").write_text(
+        "from .widget_impl import Widget\n"
+    )
+
+    kb = KnowledgeBase(str(proj))
+    kb.add_module_mapping(ModuleMapping(
+        module_prefix="pkg",
+        local_path=str(external_root)
+    ))
+    kb.close()
+
+    os.chdir(str(proj))
+
+    result = run_emend_cmd(["map", "resolve-file", "pkg.sub1.sub2.Widget"])
+    assert result.returncode == 0, result.stderr
+    assert "widget_impl.py" in result.stdout
+    assert "Widget" in result.stdout or "Line:" in result.stdout
+
+
 def test_map_resolve_directory(tmp_path, emend_cmd_list, run_emend_cmd):
     proj = tmp_path / "app"
     proj.mkdir()

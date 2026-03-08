@@ -2704,29 +2704,22 @@ def map_resolve_file_cmd(
         # Resolve to a selector with an explicit file path first.
         file_path = None
         symbol_parts = []
-        
-        sel = parse_extended_selector(selector)
-        if sel.file_path:
+
+        try:
+            sel = parse_extended_selector(selector)
+        except Exception:
+            sel = None
+        if sel and sel.file_path:
             file_path = sel.file_path
             symbol_parts = sel.symbol_path
         else:
-            parts = sel.symbol_path
-            for i in range(len(parts), 0, -1):
-                module_name = ".".join(parts[:i])
-                resolved = kb.resolve_module_to_path(module_name)
-                if resolved:
-                    rel_parts = parts[i:]
-                    if os.path.isfile(resolved):
-                        file_path = resolved
-                        symbol_parts = rel_parts
-                        break
-                    elif os.path.isdir(resolved) and rel_parts:
-                        next_file = os.path.join(resolved, rel_parts[0] + ".py")
-                        if os.path.isfile(next_file):
-                            file_path = next_file
-                            symbol_parts = rel_parts[1:]
-                            break
-        
+            # Use resolve_selector which handles deep paths and __init__.py re-exports.
+            resolved_sel = kb.resolve_selector(selector)
+            if resolved_sel:
+                parsed = parse_extended_selector(resolved_sel)
+                file_path = parsed.file_path
+                symbol_parts = parsed.symbol_path
+
         if not file_path or not os.path.isfile(file_path):
             print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
             raise typer.Exit(1)
