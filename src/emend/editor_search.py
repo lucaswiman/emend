@@ -1094,36 +1094,6 @@ def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_lookup"}
 
 
-def _extract_import_binding(file_path: str, identifier: str) -> tuple[str, str] | None:
-    """Find if identifier is imported in file_path.
-    
-    Returns (module_path, imported_name) or None.
-    Example: 'from x.y import Z as A' -> ('x.y', 'Z')
-    """
-    import ast
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-    except (OSError, SyntaxError):
-        return None
-
-    # Use walk() to catch imports inside TYPE_CHECKING blocks or functions
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if (alias.asname or alias.name) == identifier:
-                    return alias.name, alias.name
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if (alias.asname or alias.name) == identifier:
-                    # module might be None for 'from . import X'
-                    module = node.module or ""
-                    # Handle relative imports if needed? KnowledgeBase.resolve_selector 
-                    # handles dotted paths, but maybe not relative ones directly.
-                    # For now, we return the dotted module path.
-                    return module, alias.name
-    return None
-
 
 def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) -> dict | None:
     """Resolve a file::Symbol selector to a goto result dict with line number.
@@ -1138,7 +1108,7 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
     if not Path(file_path).is_file():
         return None
 
-    from emend.ast_utils import find_nested_definitions, find_symbol_by_path, _resolve_through_reexports
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
     
     # We only handle top-level symbol re-exports for now (e.g. mod.Symbol).
     # Nested symbols like mod.Class.method are assumed to be defined in mod.py.
@@ -1176,9 +1146,10 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
         except Exception:
             return None
 
-    result = _resolve_through_reexports(file_path, base_symbol, resolve_module_cb)
-    if result:
-        resolved_file, line = result
+    res = resolve_through_reexports(file_path, base_symbol, resolve_module_cb)
+
+    if res:
+        resolved_file, line = res
         # If it was a nested path, we need to find the actual line for the nested part
         if len(parts) > 1:
             try:
@@ -1252,10 +1223,20 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
 
     # --- 3. Import-aware module mapping resolution (Tier 3) ---
     if not items and params.get("file"):
+        from emend.ast_utils import get_imports
         file_path = params["file"]
-        import_info = _extract_import_binding(file_path, identifier)
-        if import_info:
-            module_path, imported_name = import_info
+        imports = get_imports(file_path)
+        
+        # Filter imports for the target identifier
+        found_import = None
+        for imp in imports:
+            if (imp["asname"] or imp["name"]) == identifier:
+                found_import = imp
+                break
+        
+        if found_import:
+            module_path = found_import["module"] or ""
+            imported_name = found_import["name"]
             # 'from common.domain_models import X' -> 'common.domain_models.X'
             fq_path = f"{module_path}.{imported_name}" if module_path else imported_name
             resolved_selector = kb.resolve_selector(fq_path)

@@ -89,10 +89,11 @@ function! emend#ui#interactive() abort
   endif
 endfunction
 
-function! emend#ui#search(query) abort
+function! emend#ui#search(query, ...) abort
   let s:query = a:query
   let s:is_interactive = 0
-  call emend#search(a:query)
+  let l:params = a:0 > 0 ? a:1 : {}
+  call emend#search(a:query, l:params)
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -581,7 +582,7 @@ function! emend#ui#goto_last() abort
   call emend#ui#move(len(s:results))
 endfunction
 
-function! s:open_selected() abort
+function! emend#ui#accept() abort
   if empty(s:results) || s:selected >= len(s:results)
     return
   endif

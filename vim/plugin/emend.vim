@@ -45,6 +45,9 @@ command! -nargs=? Emend call emend#ui#prompt(<q-args>)
 " Search with explicit query (no prompt).
 command! -nargs=1 EmendSearch call emend#ui#search(<q-args>)
 
+" Search with cross-project module mappings included.
+command! -nargs=1 EmendSearchMap call emend#ui#search(<q-args>, {'include_map': v:true})
+
 " Show symbols in the current file.
 command! -nargs=0 EmendOutline call emend#file_symbols(expand('%:p'))
 
@@ -90,7 +93,4 @@ if get(g:, 'emend_default_mappings', 0)
   nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
   nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
   nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
-
-  " Bug 1: \d unmapped for Python files deletes lines.
-  autocmd FileType python nnoremap <buffer> <silent> <Leader>d <Cmd>EmendGoto<CR>
 endif

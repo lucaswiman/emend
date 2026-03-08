@@ -1,13 +1,19 @@
 Selector Syntax
 ===============
 
-Selectors identify Python symbols and their components. The general form is
-``file_scope::symbol.path[component][accessor]``.
+Selectors identify Python symbols and their components. There are two general
+forms:
 
-The ``::`` separator splits the file scope (left) from the query (right). When
-the right side is a valid selector, it identifies a symbol for lookup. When it
-isn't valid selector syntax (e.g. contains parentheses, operators, or multiple
-bare words), it's treated as a code **pattern** instead — see :doc:`patterns`.
+1. **Explicit selector:** ``file_path::symbol.path[component]``
+2. **Dotted selector:** ``dotted.module.path.Symbol[component]`` (resolved via module mappings)
+
+The ``::`` separator in an explicit selector splits the file scope (left)
+from the query (right).
+
+.. note::
+
+   **Spaces in paths:** Selectors with spaces in file paths must use the
+   explicit ``file.py::Symbol`` form. Dotted selectors do not support spaces.
 
 Symbol selectors
 ----------------
@@ -20,7 +26,7 @@ Address a symbol by its dotted path within a file:
    file.py::Class.method            # Method in a class
    file.py::Class.method.nested     # Nested function inside a method
    ::func                           # All files (shorthand for **::func)
-   func                             # Same (bare name fallback)
+   func                             # Same (bare name fallback or dotted lookup)
 
 Extended selectors (components)
 -------------------------------
@@ -126,7 +132,10 @@ Selector grammar (Lark)
 
    start: selector
 
-   selector: file_path DOUBLE_COLON symbol_path? component*
+   selector: explicit_selector | dotted_selector
+
+   explicit_selector: file_path DOUBLE_COLON symbol_path? component*
+   dotted_selector: symbol_path component*
 
    file_path: PATH
    symbol_path: symbol_segment ("." symbol_segment)*
@@ -137,7 +146,7 @@ Selector grammar (Lark)
 
    COMPONENT_NAME: "params" | "returns" | "decorators" | "bases" | "body" | "imports"
    DOUBLE_COLON: "::"
-   PATH: /[^:]+/
+   PATH: /[^:\[\s]+/
    WILDCARD: "*" | /[a-zA-Z_*][a-zA-Z0-9_*]*/
    IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/
    INT: /-?\d+/

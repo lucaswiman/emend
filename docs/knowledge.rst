@@ -146,6 +146,24 @@ The path (or repo + subpath) should point to the directory or file that
 **corresponds to the module prefix**. The prefix itself is stripped from the
 module name during resolution, and the remainder is appended to the mapped path.
 
+.. tip::
+
+   **Rule of Thumb:** The ``--repo`` + ``--subpath`` (or ``--path``) should
+   point to the **directory that IS the package** — i.e. the directory whose
+   name matches the module prefix's last component, or whose contents are
+   the package's ``__init__.py`` and submodules.
+
+   - ``payments`` package lives at ``repo-root/payments/`` → ``--repo org/repo --subpath payments``
+   - ``payments`` package lives at ``repo-root/src/payments/`` → ``--repo org/repo --subpath src/payments``
+   - ``payments`` package IS the repo root → ``--repo org/repo`` (no subpath)
+
+.. warning::
+
+   **Anti-Pattern:** Do NOT point to the directory *containing* the package.
+   If ``payments/`` is at ``src/payments/``, mapping to ``--subpath src`` is
+   wrong because resolution would look for ``src/payments/models.py`` by
+   appending ``payments.models`` to ``src/``, duplicating the ``payments`` part.
+
 **Example 1: Package in a subdirectory**
   If your repo ``shared-libs`` has a package ``utils`` at ``src/utils/``, map it as::
 
@@ -156,11 +174,9 @@ module name during resolution, and the remainder is appended to the mapped path.
 **Example 2: Top-level package**
   If your repo ``payments-service`` has the ``payments`` package in the root, map it as::
 
-      emend map add-module payments --repo org/payments-service/payments
+      emend map add-module payments --repo org/payments-service
 
-  Or use the repo root and the prefix will be handled correctly if it matches the directory name::
-
-      emend map add-module payments --repo org/payments-service --subpath payments
+  Resolution: ``payments.models.Order`` → ``.../payments-service/payments/models.py::Order``
 
 
 Unified Resolution

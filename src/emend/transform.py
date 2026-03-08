@@ -43,48 +43,37 @@ def _resolve_cache_root(project_root: str) -> Path:
     """Return the main repo root for cache storage.
 
     In a git worktree, the cache lives in the main repo so all
-    worktrees share a single parse.db. Searches upwards for a project root
-    marker (.git or .emend). For non-git projects without .emend, returns
-    *project_root* unchanged.
+    worktrees share a single parse.db.
     """
     root = Path(project_root).resolve()
-    current = root
-    while True:
-        git_path = current / ".git"
-        if git_path.exists():
-            if git_path.is_file():
-                # Worktree: .git is a file like "gitdir: /main/.git/worktrees/foo"
-                try:
-                    text = git_path.read_text().strip()
-                except OSError:
-                    return current
+    
+    # 1. Check for git (regular or worktree)
+    git_path = root / ".git"
+    if git_path.exists():
+        if git_path.is_file():
+            # Worktree: .git is a file like "gitdir: /main/.git/worktrees/foo"
+            try:
+                text = git_path.read_text().strip()
                 if text.startswith("gitdir:"):
                     gitdir = Path(text.split(":", 1)[1].strip())
                     if not gitdir.is_absolute():
-                        gitdir = (current / gitdir).resolve()
-                    # gitdir is e.g. /main/repo/.git/worktrees/my-wt
-                    # The commondir file points to the main .git
+                        gitdir = (root / gitdir).resolve()
                     commondir_file = gitdir / "commondir"
                     if commondir_file.is_file():
-                        try:
-                            commondir = commondir_file.read_text().strip()
-                            main_git_dir = (gitdir / commondir).resolve()
-                            # main_git_dir is /main/repo/.git → parent is /main/repo
-                            return main_git_dir.parent
-                        except OSError:
-                            pass
-            else:
-                # Regular git repo
-                return current
+                        commondir = commondir_file.read_text().strip()
+                        main_git_dir = (gitdir / commondir).resolve()
+                        return main_git_dir.parent
+            except OSError:
+                pass
+        else:
+            # Regular git repo
+            return root
 
-        if (current / ".emend").is_dir():
-            return current
+    # 2. Check for .emend marker
+    if (root / ".emend").is_dir():
+        return root
 
-        if current == current.parent:
-            break
-        current = current.parent
-
-    # Not found — use project_root as-is
+    # 3. Fall back to project_root unchanged
     return root
 
 

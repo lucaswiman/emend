@@ -64,7 +64,7 @@ def test_cli_resolve_reexport(tmp_path):
     # Use absolute path for selector to bypass KB module resolution
     selector = f"{coding_output_py}::DiagnosisCodeEntry"
     
-    result = runner.invoke(app, ["map", "resolve-file", selector, "--json"])
+    result = runner.invoke(app, ["map", "resolve", selector, "--location", "--json"])
     assert result.exit_code == 0
     
     import json

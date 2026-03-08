@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -596,6 +597,35 @@ class TestRepoCheckouts:
         root = _repo_checkouts_root(cache_dir="/custom/cache")
         assert root == _Path("/custom/cache")
 
+    def test_maybe_fetch_branch_ttl(self, tmp_path):
+        """_maybe_fetch_branch respect TTL and skips if recent."""
+        from emend.knowledge import _maybe_fetch_branch
+        import time
+        from unittest.mock import MagicMock, patch
+
+        bare_dir = tmp_path / "bare"
+        bare_dir.mkdir()
+        worktree_dir = tmp_path / "worktree"
+        worktree_dir.mkdir()
+        
+        last_fetched = worktree_dir / ".last_fetched"
+        # 1 hour ago
+        last_fetched.touch()
+        mtime = time.time() - 3600
+        os.utime(last_fetched, (mtime, mtime))
+
+        with patch("subprocess.run") as mock_run:
+            _maybe_fetch_branch(bare_dir, worktree_dir, "main", ttl_hours=24)
+            # Should NOT have run any git commands
+            assert mock_run.call_count == 0
+
+            # Older than TTL
+            mtime = time.time() - (25 * 3600)
+            os.utime(last_fetched, (mtime, mtime))
+            _maybe_fetch_branch(bare_dir, worktree_dir, "main", ttl_hours=24)
+            # Should HAVE run git commands
+            assert mock_run.call_count >= 1
+
     def test_ensure_repo_cloned_worktree_layout(self, tmp_path):
         """Test the full clone+worktree flow using a local git repo as source."""
         from emend.knowledge import _ensure_repo_cloned, _repo_id
@@ -905,21 +935,6 @@ class TestEditorServerRPC:
         result = _mapping_goto(engine, {"identifier": "User"})
         assert result["source"] == "kb"
         assert len(result["items"]) == 0
-
-    def test_extract_import_binding(self, tmp_path):
-        from emend.editor_search import _extract_import_binding
-        f = tmp_path / "test.py"
-        f.write_text("\n".join([
-            "import os",
-            "from path import Path as P",
-            "if TYPE_CHECKING:",
-            "    from models import User",
-        ]))
-        
-        assert _extract_import_binding(str(f), "os") == ("os", "os")
-        assert _extract_import_binding(str(f), "P") == ("path", "Path")
-        assert _extract_import_binding(str(f), "User") == ("models", "User")
-        assert _extract_import_binding(str(f), "Missing") is None
 
     def test_resolve_selector_to_goto_item(self, tmp_path):
         from emend.editor_search import _resolve_selector_to_goto_item

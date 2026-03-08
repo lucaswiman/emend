@@ -46,7 +46,7 @@ def get_imports(filepath: str) -> list[dict]:
     return imports
 
 
-def _resolve_through_reexports(
+def resolve_through_reexports(
     file_path: str,
     symbol_name: str,
     resolve_module_cb: Callable[[str, int, str], Optional[str]],
@@ -96,17 +96,26 @@ def _resolve_through_reexports(
             target_file = resolve_module_cb(imp["module"], imp["level"], file_path)
             
             if target_file:
-                # If target_file is a directory, we should check its __init__.py
+                # If target_file is a directory, check if the target_symbol matches a file or submodule.
                 if Path(target_file).is_dir():
-                    init_py = Path(target_file) / "__init__.py"
-                    if init_py.is_file():
-                        target_file = str(init_py)
+                    candidate = Path(target_file) / (target_symbol + ".py")
+                    if candidate.is_file():
+                        target_file = str(candidate)
+                    else:
+                        init_py = Path(target_file) / "__init__.py"
+                        if init_py.is_file():
+                            target_file = str(init_py)
                 
-                result = _resolve_through_reexports(
+                result = resolve_through_reexports(
                     target_file, target_symbol, resolve_module_cb, visited, depth + 1
                 )
                 if result:
                     return result
+                
+                # If it didn't find a nested symbol but target_file exists, 
+                # and it's a module we were looking for, return it.
+                if Path(target_file).is_file():
+                    return target_file, 1
 
     # 2. Check star imports: from module import *
     for imp in imports:
@@ -119,7 +128,7 @@ def _resolve_through_reexports(
                         target_file = str(init_py)
 
                 # Recursively search in the target file.
-                result = _resolve_through_reexports(
+                result = resolve_through_reexports(
                     target_file, symbol_name, resolve_module_cb, visited, depth + 1
                 )
                 if result:
