@@ -55,7 +55,7 @@ command! -nargs=? EmendRefs call emend#references(<q-args> ==# '' ? expand('<cwo
 command! -nargs=? EmendGoto call emend#goto(<q-args> ==# '' ? expand('<cword>') : <q-args>)
 
 " Search the knowledge base.
-command! -nargs=1 EmendKB call emend#kb_search(<q-args>)
+command! -nargs=? EmendKB call emend#kb_search(<q-args> ==# '' ? expand('<cword>') : <q-args>)
 
 " Resolve a module to its external repo / local path.
 command! -nargs=1 EmendResolve call emend#module_resolve(<q-args>)

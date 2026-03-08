@@ -581,7 +581,17 @@ function! emend#ui#goto_last() abort
   call emend#ui#move(len(s:results))
 endfunction
 
-function! emend#ui#accept() abort
+function! s:jump_to(file, line) abort
+  if empty(a:file) || !filereadable(a:file)
+    return
+  endif
+  normal! m'
+  execute 'edit ' . fnameescape(a:file)
+  execute a:line
+  normal! zz
+endfunction
+
+function! s:open_selected() abort
   if empty(s:results) || s:selected >= len(s:results)
     return
   endif
@@ -592,9 +602,7 @@ function! emend#ui#accept() abort
   call s:close_ui()
 
   if l:file !=# '' && filereadable(l:file)
-    execute 'edit ' . fnameescape(l:file)
-    execute l:line
-    normal! zz
+    call s:jump_to(l:file, l:line)
   elseif l:file !=# ''
     echohl WarningMsg
     echom 'emend: file not readable: ' . l:file
