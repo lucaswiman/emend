@@ -119,11 +119,12 @@ function! emend#stop() abort
     return
   endif
   call emend#send('shutdown', {}, {_ -> 0})
-  call timer_start(500, {_ -> s:force_stop()})
+  let l:current_job = s:job
+  call timer_start(500, {t -> s:force_stop(l:current_job)})
 endfunction
 
-function! s:force_stop() abort
-  if s:job is v:null
+function! s:force_stop(job) abort
+  if a:job isnot s:job || s:job is v:null
     return
   endif
   if has('nvim')
@@ -332,7 +333,12 @@ function! s:show_status(result) abort
   if s:show_rpc_error('emend: ', a:result)
     return
   endif
-  let l:info = a:result.items[0]
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: status unavailable'
+    return
+  endif
+  let l:info = l:items[0]
   echo 'emend index: '
         \ . l:info.symbol_count . ' symbols, '
         \ . l:info.reference_count . ' refs, '
@@ -359,7 +365,17 @@ endfunction
 
 function! emend#goto(identifier, ...) abort
   let l:Cb = a:0 > 0 ? a:1 : function('s:on_goto_result')
-  call emend#send('mapping_goto', {'identifier': a:identifier}, l:Cb)
+  call emend#send('mapping_goto', {'identifier': a:identifier, 'file': expand('%:p')}, l:Cb)
+endfunction
+
+function! s:jump_to(file, line) abort
+  if empty(a:file) || !filereadable(a:file)
+    return
+  endif
+  normal! m'
+  execute 'edit ' . fnameescape(a:file)
+  execute a:line
+  normal! zz
 endfunction
 
 function! s:on_goto_result(result) abort
@@ -378,9 +394,7 @@ function! s:on_goto_result(result) abort
     let l:item = l:items[0]
     " Local result: has file_path + line from the project index.
     if has_key(l:item, 'file_path') && has_key(l:item, 'line')
-      execute 'edit ' . fnameescape(l:item.file_path)
-      execute l:item.line
-      normal! zz
+      call s:jump_to(l:item.file_path, l:item.line)
       return
     endif
     " KB result: has resolved_path from cross-repo mapping.
@@ -388,10 +402,8 @@ function! s:on_goto_result(result) abort
       let l:path = l:item.resolved_path
       if isdirectory(l:path)
         echo 'emend: mapped to directory: ' . l:path
-      elseif filereadable(l:path)
-        execute 'edit ' . fnameescape(l:path)
       else
-        echo 'emend: resolved to ' . l:path . ' (not yet available — clone may be in progress)'
+        call s:jump_to(l:path, get(l:item, 'line', 1))
       endif
       return
     endif
@@ -454,10 +466,8 @@ function! s:on_module_resolve(result) abort
   if l:path !=# ''
     if isdirectory(l:path)
       echo 'emend: module maps to directory: ' . l:path
-    elseif filereadable(l:path)
-      execute 'edit ' . fnameescape(l:path)
     else
-      echo 'emend: resolved to ' . l:path
+      call s:jump_to(l:path, 1)
     endif
   else
     let l:repo = get(l:item, 'repo', '')

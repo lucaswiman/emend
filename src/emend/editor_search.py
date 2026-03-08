@@ -326,6 +326,14 @@ class EditorSearchEngine:
             self._conn.close()
             self._conn = None
             self._fts_ready = False
+        
+        # Close KB if it was lazy-initialized
+        if hasattr(self, "_kb"):
+            try:
+                self._kb.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            delattr(self, "_kb")
 
     # -- FTS ----------------------------------------------------------------
 
@@ -1086,6 +1094,71 @@ def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_lookup"}
 
 
+def _extract_import_binding(file_path: str, identifier: str) -> tuple[str, str] | None:
+    """Find if identifier is imported in file_path.
+    
+    Returns (module_path, imported_name) or None.
+    Example: 'from x.y import Z as A' -> ('x.y', 'Z')
+    """
+    import ast
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError):
+        return None
+
+    # Use walk() to catch imports inside TYPE_CHECKING blocks or functions
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.asname or alias.name) == identifier:
+                    return alias.name, alias.name
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if (alias.asname or alias.name) == identifier:
+                    # module might be None for 'from . import X'
+                    module = node.module or ""
+                    # Handle relative imports if needed? KnowledgeBase.resolve_selector 
+                    # handles dotted paths, but maybe not relative ones directly.
+                    # For now, we return the dotted module path.
+                    return module, alias.name
+    return None
+
+
+def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) -> dict | None:
+    """Resolve a file::Symbol selector to a goto result dict with line number."""
+    if "::" not in selector:
+        return None
+    
+    file_path, symbol_path = selector.split("::", 1)
+    if not Path(file_path).is_file():
+        return None
+
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            source = f.read()
+        definitions = find_nested_definitions(source)
+        symbol = find_symbol_by_path(definitions, symbol_path.split("."))
+        line = symbol.line if symbol else 1
+        
+        return {
+            "name": symbol_path.split(".")[-1],
+            "qualified_name": symbol_path,
+            "location": f"{file_path}:{line}",
+            "file_path": file_path,
+            "line": line,
+        }
+    except Exception:
+        return {
+            "name": symbol_path.split(".")[-1],
+            "qualified_name": symbol_path,
+            "location": f"{file_path}:1",
+            "file_path": file_path,
+            "line": 1,
+        }
+
+
 def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
     """Go to definition: try local symbol lookup first, then KB mappings.
 
@@ -1128,6 +1201,20 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
         if resolved:
             entry["resolved_path"] = resolved
         items.append(entry)
+
+    # --- 3. Import-aware module mapping resolution (Tier 3) ---
+    if not items and params.get("file"):
+        file_path = params["file"]
+        import_info = _extract_import_binding(file_path, identifier)
+        if import_info:
+            module_path, imported_name = import_info
+            # 'from common.domain_models import X' -> 'common.domain_models.X'
+            fq_path = f"{module_path}.{imported_name}" if module_path else imported_name
+            resolved_selector = kb.resolve_selector(fq_path)
+            if resolved_selector:
+                item = _resolve_selector_to_goto_item(engine, resolved_selector)
+                if item:
+                    items.append(item)
 
     elapsed = (_time.monotonic() - t0) * 1000
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto", "source": "kb"}
