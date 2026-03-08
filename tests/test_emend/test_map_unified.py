@@ -159,6 +159,32 @@ def test_map_resolve_file_deep_reexport(tmp_path, emend_cmd_list, run_emend_cmd)
     assert "Widget" in result.stdout or "Line:" in result.stdout
 
 
+def test_map_resolve_file_plain_module_path(tmp_path, emend_cmd_list, run_emend_cmd):
+    """map resolve-file with a plain dotted module path (no symbol) should not crash."""
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+
+    external_root = tmp_path / "external_root"
+    (external_root / "db").mkdir(parents=True)
+    (external_root / "db" / "__init__.py").touch()
+
+    kb = KnowledgeBase(str(proj))
+    kb.add_module_mapping(ModuleMapping(
+        module_prefix="pkg",
+        local_path=str(external_root)
+    ))
+    kb.close()
+
+    os.chdir(str(proj))
+
+    # Should fail cleanly (it's a directory, not a file) without crashing with a parser error.
+    result = run_emend_cmd(["map", "resolve-file", "pkg.db"], check=False)
+    assert result.returncode != 0
+    assert "Unexpected token" not in result.stderr
+    assert "Could not resolve" in result.stderr
+
+
 def test_map_resolve_directory(tmp_path, emend_cmd_list, run_emend_cmd):
     proj = tmp_path / "app"
     proj.mkdir()

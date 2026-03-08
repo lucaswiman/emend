@@ -2715,10 +2715,12 @@ def map_resolve_file_cmd(
         else:
             # Use resolve_selector which handles deep paths and __init__.py re-exports.
             resolved_sel = kb.resolve_selector(selector)
-            if resolved_sel:
+            if resolved_sel and "::" in resolved_sel:
                 parsed = parse_extended_selector(resolved_sel)
                 file_path = parsed.file_path
                 symbol_parts = parsed.symbol_path
+            elif resolved_sel and os.path.isfile(resolved_sel):
+                file_path = resolved_sel
 
         if not file_path or not os.path.isfile(file_path):
             print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
