@@ -57,6 +57,9 @@ command! -nargs=? EmendRefs call emend#references(<q-args> ==# '' ? expand('<cwo
 " Go to the cross-service mapping target for the symbol under cursor.
 command! -nargs=? EmendGoto call emend#goto(<q-args> ==# '' ? expand('<cword>') : <q-args>)
 
+" Rename the symbol under cursor across the project.
+command! -nargs=? EmendRename call emend#rename(<q-args>)
+
 " Search the knowledge base.
 command! -nargs=? EmendKB call emend#kb_search(<q-args> ==# '' ? expand('<cword>') : <q-args>)
 

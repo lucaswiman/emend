@@ -365,7 +365,53 @@ endfunction
 
 function! emend#goto(identifier, ...) abort
   let l:Cb = a:0 > 0 ? a:1 : function('s:on_goto_result')
-  call emend#send('mapping_goto', {'identifier': a:identifier, 'file': expand('%:p')}, l:Cb)
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('mapping_goto', {
+        \ 'identifier': a:identifier,
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, l:Cb)
+endfunction
+
+function! emend#rename(new_name) abort
+  let l:old_name = expand('<cword>')
+  let l:new_name = a:new_name
+  if empty(l:new_name)
+    let l:new_name = input('Rename ' . l:old_name . ' to: ', l:old_name)
+  endif
+  if empty(l:new_name) || l:new_name ==# l:old_name
+    return
+  endif
+
+  " Resolve QN first
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('goto_local', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_rename_resolve(res, l:new_name)})
+endfunction
+
+function! s:on_rename_resolve(result, new_name) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: could not resolve symbol at cursor' | echohl None
+    return
+  endif
+  let l:item = l:items[0]
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+  
+  call emend#send('rename_preview', {
+        \ 'qualified_name': l:qn,
+        \ 'new_name': a:new_name,
+        \ 'file': l:file,
+        \ }, {res -> emend#ui#show_rename_preview(res, l:qn, a:new_name, l:file)})
 endfunction
 
 function! emend#jump_to(file, line) abort

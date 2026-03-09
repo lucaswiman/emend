@@ -140,6 +140,70 @@ def _split_identifier(name: str) -> list[str]:
     return [s for s in _IDENT_BOUNDARY.split(name) if s]
 
 
+def is_fuzzy_subsequence(search: str, path: str, max_subs: int = 1) -> bool:
+    """Check if search is a subsequence of path with at most max_subs substitutions.
+
+    Single linear traversal of path. O(n + m) time, O(max_subs) space.
+    """
+    s = search.lower()
+    p = path.lower()
+    n, m = len(s), len(p)
+
+    if n == 0:
+        return True
+    if n > m + max_subs:
+        return False
+
+    # si[k] = number of search chars matched so far using exactly k substitutions.
+    # -1 means this state is not yet active.
+    si = [0] + [-1] * max_subs
+
+    for c in p:
+        # Process states from most-subs to least-subs to avoid double-advancing.
+        for k in range(max_subs, -1, -1):
+            if si[k] < 0 or si[k] >= n:
+                continue
+            if s[si[k]] == c:
+                # Exact match: advance this state.
+                si[k] += 1
+            elif k < max_subs:
+                # Mismatch: fork a new state with one more substitution.
+                new_si = si[k] + 1
+                if si[k + 1] < new_si:
+                    si[k + 1] = new_si
+            # else: mismatch with no subs remaining — skip this path char.
+
+        if any(x >= n for x in si):
+            return True
+
+    return any(x >= n for x in si)
+
+
+def _score_file(file_path: str, query: str) -> float:
+    """Score a file path against *query*.  Higher is more relevant."""
+    q = query.lower()
+    p = file_path.lower()
+    basename = Path(file_path).name.lower()
+
+    # Exact basename match
+    if basename == q:
+        return 1100.0
+
+    # Basename prefix
+    if basename.startswith(q):
+        return 1080.0 - (len(basename) - len(q))
+
+    # Path substring
+    if q in p:
+        return 1050.0 - (len(p) - len(q))
+
+    # Fuzzy subsequence
+    if is_fuzzy_subsequence(q, p):
+        return 950.0 - (len(p) - len(q))
+
+    return 0.0
+
+
 def _score_symbol(name: str, qualified_name: str, query: str) -> float:
     """Score a symbol against *query*.  Higher is more relevant."""
     q = query.lower()
@@ -257,14 +321,15 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
 
 
 def rebuild_fts(conn: sqlite3.Connection) -> int:
-    """(Re)build the ``symbol_fts`` FTS5 index from ``symbol_index``.
+    """(Re)build the FTS5 indexes from ``symbol_index``.
 
-    Returns the number of rows indexed (0 if FTS5 is unavailable).
+    Returns the total number of rows indexed (0 if FTS5 is unavailable).
     """
     if not _fts5_available(conn):
         logger.debug("FTS5 trigram not available — skipping FTS build")
         return 0
 
+    # Symbol index
     conn.execute("DROP TABLE IF EXISTS symbol_fts")
     conn.execute(
         "CREATE VIRTUAL TABLE symbol_fts USING fts5("
@@ -277,10 +342,25 @@ def rebuild_fts(conn: sqlite3.Connection) -> int:
         "SELECT rowid, name, qualified_name, COALESCE(signature, '') "
         "FROM symbol_index"
     )
+
+    # File index
+    conn.execute("DROP TABLE IF EXISTS file_fts")
+    conn.execute(
+        "CREATE VIRTUAL TABLE file_fts USING fts5("
+        "  file_path,"
+        "  tokenize='trigram'"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO file_fts(file_path) "
+        "SELECT DISTINCT file_path FROM symbol_index"
+    )
+
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone()[0]
-    logger.debug("FTS index rebuilt: %d rows", count)
-    return count
+    file_count = conn.execute("SELECT COUNT(*) FROM file_fts").fetchone()[0]
+    logger.debug("FTS index rebuilt: %d symbols, %d files", count, file_count)
+    return count + file_count
 
 
 # ---------------------------------------------------------------------------
@@ -350,15 +430,19 @@ class EditorSearchEngine:
             self._fts_ready = True
             return False
 
-        # Check if FTS table exists and has rows.
+        # Check if FTS tables exist and have rows.
         try:
             fts_count = conn.execute(
                 "SELECT COUNT(*) FROM symbol_fts"
             ).fetchone()[0]
+            file_fts_count = conn.execute(
+                "SELECT COUNT(*) FROM file_fts"
+            ).fetchone()[0]
         except Exception:
             fts_count = 0
+            file_fts_count = 0
 
-        if fts_count == 0:
+        if fts_count == 0 or file_fts_count == 0:
             sym_count = conn.execute(
                 "SELECT COUNT(*) FROM symbol_index"
             ).fetchone()[0]
@@ -402,6 +486,13 @@ class EditorSearchEngine:
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
+        elif "/" in query or any(query.endswith(ext) for ext in (".py", ".ts", ".js", ".rs", ".go", ".c", ".cpp", ".h")):
+            # Prioritize file search for path-like queries
+            result = self._search_files(query, limit=limit)
+            if not result.items:
+                result = self._search_symbols(
+                    query, limit=limit, file_scope=file_scope, kind=kind
+                )
         else:
             result = self._search_symbols(
                 query, limit=limit, file_scope=file_scope, kind=kind
@@ -552,7 +643,13 @@ class EditorSearchEngine:
             (round(_score_symbol(c["name"], c["qualified_name"], query), 1), c)
             for c in items
         ]
-        scored.sort(key=lambda x: (-x[0], len(x[1]["name"])))
+        
+        # Include file matches
+        file_results = self._search_files(query, limit=limit)
+        for fr in file_results.items:
+            scored.append((fr["score"], fr))
+
+        scored.sort(key=lambda x: (-x[0], len(x[1].get("name", ""))))
 
         truncated = len(scored) > limit
         top = scored[:limit]
@@ -563,6 +660,53 @@ class EditorSearchEngine:
             mode="symbol",
             truncated=truncated,
         )
+
+    def _search_files(self, query: str, limit: int = 50) -> SearchResult:
+        """Search for files matching the query."""
+        conn = self._get_conn()
+        q_lower = query.lower()
+        
+        candidates: set[str] = set()
+        
+        # Strategy 1: exact basename or substring
+        # Using DISTINCT file_path from symbol_index
+        base_sql = "SELECT DISTINCT file_path FROM symbol_index"
+        
+        # FTS5 pre-filter
+        fts_ok = len(query) >= 3 and self._ensure_fts()
+        if fts_ok:
+            fts_q = '"' + query.replace('"', '""') + '"'
+            sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT 200"
+            candidates.update(r[0] for r in conn.execute(sql, (fts_q,)))
+        else:
+            # Fallback for short queries
+            sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT 200"
+            candidates.update(r[0] for r in conn.execute(sql, ("%" + q_lower + "%",)))
+
+        # Fuzzy subsequence fallback if candidates are few
+        if len(candidates) < limit:
+            # This is expensive on large indexes, but DISTINCT file_path is usually small enough
+            all_files = [r[0] for r in conn.execute(base_sql)]
+            for fp in all_files:
+                if is_fuzzy_subsequence(query, fp):
+                    candidates.add(fp)
+                    if len(candidates) >= 200:
+                        break
+
+        items = []
+        for fp in candidates:
+            score = _score_file(fp, query)
+            if score > 0:
+                items.append({
+                    "kind": "file",
+                    "name": Path(fp).name,
+                    "file_path": fp,
+                    "line": 1,
+                    "score": score,
+                })
+        
+        items.sort(key=lambda x: -x["score"])
+        return SearchResult(items=items[:limit], elapsed_ms=0, mode="symbol")
 
     # -- pattern search -----------------------------------------------------
 
@@ -971,6 +1115,75 @@ class EditorSearchEngine:
             query="status",
         )
 
+    def goto_local(self, file: str, line: int, col: int) -> SearchResult:
+        """Find the definition of the symbol at the given position.
+
+        Uses the scope resolver to trace the reference back to its binding site.
+        Works for local variables, parameters, loop variables, etc.
+        """
+        from emend.transform import _rust
+        import time as _time
+        t0 = _time.monotonic()
+
+        file_path = Path(file).resolve()
+        if not file_path.exists():
+            return SearchResult(items=[], elapsed_ms=0, mode="symbol")
+
+        # Parse with scope resolver
+        try:
+            resolver = _rust.PyScopeResolver(str(self.project_root))
+            with open(file_path, "r") as f:
+                content = f.read()
+            resolver.index_file(str(file_path), content)
+            refs = resolver.references_in_file(str(file_path))
+        except Exception as exc:
+            logger.debug("Scope resolver failed: %s", exc)
+            return SearchResult(items=[], elapsed_ms=0, mode="symbol")
+
+        # Find the reference at (line, col)
+        target_qn = None
+        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+            # line/col from scope resolver are 1-based, same as Vim.
+            if r_line == line and abs(r_col - col) <= 2:
+                target_qn = qn
+                break
+
+        if not target_qn:
+            return SearchResult(items=[], elapsed_ms=0, mode="symbol")
+
+        # 1. Local definition in the same file
+        local_defs = []
+        all_refs = []
+        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+            if qn == target_qn:
+                all_refs.append((r_line, r_col))
+                if r_kind in ("definition", "write"):
+                    local_defs.append((r_line, r_col))
+
+        if not local_defs and all_refs:
+            # Fallback: use the first occurrence in the file
+            all_refs.sort()
+            local_defs = [all_refs[0]]
+
+        if local_defs:
+            local_defs.sort()
+            r_line, r_col = local_defs[0]
+            item = {
+                "name": target_qn.split(".")[-1],
+                "kind": "variable",
+                "file_path": str(file_path),
+                "line": r_line,
+                "col": r_col,
+                "qualified_name": target_qn,
+            }
+            res = SearchResult(items=[item], elapsed_ms=0, mode="symbol")
+            res.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
+            return res
+
+        # 2. Cross-file definition: resolve target_qn via symbol index
+        # This handles module-level symbols and imported names.
+        return self._search_symbols(target_qn, limit=1)
+
     # -- incremental re-index -----------------------------------------------
 
     def reindex(self) -> SearchResult:
@@ -992,6 +1205,73 @@ class EditorSearchEngine:
             mode="reindex",
             query="reindex",
         )
+
+    def rename_preview(self, qualified_name: str, new_name: str, file: str = "") -> SearchResult:
+        """Dry-run rename, return list of changes."""
+        from emend.transform import rename_symbol
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        diffs = rename_symbol(selector, new_name, project_path=str(self.project_root), apply=False)
+
+        items = []
+        for fp, diff in diffs.items():
+            items.append({
+                "file_path": fp,
+                "diff": diff,
+            })
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
+
+    def rename_apply(self, qualified_name: str, new_name: str, file: str = "") -> SearchResult:
+        """Apply rename across the project."""
+        from emend.transform import rename_symbol
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        diffs = rename_symbol(selector, new_name, project_path=str(self.project_root), apply=True)
+
+        items = []
+        for fp, diff in diffs.items():
+            items.append({
+                "file_path": fp,
+                "diff": diff,
+            })
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
+
+    def complete(self, prefix: str, limit: int = 20) -> SearchResult:
+        """Return completion candidates for the given prefix."""
+        conn = self._get_conn()
+        items = []
+
+        # 1. Symbols by prefix
+        sql = "SELECT DISTINCT name, kind FROM symbol_index WHERE name LIKE ? LIMIT ?"
+        for row in conn.execute(sql, (prefix + "%", limit)):
+            items.append({
+                "word": row[0],
+                "kind": row[1],
+                "menu": "[sym]",
+            })
+
+        # 2. Files by substring
+        if len(items) < limit:
+            sql = "SELECT DISTINCT file_path FROM symbol_index WHERE file_path LIKE ? LIMIT ?"
+            for row in conn.execute(sql, ("%" + prefix + "%", limit - len(items))):
+                fp = row[0]
+                items.append({
+                    "word": fp,
+                    "kind": "file",
+                    "menu": "[file]",
+                })
+
+        return SearchResult(items=items, elapsed_ms=0, mode="complete", query=prefix)
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1301,24 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.status().to_dict()
     elif method == "reindex":
         return engine.reindex().to_dict()
+    elif method == "goto_local":
+        file = params.pop("file", "")
+        line = int(params.pop("line", 1))
+        col = int(params.pop("col", 0))
+        return engine.goto_local(file, line, col).to_dict()
+    elif method == "rename_preview":
+        qn = params.get("qualified_name", "")
+        new_name = params.get("new_name", "")
+        file = params.get("file", "")
+        return engine.rename_preview(qn, new_name, file=file).to_dict()
+    elif method == "rename_apply":
+        qn = params.get("qualified_name", "")
+        new_name = params.get("new_name", "")
+        file = params.get("file", "")
+        return engine.rename_apply(qn, new_name, file=file).to_dict()
+    elif method == "complete":
+        prefix = params.get("prefix", params.get("query", ""))
+        return engine.complete(prefix).to_dict()
     # -- Knowledge base methods --
     elif method == "kb_search":
         return _kb_search(engine, params)
@@ -1029,6 +1327,14 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     elif method == "mapping_lookup":
         return _mapping_lookup(engine, params)
     elif method == "mapping_goto":
+        # First try goto_local if file/line/col are provided
+        if "file" in params and "line" in params:
+            file = params.get("file", "")
+            line = int(params.get("line", 1))
+            col = int(params.get("col", 0))
+            res = engine.goto_local(file, line, col)
+            if res.items:
+                return res.to_dict()
         return _mapping_goto(engine, params)
     elif method == "module_resolve":
         return _module_resolve(engine, params)
