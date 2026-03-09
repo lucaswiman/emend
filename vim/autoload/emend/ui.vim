@@ -494,6 +494,14 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
     call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
     call s:map_current_buf('n', '<C-q>',     '<Cmd>call emend#ui#send_to_quickfix()<CR>')
+
+    " Result actions
+    call s:map_current_buf('n', 'r',         '<Cmd>call emend#ui#action_rename()<CR>')
+    call s:map_current_buf('n', 'R',         '<Cmd>call emend#ui#action_refs()<CR>')
+    call s:map_current_buf('n', 'c',         '<Cmd>call emend#ui#action_callers()<CR>')
+    call s:map_current_buf('n', 'C',         '<Cmd>call emend#ui#action_callees()<CR>')
+    call s:map_current_buf('n', 't',         '<Cmd>call emend#ui#action_type()<CR>')
+    call s:map_current_buf('n', 'm',         '<Cmd>call emend#ui#action_move()<CR>')
   endif
 
   " Preview buffer maps
@@ -1030,6 +1038,276 @@ function! s:on_rename_apply(result) abort
   let l:count = len(get(a:result, 'items', []))
   echom 'emend: renamed symbol in ' . l:count . ' files. Reloading...'
   checktime
+endfunction
+
+" ---------------------------------------------------------------------------
+" Replace Preview UI
+" ---------------------------------------------------------------------------
+
+let s:replace_state = {}
+
+function! emend#ui#show_replace_preview(result, pattern, replacement) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no matches found for pattern'
+    return
+  endif
+
+  let s:replace_state = {
+        \ 'pattern': a:pattern,
+        \ 'replacement': a:replacement,
+        \ }
+
+  let l:total_count = 0
+  let l:lines = [
+        \ '  REPLACE PREVIEW',
+        \ '  Pattern: ' . a:pattern,
+        \ '  Replace: ' . a:replacement,
+        \ '  Press <CR> to apply, <Esc> to cancel.',
+        \ '',
+        \ ]
+
+  for l:item in l:items
+    let l:count = get(l:item, 'count', 0)
+    let l:total_count += l:count
+    let l:lines += ['--- ' . l:item.file_path . ' (' . l:count . ' replacements)', '']
+    let l:lines += split(l:item.diff, "\n")
+    call add(l:lines, '')
+  endfor
+
+  call s:open_ui()
+  call s:set_buf_lines(s:list_buf, [
+        \ '  Replace Preview',
+        \ '  ' . l:total_count . ' replacements in ' . len(l:items) . ' files',
+        \ '',
+        \ '  <CR> Apply',
+        \ '  <Esc> Cancel',
+        \ ])
+  call s:set_buf_lines(s:preview_buf, l:lines)
+  call setbufvar(s:preview_buf, '&filetype', 'diff')
+
+  " Map <CR> in list window to confirm replace
+  call win_gotoid(s:list_win)
+  nnoremap <buffer> <silent> <CR> <Cmd>call emend#ui#replace_confirm()<CR>
+endfunction
+
+function! emend#ui#replace_confirm() abort
+  let l:state = s:replace_state
+  call s:close_ui()
+  echom 'emend: applying replacements...'
+  call emend#send('replace_apply', {
+        \ 'pattern': l:state.pattern,
+        \ 'replacement': l:state.replacement,
+        \ }, {res -> s:on_replace_apply(res)})
+endfunction
+
+function! s:on_replace_apply(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  let l:total = 0
+  for l:item in l:items
+    let l:total += get(l:item, 'count', 0)
+  endfor
+  echom 'emend: replaced ' . l:total . ' matches in ' . len(l:items) . ' files. Reloading...'
+  checktime
+endfunction
+
+" ---------------------------------------------------------------------------
+" Move Preview UI
+" ---------------------------------------------------------------------------
+
+let s:move_state = {}
+
+function! emend#ui#show_move_preview(result, qn, dest_file, file) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: no changes for move' | echohl None
+    return
+  endif
+
+  let s:move_state = {
+        \ 'qn': a:qn,
+        \ 'dest_file': a:dest_file,
+        \ 'file': a:file,
+        \ }
+
+  let l:lines = [
+        \ '  MOVE PREVIEW',
+        \ '  Symbol: ' . a:qn,
+        \ '  Destination: ' . a:dest_file,
+        \ '  Press <CR> to apply, <Esc> to cancel.',
+        \ '',
+        \ ]
+
+  for l:item in l:items
+    let l:lines += ['--- ' . l:item.file_path, '']
+    let l:lines += split(l:item.diff, "\n")
+    call add(l:lines, '')
+  endfor
+
+  call s:open_ui()
+  call s:set_buf_lines(s:list_buf, [
+        \ '  Move Preview',
+        \ '  ' . len(l:items) . ' files changed',
+        \ '',
+        \ '  <CR> Apply',
+        \ '  <Esc> Cancel',
+        \ ])
+  call s:set_buf_lines(s:preview_buf, l:lines)
+  call setbufvar(s:preview_buf, '&filetype', 'diff')
+
+  " Map <CR> in list window to confirm move
+  call win_gotoid(s:list_win)
+  nnoremap <buffer> <silent> <CR> <Cmd>call emend#ui#move_confirm()<CR>
+endfunction
+
+function! emend#ui#move_confirm() abort
+  let l:state = s:move_state
+  call s:close_ui()
+  echom 'emend: applying move...'
+  call emend#send('move_apply', {
+        \ 'qualified_name': l:state.qn,
+        \ 'dest_file': l:state.dest_file,
+        \ 'file': l:state.file,
+        \ }, {res -> s:on_move_apply(res)})
+endfunction
+
+function! s:on_move_apply(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:count = len(get(a:result, 'items', []))
+  echom 'emend: moved symbol, updated ' . l:count . ' files. Reloading...'
+  checktime
+endfunction
+
+" ---------------------------------------------------------------------------
+" Search Result Actions
+" ---------------------------------------------------------------------------
+
+function! s:get_selected_item() abort
+  if empty(s:results) || s:selected >= len(s:results)
+    return {}
+  endif
+  return s:results[s:selected]
+endfunction
+
+function! emend#ui#action_rename() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:name = get(l:item, 'name', '')
+  let l:file = get(l:item, 'file_path', '')
+  let l:qn = get(l:item, 'qualified_name', l:name)
+  if empty(l:name) | return | endif
+
+  let l:new_name = input('Rename ' . l:name . ' to: ', l:name)
+  if empty(l:new_name) || l:new_name ==# l:name
+    return
+  endif
+
+  call emend#send('rename_preview', {
+        \ 'qualified_name': l:qn,
+        \ 'new_name': l:new_name,
+        \ 'file': l:file,
+        \ }, {res -> emend#ui#show_rename_preview(res, l:qn, l:new_name, l:file)})
+endfunction
+
+function! emend#ui#action_refs() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  if empty(l:qn) | return | endif
+  call s:close_ui()
+  call emend#references(l:qn)
+endfunction
+
+function! emend#ui#action_callers() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+  if empty(l:qn) | return | endif
+  call s:close_ui()
+  call emend#send('callers', {
+        \ 'qualified_name': l:qn,
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
+endfunction
+
+function! emend#ui#action_callees() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+  if empty(l:qn) | return | endif
+  call s:close_ui()
+  call emend#send('callees', {
+        \ 'qualified_name': l:qn,
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
+endfunction
+
+function! emend#ui#action_type() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:file = get(l:item, 'file_path', '')
+  let l:line = get(l:item, 'line', 0)
+  if empty(l:file) | return | endif
+  call emend#send('types_at_cursor', {
+        \ 'file': l:file,
+        \ 'line': l:line,
+        \ 'col': 0,
+        \ }, function('s:on_action_type'))
+endfunction
+
+function! s:on_action_type(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no type information available'
+    return
+  endif
+  " Show all types for the line in the echo area
+  let l:parts = []
+  for l:item in l:items
+    call add(l:parts, get(l:item, 'name', '?') . ': ' . get(l:item, 'type', '?'))
+  endfor
+  echo join(l:parts, '  |  ')
+endfunction
+
+function! emend#ui#action_move() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:name = get(l:item, 'name', '')
+  let l:file = get(l:item, 'file_path', '')
+  let l:qn = get(l:item, 'qualified_name', l:name)
+  if empty(l:name) | return | endif
+
+  let l:dest = input('Move ' . l:name . ' to: ', '', 'file')
+  if empty(l:dest)
+    return
+  endif
+
+  call emend#send('move_preview', {
+        \ 'qualified_name': l:qn,
+        \ 'dest_file': l:dest,
+        \ 'file': l:file,
+        \ }, {res -> emend#ui#show_move_preview(res, l:qn, l:dest, l:file)})
 endfunction
 
 " ---------------------------------------------------------------------------

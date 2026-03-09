@@ -1355,6 +1355,201 @@ class EditorSearchEngine:
         elapsed = round((_time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
 
+    def replace_preview(self, pattern: str, replacement: str, file: str = "", inside: str | None = None, not_inside: str | None = None) -> SearchResult:
+        """Dry-run pattern replace, return diffs."""
+        from emend.transform import replace_pattern
+        from emend.cli import resolve_files
+        import time as _time
+        t0 = _time.monotonic()
+
+        items: list[dict] = []
+        search_path = file if file else str(self.project_root)
+        files, is_multi = resolve_files(search_path)
+        file_strs = [str(f) for f in files]
+
+        total_count = 0
+        for fp in file_strs:
+            try:
+                diff, count = replace_pattern(
+                    pattern, replacement, fp,
+                    inside=inside, not_inside=not_inside,
+                    apply=False,
+                )
+                if count > 0:
+                    items.append({"file_path": fp, "diff": diff, "count": count})
+                    total_count += count
+            except Exception:
+                continue
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="replace_preview", query=f"{pattern} -> {replacement}")
+
+    def replace_apply(self, pattern: str, replacement: str, file: str = "", inside: str | None = None, not_inside: str | None = None) -> SearchResult:
+        """Apply pattern replace, return diffs of applied changes."""
+        from emend.transform import replace_pattern
+        from emend.cli import resolve_files
+        import time as _time
+        t0 = _time.monotonic()
+
+        items: list[dict] = []
+        search_path = file if file else str(self.project_root)
+        files, is_multi = resolve_files(search_path)
+        file_strs = [str(f) for f in files]
+
+        total_count = 0
+        for fp in file_strs:
+            try:
+                diff, count = replace_pattern(
+                    pattern, replacement, fp,
+                    inside=inside, not_inside=not_inside,
+                    apply=True,
+                )
+                if count > 0:
+                    items.append({"file_path": fp, "diff": diff, "count": count})
+                    total_count += count
+            except Exception:
+                continue
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="replace_apply", query=f"{pattern} -> {replacement}")
+
+    def move_preview(self, qualified_name: str, dest_file: str, file: str = "") -> SearchResult:
+        """Dry-run move, return diffs."""
+        from emend.transform import move_symbol
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        diffs = move_symbol(selector, dest_file, project_path=str(self.project_root), apply=False)
+
+        items: list[dict] = []
+        for fp, diff in diffs.items():
+            items.append({"file_path": fp, "diff": diff})
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="move_preview", query=f"move {qualified_name}")
+
+    def move_apply(self, qualified_name: str, dest_file: str, file: str = "") -> SearchResult:
+        """Apply move across the project."""
+        from emend.transform import move_symbol
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        diffs = move_symbol(selector, dest_file, project_path=str(self.project_root), apply=True)
+
+        items: list[dict] = []
+        for fp, diff in diffs.items():
+            items.append({"file_path": fp, "diff": diff})
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="move_apply", query=f"move {qualified_name}")
+
+    def callers(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
+        """Find call sites for a symbol."""
+        from emend.transform import find_callers
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        refs = list(find_callers(selector, project_path=str(self.project_root)))
+
+        items: list[dict] = []
+        for ref in refs[:limit]:
+            items.append({
+                "name": qualified_name.split(".")[-1],
+                "kind": "reference",
+                "file_path": ref.file_path,
+                "line": ref.line,
+                "end_line": ref.line,
+            })
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="callers", query=f"callers of {qualified_name}")
+
+    def callees(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
+        """Find functions called by a symbol."""
+        from emend.transform import find_callees
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        callee_list = find_callees(selector, project_path=str(self.project_root))
+
+        items: list[dict] = []
+        for callee in callee_list[:limit]:
+            items.append({
+                "name": callee.name,
+                "kind": "function",
+                "file_path": callee.file_path or file,
+                "line": callee.line,
+                "end_line": callee.line,
+                "qualified_name": callee.qualified_name or callee.name,
+            })
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="callees", query=f"callees of {qualified_name}")
+
+    def types_at_cursor(self, file: str, line: int = 0, col: int = 0) -> SearchResult:
+        """Return type information for the symbol at cursor position."""
+        import time as _time
+        t0 = _time.monotonic()
+
+        items: list[dict] = []
+        try:
+            from emend.type_oracle import create_type_oracle
+            oracle = create_type_oracle(engine="auto", project_root=str(self.project_root))
+            file_types = oracle.get_file_types(file)
+            if file_types:
+                file_types.build_index()
+                # Try to find type at the given position
+                binding = file_types._by_position.get((line, col))
+                if binding:
+                    items.append({
+                        "name": binding.name,
+                        "type": binding.raw_type,
+                        "line": binding.line,
+                        "file_path": file,
+                    })
+                else:
+                    # Fall back: find closest binding on the given line
+                    for b in file_types.bindings:
+                        if b.line == line:
+                            items.append({
+                                "name": b.name,
+                                "type": b.raw_type,
+                                "line": b.line,
+                                "file_path": file,
+                            })
+        except Exception as e:
+            import logging
+            logging.getLogger("emend.editor").debug(f"types_at_cursor failed: {e}")
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="types", query=f"types at {file}:{line}")
+
+    def get_config(self, section: str = "") -> SearchResult:
+        """Return project configuration from .emend/config.toml / pyproject.toml.
+
+        If *section* is given, return only that section (e.g. "vim").
+        Otherwise return the full merged config.
+        """
+        from emend.project_config import load_project_config
+        import time as _time
+        t0 = _time.monotonic()
+
+        config = load_project_config(str(self.project_root))
+        if section:
+            config = config.get(section, {})
+
+        items = [config] if config else []
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode="config", query=section or "all")
+
     def complete(self, prefix: str, limit: int = 20, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
         """Return completion candidates for the given prefix.
 
@@ -1658,6 +1853,56 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return _mapping_goto(engine, params)
     elif method == "module_resolve":
         return _module_resolve(engine, params)
+    elif method == "replace_preview":
+        return engine.replace_preview(
+            pattern=params.get("pattern", ""),
+            replacement=params.get("replacement", ""),
+            file=params.get("file", ""),
+            inside=params.get("inside"),
+            not_inside=params.get("not_inside"),
+        ).to_dict()
+    elif method == "replace_apply":
+        return engine.replace_apply(
+            pattern=params.get("pattern", ""),
+            replacement=params.get("replacement", ""),
+            file=params.get("file", ""),
+            inside=params.get("inside"),
+            not_inside=params.get("not_inside"),
+        ).to_dict()
+    elif method == "move_preview":
+        return engine.move_preview(
+            qualified_name=params.get("qualified_name", ""),
+            dest_file=params.get("dest_file", ""),
+            file=params.get("file", ""),
+        ).to_dict()
+    elif method == "move_apply":
+        return engine.move_apply(
+            qualified_name=params.get("qualified_name", ""),
+            dest_file=params.get("dest_file", ""),
+            file=params.get("file", ""),
+        ).to_dict()
+    elif method == "callers":
+        return engine.callers(
+            qualified_name=params.get("qualified_name", ""),
+            file=params.get("file", ""),
+            limit=int(params.get("limit", 50)),
+        ).to_dict()
+    elif method == "callees":
+        return engine.callees(
+            qualified_name=params.get("qualified_name", ""),
+            file=params.get("file", ""),
+            limit=int(params.get("limit", 50)),
+        ).to_dict()
+    elif method == "types_at_cursor":
+        return engine.types_at_cursor(
+            file=params.get("file", ""),
+            line=int(params.get("line", 0)),
+            col=int(params.get("col", 0)),
+        ).to_dict()
+    elif method == "config":
+        return engine.get_config(
+            section=params.get("section", ""),
+        ).to_dict()
     else:
         raise ValueError(f"Unknown method: {method!r}")
 
