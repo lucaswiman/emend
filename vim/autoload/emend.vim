@@ -414,6 +414,78 @@ function! s:on_rename_resolve(result, new_name) abort
         \ }, {res -> emend#ui#show_rename_preview(res, l:qn, a:new_name, l:file)})
 endfunction
 
+" ---------------------------------------------------------------------------
+" Global completion (C-Space in any buffer)
+" ---------------------------------------------------------------------------
+
+function! emend#complete_at_cursor() abort
+  let l:line = getline('.')
+  let l:col = col('.')
+  let l:before = strpart(l:line, 0, l:col - 1)
+
+  " Check for dotted prefix (e.g. "DocumentRequestConfig.ing")
+  let l:dotted = matchstr(l:before, '\k\+\.\k*$')
+  if !empty(l:dotted)
+    let l:word = l:dotted
+    " For dotted completions, only replace the part after the last dot.
+    let l:replace_len = len(matchstr(l:dotted, '\.\zs\k*$'))
+  else
+    let l:word = matchstr(l:before, '\k\+$')
+    let l:replace_len = len(l:word)
+  endif
+
+  if empty(l:word) | return | endif
+
+  call emend#send('complete', {
+        \ 'prefix': l:word,
+        \ 'file': expand('%:p'),
+        \ }, {res -> s:on_complete_result(res, l:replace_len)})
+endfunction
+
+function! s:on_complete_result(result, replace_len) abort
+  if has_key(a:result, 'error') | return | endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items) | return | endif
+
+  " Don't auto-insert or auto-select; let user browse with arrows.
+  let s:save_cot = &completeopt
+  set completeopt=menuone,noinsert,noselect
+
+  " Install dot-chaining BEFORE showing the popup, so typing '.' while
+  " browsing the menu accepts the current item + triggers attribute completion.
+  inoremap <buffer><silent> . <C-y>.<Cmd>call <SID>dot_complete()<CR>
+
+  let l:start_col = col('.') - a:replace_len
+  call complete(l:start_col, l:items)
+
+  " Restore completeopt and clean up dot mapping after the popup closes.
+  augroup emend_complete_restore
+    autocmd!
+    autocmd CompleteDone * ++once call s:on_complete_done()
+  augroup END
+endfunction
+
+function! s:on_complete_done() abort
+  let &completeopt = s:save_cot
+  " Keep the dot mapping alive briefly for the Enter-then-dot case.
+  " It will be cleaned up on InsertLeave or by the next dot_complete call.
+  augroup emend_dot_cleanup
+    autocmd!
+    autocmd InsertLeave * ++once silent! iunmap <buffer> .
+  augroup END
+endfunction
+
+function! s:dot_complete() abort
+  " Remove the one-shot dot mapping.
+  silent! iunmap <buffer> .
+  augroup emend_dot_cleanup
+    autocmd!
+  augroup END
+  " Trigger completion directly. We're called from <Cmd> within insert mode,
+  " so the '.' has already been inserted into the buffer.
+  call emend#complete_at_cursor()
+endfunction
+
 function! emend#jump_to(file, line) abort
   if empty(a:file) || !filereadable(a:file)
     return

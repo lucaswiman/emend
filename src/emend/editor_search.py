@@ -193,13 +193,13 @@ def _score_file(file_path: str, query: str) -> float:
     if basename.startswith(q):
         return 1080.0 - (len(basename) - len(q))
 
-    # Path substring
+    # Path substring (below symbol exact 1000 and prefix 900)
     if q in p:
-        return 1050.0 - (len(p) - len(q))
+        return 750.0 - min((len(p) - len(q)), 100)
 
-    # Fuzzy subsequence
+    # Fuzzy subsequence (below most symbol matches)
     if is_fuzzy_subsequence(q, p):
-        return 950.0 - (len(p) - len(q))
+        return 300.0 - min((len(p) - len(q)), 100)
 
     return 0.0
 
@@ -1246,32 +1246,165 @@ class EditorSearchEngine:
         elapsed = round((_time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
 
-    def complete(self, prefix: str, limit: int = 20) -> SearchResult:
-        """Return completion candidates for the given prefix."""
+    def complete(self, prefix: str, limit: int = 20, file: str = "") -> SearchResult:
+        """Return completion candidates for the given prefix.
+
+        When *file* is provided, imported names in that file are included
+        as candidates (union with the project symbol index).
+        """
         conn = self._get_conn()
-        items = []
+        seen: set[str] = set()
+        items: list[dict] = []
 
-        # 1. Symbols by prefix
-        sql = "SELECT DISTINCT name, kind FROM symbol_index WHERE name LIKE ? LIMIT ?"
-        for row in conn.execute(sql, (prefix + "%", limit)):
-            items.append({
-                "word": row[0],
-                "kind": row[1],
-                "menu": "[sym]",
-            })
+        # Collect imported names from the current file for local completions.
+        import_names: dict[str, str] = {}  # local_name -> qualified source
+        if file:
+            import_names = self._extract_import_names(file)
 
-        # 2. Files by substring
-        if len(items) < limit:
-            sql = "SELECT DISTINCT file_path FROM symbol_index WHERE file_path LIKE ? LIMIT ?"
-            for row in conn.execute(sql, ("%" + prefix + "%", limit - len(items))):
-                fp = row[0]
+        if "." in prefix:
+            # Dotted prefix: e.g. "Foo.bar" -> search qualified names
+            parts = prefix.rsplit(".", 1)
+            parent = parts[0]
+            member_prefix = parts[1] if len(parts) > 1 else ""
+
+            # Resolve parent through imports (e.g. DocumentFilter -> document_api...DocumentFilter)
+            resolved_parent = import_names.get(parent, parent)
+
+            # Search local project symbol index
+            for search_parent in dict.fromkeys([resolved_parent, parent]):
+                pattern = f"*{search_parent}.{member_prefix}*"
+                sql = (
+                    "SELECT DISTINCT name, qualified_name, kind FROM symbol_index "
+                    "WHERE qualified_name GLOB ? LIMIT ?"
+                )
+                for row in conn.execute(sql, (pattern, limit)):
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        items.append({
+                            "word": row[0],
+                            "kind": row[2],
+                            "menu": f"[{row[1]}]",
+                        })
+
+            # Fallback: resolve through KB module mappings for cross-project symbols
+            if not items:
+                items = self._complete_via_mapping(
+                    resolved_parent, member_prefix, limit, seen
+                )
+        else:
+            # 1. Imported names matching prefix (case-sensitive)
+            for local_name, source in import_names.items():
+                if local_name.startswith(prefix) and local_name not in seen:
+                    seen.add(local_name)
+                    items.append({
+                        "word": local_name,
+                        "kind": "import",
+                        "menu": f"[{source}]",
+                    })
+
+            # 2. Symbols by case-sensitive prefix (GLOB is case-sensitive)
+            sql = (
+                "SELECT DISTINCT name, kind FROM symbol_index "
+                "WHERE name GLOB ? LIMIT ?"
+            )
+            for row in conn.execute(sql, (prefix + "*", limit)):
+                if row[0] not in seen:
+                    seen.add(row[0])
+                    items.append({
+                        "word": row[0],
+                        "kind": row[1],
+                        "menu": "[sym]",
+                    })
+
+        return SearchResult(items=items[:limit], elapsed_ms=0, mode="complete", query=prefix)
+
+    @staticmethod
+    def _extract_import_names(file: str) -> dict[str, str]:
+        """Parse imports from a Python file, returning {local_name: qualified_source}."""
+        import ast as _ast
+
+        try:
+            source = Path(file).read_text()
+            tree = _ast.parse(source)
+        except Exception:
+            return {}
+
+        names: dict[str, str] = {}
+        for node in _ast.iter_child_nodes(tree):
+            if isinstance(node, _ast.Import):
+                for alias in node.names:
+                    local = alias.asname or alias.name.split(".")[-1]
+                    names[local] = alias.name
+            elif isinstance(node, _ast.ImportFrom):
+                module = node.module or ""
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    names[local] = f"{module}.{alias.name}" if module else alias.name
+        return names
+
+    def _complete_via_mapping(
+        self,
+        resolved_parent: str,
+        member_prefix: str,
+        limit: int,
+        seen: set[str],
+    ) -> list[dict]:
+        """Resolve a symbol through KB module mappings and list its children.
+
+        E.g. for ``DocumentOrderEntry.`` where DocumentOrderEntry is defined in
+        a mapped external repo, resolve the selector, read that file's symbols,
+        and return children matching *member_prefix*.
+        """
+        try:
+            from emend.knowledge import KnowledgeBase
+        except Exception:
+            return []
+
+        kb_path = Path(self.project_root) / ".emend" / "knowledge.db"
+        if not kb_path.exists():
+            return []
+
+        kb = KnowledgeBase(str(kb_path))
+        selector = kb.resolve_selector(resolved_parent)
+        if not selector or "::" not in selector:
+            return []
+
+        file_part, sym_part = selector.split("::", 1)
+        if not Path(file_part).is_file():
+            return []
+
+        # Read symbols from the resolved file
+        try:
+            from emend.ast_utils import find_nested_definitions
+            content = Path(file_part).read_text()
+            symbols = find_nested_definitions(content)
+        except Exception:
+            return []
+
+        # Find the target symbol and return its children
+        items: list[dict] = []
+        target_prefix = f"{sym_part}." if sym_part else ""
+        for sym in symbols:
+            qn = sym.get("qualified_name", sym.get("name", ""))
+            name = sym.get("name", "")
+            if target_prefix and not qn.startswith(target_prefix):
+                continue
+            # Only direct children (one level deep)
+            remainder = qn[len(target_prefix):]
+            if "." in remainder:
+                continue
+            if member_prefix and not name.startswith(member_prefix):
+                continue
+            if name not in seen:
+                seen.add(name)
                 items.append({
-                    "word": fp,
-                    "kind": "file",
-                    "menu": "[file]",
+                    "word": name,
+                    "kind": sym.get("kind", "variable"),
+                    "menu": f"[{qn}]",
                 })
-
-        return SearchResult(items=items, elapsed_ms=0, mode="complete", query=prefix)
+            if len(items) >= limit:
+                break
+        return items
 
 
 # ---------------------------------------------------------------------------
@@ -1318,7 +1451,8 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.rename_apply(qn, new_name, file=file).to_dict()
     elif method == "complete":
         prefix = params.get("prefix", params.get("query", ""))
-        return engine.complete(prefix).to_dict()
+        file = params.get("file", "")
+        return engine.complete(prefix, file=file).to_dict()
     # -- Knowledge base methods --
     elif method == "kb_search":
         return _kb_search(engine, params)

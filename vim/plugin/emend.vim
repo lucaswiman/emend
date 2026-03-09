@@ -90,6 +90,10 @@ endif
 " Default mappings (opt-in via g:emend_default_mappings)
 " ---------------------------------------------------------------------------
 
+" Global C-Space completion via emend (works in any buffer).
+inoremap <silent> <C-Space> <Cmd>call emend#complete_at_cursor()<CR>
+inoremap <silent> <C-@> <Cmd>call emend#complete_at_cursor()<CR>
+
 if get(g:, 'emend_default_mappings', 0)
   nnoremap <silent> <Leader>es <Cmd>Emend<CR>
   nnoremap <silent> <Leader>eo <Cmd>EmendOutline<CR>

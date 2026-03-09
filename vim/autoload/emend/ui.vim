@@ -18,6 +18,7 @@ let s:results = []        " list of result dicts
 let s:selected = 0        " currently highlighted index
 let s:query = ''
 let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
+let s:all_line_hl = []    " per-line highlight ranges for re-application
 let s:is_interactive = 0
 let s:search_timer = -1
 let s:focus = 'list'
@@ -601,22 +602,38 @@ endfunction
 
 function! s:update_caret(old_idx, new_idx) abort
   " Swap ' > ' / '   ' prefix on the two affected lines.
-  " Result items start at line 3 (1-indexed), so 0-indexed line numbers are +2.
+  " Result items start at line 3 (1-indexed), so 0-indexed buf lines are +2.
   let l:old_lnum = a:old_idx + 2
   let l:new_lnum = a:new_idx + 2
-  
+
   let l:old_line = getbufline(s:list_buf, a:old_idx + 3)[0]
   let l:new_line = getbufline(s:list_buf, a:new_idx + 3)[0]
-  
+
   if empty(l:old_line) || empty(l:new_line)
     return
   endif
 
   let l:old_text = '   ' . strpart(l:old_line, 3)
   let l:new_text = ' > ' . strpart(l:new_line, 3)
-  
+
   call s:set_buf_line(s:list_buf, l:old_lnum, l:old_text)
   call s:set_buf_line(s:list_buf, l:new_lnum, l:new_text)
+
+  " Re-apply extmark highlights for the two modified lines
+  " (nvim_buf_set_lines destroys extmarks on replaced lines).
+  if has('nvim') && !empty(s:all_line_hl)
+    let l:ns = s:get_ns()
+    for [l:idx, l:row] in [[a:old_idx, l:old_lnum], [a:new_idx, l:new_lnum]]
+      if l:idx >= 0 && l:idx < len(s:all_line_hl)
+        for [l:start, l:end, l:group] in s:all_line_hl[l:idx]
+          call nvim_buf_set_extmark(s:list_buf, l:ns, l:row, l:start, {
+                \ 'end_col': l:end,
+                \ 'hl_group': l:group,
+                \ })
+        endfor
+      endif
+    endfor
+  endif
 endfunction
 
 function! emend#ui#goto_first() abort
@@ -692,15 +709,15 @@ function! s:render_list() abort
   " Compute cwd prefix once for all items.
   let l:cwd = getcwd() . '/'
 
-  let l:all_hl = []
+  let s:all_line_hl = []
   for l:i in range(len(s:results))
     let [l:text, l:hl] = s:format_result_line(s:results[l:i], l:i, l:cwd)
     call add(l:lines, l:text)
-    call add(l:all_hl, l:hl)
+    call add(s:all_line_hl, l:hl)
   endfor
 
   call s:set_buf_lines(s:list_buf, l:lines)
-  call s:apply_list_highlights(l:all_hl)
+  call s:apply_list_highlights(s:all_line_hl)
   call s:highlight_selected()
 endfunction
 
