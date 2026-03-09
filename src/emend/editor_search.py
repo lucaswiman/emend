@@ -1161,10 +1161,11 @@ class EditorSearchEngine:
         # Find the reference at (line, col) by extracting the word at cursor position
         # and matching by identifier name rather than column proximity
         target_qn = None
+        # Determine QN separator based on file extension
+        qn_sep = "/" if file.endswith((".ts", ".tsx", ".js", ".jsx")) else "."
 
         # Extract the identifier at the cursor position from the source
         lines = content.split('\n')
-        target_qn = None
         if line <= len(lines):
             line_text = lines[line - 1]
             # Find word boundaries around the cursor position
@@ -1183,15 +1184,33 @@ class EditorSearchEngine:
                         start -= 1
                     # Handle case where cursor is not on identifier (e.g., on whitespace)
                     if not (line_text[cursor_idx].isalnum() or line_text[cursor_idx] == '_'):
-                        # Try moving back to find an identifier
-                        start = cursor_idx
-                        while start > 0 and not (line_text[start].isalnum() or line_text[start] == '_'):
-                            start -= 1
-                        if start < 0 or not (line_text[start].isalnum() or line_text[start] == '_'):
-                            logger.debug(f"goto_local: cursor not on identifier, skipping reference search")
+                        # Try moving RIGHT first to find an identifier (more natural for "cursor before word")
+                        right = cursor_idx + 1
+                        while right < len(line_text) and not (line_text[right].isalnum() or line_text[right] == '_'):
+                            right += 1
+                        # Try moving LEFT to find an identifier
+                        left = cursor_idx
+                        while left > 0 and not (line_text[left].isalnum() or line_text[left] == '_'):
+                            left -= 1
+
+                        found_right = right < len(line_text) and (line_text[right].isalnum() or line_text[right] == '_')
+                        found_left = left >= 0 and (line_text[left].isalnum() or line_text[left] == '_')
+
+                        if found_right and found_left:
+                            # Pick the closer one; prefer right on ties (cursor-before-word is more common)
+                            if (right - cursor_idx) <= (cursor_idx - left):
+                                cursor_idx = right
+                            else:
+                                cursor_idx = left
+                        elif found_right:
+                            cursor_idx = right
+                        elif found_left:
+                            cursor_idx = left
                         else:
-                            # Found identifier to the left, recompute end
-                            cursor_idx = start
+                            logger.debug(f"goto_local: cursor not on identifier, skipping reference search")
+
+                        # Recompute start from the chosen cursor position
+                        start = cursor_idx
 
                     if cursor_idx >= 0 and (line_text[cursor_idx].isalnum() or line_text[cursor_idx] == '_'):
                         # Find end of identifier (move right while alphanumeric/underscore)
@@ -1202,9 +1221,6 @@ class EditorSearchEngine:
                         logger.debug(f"goto_local: extracted identifier='{identifier}' from cursor at col={col}")
 
                         # Find the reference with matching identifier (last component of QN)
-                        # Determine QN separator based on file extension
-                        qn_sep = "/" if file.endswith((".ts", ".tsx", ".js", ".jsx")) else "."
-
                         for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
                             if r_line == line:
                                 qn_parts = qn.split(qn_sep)
@@ -1242,8 +1258,11 @@ class EditorSearchEngine:
         # 1. Local definition in the same file
         local_defs = []
         all_refs = []
+        resolved_qn = target_qn
         for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
-            if qn == target_qn:
+            # Match by exact QN, or by suffix when target_qn is a bare name from bindings
+            if qn == target_qn or (qn_sep not in target_qn and qn.endswith(qn_sep + target_qn)):
+                resolved_qn = qn  # upgrade to fully-qualified name
                 all_refs.append((r_line, r_col))
                 if r_kind in ("definition", "write"):
                     local_defs.append((r_line, r_col))
@@ -1253,17 +1272,16 @@ class EditorSearchEngine:
             all_refs.sort()
             local_defs = [all_refs[0]]
 
-
         if local_defs:
             local_defs.sort()
             r_line, r_col = local_defs[0]
             item = {
-                "name": target_qn.split(qn_sep)[-1],
+                "name": resolved_qn.split(qn_sep)[-1],
                 "kind": "variable",
                 "file_path": str(file_path),
                 "line": r_line,
                 "col": r_col,
-                "qualified_name": target_qn,
+                "qualified_name": resolved_qn,
             }
             res = SearchResult(items=[item], elapsed_ms=0, mode="symbol")
             res.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
