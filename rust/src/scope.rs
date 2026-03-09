@@ -924,6 +924,7 @@ impl FileScope {
                 decorators: Vec::new(),
                 decorator_line_start: None,
                 param_names: Vec::new(),
+                bases: Vec::new(),
             });
         }
 
@@ -969,6 +970,7 @@ impl FileScope {
                          decorators: Vec::new(),
                          decorator_line_start: None,
                          param_names: Vec::new(),
+                         bases: Vec::new(),
                      });
                 }
             }
@@ -1267,10 +1269,12 @@ impl ScopeResolver {
 
         // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
-        if node_kind == "identifier" {
+        if node_kind == self.config.pattern_matching.identifier {
             // Skip if it's the 'attribute' field of an 'attribute' node
+            let attr_kind = &self.config.pattern_matching.attribute;
+            let attr_field = &self.config.pattern_matching.attr_field;
             let is_attr_name = node.parent().map_or(false, |p| {
-                p.kind() == "attribute" && p.child_by_field_name("attribute") == Some(node)
+                !attr_kind.is_empty() && p.kind() == attr_kind && p.child_by_field_name(attr_field) == Some(node)
             });
             // Skip language keywords that tree-sitter reports as identifiers
             let name = node_text(node, source);
@@ -1300,7 +1304,7 @@ impl ScopeResolver {
         }
 
         // Process attribute access nodes (e.g., `obj.attr`)
-        if node_kind == "attribute" {
+        if !self.config.pattern_matching.attribute.is_empty() && node_kind == self.config.pattern_matching.attribute {
             // Build the full dotted name and resolve.
             let kind = self.classify_reference(&node, in_import);
             if let Some(full_name) = self.collect_dotted_name(&node, source) {
@@ -1329,19 +1333,24 @@ impl ScopeResolver {
             loop {
                 let child = cursor.node();
                 let next_scope = if is_scope_creator {
-                    // Switch to new scope only for children that are truly "inside".
-                    match node_kind {
-                        "class_definition" => {
-                            if child.kind() == "block" { scope_for_children } else { current_scope }
+                    // Switch to new scope only for children that are truly "inside" or part of parameters.
+                    // Most languages bind parameters in the function scope.
+                    // The name itself is bound in the outer scope.
+                    let name_field = self.config.symbols.name_field();
+                    if node.child_by_field_name(name_field) == Some(child) {
+                        current_scope
+                    } else if child.kind() == "identifier" && node_kind != "module" && node_kind != "program" {
+                        // Heuristic: if it's an identifier but not the 'name' field, it might be the name.
+                        // Let's check if it IS the name.
+                        let mut name_cursor = node.walk();
+                        let first_id = node.children(&mut name_cursor).find(|c| c.kind() == "identifier");
+                        if first_id == Some(child) {
+                            current_scope
+                        } else {
+                            scope_for_children
                         }
-                        "function_definition" | "lambda" => {
-                            if matches!(child.kind(), "block" | "parameters" | "expression" | "body") {
-                                scope_for_children
-                            } else {
-                                current_scope
-                            }
-                        }
-                        _ => scope_for_children // comprehensions etc.
+                    } else {
+                        scope_for_children
                     }
                 } else {
                     current_scope
@@ -1406,8 +1415,23 @@ impl ScopeResolver {
     /// Check if a node is in a write (assignment) context.
     fn is_write_context(&self, node: &tree_sitter::Node) -> bool {
         let mut current = *node;
+        let mut in_parameter = false;
+        
         while let Some(parent) = current.parent() {
             let pk = parent.kind();
+
+            // Check if we are inside a parameter container
+            let params_field = self.config.symbols.parameters_field();
+            if pk == params_field || pk == "parameters" || pk == "lambda_parameters" || pk == "formal_parameters" {
+                in_parameter = true;
+                break;
+            }
+
+            // Check if any intermediate node is a parameter node
+            if self.config.bindings.parameters.param_nodes.contains(&pk.to_string()) {
+                 in_parameter = true;
+                 break;
+            }
 
             // Check configured binding rules
             let rules = [
@@ -1423,6 +1447,16 @@ impl ScopeResolver {
                     if let Some(target) = parent.child_by_field_name(&rule.target) {
                         if target.byte_range().contains(&node.start_byte()) {
                             return true;
+                        }
+                    } else {
+                        // Fallback: check if node is inside an as_pattern alias
+                        // (handles with_clause and except_clause nesting)
+                        let as_pattern_kind = &self.config.pattern_matching.as_pattern;
+                        let aliases = Self::find_all_as_pattern_aliases(&parent, as_pattern_kind);
+                        for alias in aliases {
+                            if alias.byte_range().contains(&node.start_byte()) {
+                                return true;
+                            }
                         }
                     }
                     return false;
@@ -1440,6 +1474,14 @@ impl ScopeResolver {
             }
             current = parent;
         }
+
+        if in_parameter {
+            // In a parameter context, identifiers are usually definitions/writes
+            // unless they are part of a type annotation or default value.
+            // But for simple cases, returning true here is better than false.
+            return true;
+        }
+
         false
     }
 
@@ -1681,7 +1723,6 @@ impl ScopeResolver {
     ) {
         let node = cursor.node();
         let node_kind = node.kind();
-        // eprintln!("DEBUG: node_kind={}", node_kind);
 
         // Check if this node creates a new scope
         let scope_for_children =
@@ -1703,7 +1744,16 @@ impl ScopeResolver {
 
                     // Function/class names are bound in the ENCLOSING scope
                     if creator.kind == ScopeKind::Function || creator.kind == ScopeKind::Class {
-                        if let Some(name_node) = node.child_by_field_name("name") {
+                        let name_field = self.config.symbols.name_field();
+                        let mut name_node = node.child_by_field_name(name_field);
+                        
+                        // Fallback: search for identifier child if field not found (e.g. TS)
+                        if name_node.is_none() {
+                            let mut cursor = node.walk();
+                            name_node = node.children(&mut cursor).find(|c| c.kind() == "identifier");
+                        }
+
+                        if let Some(name_node) = name_node {
                             let name = ctx.text(name_node).to_string();
                             let mut signature = None;
                             let mut returns = None;
@@ -1727,7 +1777,15 @@ impl ScopeResolver {
                             };
 
                             if creator.kind == ScopeKind::Function {
-                                if let Some(params) = node.child_by_field_name("parameters") {
+                                let params_field = self.config.symbols.parameters_field();
+                                let mut params_node = node.child_by_field_name(params_field);
+                                // TS fallback
+                                if params_node.is_none() {
+                                    let mut cursor = node.walk();
+                                    params_node = node.children(&mut cursor).find(|c| c.kind() == "formal_parameters");
+                                }
+
+                                if let Some(params) = params_node {
                                     signature = Some(ctx.text(params).to_string());
                                 }
                                 if let Some(ret) = node.child_by_field_name("return_type") {
@@ -1770,7 +1828,15 @@ impl ScopeResolver {
                     }
 
                     if creator.kind == ScopeKind::Function {
-                        if let Some(params) = node.child_by_field_name("parameters") {
+                        let params_field = self.config.symbols.parameters_field();
+                        let mut params_node = node.child_by_field_name(params_field);
+                        // TS fallback
+                        if params_node.is_none() {
+                            let mut cursor = node.walk();
+                            params_node = node.children(&mut cursor).find(|c| c.kind() == "formal_parameters");
+                        }
+
+                        if let Some(params) = params_node {
                             self.collect_parameters(ctx, &params, scope_id);
                         }
                     }
@@ -1780,6 +1846,7 @@ impl ScopeResolver {
             } else {
                 current_scope
             };
+
 
         // Collect imports
         if node_kind == self.config.imports.import_statement
@@ -1803,6 +1870,16 @@ impl ScopeResolver {
                 if let Some(target) = node.child_by_field_name(&rule.target) {
                     let type_annotation = node.child_by_field_name("type").map(|n| ctx.text(n).to_string());
                     self.collect_binding_targets(ctx, &target, scope_for_children, kind, type_annotation);
+                } else {
+                    // Fallback: collect all as_pattern aliases in nested structures.
+                    // In tree-sitter-python, `with_clause` contains multiple `with_item`
+                    // children each with an as_pattern, and `except_clause` has an
+                    // as_pattern as its `value` field.
+                    let as_pattern_kind = &self.config.pattern_matching.as_pattern;
+                    let aliases = Self::find_all_as_pattern_aliases(&node, as_pattern_kind);
+                    for alias in aliases {
+                        self.collect_binding_targets(ctx, &alias, scope_for_children, kind, None);
+                    }
                 }
             }
         }
@@ -1919,6 +1996,38 @@ impl ScopeResolver {
         }
     }
 
+    /// Search a node and its descendants (up to depth 3) for all `as_pattern`
+    /// nodes and return their `alias` fields.  This handles `with_clause` →
+    /// `with_item` → `as_pattern` (possibly multiple items) and
+    /// `except_clause` → `as_pattern` nesting in tree-sitter-python.
+    fn find_all_as_pattern_aliases<'t>(
+        node: &tree_sitter::Node<'t>,
+        as_pattern_kind: &str,
+    ) -> Vec<tree_sitter::Node<'t>> {
+        let mut results = Vec::new();
+        let mut stack: Vec<(tree_sitter::Node<'t>, usize)> = vec![(*node, 0)];
+        while let Some((current, depth)) = stack.pop() {
+            if current.kind() == as_pattern_kind {
+                if let Some(alias) = current.child_by_field_name("alias") {
+                    results.push(alias);
+                }
+                continue; // Don't recurse into as_pattern children
+            }
+            if depth < 3 {
+                let mut cursor = current.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        stack.push((cursor.node(), depth + 1));
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        results
+    }
+
     /// Collect function parameters as bindings.
     fn collect_parameters(
         &self,
@@ -1935,16 +2044,21 @@ impl ScopeResolver {
             let ck = child.kind();
 
             if self.config.bindings.parameters.param_nodes.contains(&ck.to_string()) {
-                let name_node = if ck == "identifier" {
+                let mut name_node = if ck == "identifier" {
                     Some(child)
                 } else {
                     child.child_by_field_name(&self.config.bindings.parameters.name_field)
                 };
+                
+                // Fallback for TS: required_parameter often has identifier as first named child without field
+                if name_node.is_none() {
+                    name_node = child.named_child(0);
+                }
 
                 if let Some(n) = name_node {
-                    let name = ctx.text(n);
+                    let name = ctx.text(n).to_string();
                     let binding = Binding {
-                        name: name.to_string(),
+                        name: name.clone(),
                         kind: BindingKind::Parameter,
                         line: n.start_position().row,
                         column: n.start_position().column,
@@ -1956,6 +2070,16 @@ impl ScopeResolver {
                         created_scope: None,
                     };
                     ctx.add_binding(scope_id, binding);
+
+                    // Add to definitions so it appears in symbol index
+                    let qn = self.compute_qn(&ctx.scopes, &ctx.scope_index, ctx.file_path, scope_id, &name);
+                    let loc = Location {
+                        file: ctx.file_path.to_path_buf(),
+                        line: n.start_position().row + 1,
+                        column: n.start_position().column + 1,
+                        byte_offset: n.start_byte(),
+                    };
+                    ctx.definitions.push((qn, loc));
                 }
             }
 
@@ -2828,5 +2952,144 @@ x = 20
         assert!(has_write, "Should have write references, got: {:?}", ref_kinds);
         assert!(has_read, "Should have read references, got: {:?}", ref_kinds);
         assert!(has_call, "Should have call references (print), got: {:?}", ref_kinds);
+    }
+
+    #[test]
+    fn test_with_as_binding() {
+        let source = r#"
+def read_file():
+    with open('f') as fh:
+        data = fh.read()
+    return data
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let func_scope = file_scope.scopes.iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("Should have a function scope");
+
+        assert!(
+            func_scope.bindings.contains_key("fh"),
+            "Should track 'with ... as fh' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_with_multiple_as_bindings() {
+        let source = r#"
+def func():
+    with open('a') as fh, open('b') as gh:
+        print(fh, gh)
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let func_scope = file_scope.scopes.iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("Should have a function scope");
+
+        assert!(
+            func_scope.bindings.contains_key("fh"),
+            "Should track first 'with ... as fh' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            func_scope.bindings.contains_key("gh"),
+            "Should track second 'with ... as gh' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_with_as_reference_is_write() {
+        let source = r#"
+def func():
+    with open('f') as fh:
+        data = fh.read()
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        // The 'fh' at the binding site should be a write reference
+        // Find the 'fh' reference at its binding site (first occurrence)
+        let fh_refs: Vec<_> = file_scope.references.iter()
+            .filter(|r| r.qn.name == "test.func.fh")
+            .collect();
+        assert!(!fh_refs.is_empty(), "Should have references for 'fh'");
+        let fh_binding_ref = &fh_refs[0];
+        assert_eq!(
+            fh_binding_ref.kind, ReferenceKind::Write,
+            "'fh' at binding site should be Write, got {:?}", fh_binding_ref.kind
+        );
+    }
+
+    #[test]
+    fn test_except_as_reference_is_write() {
+        let source = r#"
+def handler():
+    try:
+        pass
+    except ValueError as e:
+        print(e)
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        // The 'e' at the binding site should be a write reference
+        // Find the 'e' reference at its binding site (first occurrence)
+        let e_refs: Vec<_> = file_scope.references.iter()
+            .filter(|r| r.qn.name == "test.handler.e")
+            .collect();
+        assert!(!e_refs.is_empty(), "Should have references for 'e'");
+        let e_binding_ref = &e_refs[0];
+        assert_eq!(
+            e_binding_ref.kind, ReferenceKind::Write,
+            "'e' at binding site should be Write, got {:?}", e_binding_ref.kind
+        );
+    }
+
+    #[test]
+    fn test_except_as_binding() {
+        let source = r#"
+def handler():
+    try:
+        pass
+    except ValueError as e:
+        print(e)
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let func_scope = file_scope.scopes.iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("Should have a function scope");
+
+        assert!(
+            func_scope.bindings.contains_key("e"),
+            "Should track 'except ... as e' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
     }
 }

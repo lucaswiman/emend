@@ -119,11 +119,12 @@ function! emend#stop() abort
     return
   endif
   call emend#send('shutdown', {}, {_ -> 0})
-  call timer_start(500, {_ -> s:force_stop()})
+  let l:current_job = s:job
+  call timer_start(500, {t -> s:force_stop(l:current_job)})
 endfunction
 
-function! s:force_stop() abort
-  if s:job is v:null
+function! s:force_stop(job) abort
+  if a:job isnot s:job || s:job is v:null
     return
   endif
   if has('nvim')
@@ -332,7 +333,12 @@ function! s:show_status(result) abort
   if s:show_rpc_error('emend: ', a:result)
     return
   endif
-  let l:info = a:result.items[0]
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: status unavailable'
+    return
+  endif
+  let l:info = l:items[0]
   echo 'emend index: '
         \ . l:info.symbol_count . ' symbols, '
         \ . l:info.reference_count . ' refs, '
@@ -359,7 +365,171 @@ endfunction
 
 function! emend#goto(identifier, ...) abort
   let l:Cb = a:0 > 0 ? a:1 : function('s:on_goto_result')
-  call emend#send('mapping_goto', {'identifier': a:identifier}, l:Cb)
+  let [l:line_num, l:col] = getpos('.')[1:2]
+  call emend#send('mapping_goto', {
+        \ 'identifier': a:identifier,
+        \ 'file': expand('%:p'),
+        \ 'line': l:line_num,
+        \ 'col': l:col,
+        \ }, l:Cb)
+endfunction
+
+function! emend#rename(new_name) abort
+  let l:old_name = expand('<cword>')
+  let l:new_name = a:new_name
+  if empty(l:new_name)
+    let l:new_name = input('Rename ' . l:old_name . ' to: ', l:old_name)
+  endif
+  if empty(l:new_name) || l:new_name ==# l:old_name
+    return
+  endif
+
+  " Resolve QN first
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('goto_local', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_rename_resolve(res, l:new_name)})
+endfunction
+
+function! s:on_rename_resolve(result, new_name) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: could not resolve symbol at cursor' | echohl None
+    return
+  endif
+  let l:item = l:items[0]
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+  
+  call emend#send('rename_preview', {
+        \ 'qualified_name': l:qn,
+        \ 'new_name': a:new_name,
+        \ 'file': l:file,
+        \ }, {res -> emend#ui#show_rename_preview(res, l:qn, a:new_name, l:file)})
+endfunction
+
+" ---------------------------------------------------------------------------
+" Global completion (C-Space in any buffer)
+" ---------------------------------------------------------------------------
+
+function! emend#complete_at_cursor() abort
+  let l:line_text = getline('.')
+  let l:line_num = line('.')
+  let l:col = col('.')
+  let l:before = strpart(l:line_text, 0, l:col - 1)
+
+  " Check for dotted prefix (e.g. "DocumentRequestConfig.ing")
+  let l:dotted = matchstr(l:before, '\k\+\.\k*$')
+  if !empty(l:dotted)
+    let l:word = l:dotted
+    " For dotted completions, only replace the part after the last dot.
+    let l:replace_len = len(matchstr(l:dotted, '\.\zs\k*$'))
+  else
+    let l:word = matchstr(l:before, '\k\+$')
+    let l:replace_len = len(l:word)
+  endif
+
+  if empty(l:word) | return | endif
+
+  call emend#send('complete', {
+        \ 'prefix': l:word,
+        \ 'file': expand('%:p'),
+        \ 'line': l:line_num,
+        \ 'col': l:col,
+        \ }, {res -> s:on_complete_result(res, l:replace_len)})
+endfunction
+
+function! s:on_complete_result(result, replace_len) abort
+  if has_key(a:result, 'error') | return | endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items) | return | endif
+
+  " Don't auto-insert or auto-select; let user browse with arrows.
+  let s:save_cot = &completeopt
+  set completeopt=menuone,noinsert,noselect
+
+  " Install dot-chaining BEFORE showing the popup, so typing '.' while
+  " browsing the menu accepts the current item + triggers attribute completion.
+  inoremap <buffer><silent> . <C-y>.<Cmd>call <SID>dot_complete()<CR>
+
+  let l:start_col = col('.') - a:replace_len
+  call complete(l:start_col, l:items)
+
+  " Restore completeopt and clean up dot mapping after the popup closes.
+  augroup emend_complete_restore
+    autocmd!
+    autocmd CompleteDone * ++once call s:on_complete_done()
+  augroup END
+endfunction
+
+function! s:on_complete_done() abort
+  let &completeopt = s:save_cot
+  " Keep the dot mapping alive briefly for the Enter-then-dot case.
+  " It will be cleaned up on InsertLeave or by the next dot_complete call.
+  augroup emend_dot_cleanup
+    autocmd!
+    autocmd InsertLeave * ++once silent! iunmap <buffer> .
+  augroup END
+endfunction
+
+function! s:dot_complete() abort
+  " Remove the one-shot dot mapping.
+  silent! iunmap <buffer> .
+  augroup emend_dot_cleanup
+    autocmd!
+  augroup END
+  " Trigger completion directly. We're called from <Cmd> within insert mode,
+  " so the '.' has already been inserted into the buffer.
+  call emend#complete_at_cursor()
+endfunction
+
+function! emend#jump_to(file, line) abort
+  if empty(a:file) || !filereadable(a:file)
+    return
+  endif
+
+  let l:target = fnamemodify(a:file, ':p')
+  let l:current = expand('%:p')
+
+  " Case 1: Same file — just move the cursor.
+  if l:target ==# l:current
+    " Mark current position in jumplist so Ctrl-O returns here.
+    normal! m'
+    execute a:line
+    normal! zz
+    return
+  endif
+
+  " Case 2: File already open in a tab — switch to it.
+  " Search all tab pages and windows for a buffer matching the target path.
+  for l:tab in range(1, tabpagenr('$'))
+    for l:win in range(1, tabpagewinnr(l:tab, '$'))
+      let l:bufnr = tabpagebuflist(l:tab)[l:win - 1]
+      if fnamemodify(bufname(l:bufnr), ':p') ==# l:target
+        " Found it. Switch tab, switch window, go to line.
+        execute 'tabnext ' . l:tab
+        execute l:win . 'wincmd w'
+        " Mark position in jumplist before moving.
+        normal! m'
+        execute a:line
+        normal! zz
+        return
+      endif
+    endfor
+  endfor
+
+  " Case 3: File not open anywhere — open it in the current window.
+  " normal! m' sets the ' mark so Ctrl-O returns to this position/buffer.
+  normal! m'
+  execute 'edit ' . fnameescape(l:target)
+  execute a:line
+  normal! zz
 endfunction
 
 function! s:on_goto_result(result) abort
@@ -378,9 +548,7 @@ function! s:on_goto_result(result) abort
     let l:item = l:items[0]
     " Local result: has file_path + line from the project index.
     if has_key(l:item, 'file_path') && has_key(l:item, 'line')
-      execute 'edit ' . fnameescape(l:item.file_path)
-      execute l:item.line
-      normal! zz
+      call emend#jump_to(l:item.file_path, l:item.line)
       return
     endif
     " KB result: has resolved_path from cross-repo mapping.
@@ -388,10 +556,8 @@ function! s:on_goto_result(result) abort
       let l:path = l:item.resolved_path
       if isdirectory(l:path)
         echo 'emend: mapped to directory: ' . l:path
-      elseif filereadable(l:path)
-        execute 'edit ' . fnameescape(l:path)
       else
-        echo 'emend: resolved to ' . l:path . ' (not yet available — clone may be in progress)'
+        call emend#jump_to(l:path, get(l:item, 'line', 1))
       endif
       return
     endif
@@ -454,10 +620,8 @@ function! s:on_module_resolve(result) abort
   if l:path !=# ''
     if isdirectory(l:path)
       echo 'emend: module maps to directory: ' . l:path
-    elseif filereadable(l:path)
-      execute 'edit ' . fnameescape(l:path)
     else
-      echo 'emend: resolved to ' . l:path
+      call emend#jump_to(l:path, 1)
     endif
   else
     let l:repo = get(l:item, 'repo', '')

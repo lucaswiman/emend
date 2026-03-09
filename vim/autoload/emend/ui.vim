@@ -18,6 +18,7 @@ let s:results = []        " list of result dicts
 let s:selected = 0        " currently highlighted index
 let s:query = ''
 let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
+let s:all_line_hl = []    " per-line highlight ranges for re-application
 let s:is_interactive = 0
 let s:search_timer = -1
 let s:focus = 'list'
@@ -38,6 +39,7 @@ highlight default EmendKindFunc guifg=#3ad900 ctermfg=76
 highlight default EmendKindMethod guifg=#80fcff ctermfg=123
 highlight default EmendKindAsync guifg=#cc99ff ctermfg=183
 highlight default EmendKindVar guifg=#ff9d00 ctermfg=208
+highlight default EmendKindFile guifg=#ffffff ctermfg=15
 highlight default EmendName guifg=#e1efff gui=bold ctermfg=255 cterm=bold
 highlight default EmendFilePath guifg=#7e8a93 ctermfg=102
 highlight default EmendSelected guibg=#1d4e7a gui=bold ctermbg=24 cterm=bold
@@ -50,6 +52,7 @@ let s:KIND_HIGHLIGHTS = {
       \ 'async_function': 'EmendKindAsync',
       \ 'async_method': 'EmendKindAsync',
       \ 'variable': 'EmendKindVar',
+      \ 'file': 'EmendKindFile',
       \ }
 
 " Kind abbreviations (hoisted to avoid per-call allocation).
@@ -60,6 +63,7 @@ let s:KIND_ICONS = {
       \ 'async_function': 'af',
       \ 'async_method': 'am',
       \ 'variable': 'v',
+      \ 'file': 'F',
       \ }
 
 " ---------------------------------------------------------------------------
@@ -89,10 +93,11 @@ function! emend#ui#interactive() abort
   endif
 endfunction
 
-function! emend#ui#search(query) abort
+function! emend#ui#search(query, ...) abort
   let s:query = a:query
   let s:is_interactive = 0
-  call emend#search(a:query)
+  let l:params = a:0 > 0 ? a:1 : {}
+  call emend#search(a:query, l:params)
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -115,6 +120,10 @@ function! emend#ui#on_search_result(result) abort
   let s:last_result = a:result
   let s:results = get(a:result, 'items', [])
   let s:selected = 0
+  
+  if s:query !=# ''
+    call s:save_history(s:query)
+  endif
 
   if s:ui_is_open()
     call s:render_list()
@@ -315,7 +324,7 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
     let l:row = max([4, l:row]) 
   endif
 
-  let s:list_win = nvim_open_win(s:list_buf, v:true, {
+  let l:opts = {
         \ 'relative': 'editor',
         \ 'row': l:row,
         \ 'col': l:col,
@@ -323,12 +332,16 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'height': a:height,
         \ 'style': 'minimal',
         \ 'border': 'rounded',
-        \ 'title': ' results ',
-        \ 'title_pos': 'center',
-        \ })
+        \ }
+  if has('nvim-0.9')
+    let l:opts.title = ' results '
+    let l:opts.title_pos = 'center'
+  endif
+
+  let s:list_win = nvim_open_win(s:list_buf, v:true, l:opts)
   call nvim_win_set_option(s:list_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder,CursorLine:EmendSelected')
 
-  let s:preview_win = nvim_open_win(s:preview_buf, v:false, {
+  let l:p_opts = {
         \ 'relative': 'editor',
         \ 'row': l:row,
         \ 'col': l:col + a:list_w + 2,
@@ -336,9 +349,13 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
         \ 'height': a:height,
         \ 'style': 'minimal',
         \ 'border': 'rounded',
-        \ 'title': ' preview ',
-        \ 'title_pos': 'center',
-        \ })
+        \ }
+  if has('nvim-0.9')
+    let l:p_opts.title = ' preview '
+    let l:p_opts.title_pos = 'center'
+  endif
+
+  let s:preview_win = nvim_open_win(s:preview_buf, v:false, l:p_opts)
   call nvim_win_set_option(s:preview_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
 
   call nvim_win_set_option(s:list_win, 'cursorline', v:true)
@@ -347,7 +364,7 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
   call nvim_win_set_option(s:preview_win, 'wrap', v:false)
   
   if s:is_interactive
-    let s:input_win = nvim_open_win(s:input_buf, v:true, {
+    let l:i_opts = {
           \ 'relative': 'editor',
           \ 'row': l:row - 3,
           \ 'col': l:col,
@@ -355,9 +372,12 @@ function! s:open_nvim_float(height, list_w, preview_w) abort
           \ 'height': 1,
           \ 'style': 'minimal',
           \ 'border': 'rounded',
-          \ 'title': ' emend search ',
-          \ 'title_pos': 'left',
-          \ })
+          \ }
+    if has('nvim-0.9')
+      let l:i_opts.title = ' emend search '
+      let l:i_opts.title_pos = 'left'
+    endif
+    let s:input_win = nvim_open_win(s:input_buf, v:true, l:i_opts)
     call nvim_win_set_option(s:input_win, 'winhighlight', 'Normal:Normal,FloatBorder:FloatBorder')
     call nvim_win_set_option(s:input_win, 'number', v:false)
   endif
@@ -473,6 +493,7 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('n', 'G',         '<Cmd>call emend#ui#goto_last()<CR>')
     call s:map_current_buf('n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
     call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
+    call s:map_current_buf('n', '<C-q>',     '<Cmd>call emend#ui#send_to_quickfix()<CR>')
   endif
 
   " Preview buffer maps
@@ -500,6 +521,10 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('i', '<Up>',      '<Cmd>call emend#ui#move(-1)<CR>')
     call s:map_current_buf('i', '<Tab>',     '<Esc><Cmd>call emend#ui#toggle_focus()<CR>')
     call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
+    call s:map_current_buf('i', '<C-q>',     '<Esc><Cmd>call emend#ui#send_to_quickfix()<CR>')
+    call s:map_current_buf('i', '<C-r>',     '<Cmd>call emend#ui#history(1)<CR>')
+    call s:map_current_buf('i', '<C-f>',     '<Cmd>call emend#ui#history(-1)<CR>')
+    call s:map_current_buf('i', '<C-Space>', '<Cmd>call emend#ui#complete()<CR>')
 
     " Trigger search on change
     augroup emend_input
@@ -564,13 +589,51 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! emend#ui#move(delta) abort
+  let l:old = s:selected
   let l:new = max([0, min([s:selected + a:delta, len(s:results) - 1])])
-  if l:new == s:selected
+  if l:new == l:old
     return
   endif
   let s:selected = l:new
+  call s:update_caret(l:old, l:new)
   call s:highlight_selected()
   call s:render_preview()
+endfunction
+
+function! s:update_caret(old_idx, new_idx) abort
+  " Swap ' > ' / '   ' prefix on the two affected lines.
+  " Result items start at line 3 (1-indexed), so 0-indexed buf lines are +2.
+  let l:old_lnum = a:old_idx + 2
+  let l:new_lnum = a:new_idx + 2
+
+  let l:old_line = getbufline(s:list_buf, a:old_idx + 3)[0]
+  let l:new_line = getbufline(s:list_buf, a:new_idx + 3)[0]
+
+  if empty(l:old_line) || empty(l:new_line)
+    return
+  endif
+
+  let l:old_text = '   ' . strpart(l:old_line, 3)
+  let l:new_text = ' > ' . strpart(l:new_line, 3)
+
+  call s:set_buf_line(s:list_buf, l:old_lnum, l:old_text)
+  call s:set_buf_line(s:list_buf, l:new_lnum, l:new_text)
+
+  " Re-apply extmark highlights for the two modified lines
+  " (nvim_buf_set_lines destroys extmarks on replaced lines).
+  if has('nvim') && !empty(s:all_line_hl)
+    let l:ns = s:get_ns()
+    for [l:idx, l:row] in [[a:old_idx, l:old_lnum], [a:new_idx, l:new_lnum]]
+      if l:idx >= 0 && l:idx < len(s:all_line_hl)
+        for [l:start, l:end, l:group] in s:all_line_hl[l:idx]
+          call nvim_buf_set_extmark(s:list_buf, l:ns, l:row, l:start, {
+                \ 'end_col': l:end,
+                \ 'hl_group': l:group,
+                \ })
+        endfor
+      endif
+    endfor
+  endif
 endfunction
 
 function! emend#ui#goto_first() abort
@@ -592,9 +655,7 @@ function! emend#ui#accept() abort
   call s:close_ui()
 
   if l:file !=# '' && filereadable(l:file)
-    execute 'edit ' . fnameescape(l:file)
-    execute l:line
-    normal! zz
+    call emend#jump_to(l:file, l:line)
   elseif l:file !=# ''
     echohl WarningMsg
     echom 'emend: file not readable: ' . l:file
@@ -648,15 +709,15 @@ function! s:render_list() abort
   " Compute cwd prefix once for all items.
   let l:cwd = getcwd() . '/'
 
-  let l:all_hl = []
+  let s:all_line_hl = []
   for l:i in range(len(s:results))
     let [l:text, l:hl] = s:format_result_line(s:results[l:i], l:i, l:cwd)
     call add(l:lines, l:text)
-    call add(l:all_hl, l:hl)
+    call add(s:all_line_hl, l:hl)
   endfor
 
   call s:set_buf_lines(s:list_buf, l:lines)
-  call s:apply_list_highlights(l:all_hl)
+  call s:apply_list_highlights(s:all_line_hl)
   call s:highlight_selected()
 endfunction
 
@@ -830,7 +891,7 @@ function! s:render_preview() abort
 endfunction
 
 function! s:set_preview_title(title) abort
-  if has('nvim') && s:preview_win >= 0 && nvim_win_is_valid(s:preview_win)
+  if has('nvim-0.9') && s:preview_win >= 0 && nvim_win_is_valid(s:preview_win)
     call nvim_win_set_config(s:preview_win, {'title': a:title, 'title_pos': 'center'})
   endif
 endfunction
@@ -901,4 +962,157 @@ function! s:append_buf_lines(buf, lines) abort
     endif
   catch
   endtry
+endfunction
+
+" ---------------------------------------------------------------------------
+" Rename UI
+" ---------------------------------------------------------------------------
+
+let s:rename_state = {}
+
+function! emend#ui#show_rename_preview(result, qn, new_name, file) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: no changes for rename' | echohl None
+    return
+  endif
+
+  let s:rename_state = {
+        \ 'qn': a:qn,
+        \ 'new_name': a:new_name,
+        \ 'file': a:file,
+        \ }
+
+  let l:lines = [
+        \ '  RENAME PREVIEW',
+        \ '  Target: ' . a:qn,
+        \ '  New name: ' . a:new_name,
+        \ '  Press <CR> in the results list to apply, <Esc> to cancel.',
+        \ '',
+        \ ]
+
+  for l:item in l:items
+    let l:lines += ['--- ' . l:item.file_path, '']
+    let l:lines += split(l:item.diff, "\n")
+    call add(l:lines, '')
+  endfor
+
+  call s:open_ui()
+  call s:set_buf_lines(s:list_buf, ['  Rename Preview', '  ' . len(l:items) . ' files changed', '', '  <CR> Apply', '  <Esc> Cancel'])
+  call s:set_buf_lines(s:preview_buf, l:lines)
+  call setbufvar(s:preview_buf, '&filetype', 'diff')
+  
+  " Map <CR> in list window to confirm rename
+  call win_gotoid(s:list_win)
+  nnoremap <buffer> <silent> <CR> <Cmd>call emend#ui#rename_confirm()<CR>
+endfunction
+
+function! emend#ui#rename_confirm() abort
+  let l:state = s:rename_state
+  call s:close_ui()
+  echom 'emend: applying rename...'
+  call emend#send('rename_apply', {
+        \ 'qualified_name': l:state.qn,
+        \ 'new_name': l:state.new_name,
+        \ 'file': l:state.file,
+        \ }, {res -> s:on_rename_apply(res)})
+endfunction
+
+function! s:on_rename_apply(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:count = len(get(a:result, 'items', []))
+  echom 'emend: renamed symbol in ' . l:count . ' files. Reloading...'
+  checktime
+endfunction
+
+" ---------------------------------------------------------------------------
+" Quickfix
+" ---------------------------------------------------------------------------
+
+function! emend#ui#send_to_quickfix() abort
+  if empty(s:results)
+    return
+  endif
+  let l:qf = []
+  for l:item in s:results
+    call add(l:qf, {
+          \ 'filename': get(l:item, 'file_path', ''),
+          \ 'lnum': get(l:item, 'line', 1),
+          \ 'text': get(l:item, 'name', '') . ' [' . get(l:item, 'kind', '') . ']',
+          \ })
+  endfor
+  call setqflist(l:qf, 'r')
+  call s:close_ui()
+  copen
+endfunction
+
+" ---------------------------------------------------------------------------
+" Search History
+" ---------------------------------------------------------------------------
+
+let s:search_history = []
+let s:history_idx = -1
+
+function! s:save_history(query) abort
+  if empty(a:query) || a:query =~# '^\s*$' | return | endif
+  " Remove if already exists to move to top
+  let l:idx = index(s:search_history, a:query)
+  if l:idx >= 0
+    call remove(s:search_history, l:idx)
+  endif
+  call insert(s:search_history, a:query, 0)
+  if len(s:search_history) > 100
+    call remove(s:search_history, 100, -1)
+  endif
+  let s:history_idx = -1
+endfunction
+
+function! emend#ui#history(delta) abort
+  if empty(s:search_history) | return | endif
+  let s:history_idx = max([0, min([s:history_idx + a:delta, len(s:search_history) - 1])])
+  let l:query = s:search_history[s:history_idx]
+  
+  if s:input_buf >= 0 && bufexists(s:input_buf)
+    call s:set_buf_lines(s:input_buf, [l:query])
+    
+    " Move cursor to end of line in input window
+    if s:input_win >= 0 && nvim_win_is_valid(s:input_win)
+      call win_gotoid(s:input_win)
+      call cursor(1, len(l:query) + 1)
+    endif
+
+    " Trigger search
+    let s:query = l:query
+    call s:trigger_search()
+  endif
+endfunction
+
+function! emend#ui#complete() abort
+  if s:input_buf < 0 | return | endif
+  let l:line = getbufline(s:input_buf, 1)[0]
+  let l:col = col('.')
+  " Prefix is everything before cursor
+  let l:prefix = strpart(l:line, 0, l:col - 1)
+  " Extract last word
+  let l:prefix = matchstr(l:prefix, '\k*$')
+  
+  if empty(l:prefix) | return | endif
+  
+  call emend#send('complete', {'prefix': l:prefix}, {res -> s:on_complete(res, l:prefix)})
+endfunction
+
+function! s:on_complete(result, prefix) abort
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items) | return | endif
+  
+  " Format for complete()
+  let l:start_col = col('.') - len(a:prefix)
+  call complete(l:start_col, l:items)
 endfunction

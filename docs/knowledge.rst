@@ -80,35 +80,43 @@ Add, search, and manage free-form notes.
 +-----------------+----------------------------------------------------------------------+
 
 
-Identifier Mappings (``emend mapping``)
----------------------------------------
+Identifier and Module Mappings (``emend map``)
+---------------------------------------------
+
+emend provides a unified ``map`` command for managing both cross-service
+identifier mappings and module-to-repo mappings.
+
+Identifier mappings record relationships between symbols in different projects,
+while module mappings provide coarse information about where code for a
+specific module lives.
+
+Identifier Mappings
+~~~~~~~~~~~~~~~~~~~
 
 Record and query cross-service identifier relationships.
 
 .. code-block:: bash
 
    # Add a mapping
-   emend mapping add \
-       --source-project backend --source-id "users.UserService.create" --source-kind function \
-       --target-project gateway --target-id "POST /api/v1/users" --target-kind endpoint \
-       --relationship calls
+   emend map add \
+       backend "users.UserService.create" \
+       gateway "POST /api/v1/users" \
+       --rel calls --src-kind function --tgt-kind endpoint
 
-   # Search mappings
-   emend mapping search "UserService"
+   # Search mappings (FTS5 trigram)
+   emend map search "UserService"
 
    # Find all mappings for an identifier
-   emend mapping lookup "users.UserService.create"
+   emend map lookup "users.UserService.create"
 
    # Delete a mapping
-   emend mapping rm 1
+   emend map rm 1
 
 **Relationship types:** ``equivalent``, ``calls``, ``implements``, ``produces``, ``consumes``
 
-**Provenance:** ``manual``, ``heuristic``, ``llm``
 
-
-Module Mappings (``emend modmap``)
-----------------------------------
+Module Mappings
+~~~~~~~~~~~~~~~
 
 Map Python module prefixes to external repositories or local directories. When
 a mapping points to a GitHub repo, emend clones it automatically using ``gh``
@@ -117,22 +125,85 @@ and manages worktrees for different branches.
 .. code-block:: bash
 
    # Map a module prefix to a GitHub repo
-   emend modmap add payments --repo org/payments-service
+   emend map add-module payments --repo org/payments-service
 
    # Map to a specific branch and subdirectory
-   emend modmap add gateway --repo org/gateway --branch v2 --subpath src/gateway
+   emend map add-module gateway --repo org/gateway --branch v2 --subpath src/gateway
 
    # Map to a local directory
-   emend modmap add shared.utils --path /home/user/shared-utils
+   emend map add-module shared.utils --path /home/user/shared-utils
 
    # List all module mappings
-   emend modmap list
-
-   # Resolve a module name to a local path
-   emend modmap resolve payments.models.Order
+   emend map list-modules
 
    # Delete a mapping
-   emend modmap rm 1
+   emend map rm-module payments
+
+How to specify mappings
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The path (or repo + subpath) should point to the directory or file that
+**corresponds to the module prefix**. The prefix itself is stripped from the
+module name during resolution, and the remainder is appended to the mapped path.
+
+.. tip::
+
+   **Rule of Thumb:** The ``--repo`` + ``--subpath`` (or ``--path``) should
+   point to the **directory that IS the package** — i.e. the directory whose
+   name matches the module prefix's last component, or whose contents are
+   the package's ``__init__.py`` and submodules.
+
+   - ``payments`` package lives at ``repo-root/payments/`` → ``--repo org/repo --subpath payments``
+   - ``payments`` package lives at ``repo-root/src/payments/`` → ``--repo org/repo --subpath src/payments``
+   - ``payments`` package IS the repo root → ``--repo org/repo`` (no subpath)
+
+.. warning::
+
+   **Anti-Pattern:** Do NOT point to the directory *containing* the package.
+   If ``payments/`` is at ``src/payments/``, mapping to ``--subpath src`` is
+   wrong because resolution would look for ``src/payments/models.py`` by
+   appending ``payments.models`` to ``src/``, duplicating the ``payments`` part.
+
+**Example 1: Package in a subdirectory**
+  If your repo ``shared-libs`` has a package ``utils`` at ``src/utils/``, map it as::
+
+      emend map add-module utils --repo org/shared-libs --subpath src/utils
+
+  Resolution: ``utils.networking.fetch`` → ``.../shared-libs/src/utils/networking.py::fetch``
+
+**Example 2: Top-level package**
+  If your repo ``payments-service`` has the ``payments`` package in the root, map it as::
+
+      emend map add-module payments --repo org/payments-service
+
+  Resolution: ``payments.models.Order`` → ``.../payments-service/payments/models.py::Order``
+
+
+Unified Resolution
+~~~~~~~~~~~~~~~~~~
+
+The ``resolve`` and ``resolve-file`` commands provide a unified way to find
+the local location of a symbol or module, taking all mappings into account.
+
+.. code-block:: bash
+
+   # Resolve to an explicit selector (file.py::Symbol)
+   emend map resolve payments.models.Order
+   # Output: /path/to/payments/models.py::Order
+
+   # Resolve to file and line (for editor integration)
+   emend map resolve-file payments.models.Order
+   # Output:
+   # File: /path/to/payments/models.py
+   # Line: 42
+   # Kind: class
+
+**Dotted Selectors:** You can use dotted paths like ``path.to.module.Symbol``
+anywhere a selector is expected if you use the ``--include-map`` flag with
+``emend search`` (aliased as ``grep``)::
+
+    emend search --include-map payments.models.Order
+
 
 Repo Checkout Layout
 ~~~~~~~~~~~~~~~~~~~~

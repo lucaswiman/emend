@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from .transform import _cache_db_dir, _knowledge_db_dir
 
@@ -257,6 +258,122 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def make_resolve_module_cb(
+    kb: "KnowledgeBase",
+) -> Callable[[str, int, str], Optional[str]]:
+    """Create a resolve_module_cb suitable for resolve_through_reexports().
+
+    Handles relative imports by walking up directories, and absolute imports
+    by delegating to kb.resolve_module_to_path().
+    """
+    def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
+        if level > 0:
+            current_path = Path(current_file).resolve().parent
+            for _ in range(level - 1):
+                current_path = current_path.parent
+            if not module:
+                return str(current_path) if current_path.is_dir() else None
+            target = current_path
+            for p in module.split('.'):
+                target = target / p
+            if target.with_suffix('.py').is_file():
+                return str(target.with_suffix('.py'))
+            if target.is_dir():
+                return str(target)
+            return None
+        try:
+            return kb.resolve_module_to_path(module)
+        except Exception:
+            return None
+
+    return resolve_module_cb
+
+
+def resolve_dotted_path_to_selector(
+    resolved_base: str,
+    rem_parts: list[str],
+    resolve_module_cb: Callable[[str, int, str], Optional[str]]
+) -> str | None:
+    """Walk remaining dotted parts against a base directory or file.
+
+    Handles snake_case fallback and __init__.py re-exports.
+    """
+    # If the mapped part is a file, the rest are symbols
+    if os.path.isfile(resolved_base):
+        return f"{resolved_base}::{'.'.join(rem_parts)}" if rem_parts else resolved_base
+    
+    # If it was a directory, walk the remaining parts recursively.
+    if os.path.isdir(resolved_base):
+        current_path = Path(resolved_base)
+        
+        if not rem_parts:
+            return str(current_path)
+
+        for j, part in enumerate(rem_parts):
+            names = [part]
+            # Robust snake_case translation
+            snake = _to_snake_case(part)
+            if snake != part:
+                names.append(snake)
+            
+            found = False
+            # 1. Try as directory first
+            for name in names:
+                if (current_path / name).is_dir():
+                    current_path = current_path / name
+                    found = True
+                    break
+            if found:
+                if j == len(rem_parts) - 1:
+                    # Consumed all parts as directories
+                    return str(current_path)
+                continue
+            
+            # 2. Try as file
+            for name in names:
+                candidate_file = current_path / (name + ".py")
+                if candidate_file.is_file():
+                    # Found the file! 
+                    symbol_parts = rem_parts[j+1:]
+                    # Heuristic: if we matched a snake_case name and there are no remaining parts,
+                    # the original part might be a symbol in this file.
+                    if name != part and not symbol_parts:
+                        symbol_parts = [part]
+                    
+                    symbol_suffix = ".".join(symbol_parts)
+                    if symbol_suffix:
+                        return f"{candidate_file}::{symbol_suffix}"
+                    return str(candidate_file)
+            
+            # 3. Neither file nor dir found - check for re-export in __init__.py
+            init_file = current_path / "__init__.py"
+            if init_file.is_file():
+                from emend.ast_utils import resolve_through_reexports
+
+                res = resolve_through_reexports(
+                    str(init_file), part, resolve_module_cb
+                )
+                if res:
+                    target_file, _ = res
+                    # Re-construct the symbol path
+                    symbol_parts = [part] + rem_parts[j+1:]
+                    symbol_suffix = ".".join(symbol_parts)
+                    return f"{target_file}::{symbol_suffix}"
+                
+                # Fallback: just point to __init__.py with symbols
+                return f"{init_file}::{'.'.join(rem_parts[j:])}"
+            
+            # Completely stuck
+            break
+    
+    return None
+
+
+def _to_snake_case(name: str) -> str:
+    """Convert CamelCase to snake_case robustly."""
+    return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)).lower()
 
 
 class KnowledgeBase:
@@ -827,14 +944,89 @@ class KnowledgeBase:
             candidate_dir = base / "/".join(parts)
             if candidate_dir.is_dir():
                 return str(candidate_dir)
-            candidate_file = base / "/".join(parts[:-1]) / (parts[-1] + ".py")
-            if candidate_file.is_file():
-                return str(candidate_file)
-            # Fall back to the directory for the dotted prefix.
-            candidate_dir = base / "/".join(parts)
-            return str(candidate_dir)
+            
+            # Try original name and snake_case variant for the file
+            names_to_try = [parts[-1]]
+            snake = _to_snake_case(parts[-1])
+            if snake != parts[-1]:
+                names_to_try.append(snake)
+
+            parent_dir = base / "/".join(parts[:-1])
+            if parent_dir.is_dir():
+                for name in names_to_try:
+                    candidate_file = parent_dir / (name + ".py")
+                    if candidate_file.is_file():
+                        return str(candidate_file)
+
+            # Fall back to the directory for the dotted prefix if it exists.
+            return str(candidate_dir) if candidate_dir.is_dir() else None
         else:
-            return str(base)
+            return str(base) if base.exists() else None
+
+    def resolve_selector(self, selector: str) -> str | None:
+        """Resolve a dotted selector using module mappings.
+
+        If the selector is already an explicit selector (contains ::) or
+        a file path, it is returned as-is.
+
+        If it's a dotted selector like 'a.b.C', it tries to find a module
+        mapping for 'a.b' or 'a', and returns an explicit selector like
+        'path/to/a/b.py::C'.
+
+        Returns the resolved selector string, or None if no mapping found
+        and it wasn't already an explicit selector.
+        """
+        from emend.component_selector import parse_extended_selector
+
+        if "::" in selector:
+            return selector
+
+        try:
+            sel = parse_extended_selector(selector)
+            if sel.file_path:
+                return selector
+            
+            if not sel.symbol_path:
+                return None
+
+            parts = sel.symbol_path
+            # Find the best (longest-prefix) module mapping for the whole path
+            mm = self.resolve_module(selector)
+            if not mm:
+                return None
+
+            # Resolve the mapped part to a path
+            resolved_base = self.resolve_module_to_path(mm.module_prefix)
+            if not resolved_base:
+                return None
+
+            # Determine remaining parts after the mapped prefix
+            prefix_parts = mm.module_prefix.split('.')
+            rem_parts = parts[len(prefix_parts):]
+
+            return resolve_dotted_path_to_selector(
+                resolved_base,
+                rem_parts,
+                resolve_module_cb=make_resolve_module_cb(self)
+            )
+        except Exception:
+            return None
+
+    def fetch_module_repo(self, module_prefix: str) -> str | None:
+        """Force-fetch the latest commits for a module mapping's repo.
+
+        Returns the worktree path, or None if the mapping has no repo.
+        """
+        mm = self.get_module_mapping_by_prefix(module_prefix)
+        if mm is None or not mm.repo:
+            return None
+        local_root = _ensure_repo_cloned(mm.repo, branch=mm.branch)
+        root = _repo_checkouts_root()
+        rid = _repo_id(mm.repo)
+        contents_dir = root / rid / "contents"
+        ref = mm.branch or _default_branch(contents_dir) or "main"
+        _maybe_fetch_branch(contents_dir, Path(local_root), ref, force=True)
+        return local_root
 
     # -- Helpers -------------------------------------------------------------
 
@@ -979,6 +1171,10 @@ def _ensure_repo_cloned(
     worktree_dir = checkouts_dir / safe_ref
 
     if worktree_dir.is_dir():
+        # For tags, always reuse (immutable).
+        # For branches, check if stale (older than TTL).
+        if not _is_tag(contents_dir, ref):
+            _maybe_fetch_branch(contents_dir, worktree_dir, ref, ttl_hours=24)
         return str(worktree_dir)
 
     checkouts_dir.mkdir(parents=True, exist_ok=True)
@@ -1017,6 +1213,54 @@ def _default_branch(bare_dir: Path) -> str:
     except Exception:
         pass
     return ""
+
+
+def _is_tag(bare_dir: Path, ref: str) -> bool:
+    """Check if *ref* is a tag in the bare repo."""
+    try:
+        result = subprocess.run(
+            ["git", "show-ref", "--tags", ref],
+            cwd=str(bare_dir),
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _maybe_fetch_branch(
+    bare_dir: Path, worktree_dir: Path, ref: str, ttl_hours: int = 24, force: bool = False
+) -> None:
+    """Fetch the latest commits for a branch if older than *ttl_hours*."""
+    last_fetch_file = worktree_dir / ".last_fetched"
+    now = time.time()
+
+    if not force and last_fetch_file.exists():
+        try:
+            mtime = last_fetch_file.stat().st_mtime
+            if (now - mtime) < (ttl_hours * 3600):
+                return
+        except Exception:
+            pass
+
+    try:
+        # 1. Fetch from origin into the bare repo
+        subprocess.run(
+            ["git", "fetch", "origin", f"{ref}:{ref}"],
+            cwd=str(bare_dir),
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        # 2. Reset the worktree to the new commit
+        subprocess.run(
+            ["git", "reset", "--hard", ref],
+            cwd=str(worktree_dir),
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        # 3. Update timestamp
+        last_fetch_file.touch()
+    except Exception:
+        # Best effort - if network is down or merge fails, just keep going
+        pass
 
 
 def _fts_escape(query: str) -> str:

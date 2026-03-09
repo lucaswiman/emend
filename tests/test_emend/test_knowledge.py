@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -596,6 +597,35 @@ class TestRepoCheckouts:
         root = _repo_checkouts_root(cache_dir="/custom/cache")
         assert root == _Path("/custom/cache")
 
+    def test_maybe_fetch_branch_ttl(self, tmp_path):
+        """_maybe_fetch_branch respect TTL and skips if recent."""
+        from emend.knowledge import _maybe_fetch_branch
+        import time
+        from unittest.mock import MagicMock, patch
+
+        bare_dir = tmp_path / "bare"
+        bare_dir.mkdir()
+        worktree_dir = tmp_path / "worktree"
+        worktree_dir.mkdir()
+        
+        last_fetched = worktree_dir / ".last_fetched"
+        # 1 hour ago
+        last_fetched.touch()
+        mtime = time.time() - 3600
+        os.utime(last_fetched, (mtime, mtime))
+
+        with patch("subprocess.run") as mock_run:
+            _maybe_fetch_branch(bare_dir, worktree_dir, "main", ttl_hours=24)
+            # Should NOT have run any git commands
+            assert mock_run.call_count == 0
+
+            # Older than TTL
+            mtime = time.time() - (25 * 3600)
+            os.utime(last_fetched, (mtime, mtime))
+            _maybe_fetch_branch(bare_dir, worktree_dir, "main", ttl_hours=24)
+            # Should HAVE run git commands
+            assert mock_run.call_count >= 1
+
     def test_ensure_repo_cloned_worktree_layout(self, tmp_path):
         """Test the full clone+worktree flow using a local git repo as source."""
         from emend.knowledge import _ensure_repo_cloned, _repo_id
@@ -778,6 +808,153 @@ class TestEditorServerRPC:
         # Fuzzy hit filtered out, falls back to KB (empty since no mapping).
         assert result["source"] == "kb"
         assert len(result["items"]) == 0
+
+    def test_mapping_goto_import_resolution(self, kb, tmp_path):
+        """mapping_goto resolves a symbol via local imports and KB module mapping."""
+        from emend.editor_search import SearchResult, _mapping_goto
+        from emend.knowledge import ModuleMapping
+
+        # 1. Setup KB module mapping: 'common.models' -> '/repo/common/models'
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        (repo_path / "common").mkdir()
+        (repo_path / "common" / "models").mkdir()
+        user_py = repo_path / "common" / "models" / "user.py"
+        user_py.write_text("class User: pass\n")
+
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="common.models",
+            local_path=str(repo_path / "common" / "models"),
+        ))
+
+        # 2. Setup local file with import
+        local_file = tmp_path / "app.py"
+        local_file.write_text("from common.models.user import User\n")
+
+        class FakeEngine:
+            project_root = str(tmp_path)
+            def search_symbols(self, query, *, limit=10):
+                return SearchResult(items=[], elapsed_ms=1.0, mode="symbol")
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        # 3. Request 'User' from 'app.py'
+        result = _mapping_goto(engine, {
+            "identifier": "User",
+            "file": str(local_file)
+        })
+        
+        assert result["source"] == "kb"
+        assert len(result["items"]) == 1
+        item = result["items"][0]
+        assert item["name"] == "User"
+        assert item["file_path"] == str(user_py)
+        assert item["line"] == 1
+
+    def test_mapping_goto_import_reexport(self, kb, tmp_path):
+        """mapping_goto follows re-exports in __init__.py via module mapping."""
+        from emend.editor_search import SearchResult, _mapping_goto
+        from emend.knowledge import ModuleMapping
+
+        repo_path = tmp_path / "repo"
+        (repo_path / "common").mkdir(parents=True)
+        init_py = repo_path / "common" / "__init__.py"
+        init_py.write_text("from .models import User\n")
+        (repo_path / "common" / "models.py").write_text("class User: pass\n")
+
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="common",
+            local_path=str(repo_path / "common"),
+        ))
+
+        local_file = tmp_path / "app.py"
+        local_file.write_text("from common import User\n")
+
+        class FakeEngine:
+            project_root = str(tmp_path)
+            def search_symbols(self, query, *, limit=10):
+                return SearchResult(items=[], elapsed_ms=1.0, mode="symbol")
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _mapping_goto(engine, {
+            "identifier": "User",
+            "file": str(local_file)
+        })
+        
+        assert len(result["items"]) == 1
+        assert result["items"][0]["file_path"] == str(repo_path / "common" / "models.py")
+
+    def test_mapping_goto_import_reexport_submodule(self, kb, tmp_path):
+        """mapping_goto follows 'from . import submodule as alias' re-exports."""
+        from emend.editor_search import SearchResult, _mapping_goto
+        from emend.knowledge import ModuleMapping
+
+        repo_path = tmp_path / "repo"
+        (repo_path / "common").mkdir(parents=True)
+        init_py = repo_path / "common" / "__init__.py"
+        # 'from . import models as mod' 
+        init_py.write_text("from . import models as mod\n")
+        (repo_path / "common" / "models.py").write_text("class User: pass\n")
+
+        kb.add_module_mapping(ModuleMapping(
+            module_prefix="common",
+            local_path=str(repo_path / "common"),
+        ))
+
+        local_file = tmp_path / "app.py"
+        local_file.write_text("from common import mod\n")
+
+        class FakeEngine:
+            project_root = str(tmp_path)
+            def search_symbols(self, query, *, limit=10):
+                return SearchResult(items=[], elapsed_ms=1.0, mode="symbol")
+
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _mapping_goto(engine, {
+            "identifier": "mod",
+            "file": str(local_file)
+        })
+        
+        assert len(result["items"]) == 1
+        assert result["items"][0]["file_path"] == str(repo_path / "common" / "models.py")
+
+    def test_mapping_goto_no_file_param(self, kb):
+        """mapping_goto skips Tier 3 if 'file' param is missing (backward compat)."""
+        from emend.editor_search import SearchResult, _mapping_goto
+        class FakeEngine:
+            def search_symbols(self, query, *, limit=10):
+                return SearchResult(items=[], elapsed_ms=1.0, mode="symbol")
+        engine = FakeEngine()
+        engine._kb = kb
+
+        result = _mapping_goto(engine, {"identifier": "User"})
+        assert result["source"] == "kb"
+        assert len(result["items"]) == 0
+
+    def test_resolve_selector_to_goto_item(self, tmp_path):
+        from emend.editor_search import _resolve_selector_to_goto_item
+        f = tmp_path / "mod.py"
+        f.write_text("class MyClass:\n    pass\n")
+        
+        class FakeEngine:
+            def __init__(self, root):
+                self.project_root = str(root)
+        engine = FakeEngine(tmp_path)
+        
+        # Exact match
+        res = _resolve_selector_to_goto_item(engine, f"{f}::MyClass")
+        assert res["file_path"] == str(f)
+        assert res["line"] == 1
+        
+        # Missing file
+        assert _resolve_selector_to_goto_item(engine, "/none::X") is None
+        # Invalid selector
+        assert _resolve_selector_to_goto_item(engine, "not-a-selector") is None
 
 
 # ---------------------------------------------------------------------------

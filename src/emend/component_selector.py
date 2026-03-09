@@ -100,6 +100,9 @@ class SelectorTransformer(Transformer):
         return items[0]
 
     def selector(self, items):
+        return items[0]
+
+    def explicit_selector(self, items):
         # Filter out tokens (like ::), keep only transformed rules
         transformed = [item for item in items if not isinstance(item, Token)]
 
@@ -132,6 +135,38 @@ class SelectorTransformer(Transformer):
         else:
             return ExtendedSelector(
                 file_path=file_path,
+                symbol_path=symbol_path,
+                type_filter=type_filter,
+            )
+
+    def dotted_selector(self, items):
+        # Filter out tokens, keep only transformed rules
+        transformed = [item for item in items if not isinstance(item, Token)]
+
+        # symbol_path is required for dotted_selector
+        symbol_path = transformed[0]
+        type_filter = None
+        components = []
+
+        rest = transformed[1:]
+        if rest and isinstance(rest[0], str) and not isinstance(rest[0], dict):
+            type_filter = rest[0]
+            rest = rest[1:]
+        components = rest
+
+        if components:
+            comp = components[0]
+            return ExtendedSelector(
+                file_path="",  # No explicit file path
+                symbol_path=symbol_path,
+                component=comp["name"],
+                accessor=comp.get("accessor"),
+                pseudo_class=comp.get("pseudo_class"),
+                type_filter=type_filter,
+            )
+        else:
+            return ExtendedSelector(
+                file_path="",
                 symbol_path=symbol_path,
                 type_filter=type_filter,
             )
@@ -204,7 +239,12 @@ class SelectorTransformer(Transformer):
 
 # Load grammar from package
 _grammar_text = importlib.resources.read_text("emend.grammars", "selector.lark")
-_parser = Lark(_grammar_text, parser="lalr", transformer=SelectorTransformer())
+_parser = Lark(
+    _grammar_text,
+    parser="lalr",
+    transformer=SelectorTransformer(),
+    start=["explicit_selector", "dotted_selector", "selector"]
+)
 
 
 def parse_extended_selector(selector_str: str) -> ExtendedSelector:
@@ -212,38 +252,16 @@ def parse_extended_selector(selector_str: str) -> ExtendedSelector:
 
     Args:
         selector_str: Selector in format file.py::Symbol.path[component][accessor]
+                      or path.to.file.SomeSymbol
                       or file.py:4 or file.py:4-10 for line-based selectors
 
     Returns:
         ExtendedSelector object with parsed components
-
-    Examples:
-        >>> sel = parse_extended_selector("file.py::func")
-        >>> sel.file_path
-        'file.py'
-        >>> sel.symbol_path
-        ['func']
-
-        >>> sel = parse_extended_selector("file.py::Class.method[params][ctx]")
-        >>> sel.component
-        'params'
-        >>> sel.accessor
-        'ctx'
-
-        >>> sel = parse_extended_selector("file.py:10")
-        >>> sel.line_start
-        10
-
-        >>> sel = parse_extended_selector("file.py:10-20")
-        >>> sel.line_start
-        10
-        >>> sel.line_end
-        20
     """
     # Pre-check for line-based selectors (file.py:4 or file.py:4-10)
     # Only match if there's no :: (which indicates a symbol selector)
-    if '::' not in selector_str:
-        line_match = re.match(r'^(.+):(\d+)(?:-(\d+))?$', selector_str)
+    if "::" not in selector_str:
+        line_match = re.match(r"^(.+):(\d+)(?:-(\d+))?$", selector_str)
         if line_match:
             file_path = line_match.group(1)
             line_start = int(line_match.group(2))
@@ -254,4 +272,11 @@ def parse_extended_selector(selector_str: str) -> ExtendedSelector:
                 line_start=line_start,
                 line_end=line_end,
             )
-    return _parser.parse(selector_str)
+        # For dotted selectors without ::, use dotted_selector start rule
+        try:
+            return _parser.parse(selector_str, start="dotted_selector")
+        except Exception:
+            # Fall back to default start (selector) which will probably fail but with a better error
+            pass
+
+    return _parser.parse(selector_str, start="explicit_selector")

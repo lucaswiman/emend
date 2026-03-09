@@ -384,6 +384,10 @@ def search(
         Optional[str],
         typer.Option("--project", help="Project root for index-based queries")
     ] = None,
+    include_map: Annotated[
+        bool,
+        typer.Option("--include-map", help="Take symbol / module mappings into account for resolution")
+    ] = False,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -482,6 +486,23 @@ def search(
     is_pattern_mode = _shape.is_pattern_mode
     has_selector = _shape.has_selector
     is_line_selector = _shape.is_line_selector
+
+    if include_map and "::" not in query:
+        from emend.knowledge import KnowledgeBase
+        kb = KnowledgeBase(project or ".")
+        try:
+            resolved_query = kb.resolve_selector(query)
+            if resolved_query and resolved_query != query:
+                # Re-detect shape with resolved query
+                query = resolved_query
+                _shape = detect_query_shape(query, path)
+                query = _shape.query
+                path = _shape.path
+                is_pattern_mode = _shape.is_pattern_mode
+                has_selector = _shape.has_selector
+                is_line_selector = _shape.is_line_selector
+        finally:
+            kb.close()
 
     # If query looks like a file path/glob/directory (no $ or ::) but --where
     # provides a pattern (has $), the user likely intended:
@@ -2043,8 +2064,10 @@ def index_cmd(
     from emend.transform import _collect_source_files_scandir
     from pathlib import Path as _Path
     scan_root = str(_Path(path).resolve())
-    total = len(_collect_source_files_scandir(scan_root))
-    print(f"Indexing {total} source files in {scan_root}...", file=sys.stderr)
+    file_count = len(_collect_source_files_scandir(scan_root))
+    # Callback is called twice per file (index + types phases)
+    total = file_count * 2
+    print(f"Indexing {file_count} source files in {scan_root}...", file=sys.stderr)
 
     from emend.type_oracle import TypeEngineUnavailableError
     try:
@@ -2316,7 +2339,7 @@ def kb_rm_cmd(
 # Mapping commands
 # ---------------------------------------------------------------------------
 
-map_app = typer.Typer(help="Cross-service identifier mappings.")
+map_app = typer.Typer(help="Identifier and module mappings.")
 app.add_typer(map_app, name="map")
 
 
@@ -2437,19 +2460,14 @@ def map_rm_cmd(
         kb.close()
 
 
-# ---------------------------------------------------------------------------
-# Module mapping commands (coarse: module prefix -> repo/directory)
-# ---------------------------------------------------------------------------
-
-modmap_app = typer.Typer(help="Module-to-repo mappings (e.g. 'payments' -> org/payments-service).")
-app.add_typer(modmap_app, name="modmap")
+# Module mapping commands
 
 
-@modmap_app.command("add")
-def modmap_add_cmd(
+@map_app.command("add-module")
+def map_add_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
-    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
     provenance: Annotated[str, typer.Option("--provenance")] = "manual",
@@ -2458,21 +2476,21 @@ def modmap_add_cmd(
     """Register a module prefix -> repo/directory mapping.
 
     Examples:
-        emend modmap add payments --repo org/payments-service
-        emend modmap add shared.utils --path /home/user/shared-utils
-        emend modmap add gateway --repo org/gateway --subpath src/gateway
+        emend map add-module payments --repo org/payments-service
+        emend map add-module shared.utils --path /home/user/shared-utils
+        emend map add-module gateway --repo org/gateway --subpath src/gateway
     """
     import json as _json
     from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
 
-    if not repo and not local_path:
+    if not repo and not path:
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
 
     kb = KnowledgeBase(".")
     try:
         m = ModuleMapping(
-            module_prefix=module_prefix, repo=repo, local_path=local_path,
+            module_prefix=module_prefix, repo=repo, local_path=path,
             branch=branch, subpath=subpath, provenance=provenance,
         )
         mid = kb.add_module_mapping(m)
@@ -2480,14 +2498,14 @@ def modmap_add_cmd(
         if json_output:
             print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
         else:
-            target = repo if repo else local_path
+            target = repo if repo else path
             print(f"Added module mapping #{mid}: {module_prefix} -> {target}")
     finally:
         kb.close()
 
 
-@modmap_app.command("list")
-def modmap_list_cmd(
+@map_app.command("list-modules")
+def map_list_modules_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """List all module mappings."""
@@ -2510,51 +2528,24 @@ def modmap_list_cmd(
         kb.close()
 
 
-@modmap_app.command("resolve")
-def modmap_resolve_cmd(
-    module: Annotated[str, typer.Argument(help="Module to resolve (e.g. 'payments.models.Order').")],
-    json_output: Annotated[bool, typer.Option("--json")] = False,
-):
-    """Resolve a module name to a local path (clones repo via gh if needed)."""
-    import json as _json
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        mm = kb.resolve_module(module)
-        if mm is None:
-            print(f"No module mapping for '{module}'.", file=sys.stderr)
-            raise typer.Exit(1)
-        resolved = kb.resolve_module_to_path(module)
-        if json_output:
-            d = module_mapping_to_dict(mm)
-            if resolved:
-                d["resolved_path"] = resolved
-            print(_json.dumps(d, indent=2))
-        else:
-            target = mm.repo if mm.repo else mm.local_path
-            print(f"Module '{module}' -> {target}")
-            if resolved:
-                print(f"Local path: {resolved}")
-    finally:
-        kb.close()
-
-
-@modmap_app.command("update")
-def modmap_update_cmd(
+@map_app.command("update-module")
+def map_update_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix to update.")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
-    local_path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
+    path: Annotated[str, typer.Option("--path", help="Local directory.")] = "",
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
+    fetch: Annotated[bool, typer.Option("--fetch", help="Force fetch the latest commits from the remote repo.")] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Update an existing module mapping.
 
     Examples:
-        emend modmap update payments --repo org/payments-v2
-        emend modmap update shared.utils --path /new/path
-        emend modmap update gateway --branch v2 --subpath src/gw
+        emend map update-module payments --repo org/payments-v2
+        emend map update-module shared.utils --path /new/path
+        emend map update-module gateway --branch v2 --subpath src/gw
+        emend map update-module payments --fetch
     """
     import json as _json
     from emend.knowledge import KnowledgeBase, module_mapping_to_dict
@@ -2569,18 +2560,25 @@ def modmap_update_cmd(
         kwargs: dict[str, str] = {}
         if repo:
             kwargs["repo"] = repo
-        if local_path:
-            kwargs["local_path"] = local_path
+        if path:
+            kwargs["local_path"] = path
         if branch:
             kwargs["branch"] = branch
         if subpath:
             kwargs["subpath"] = subpath
 
-        if not kwargs:
-            print("Nothing to update (provide --repo, --path, --branch, or --subpath).", file=sys.stderr)
+        if not kwargs and not fetch:
+            print("Nothing to update (provide --repo, --path, --branch, --subpath, or --fetch).", file=sys.stderr)
             raise typer.Exit(1)
 
-        kb.update_module_mapping(mm.id, **kwargs)  # type: ignore[arg-type]
+        if kwargs:
+            kb.update_module_mapping(mm.id, **kwargs)  # type: ignore[arg-type]
+
+        if fetch:
+            result = kb.fetch_module_repo(module_prefix)
+            if result is None:
+                print(f"Module mapping '{module_prefix}' has no repo to fetch.", file=sys.stderr)
+
         saved = kb.get_module_mapping(mm.id)  # type: ignore[arg-type]
         if json_output:
             print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
@@ -2591,8 +2589,8 @@ def modmap_update_cmd(
         kb.close()
 
 
-@modmap_app.command("rm")
-def modmap_rm_cmd(
+@map_app.command("rm-module")
+def map_rm_module_cmd(
     identifier: Annotated[str, typer.Argument(help="Module prefix or numeric mapping ID to delete.")],
 ):
     """Delete a module mapping by prefix name or ID."""
@@ -2613,6 +2611,125 @@ def modmap_rm_cmd(
         else:
             print(f"Module mapping {label} not found.", file=sys.stderr)
             raise typer.Exit(1)
+    finally:
+        kb.close()
+
+
+# Unified resolution commands
+
+
+@map_app.command("resolve")
+def map_resolve_cmd(
+    selector: Annotated[str, typer.Argument(help="Selector or module to resolve (e.g. 'payments.models.Order' or 'payments::Order').")],
+    location: Annotated[bool, typer.Option("--location", "-l", help="Resolve to file path and line number instead of a selector.")] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+):
+    """Unified resolution for modules and selectors.
+
+    If the input is a module prefix, it resolves to the mapped repo/directory.
+    If it's a dotted selector like 'a.b.C', it uses module mappings to find
+    where 'a.b' lives, then treats 'C' as a symbol.
+    """
+    import json as _json
+    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+    import os
+
+    kb = KnowledgeBase(".")
+    try:
+        if location:
+            from emend.component_selector import parse_extended_selector
+            from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
+            
+            # Resolve to a selector with an explicit file path first.
+            file_path = None
+            symbol_parts = []
+
+            try:
+                sel = parse_extended_selector(selector)
+            except Exception:
+                sel = None
+            if sel and sel.file_path:
+                file_path = sel.file_path
+                symbol_parts = sel.symbol_path
+            else:
+                # Use resolve_selector which handles deep paths and __init__.py re-exports.
+                resolved_sel = kb.resolve_selector(selector)
+                if resolved_sel and "::" in resolved_sel:
+                    parsed = parse_extended_selector(resolved_sel)
+                    file_path = parsed.file_path
+                    symbol_parts = parsed.symbol_path
+                elif resolved_sel and os.path.isfile(resolved_sel):
+                    file_path = resolved_sel
+                elif resolved_sel and os.path.isdir(resolved_sel):
+                    init_py = os.path.join(resolved_sel, "__init__.py")
+                    if os.path.isfile(init_py):
+                        file_path = init_py
+
+            if not file_path or not os.path.isfile(file_path):
+                print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
+                raise typer.Exit(1)
+
+            # Follow re-exports if the symbol isn't defined in the file.
+            from emend.knowledge import make_resolve_module_cb
+            resolve_cb = make_resolve_module_cb(kb)
+
+            if symbol_parts:
+                res = resolve_through_reexports(file_path, symbol_parts[0], resolve_cb)
+                if res:
+                    file_path, _ = res
+
+            # Now find the symbol in the file to get the line number.
+            if symbol_parts:
+                symbols = find_nested_definitions(file_path)
+                target = find_symbol_by_path(symbols, symbol_parts)
+                if target:
+                    if json_output:
+                        print(_json.dumps({
+                            "file": file_path,
+                            "line": target.line_start,
+                            "kind": target.kind
+                        }, indent=2))
+                    else:
+                        print(f"File: {file_path}")
+                        print(f"Line: {target.line_start}")
+                        print(f"Kind: {target.kind}")
+                    return
+            
+            # If no symbol parts or symbol not found, just return the file.
+            if json_output:
+                print(_json.dumps({"file": file_path, "line": 1}, indent=2))
+            else:
+                print(f"File: {file_path}")
+                print("Line: 1")
+            return
+
+        # First, try resolving as a pure module.
+        mm = kb.resolve_module(selector)
+        if mm and mm.module_prefix == selector:
+            # Exact module match
+            resolved = kb.resolve_module_to_path(selector)
+            if json_output:
+                d = module_mapping_to_dict(mm)
+                if resolved: d["resolved_path"] = resolved
+                print(_json.dumps(d, indent=2))
+            else:
+                print(f"Module '{selector}' -> {mm.repo or mm.local_path}")
+                if resolved: print(f"Local path: {resolved}")
+            return
+
+        # Use unified resolve_selector logic
+        resolved_sel = kb.resolve_selector(selector)
+        if resolved_sel:
+            if json_output:
+                from emend.component_selector import parse_extended_selector
+                sel = parse_extended_selector(resolved_sel)
+                print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
+            else:
+                print(resolved_sel)
+            return
+
+        print(f"Could not resolve '{selector}'.", file=sys.stderr)
+        raise typer.Exit(1)
     finally:
         kb.close()
 

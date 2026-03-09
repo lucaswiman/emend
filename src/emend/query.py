@@ -34,6 +34,7 @@ class SymbolInfo:
     parameters: list[str] = field(default_factory=list)
     returns: str | None = None
     parent: str | None = None
+    bases: list[str] = field(default_factory=list)
     depth: int = 1
 
     def to_dict(self) -> dict:
@@ -53,6 +54,8 @@ class SymbolInfo:
             result["returns"] = self.returns
         if self.parent:
             result["parent"] = self.parent
+        if self.bases:
+            result["bases"] = self.bases
         return result
 
 
@@ -201,6 +204,9 @@ def _rust_dict_to_symbol_info_list(
         # Get return type
         returns = d.get("returns")
 
+        # Get bases (superclasses)
+        bases = list(d.get("bases", []))
+
         symbols.append(
             SymbolInfo(
                 path=path_str,
@@ -212,6 +218,7 @@ def _rust_dict_to_symbol_info_list(
                 parameters=parameters,
                 returns=returns,
                 parent=parent,
+                bases=bases,
                 depth=depth,
             )
         )
@@ -267,6 +274,7 @@ def _collect_symbols(
                 parameters=sym.parameters,
                 returns=sym.returns,
                 parent=sym.parent,
+                bases=sym.bases,
                 depth=sym.depth,
             )
             remapped.append(new_sym)

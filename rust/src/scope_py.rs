@@ -103,8 +103,8 @@ impl PyScopeResolver {
             .unwrap_or_default()
     }
 
-    /// Returns (scope_kind, [(name, binding_kind, line, column)]).
-    fn scopes_in_file(&self, path: &str) -> Vec<(&'static str, Vec<(String, &'static str, usize, usize)>)> {
+    /// Returns (scope_kind, start_line, end_line, [(name, binding_kind, line, column)]).
+    fn scopes_in_file(&self, path: &str) -> Vec<(&'static str, usize, usize, Vec<(String, &'static str, usize, usize)>)> {
         let path = PathBuf::from(path);
         self.inner
             .file_scopes
@@ -118,7 +118,7 @@ impl PyScopeResolver {
                             .values()
                             .map(|b| (b.name.clone(), b.kind.as_str(), b.line, b.column))
                             .collect();
-                        (scope.kind.as_str(), bindings)
+                        (scope.kind.as_str(), scope.start_line, scope.end_line, bindings)
                     })
                     .collect()
             })
