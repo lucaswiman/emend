@@ -1269,10 +1269,12 @@ impl ScopeResolver {
 
         // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
-        if node_kind == "identifier" {
+        if node_kind == self.config.pattern_matching.identifier {
             // Skip if it's the 'attribute' field of an 'attribute' node
+            let attr_kind = &self.config.pattern_matching.attribute;
+            let attr_field = &self.config.pattern_matching.attr_field;
             let is_attr_name = node.parent().map_or(false, |p| {
-                p.kind() == "attribute" && p.child_by_field_name("attribute") == Some(node)
+                !attr_kind.is_empty() && p.kind() == attr_kind && p.child_by_field_name(attr_field) == Some(node)
             });
             // Skip language keywords that tree-sitter reports as identifiers
             let name = node_text(node, source);
@@ -1302,7 +1304,7 @@ impl ScopeResolver {
         }
 
         // Process attribute access nodes (e.g., `obj.attr`)
-        if node_kind == "attribute" {
+        if !self.config.pattern_matching.attribute.is_empty() && node_kind == self.config.pattern_matching.attribute {
             // Build the full dotted name and resolve.
             let kind = self.classify_reference(&node, in_import);
             if let Some(full_name) = self.collect_dotted_name(&node, source) {
@@ -1331,19 +1333,24 @@ impl ScopeResolver {
             loop {
                 let child = cursor.node();
                 let next_scope = if is_scope_creator {
-                    // Switch to new scope only for children that are truly "inside".
-                    match node_kind {
-                        "class_definition" => {
-                            if child.kind() == "block" { scope_for_children } else { current_scope }
+                    // Switch to new scope only for children that are truly "inside" or part of parameters.
+                    // Most languages bind parameters in the function scope.
+                    // The name itself is bound in the outer scope.
+                    let name_field = self.config.symbols.name_field();
+                    if node.child_by_field_name(name_field) == Some(child) {
+                        current_scope
+                    } else if child.kind() == "identifier" && node_kind != "module" && node_kind != "program" {
+                        // Heuristic: if it's an identifier but not the 'name' field, it might be the name.
+                        // Let's check if it IS the name.
+                        let mut name_cursor = node.walk();
+                        let first_id = node.children(&mut name_cursor).find(|c| c.kind() == "identifier");
+                        if first_id == Some(child) {
+                            current_scope
+                        } else {
+                            scope_for_children
                         }
-                        "function_definition" | "lambda" => {
-                            if matches!(child.kind(), "block" | "parameters" | "expression" | "body") {
-                                scope_for_children
-                            } else {
-                                current_scope
-                            }
-                        }
-                        _ => scope_for_children // comprehensions etc.
+                    } else {
+                        scope_for_children
                     }
                 } else {
                     current_scope
@@ -1408,8 +1415,23 @@ impl ScopeResolver {
     /// Check if a node is in a write (assignment) context.
     fn is_write_context(&self, node: &tree_sitter::Node) -> bool {
         let mut current = *node;
+        let mut in_parameter = false;
+        
         while let Some(parent) = current.parent() {
             let pk = parent.kind();
+
+            // Check if we are inside a parameter container
+            let params_field = self.config.symbols.parameters_field();
+            if pk == params_field || pk == "parameters" || pk == "lambda_parameters" || pk == "formal_parameters" {
+                in_parameter = true;
+                break;
+            }
+
+            // Check if any intermediate node is a parameter node
+            if self.config.bindings.parameters.param_nodes.contains(&pk.to_string()) {
+                 in_parameter = true;
+                 break;
+            }
 
             // Check configured binding rules
             let rules = [
@@ -1442,6 +1464,14 @@ impl ScopeResolver {
             }
             current = parent;
         }
+
+        if in_parameter {
+            // In a parameter context, identifiers are usually definitions/writes
+            // unless they are part of a type annotation or default value.
+            // But for simple cases, returning true here is better than false.
+            return true;
+        }
+
         false
     }
 
@@ -1683,7 +1713,6 @@ impl ScopeResolver {
     ) {
         let node = cursor.node();
         let node_kind = node.kind();
-        // eprintln!("DEBUG: node_kind={}", node_kind);
 
         // Check if this node creates a new scope
         let scope_for_children =
@@ -1705,7 +1734,16 @@ impl ScopeResolver {
 
                     // Function/class names are bound in the ENCLOSING scope
                     if creator.kind == ScopeKind::Function || creator.kind == ScopeKind::Class {
-                        if let Some(name_node) = node.child_by_field_name("name") {
+                        let name_field = self.config.symbols.name_field();
+                        let mut name_node = node.child_by_field_name(name_field);
+                        
+                        // Fallback: search for identifier child if field not found (e.g. TS)
+                        if name_node.is_none() {
+                            let mut cursor = node.walk();
+                            name_node = node.children(&mut cursor).find(|c| c.kind() == "identifier");
+                        }
+
+                        if let Some(name_node) = name_node {
                             let name = ctx.text(name_node).to_string();
                             let mut signature = None;
                             let mut returns = None;
@@ -1729,7 +1767,15 @@ impl ScopeResolver {
                             };
 
                             if creator.kind == ScopeKind::Function {
-                                if let Some(params) = node.child_by_field_name("parameters") {
+                                let params_field = self.config.symbols.parameters_field();
+                                let mut params_node = node.child_by_field_name(params_field);
+                                // TS fallback
+                                if params_node.is_none() {
+                                    let mut cursor = node.walk();
+                                    params_node = node.children(&mut cursor).find(|c| c.kind() == "formal_parameters");
+                                }
+
+                                if let Some(params) = params_node {
                                     signature = Some(ctx.text(params).to_string());
                                 }
                                 if let Some(ret) = node.child_by_field_name("return_type") {
@@ -1772,7 +1818,15 @@ impl ScopeResolver {
                     }
 
                     if creator.kind == ScopeKind::Function {
-                        if let Some(params) = node.child_by_field_name("parameters") {
+                        let params_field = self.config.symbols.parameters_field();
+                        let mut params_node = node.child_by_field_name(params_field);
+                        // TS fallback
+                        if params_node.is_none() {
+                            let mut cursor = node.walk();
+                            params_node = node.children(&mut cursor).find(|c| c.kind() == "formal_parameters");
+                        }
+
+                        if let Some(params) = params_node {
                             self.collect_parameters(ctx, &params, scope_id);
                         }
                     }
@@ -1782,6 +1836,7 @@ impl ScopeResolver {
             } else {
                 current_scope
             };
+
 
         // Collect imports
         if node_kind == self.config.imports.import_statement
@@ -1937,16 +1992,21 @@ impl ScopeResolver {
             let ck = child.kind();
 
             if self.config.bindings.parameters.param_nodes.contains(&ck.to_string()) {
-                let name_node = if ck == "identifier" {
+                let mut name_node = if ck == "identifier" {
                     Some(child)
                 } else {
                     child.child_by_field_name(&self.config.bindings.parameters.name_field)
                 };
+                
+                // Fallback for TS: required_parameter often has identifier as first named child without field
+                if name_node.is_none() {
+                    name_node = child.named_child(0);
+                }
 
                 if let Some(n) = name_node {
-                    let name = ctx.text(n);
+                    let name = ctx.text(n).to_string();
                     let binding = Binding {
-                        name: name.to_string(),
+                        name: name.clone(),
                         kind: BindingKind::Parameter,
                         line: n.start_position().row,
                         column: n.start_position().column,
@@ -1958,6 +2018,16 @@ impl ScopeResolver {
                         created_scope: None,
                     };
                     ctx.add_binding(scope_id, binding);
+
+                    // Add to definitions so it appears in symbol index
+                    let qn = self.compute_qn(&ctx.scopes, &ctx.scope_index, ctx.file_path, scope_id, &name);
+                    let loc = Location {
+                        file: ctx.file_path.to_path_buf(),
+                        line: n.start_position().row + 1,
+                        column: n.start_position().column + 1,
+                        byte_offset: n.start_byte(),
+                    };
+                    ctx.definitions.push((qn, loc));
                 }
             }
 

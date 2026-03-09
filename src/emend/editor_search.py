@@ -1134,24 +1134,86 @@ class EditorSearchEngine:
 
         # Parse with scope resolver
         try:
-            resolver = _rust.PyScopeResolver(str(self.project_root))
+            ext = file_path.suffix.lstrip('.')
+            resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
             with open(file_path, "r") as f:
                 content = f.read()
             resolver.index_file(str(file_path), content)
             refs = resolver.references_in_file(str(file_path))
             logger.debug(f"goto_local: found {len(refs)} references in file")
+
+            # Also get bindings (for parameters and other definitions)
+            bindings = []
+            try:
+                scopes = resolver.scopes_in_file(str(file_path))
+                for scope_kind, scope_start, scope_end, scope_bindings in scopes:
+                    for b_name, b_kind, b_line, b_col in scope_bindings:
+                        # scopes_in_file returns 0-based line numbers, convert to 1-based
+                        binding_line_1based = b_line + 1
+                        bindings.append((f"{b_name}", binding_line_1based, b_col, b_kind))
+                logger.debug(f"goto_local: found {len(bindings)} bindings in scopes")
+            except Exception as e:
+                logger.debug(f"goto_local: error getting bindings: {e}")
         except Exception as exc:
             logger.debug("Scope resolver failed: %s", exc)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
-        # Find the reference at (line, col)
+        # Find the reference at (line, col) by extracting the word at cursor position
+        # and matching by identifier name rather than column proximity
         target_qn = None
-        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
-            # line/col from scope resolver are 1-based, same as Vim.
-            if r_line == line and abs(r_col - col) <= 2:
-                logger.debug(f"goto_local: found target_qn={qn} at line={r_line}, col={r_col}")
-                target_qn = qn
-                break
+
+        # Extract the identifier at the cursor position from the source
+        lines = content.split('\n')
+        if line <= len(lines):
+            line_text = lines[line - 1]
+            # Find word boundaries around the cursor position
+            if col <= len(line_text):
+                # Move col to be 0-based for string indexing
+                cursor_idx = col - 1
+                # Find start of identifier (move left while alphanumeric/underscore)
+                start = cursor_idx
+                while start > 0 and (line_text[start-1].isalnum() or line_text[start-1] == '_'):
+                    start -= 1
+                # Find end of identifier (move right while alphanumeric/underscore)
+                end = cursor_idx
+                while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
+                    end += 1
+                identifier = line_text[start:end]
+                logger.debug(f"goto_local: extracted identifier='{identifier}' from cursor")
+
+                # Find the reference with matching identifier (last component of QN)
+                # Determine QN separator based on file extension
+                qn_sep = "/" if file.endswith((".ts", ".tsx", ".js", ".jsx")) else "."
+
+                for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+                    if r_line == line:
+                        qn_parts = qn.split(qn_sep)
+                        qn_last = qn_parts[-1]
+                        
+                        if qn_last == identifier:
+                            logger.debug(f"goto_local: MATCH found target_qn={qn}")
+                            target_qn = qn
+                            break
+
+                # If no reference found, check bindings (for parameters, etc.)
+                if not target_qn:
+                    # First try exact line match
+                    for b_name, b_line, b_col, b_kind in bindings:
+                        if b_line == line and b_name == identifier:
+                            logger.debug(f"goto_local: MATCH found binding {b_name} at line {b_line}")
+                            target_qn = b_name
+                            break
+
+                    # If still not found, search in enclosing scopes (for parameters in parent function/class)
+                    if not target_qn:
+                        # Find bindings with matching name in any line before current line
+                        matching_bindings = [(b_name, b_line, b_col, b_kind) for b_name, b_line, b_col, b_kind in bindings if b_name == identifier and b_line < line]
+                        if matching_bindings:
+                            # Use the most recent one (highest line number)
+                            matching_bindings.sort(key=lambda x: -x[1])
+                            b_name, b_line, b_col, b_kind = matching_bindings[0]
+                            logger.debug(f"goto_local: MATCH found binding {b_name} in parent scope at line {b_line}")
+                            target_qn = b_name
 
         if not target_qn:
             logger.debug(f"goto_local: no target_qn found at line={line}, col={col}")
@@ -1171,11 +1233,12 @@ class EditorSearchEngine:
             all_refs.sort()
             local_defs = [all_refs[0]]
 
+
         if local_defs:
             local_defs.sort()
             r_line, r_col = local_defs[0]
             item = {
-                "name": target_qn.split(".")[-1],
+                "name": target_qn.split(qn_sep)[-1],
                 "kind": "variable",
                 "file_path": str(file_path),
                 "line": r_line,
