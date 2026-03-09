@@ -1448,6 +1448,16 @@ impl ScopeResolver {
                         if target.byte_range().contains(&node.start_byte()) {
                             return true;
                         }
+                    } else {
+                        // Fallback: check if node is inside an as_pattern alias
+                        // (handles with_clause and except_clause nesting)
+                        let as_pattern_kind = &self.config.pattern_matching.as_pattern;
+                        let aliases = Self::find_all_as_pattern_aliases(&parent, as_pattern_kind);
+                        for alias in aliases {
+                            if alias.byte_range().contains(&node.start_byte()) {
+                                return true;
+                            }
+                        }
                     }
                     return false;
                 }
@@ -2997,6 +3007,62 @@ def func():
             func_scope.bindings.contains_key("gh"),
             "Should track second 'with ... as gh' binding. Bindings: {:?}",
             func_scope.bindings.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_with_as_reference_is_write() {
+        let source = r#"
+def func():
+    with open('f') as fh:
+        data = fh.read()
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        // The 'fh' at the binding site should be a write reference
+        // Find the 'fh' reference at its binding site (first occurrence)
+        let fh_refs: Vec<_> = file_scope.references.iter()
+            .filter(|r| r.qn.name == "test.func.fh")
+            .collect();
+        assert!(!fh_refs.is_empty(), "Should have references for 'fh'");
+        let fh_binding_ref = &fh_refs[0];
+        assert_eq!(
+            fh_binding_ref.kind, ReferenceKind::Write,
+            "'fh' at binding site should be Write, got {:?}", fh_binding_ref.kind
+        );
+    }
+
+    #[test]
+    fn test_except_as_reference_is_write() {
+        let source = r#"
+def handler():
+    try:
+        pass
+    except ValueError as e:
+        print(e)
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        // The 'e' at the binding site should be a write reference
+        // Find the 'e' reference at its binding site (first occurrence)
+        let e_refs: Vec<_> = file_scope.references.iter()
+            .filter(|r| r.qn.name == "test.handler.e")
+            .collect();
+        assert!(!e_refs.is_empty(), "Should have references for 'e'");
+        let e_binding_ref = &e_refs[0];
+        assert_eq!(
+            e_binding_ref.kind, ReferenceKind::Write,
+            "'e' at binding site should be Write, got {:?}", e_binding_ref.kind
         );
     }
 
