@@ -1211,6 +1211,8 @@ class EditorSearchEngine:
 
                         # Recompute start from the chosen cursor position
                         start = cursor_idx
+                        while start > 0 and (line_text[start-1].isalnum() or line_text[start-1] == '_'):
+                            start -= 1
 
                     if cursor_idx >= 0 and (line_text[cursor_idx].isalnum() or line_text[cursor_idx] == '_'):
                         # Find end of identifier (move right while alphanumeric/underscore)
