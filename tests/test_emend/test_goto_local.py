@@ -1,4 +1,3 @@
-import pytest
 from emend.editor_search import EditorSearchEngine
 from emend.transform import warm_caches
 
@@ -400,12 +399,6 @@ def long_func(
     engine.close()
 
 
-# -- Scope resolver limitation tests --
-# These test cases where the Rust scope resolver doesn't track certain
-# binding types. They document known gaps rather than goto_local bugs.
-
-
-@pytest.mark.xfail(reason="Scope resolver doesn't track 'with ... as' bindings")
 def test_goto_with_as_variable(tmp_path):
     """Goto context manager variable from 'with ... as fh:'."""
     engine, fp = _make_engine(tmp_path, "test.py", """
@@ -419,7 +412,6 @@ def read_file():
     engine.close()
 
 
-@pytest.mark.xfail(reason="Scope resolver doesn't track 'except ... as' bindings")
 def test_goto_except_as_variable(tmp_path):
     """Goto exception variable from 'except ... as e:'."""
     engine, fp = _make_engine(tmp_path, "test.py", """

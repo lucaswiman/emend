@@ -1857,7 +1857,15 @@ impl ScopeResolver {
 
         for (rule_list, kind) in binding_rules {
             if let Some(rule) = rule_list.iter().find(|r| r.node == node_kind) {
-                if let Some(target) = node.child_by_field_name(&rule.target) {
+                let target = node.child_by_field_name(&rule.target).or_else(|| {
+                    // Fallback: look for as_pattern alias in nested structures.
+                    // In tree-sitter-python, `with_clause` contains `with_item`
+                    // children with as_pattern, and `except_clause` has an as_pattern
+                    // as its `value` field.  Both use as_pattern_target [alias].
+                    let as_pattern_alias = &self.config.pattern_matching.as_pattern;
+                    Self::find_as_pattern_alias(&node, as_pattern_alias)
+                });
+                if let Some(target) = target {
                     let type_annotation = node.child_by_field_name("type").map(|n| ctx.text(n).to_string());
                     self.collect_binding_targets(ctx, &target, scope_for_children, kind, type_annotation);
                 }
@@ -1974,6 +1982,35 @@ impl ScopeResolver {
             }
             _ => {}
         }
+    }
+
+    /// Search a node and its descendants (up to depth 3) for an `as_pattern`
+    /// node and return its `alias` field.  This handles `with_clause` →
+    /// `with_item` → `as_pattern` and `except_clause` → `as_pattern` nesting
+    /// in tree-sitter-python.
+    fn find_as_pattern_alias<'t>(
+        node: &tree_sitter::Node<'t>,
+        as_pattern_kind: &str,
+    ) -> Option<tree_sitter::Node<'t>> {
+        // Breadth-first search up to depth 3
+        let mut stack: Vec<(tree_sitter::Node<'t>, usize)> = vec![(*node, 0)];
+        while let Some((current, depth)) = stack.pop() {
+            if current.kind() == as_pattern_kind {
+                return current.child_by_field_name("alias");
+            }
+            if depth < 3 {
+                let mut cursor = current.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        stack.push((cursor.node(), depth + 1));
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Collect function parameters as bindings.
@@ -2900,5 +2937,58 @@ x = 20
         assert!(has_write, "Should have write references, got: {:?}", ref_kinds);
         assert!(has_read, "Should have read references, got: {:?}", ref_kinds);
         assert!(has_call, "Should have call references (print), got: {:?}", ref_kinds);
+    }
+
+    #[test]
+    fn test_with_as_binding() {
+        let source = r#"
+def read_file():
+    with open('f') as fh:
+        data = fh.read()
+    return data
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let func_scope = file_scope.scopes.iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("Should have a function scope");
+
+        assert!(
+            func_scope.bindings.contains_key("fh"),
+            "Should track 'with ... as fh' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_except_as_binding() {
+        let source = r#"
+def handler():
+    try:
+        pass
+    except ValueError as e:
+        print(e)
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let func_scope = file_scope.scopes.iter()
+            .find(|s| s.kind == ScopeKind::Function)
+            .expect("Should have a function scope");
+
+        assert!(
+            func_scope.bindings.contains_key("e"),
+            "Should track 'except ... as e' binding. Bindings: {:?}",
+            func_scope.bindings.keys().collect::<Vec<_>>()
+        );
     }
 }
