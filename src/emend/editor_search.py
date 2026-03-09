@@ -1364,17 +1364,20 @@ class EditorSearchEngine:
 
             # 3. Symbols by case-sensitive prefix (GLOB is case-sensitive)
             sql = (
-                "SELECT DISTINCT name, kind FROM symbol_index "
+                "SELECT DISTINCT name, kind, file_path FROM symbol_index "
                 "WHERE name GLOB ? LIMIT ?"
             )
             for row in conn.execute(sql, (prefix + "*", limit)):
                 if row[0] not in seen:
                     seen.add(row[0])
+                    # Score module items in current file higher than imports
+                    is_local_module = file and Path(row[2]).resolve() == Path(file).resolve()
+                    score = 1500 if is_local_module else 100
                     items.append({
                         "word": row[0],
                         "kind": row[1],
                         "menu": "[sym]",
-                        "score": 100,
+                        "score": score,
                     })
 
         # Sort by score (desc) and word length (asc)

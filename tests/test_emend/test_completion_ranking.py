@@ -1,6 +1,7 @@
 
 import pytest
 import textwrap
+import sqlite3
 from pathlib import Path
 from emend.editor_search import EditorSearchEngine, _dispatch
 from conftest import build_indexed_project
@@ -98,6 +99,58 @@ def test_completion_ranking_scopes(engine):
     })
     words = [item["word"] for item in result["items"]]
     assert "os" in words
+
+def test_completion_ranking_triple_tier(engine_with_remote):
+    eng, proj = engine_with_remote
+    app_path = str((proj / "app.py").resolve())
+    
+    # At # cursor_here
+    lines = SAMPLE_SOURCE.splitlines()
+    line_no = 0
+    for i, line in enumerate(lines):
+        if "# cursor_here" in line:
+            line_no = i + 1
+            break
+            
+    # Complete 'm'
+    # Expected: 
+    # 1. module_var (Module item - 1500)
+    # 2. math (Import - 500)
+    # 3. module_remote (Remote - 100)
+    
+    # We need to add 'import math' to app.py
+    source_with_import = SAMPLE_SOURCE.replace("import sys", "import math")
+    (proj / "app.py").write_text(source_with_import)
+    # Reindex is okay for just updating one file
+    _dispatch(eng, "reindex", {})
+
+    result = _dispatch(eng, "complete", {
+        "prefix": "m",
+        "file": app_path,
+        "line": line_no,
+        "col": 8
+    })
+    
+    words = [item["word"] for item in result["items"]]
+    assert "module_var" in words
+    assert "math" in words
+    assert "module_remote" in words
+    
+    idx_module = words.index("module_var")
+    idx_import = words.index("math")
+    idx_remote = words.index("module_remote")
+    
+    assert idx_module < idx_import < idx_remote
+
+@pytest.fixture
+def engine_with_remote(tmp_path):
+    proj = build_indexed_project(tmp_path, {
+        "app.py": SAMPLE_SOURCE,
+        "other.py": "module_remote = 1"
+    })
+    eng = EditorSearchEngine(str(proj))
+    yield eng, proj
+    eng.close()
 
 def test_attribute_completion_inheritance(engine):
     eng, proj = engine
