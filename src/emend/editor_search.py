@@ -1125,8 +1125,11 @@ class EditorSearchEngine:
         import time as _time
         t0 = _time.monotonic()
 
+        logger.debug(f"goto_local: file={file}, line={line}, col={col}")
+
         file_path = Path(file).resolve()
         if not file_path.exists():
+            logger.debug(f"goto_local: file not found: {file_path}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # Parse with scope resolver
@@ -1136,6 +1139,7 @@ class EditorSearchEngine:
                 content = f.read()
             resolver.index_file(str(file_path), content)
             refs = resolver.references_in_file(str(file_path))
+            logger.debug(f"goto_local: found {len(refs)} references in file")
         except Exception as exc:
             logger.debug("Scope resolver failed: %s", exc)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
@@ -1145,10 +1149,12 @@ class EditorSearchEngine:
         for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
             # line/col from scope resolver are 1-based, same as Vim.
             if r_line == line and abs(r_col - col) <= 2:
+                logger.debug(f"goto_local: found target_qn={qn} at line={r_line}, col={r_col}")
                 target_qn = qn
                 break
 
         if not target_qn:
+            logger.debug(f"goto_local: no target_qn found at line={line}, col={col}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # 1. Local definition in the same file
@@ -1525,6 +1531,7 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         file = params.get("file", "")
         line = int(params.get("line", 0))
         col = int(params.get("col", 0))
+        logger.debug(f"complete() called: prefix={prefix!r}, file={file!r}, line={line}, col={col}")
         return engine.complete(prefix, file=file, line=line, col=col).to_dict()
     # -- Knowledge base methods --
     elif method == "kb_search":
@@ -1539,9 +1546,12 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             file = params.get("file", "")
             line = int(params.get("line", 1))
             col = int(params.get("col", 0))
+            logger.debug(f"mapping_goto: trying goto_local(file={file!r}, line={line}, col={col})")
             res = engine.goto_local(file, line, col)
+            logger.debug(f"mapping_goto: goto_local returned {len(res.items)} items")
             if res.items:
                 return res.to_dict()
+        logger.debug(f"mapping_goto: falling back to _mapping_goto")
         return _mapping_goto(engine, params)
     elif method == "module_resolve":
         return _module_resolve(engine, params)

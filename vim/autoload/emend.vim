@@ -365,11 +365,11 @@ endfunction
 
 function! emend#goto(identifier, ...) abort
   let l:Cb = a:0 > 0 ? a:1 : function('s:on_goto_result')
-  let [l:line, l:col] = getpos('.')[1:2]
+  let [l:line_num, l:col] = getpos('.')[1:2]
   call emend#send('mapping_goto', {
         \ 'identifier': a:identifier,
         \ 'file': expand('%:p'),
-        \ 'line': l:line,
+        \ 'line': l:line_num,
         \ 'col': l:col,
         \ }, l:Cb)
 endfunction
@@ -419,9 +419,10 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! emend#complete_at_cursor() abort
-  let l:line = getline('.')
+  let l:line_text = getline('.')
+  let l:line_num = line('.')
   let l:col = col('.')
-  let l:before = strpart(l:line, 0, l:col - 1)
+  let l:before = strpart(l:line_text, 0, l:col - 1)
 
   " Check for dotted prefix (e.g. "DocumentRequestConfig.ing")
   let l:dotted = matchstr(l:before, '\k\+\.\k*$')
@@ -439,7 +440,7 @@ function! emend#complete_at_cursor() abort
   call emend#send('complete', {
         \ 'prefix': l:word,
         \ 'file': expand('%:p'),
-        \ 'line': l:line,
+        \ 'line': l:line_num,
         \ 'col': l:col,
         \ }, {res -> s:on_complete_result(res, l:replace_len)})
 endfunction
