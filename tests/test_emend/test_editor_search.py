@@ -117,11 +117,16 @@ class TestFTS5:
         count = rebuild_fts(conn)
         assert count > 0
 
-        # FTS table should exist now
+        # FTS tables should exist now
         fts_count = conn.execute(
             "SELECT COUNT(*) FROM symbol_fts"
         ).fetchone()[0]
-        assert fts_count == count
+        file_fts_count = conn.execute(
+            "SELECT COUNT(*) FROM file_fts"
+        ).fetchone()[0]
+        assert fts_count + file_fts_count == count
+        assert fts_count > 0
+        assert file_fts_count > 0
         conn.close()
 
     def test_rebuild_fts_idempotent(self, indexed_project):
