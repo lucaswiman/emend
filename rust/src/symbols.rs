@@ -27,6 +27,7 @@ pub struct RustSymbol {
     pub decorators: Vec<String>,
     pub decorator_line_start: Option<usize>,
     pub param_names: Vec<String>,
+    pub bases: Vec<String>,
 }
 
 /// Convert a RustSymbol tree to a Python dict (recursively).
@@ -53,6 +54,9 @@ pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
 
     let param_list = PyList::new(_py, sym.param_names.iter().map(|s| s.as_str()))?;
     d.set_item("param_names", param_list)?;
+
+    let bases_list = PyList::new(_py, sym.bases.iter().map(|s| s.as_str()))?;
+    d.set_item("bases", bases_list)?;
 
     let children_list = PyList::empty(_py);
     for child in &sym.children {
@@ -764,6 +768,7 @@ fn collect_from_body(
                                     decorators: vec![],
                                     decorator_line_start: None,
                                     param_names: vec![],
+                                    bases: vec![],
                                 });
                             }
 
@@ -868,6 +873,7 @@ fn emit_function(
                                 decorators: vec![],
                                 decorator_line_start: None,
                                 param_names: vec![],
+                                bases: vec![],
                             });
                         }
                         seen.insert(name_ref.clone());
@@ -897,6 +903,7 @@ fn emit_function(
             decorators,
             decorator_line_start,
             param_names,
+            bases: vec![],
         });
     } else {
         if let Some(top) = defined_names_stack.last_mut() {
@@ -949,6 +956,17 @@ fn emit_class(
             top.insert(name.clone());
         }
 
+        let mut bases = Vec::new();
+        let sc_field = cfg.superclasses_field();
+        if let Some(superclasses) = class_node.child_by_field_name(sc_field) {
+            let mut cursor = superclasses.walk();
+            for child in superclasses.children(&mut cursor) {
+                if !matches!(child.kind(), "(" | ")" | ",") {
+                    bases.push(node_text(child, source).to_string());
+                }
+            }
+        }
+
         symbols.push(RustSymbol {
             name,
             kind: "class".to_string(),
@@ -965,6 +983,7 @@ fn emit_class(
             decorators,
             decorator_line_start,
             param_names: vec![],
+            bases,
         });
     } else {
         if let Some(top) = defined_names_stack.last_mut() {

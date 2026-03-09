@@ -1246,15 +1246,56 @@ class EditorSearchEngine:
         elapsed = round((_time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
 
-    def complete(self, prefix: str, limit: int = 20, file: str = "") -> SearchResult:
+    def complete(self, prefix: str, limit: int = 20, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
         """Return completion candidates for the given prefix.
 
         When *file* is provided, imported names in that file are included
         as candidates (union with the project symbol index).
+
+        When *line* and *col* are provided, local variables from the
+        enclosing scopes are ranked first.
         """
         conn = self._get_conn()
         seen: set[str] = set()
         items: list[dict] = []
+
+        # 1. Local variables from PyScopeResolver
+        local_names: set[str] = set()
+        if file and line > 0:
+            try:
+                from emend.transform import _rust
+                resolver = _rust.PyScopeResolver(str(self.project_root))
+                source = Path(file).read_text()
+                resolver.index_file(str(file), source)
+                # scopes_in_file returns (kind, start_line, end_line, [(name, kind, line, col)])
+                scopes = resolver.scopes_in_file(str(file))
+                
+                # Sort scopes by size (smallest first) to find the most specific enclosing scope
+                # But actually we want ALL enclosing scopes (locals, then outer, etc.)
+                enclosing_scopes = []
+                for kind, s_start, s_end, bindings in scopes:
+                    if s_start <= line <= s_end:
+                        size = s_end - s_start
+                        enclosing_scopes.append((size, bindings))
+                
+                enclosing_scopes.sort(key=lambda x: x[0]) # innermost first
+                
+                for _, bindings in enclosing_scopes:
+                    for b_name, b_kind, b_line, b_col in bindings:
+                        # Only include if it matches prefix
+                        if not b_name.startswith(prefix.split(".")[-1]):
+                            continue
+                        if b_name not in seen:
+                            seen.add(b_name)
+                            local_names.add(b_name)
+                            items.append({
+                                "word": b_name,
+                                "kind": b_kind.lower(),
+                                "menu": "[local]",
+                                "score": 2000, # High score for locals
+                            })
+            except Exception as exc:
+                logger.debug("Local completion failed: %s", exc)
 
         # Collect imported names from the current file for local completions.
         import_names: dict[str, str] = {}  # local_name -> qualified source
@@ -1271,8 +1312,16 @@ class EditorSearchEngine:
             resolved_parent = import_names.get(parent, parent)
 
             # Search local project symbol index
-            for search_parent in dict.fromkeys([resolved_parent, parent]):
-                pattern = f"*{search_parent}.{member_prefix}*"
+            parents_to_check = [resolved_parent, parent]
+            checked_parents: set[str] = set()
+            
+            while parents_to_check:
+                p = parents_to_check.pop(0)
+                if p in checked_parents:
+                    continue
+                checked_parents.add(p)
+
+                pattern = f"*{p}.{member_prefix}*"
                 sql = (
                     "SELECT DISTINCT name, qualified_name, kind FROM symbol_index "
                     "WHERE qualified_name GLOB ? LIMIT ?"
@@ -1284,7 +1333,17 @@ class EditorSearchEngine:
                             "word": row[0],
                             "kind": row[2],
                             "menu": f"[{row[1]}]",
+                            "score": 1000,
                         })
+
+                # Follow bases if p is a class
+                sql_bases = "SELECT bases FROM symbol_index WHERE qualified_name = ? OR name = ? LIMIT 1"
+                row_bases = conn.execute(sql_bases, (p, p)).fetchone()
+                if row_bases and row_bases[0]:
+                    for b in row_bases[0].split(","):
+                        b = b.strip()
+                        if b and b not in checked_parents:
+                            parents_to_check.append(b)
 
             # Fallback: resolve through KB module mappings for cross-project symbols
             if not items:
@@ -1292,7 +1351,7 @@ class EditorSearchEngine:
                     resolved_parent, member_prefix, limit, seen
                 )
         else:
-            # 1. Imported names matching prefix (case-sensitive)
+            # 2. Imported names matching prefix (case-sensitive)
             for local_name, source in import_names.items():
                 if local_name.startswith(prefix) and local_name not in seen:
                     seen.add(local_name)
@@ -1300,9 +1359,10 @@ class EditorSearchEngine:
                         "word": local_name,
                         "kind": "import",
                         "menu": f"[{source}]",
+                        "score": 500,
                     })
 
-            # 2. Symbols by case-sensitive prefix (GLOB is case-sensitive)
+            # 3. Symbols by case-sensitive prefix (GLOB is case-sensitive)
             sql = (
                 "SELECT DISTINCT name, kind FROM symbol_index "
                 "WHERE name GLOB ? LIMIT ?"
@@ -1314,7 +1374,11 @@ class EditorSearchEngine:
                         "word": row[0],
                         "kind": row[1],
                         "menu": "[sym]",
+                        "score": 100,
                     })
+
+        # Sort by score (desc) and word length (asc)
+        items.sort(key=lambda x: (-x.get("score", 0), len(x["word"])))
 
         return SearchResult(items=items[:limit], elapsed_ms=0, mode="complete", query=prefix)
 
@@ -1452,7 +1516,9 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     elif method == "complete":
         prefix = params.get("prefix", params.get("query", ""))
         file = params.get("file", "")
-        return engine.complete(prefix, file=file).to_dict()
+        line = int(params.get("line", 0))
+        col = int(params.get("col", 0))
+        return engine.complete(prefix, file=file, line=line, col=col).to_dict()
     # -- Knowledge base methods --
     elif method == "kb_search":
         return _kb_search(engine, params)

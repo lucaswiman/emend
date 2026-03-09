@@ -924,6 +924,7 @@ impl FileScope {
                 decorators: Vec::new(),
                 decorator_line_start: None,
                 param_names: Vec::new(),
+                bases: Vec::new(),
             });
         }
 
@@ -969,6 +970,7 @@ impl FileScope {
                          decorators: Vec::new(),
                          decorator_line_start: None,
                          param_names: Vec::new(),
+                         bases: Vec::new(),
                      });
                 }
             }

@@ -154,6 +154,7 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "  end_line INTEGER NOT NULL,"
         "  depth INTEGER NOT NULL DEFAULT 1,"
         "  parent TEXT,"
+        "  bases TEXT,"
         "  signature TEXT,"
         "  returns TEXT,"
         "  decorators TEXT,"
@@ -498,6 +499,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                         sym.end_line,
                         sym.depth,
                         sym.parent,
+                        ",".join(sym.bases) if getattr(sym, "bases", None) else None,
                         sig,
                         sym.returns,
                         ",".join(sym.decorators) if sym.decorators else None,
@@ -556,9 +558,9 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 conn.executemany(
                     "INSERT INTO symbol_index "
                     "(content_hash, file_path, name, qualified_name, module_qn, kind, "
-                    "line, end_line, depth, parent, signature, returns, decorators, "
+                    "line, end_line, depth, parent, bases, signature, returns, decorators, "
                     "is_entry_point, is_exported, has_noqa) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     sym_rows,
                 )
             if import_rows:
