@@ -176,3 +176,39 @@ def test_attribute_completion_inheritance(engine):
     # Should show both methods
     assert "derived_method" in words
     assert "base_method" in words
+
+
+def test_completion_function_parameters(engine):
+    eng, proj = engine
+    app_path = str((proj / "app.py").resolve())
+
+    # Test completion for function parameters
+    source = textwrap.dedent("""\
+        def my_func(param_one, param_two):
+            # cursor_here
+            param
+        """)
+    (proj / "test.py").write_text(source)
+
+    lines = source.splitlines()
+    line_no = 0
+    for i, line in enumerate(lines):
+        if "# cursor_here" in line:
+            line_no = i + 1
+            break
+
+    test_path = str((proj / "test.py").resolve())
+    _dispatch(eng, "reindex", {})
+
+    # Complete "param" inside the function
+    result = _dispatch(eng, "complete", {
+        "prefix": "param",
+        "file": test_path,
+        "line": line_no,
+        "col": 4
+    })
+
+    words = [item["word"] for item in result["items"]]
+    # Should find param_one and param_two
+    assert "param_one" in words, f"param_one not in {words}"
+    assert "param_two" in words, f"param_two not in {words}"

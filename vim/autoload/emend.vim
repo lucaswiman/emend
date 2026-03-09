@@ -439,6 +439,8 @@ function! emend#complete_at_cursor() abort
   call emend#send('complete', {
         \ 'prefix': l:word,
         \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
         \ }, {res -> s:on_complete_result(res, l:replace_len)})
 endfunction
 

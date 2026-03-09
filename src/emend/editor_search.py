@@ -1268,13 +1268,15 @@ class EditorSearchEngine:
                 source = Path(file).read_text()
                 resolver.index_file(str(file), source)
                 # scopes_in_file returns (kind, start_line, end_line, [(name, kind, line, col)])
+                # Note: Rust uses 0-based line numbers, Vim uses 1-based, so subtract 1
                 scopes = resolver.scopes_in_file(str(file))
-                
+
                 # Sort scopes by size (smallest first) to find the most specific enclosing scope
                 # But actually we want ALL enclosing scopes (locals, then outer, etc.)
                 enclosing_scopes = []
+                zero_based_line = line - 1  # Convert from Vim's 1-based to 0-based
                 for kind, s_start, s_end, bindings in scopes:
-                    if s_start <= line <= s_end:
+                    if s_start <= zero_based_line <= s_end:
                         size = s_end - s_start
                         enclosing_scopes.append((size, bindings))
                 
@@ -1288,11 +1290,13 @@ class EditorSearchEngine:
                         if b_name not in seen:
                             seen.add(b_name)
                             local_names.add(b_name)
+                            # Rank local variables higher than parameters
+                            score = 2000 if b_kind.lower() != "parameter" else 1800
                             items.append({
                                 "word": b_name,
                                 "kind": b_kind.lower(),
                                 "menu": "[local]",
-                                "score": 2000, # High score for locals
+                                "score": score,
                             })
             except Exception as exc:
                 logger.debug("Local completion failed: %s", exc)

@@ -2064,8 +2064,10 @@ def index_cmd(
     from emend.transform import _collect_source_files_scandir
     from pathlib import Path as _Path
     scan_root = str(_Path(path).resolve())
-    total = len(_collect_source_files_scandir(scan_root))
-    print(f"Indexing {total} source files in {scan_root}...", file=sys.stderr)
+    file_count = len(_collect_source_files_scandir(scan_root))
+    # Callback is called twice per file (index + types phases)
+    total = file_count * 2
+    print(f"Indexing {file_count} source files in {scan_root}...", file=sys.stderr)
 
     from emend.type_oracle import TypeEngineUnavailableError
     try:
