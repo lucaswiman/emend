@@ -1164,56 +1164,76 @@ class EditorSearchEngine:
 
         # Extract the identifier at the cursor position from the source
         lines = content.split('\n')
+        target_qn = None
         if line <= len(lines):
             line_text = lines[line - 1]
             # Find word boundaries around the cursor position
-            if col <= len(line_text):
+            # Allow col to be up to len(line_text) + 1 (cursor 1 past end)
+            if col >= 1 and col <= len(line_text) + 1:
                 # Move col to be 0-based for string indexing
-                cursor_idx = col - 1
-                # Find start of identifier (move left while alphanumeric/underscore)
-                start = cursor_idx
-                while start > 0 and (line_text[start-1].isalnum() or line_text[start-1] == '_'):
-                    start -= 1
-                # Find end of identifier (move right while alphanumeric/underscore)
-                end = cursor_idx
-                while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
-                    end += 1
-                identifier = line_text[start:end]
-                logger.debug(f"goto_local: extracted identifier='{identifier}' from cursor")
+                cursor_idx = min(col - 1, len(line_text) - 1)
+                identifier = ""
+                # If cursor is at/past end and line is empty, skip
+                if cursor_idx < 0:
+                    logger.debug(f"goto_local: empty line or cursor at start, skipping identifier extraction")
+                else:
+                    # Find start of identifier (move left while alphanumeric/underscore)
+                    start = cursor_idx
+                    while start > 0 and (line_text[start-1].isalnum() or line_text[start-1] == '_'):
+                        start -= 1
+                    # Handle case where cursor is not on identifier (e.g., on whitespace)
+                    if not (line_text[cursor_idx].isalnum() or line_text[cursor_idx] == '_'):
+                        # Try moving back to find an identifier
+                        start = cursor_idx
+                        while start > 0 and not (line_text[start].isalnum() or line_text[start] == '_'):
+                            start -= 1
+                        if start < 0 or not (line_text[start].isalnum() or line_text[start] == '_'):
+                            logger.debug(f"goto_local: cursor not on identifier, skipping reference search")
+                        else:
+                            # Found identifier to the left, recompute end
+                            cursor_idx = start
 
-                # Find the reference with matching identifier (last component of QN)
-                # Determine QN separator based on file extension
-                qn_sep = "/" if file.endswith((".ts", ".tsx", ".js", ".jsx")) else "."
+                    if cursor_idx >= 0 and (line_text[cursor_idx].isalnum() or line_text[cursor_idx] == '_'):
+                        # Find end of identifier (move right while alphanumeric/underscore)
+                        end = cursor_idx
+                        while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
+                            end += 1
+                        identifier = line_text[start:end]
+                        logger.debug(f"goto_local: extracted identifier='{identifier}' from cursor at col={col}")
 
-                for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
-                    if r_line == line:
-                        qn_parts = qn.split(qn_sep)
-                        qn_last = qn_parts[-1]
-                        
-                        if qn_last == identifier:
-                            logger.debug(f"goto_local: MATCH found target_qn={qn}")
-                            target_qn = qn
-                            break
+                        # Find the reference with matching identifier (last component of QN)
+                        # Determine QN separator based on file extension
+                        qn_sep = "/" if file.endswith((".ts", ".tsx", ".js", ".jsx")) else "."
 
-                # If no reference found, check bindings (for parameters, etc.)
-                if not target_qn:
-                    # First try exact line match
-                    for b_name, b_line, b_col, b_kind in bindings:
-                        if b_line == line and b_name == identifier:
-                            logger.debug(f"goto_local: MATCH found binding {b_name} at line {b_line}")
-                            target_qn = b_name
-                            break
+                        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+                            if r_line == line:
+                                qn_parts = qn.split(qn_sep)
+                                qn_last = qn_parts[-1]
 
-                    # If still not found, search in enclosing scopes (for parameters in parent function/class)
-                    if not target_qn:
-                        # Find bindings with matching name in any line before current line
-                        matching_bindings = [(b_name, b_line, b_col, b_kind) for b_name, b_line, b_col, b_kind in bindings if b_name == identifier and b_line < line]
-                        if matching_bindings:
-                            # Use the most recent one (highest line number)
-                            matching_bindings.sort(key=lambda x: -x[1])
-                            b_name, b_line, b_col, b_kind = matching_bindings[0]
-                            logger.debug(f"goto_local: MATCH found binding {b_name} in parent scope at line {b_line}")
-                            target_qn = b_name
+                                if qn_last == identifier:
+                                    logger.debug(f"goto_local: MATCH found target_qn={qn}")
+                                    target_qn = qn
+                                    break
+
+                        # If no reference found, check bindings (for parameters, etc.)
+                        if not target_qn:
+                            # First try exact line match
+                            for b_name, b_line, b_col, b_kind in bindings:
+                                if b_line == line and b_name == identifier:
+                                    logger.debug(f"goto_local: MATCH found binding {b_name} at line {b_line}")
+                                    target_qn = b_name
+                                    break
+
+                            # If still not found, search in enclosing scopes (for parameters in parent function/class)
+                            if not target_qn:
+                                # Find bindings with matching name in any line before current line
+                                matching_bindings = [(b_name, b_line, b_col, b_kind) for b_name, b_line, b_col, b_kind in bindings if b_name == identifier and b_line < line]
+                                if matching_bindings:
+                                    # Use the most recent one (highest line number)
+                                    matching_bindings.sort(key=lambda x: -x[1])
+                                    b_name, b_line, b_col, b_kind = matching_bindings[0]
+                                    logger.debug(f"goto_local: MATCH found binding {b_name} in parent scope at line {b_line}")
+                                    target_qn = b_name
 
         if not target_qn:
             logger.debug(f"goto_local: no target_qn found at line={line}, col={col}")

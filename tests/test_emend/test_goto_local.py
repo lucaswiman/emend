@@ -124,8 +124,9 @@ def test_goto_whitespace_around_cursor(tmp_path):
     """Test goto is robust to cursor position within whitespace/word.
 
     KNOWN ISSUE: Only works when cursor is at specific columns. The identifier
-    extraction logic (lines 1174-1180 in editor_search.py) may have edge cases
-    that cause it to fail when cursor is slightly off the target identifier.
+    extraction logic may have edge cases that cause it to fail when cursor is
+    slightly off the target identifier. Even after boundary improvements,
+    this test still fails, suggesting the real issue is in scope resolver.
     """
     code = """
 def foo(x):
