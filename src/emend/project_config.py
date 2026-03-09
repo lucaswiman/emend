@@ -58,29 +58,14 @@ def _merge_environment_lookup(base: dict[str, Any], override: dict[str, Any]) ->
     return merged
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge *override* into *base*; override wins for scalars."""
-    merged = dict(base)
-    for key, value in override.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-
 @lru_cache(maxsize=16)
 def load_project_config(project_root: str, language: str = "python") -> dict[str, Any]:
     """Load the merged project configuration.
 
     Merges (lowest → highest priority):
     1. Language defaults from ``languages/<lang>/config.toml``
-    2. ``pyproject.toml`` under ``[tool.emend]``
+    2. ``pyproject.toml`` ``[tool.emend]``
     3. ``.emend/config.toml``
-
-    All top-level sections are forwarded (``environment_lookup``, ``vim``,
-    ``editor``, etc.) so downstream consumers can read project-level
-    settings without knowing about every section upfront.
     """
     from emend.language_registry import load_config as load_lang_config
 
@@ -95,13 +80,15 @@ def load_project_config(project_root: str, language: str = "python") -> dict[str
     # Layer 2: pyproject.toml [tool.emend]
     pyproject_data = _load_toml(root / "pyproject.toml")
     tool_emend = pyproject_data.get("tool", {}).get("emend", {})
-    if tool_emend:
-        result = _deep_merge(result, tool_emend)
+    if "environment_lookup" in tool_emend:
+        base = result.get("environment_lookup", {})
+        result["environment_lookup"] = _merge_environment_lookup(base, tool_emend["environment_lookup"])
 
     # Layer 3: .emend/config.toml
     emend_config = _load_toml(root / ".emend" / "config.toml")
-    if emend_config:
-        result = _deep_merge(result, emend_config)
+    if "environment_lookup" in emend_config:
+        base = result.get("environment_lookup", {})
+        result["environment_lookup"] = _merge_environment_lookup(base, emend_config["environment_lookup"])
 
     return result
 

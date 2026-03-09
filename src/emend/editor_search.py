@@ -1532,24 +1532,6 @@ class EditorSearchEngine:
         elapsed = round((_time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="types", query=f"types at {file}:{line}")
 
-    def get_config(self, section: str = "") -> SearchResult:
-        """Return project configuration from .emend/config.toml / pyproject.toml.
-
-        If *section* is given, return only that section (e.g. "vim").
-        Otherwise return the full merged config.
-        """
-        from emend.project_config import load_project_config
-        import time as _time
-        t0 = _time.monotonic()
-
-        config = load_project_config(str(self.project_root))
-        if section:
-            config = config.get(section, {})
-
-        items = [config] if config else []
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="config", query=section or "all")
-
     def complete(self, prefix: str, limit: int = 20, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
         """Return completion candidates for the given prefix.
 
@@ -1898,10 +1880,6 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             file=params.get("file", ""),
             line=int(params.get("line", 0)),
             col=int(params.get("col", 0)),
-        ).to_dict()
-    elif method == "config":
-        return engine.get_config(
-            section=params.get("section", ""),
         ).to_dict()
     else:
         raise ValueError(f"Unknown method: {method!r}")

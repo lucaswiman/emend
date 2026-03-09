@@ -268,32 +268,6 @@ class TestCallees:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Config
-# ---------------------------------------------------------------------------
-
-
-class TestConfig:
-    def test_config_returns_result(self, engine):
-        eng, proj = engine
-        result = _dispatch(eng, "config", {})
-        assert result["mode"] == "config"
-        assert isinstance(result["items"], list)
-
-    def test_config_vim_section(self, engine):
-        eng, proj = engine
-        emend_dir = proj / ".emend"
-        emend_dir.mkdir(exist_ok=True)
-        (emend_dir / "config.toml").write_text('[vim]\nlimit = 25\npreview_height = 70\n')
-        from emend.project_config import load_project_config
-        load_project_config.cache_clear()
-        result = _dispatch(eng, "config", {"section": "vim"})
-        assert result["mode"] == "config"
-        assert len(result["items"]) == 1
-        assert result["items"][0]["limit"] == 25
-        assert result["items"][0]["preview_height"] == 70
-
-
-# ---------------------------------------------------------------------------
 # Tests: Types at cursor
 # ---------------------------------------------------------------------------
 

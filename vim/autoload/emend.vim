@@ -267,8 +267,6 @@ function! s:handle_message(msg) abort
   if !has_key(a:msg, 'id') && has_key(a:msg, 'method')
     if a:msg.method ==# 'ready'
       let s:ready = 1
-      " Fetch project config from .emend/config.toml / pyproject.toml [tool.emend]
-      call emend#send('config', {'section': 'vim'}, function('s:on_project_config'))
     endif
     return
   endif
@@ -290,36 +288,7 @@ function! s:handle_message(msg) abort
   endif
 endfunction
 
-" ---------------------------------------------------------------------------
-" Project config from .emend/config.toml [vim] section
-" ---------------------------------------------------------------------------
 
-function! s:on_project_config(result) abort
-  if has_key(a:result, 'error')
-    return
-  endif
-  let l:items = get(a:result, 'items', [])
-  if empty(l:items)
-    return
-  endif
-  let l:cfg = l:items[0]
-
-  " Apply vim-section overrides (only if the user hasn't set them explicitly).
-  " Supported keys: limit, preview_height, auto_start, default_mappings
-  if has_key(l:cfg, 'limit') && !exists('g:emend_config_loaded')
-    let g:emend_limit = l:cfg.limit
-  endif
-  if has_key(l:cfg, 'preview_height') && !exists('g:emend_config_loaded')
-    let g:emend_preview_height = l:cfg.preview_height
-  endif
-  if has_key(l:cfg, 'default_mappings') && !exists('g:emend_config_loaded')
-    let g:emend_default_mappings = l:cfg.default_mappings
-    if l:cfg.default_mappings
-      call s:apply_default_mappings()
-    endif
-  endif
-  let g:emend_config_loaded = 1
-endfunction
 
 function! s:apply_default_mappings() abort
   nnoremap <silent> <Leader>es <Cmd>Emend<CR>
