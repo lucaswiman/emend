@@ -4,6 +4,26 @@
 
 ### Features
 
+#### Unified Module Mapping System (`map` command)
+
+- **New `map` command**: Unified identifier and module mappings with subcommands:
+  - `add`, `add-module` — create mappings
+  - `lookup`, `search` — query mappings
+  - `resolve`, `resolve-file` — resolve identifiers to file paths with import-aware Tier 3 resolution
+  - `rm`, `rm-module`, `list-modules`, `update-module` — manage mappings
+- **Smart module resolution**: Follows re-exports at any depth, resolves plain module paths to `__init__.py`, handles snake_case file names
+- **Dotted selector support**: Extended selectors with dot notation (e.g., `module.submodule::Symbol[component]`) for navigating nested structures and re-exports
+
+#### Vim Plugin Improvements
+
+- **`:EmendGoto` fixes**: Smart navigation with local variable support and file context passing for import-aware resolution
+- **Enhanced `:Emend` search**:
+  - File path search via FTS5 trigram index with fuzzy subsequence matching
+  - Auto-detection of file-like queries (`/` or known extensions)
+  - File results displayed with distinct styling and higher scores
+- **Improved C-Space completion**: Better filtering and result scoring
+- **Selection highlighting**: Fixed caret display during navigation (`j`/`k`/`C-n`/`C-p`) with extmark-based selection
+
 #### Multi-Language Environment Lookup
 
 - **Environment lookup generalization**: Renamed `venv_lookup` to `environment_lookup` to support all languages
