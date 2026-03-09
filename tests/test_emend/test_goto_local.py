@@ -399,6 +399,33 @@ def long_func(
     engine.close()
 
 
+def test_goto_whitespace_fallback_left_multichar(tmp_path):
+    """When cursor is on whitespace and falls back LEFT, extract the full identifier."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def func():
+    total = 10
+    return total + 5
+""")
+    # Line 3: '    return total + 5'
+    # 'total' is at cols 12-16; col 17 is space after 'total'
+    _assert_goto(engine, fp, line=3, col=17, expected_name="total", expected_line=2)
+    engine.close()
+
+
+def test_goto_multiple_with_items(tmp_path):
+    """Goto variables from 'with expr as a, expr as b:'."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def func():
+    with open('a') as fh, open('b') as gh:
+        print(fh, gh)
+""")
+    # 'fh' at line 3 -> definition at line 2
+    _assert_goto(engine, fp, line=3, col=15, expected_name="fh", expected_line=2)
+    # 'gh' at line 3 -> definition at line 2
+    _assert_goto(engine, fp, line=3, col=19, expected_name="gh", expected_line=2)
+    engine.close()
+
+
 def test_goto_with_as_variable(tmp_path):
     """Goto context manager variable from 'with ... as fh:'."""
     engine, fp = _make_engine(tmp_path, "test.py", """
@@ -423,4 +450,84 @@ def handler():
 """)
     # 'e' at line 5 -> 'except ... as e' at line 4
     _assert_goto(engine, fp, line=5, col=15, expected_name="e", expected_line=4)
+    engine.close()
+
+
+def test_goto_except_tuple_as_variable(tmp_path):
+    """Goto exception variable from 'except (ValueError, TypeError) as e:'."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def handler():
+    try:
+        pass
+    except (ValueError, TypeError) as e:
+        print(e)
+""")
+    _assert_goto(engine, fp, line=5, col=15, expected_name="e", expected_line=4)
+    engine.close()
+
+
+def test_goto_multiple_except_clauses(tmp_path):
+    """Goto variables from multiple except clauses."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def handler():
+    try:
+        pass
+    except ValueError as ve:
+        print(ve)
+    except TypeError as te:
+        print(te)
+""")
+    _assert_goto(engine, fp, line=5, col=15, expected_name="ve", expected_line=4)
+    _assert_goto(engine, fp, line=7, col=15, expected_name="te", expected_line=6)
+    engine.close()
+
+
+def test_goto_nested_with(tmp_path):
+    """Goto variables from nested with statements."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def func():
+    with open('a') as outer:
+        with open('b') as inner:
+            print(outer, inner)
+""")
+    _assert_goto(engine, fp, line=4, col=19, expected_name="outer", expected_line=2)
+    _assert_goto(engine, fp, line=4, col=27, expected_name="inner", expected_line=3)
+    engine.close()
+
+
+def test_goto_async_with_as(tmp_path):
+    """Goto variable from 'async with ... as var:'."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+import asyncio
+
+async def func():
+    async with asyncio.Lock() as lock:
+        print(lock)
+""")
+    _assert_goto(engine, fp, line=5, col=15, expected_name="lock", expected_line=4)
+    engine.close()
+
+
+def test_goto_cursor_past_line_end(tmp_path):
+    """Cursor past end of line should snap to last char and resolve."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def func():
+    x = 1
+    return x
+""")
+    # Line 3: '    return x' (12 chars), col 13 = past end
+    _assert_goto(engine, fp, line=3, col=13, expected_name="x", expected_line=2)
+    engine.close()
+
+
+def test_goto_empty_line(tmp_path):
+    """Cursor on empty line should return no results."""
+    engine, fp = _make_engine(tmp_path, "test.py", """
+def func():
+    x = 1
+
+    return x
+""")
+    res = engine.goto_local(str(fp), line=3, col=1)
+    assert len(res.items) == 0, "Empty line should return no results"
     engine.close()
