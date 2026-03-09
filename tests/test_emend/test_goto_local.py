@@ -14,16 +14,16 @@ z = foo(10)
 """
     file_path = tmp_path / "test.py"
     file_path.write_text(code.strip())
-    
+
     # Ensure cache directory exists
     (tmp_path / ".emend/cache").mkdir(parents=True, exist_ok=True)
-    
+
     # Initialize index
     warm_caches(str(tmp_path))
-    
+
     # We need to initialize the project and index it
     engine = EditorSearchEngine(str(tmp_path))
-    
+
     # Try to find definition of 'y' at line 3, col 12
     # This should find the assignment at line 2
     res = engine.goto_local(str(file_path), line=3, col=12)
@@ -47,21 +47,22 @@ function greet(name: string) {
 """
     file_path = tmp_path / "test.ts"
     file_path.write_text(code.strip())
-    
+
     (tmp_path / ".emend/cache").mkdir(parents=True, exist_ok=True)
     warm_caches(str(tmp_path))
     engine = EditorSearchEngine(str(tmp_path))
-    
+
     # name is at line 1, col 16 (0-based) -> 1-based: 16
     # function greet(name: string) {
     # 0123456789012345
     # usage at line 2:
     #     console.log(name);
     # 01234567890123456
-    
+
     res = engine.goto_local(str(file_path), line=2, col=17)
     assert len(res.items) >= 1
     assert res.items[0]["line"] == 1
     assert res.items[0]["name"] == "name"
 
     engine.close()
+
