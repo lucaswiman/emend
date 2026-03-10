@@ -11,7 +11,8 @@ CONTENTS                                                      *emend-contents*
     3. Commands ............................ |emend-commands|
     4. Configuration ....................... |emend-configuration|
     5. Key mappings ........................ |emend-keymaps|
-    6. Architecture ........................ |emend-architecture|
+    6. Project configuration ............... |emend-project-config|
+    7. Architecture ........................ |emend-architecture|
 
 ==============================================================================
 1. INTRODUCTION                                           *emend-introduction*
@@ -85,6 +86,35 @@ After installing, run `:helptags ALL` to index this help file.
 :EmendRefs [name]       Find references to [name].  Without an argument, uses
                         the word under the cursor.
 
+                                                              *:EmendReplace*
+:EmendReplace           Open a prompt for a find pattern and replacement.
+                        After entering both, a diff preview is shown.
+                        Press `<CR>` to apply the changes or `<Esc>` to cancel.
+
+                                                                 *:EmendMove*
+:EmendMove [dest_file]  Move the symbol under cursor to another file.  If
+                        [dest_file] is not provided, prompts for a destination.
+                        Shows a diff preview before applying.
+
+                                                              *:EmendCallers*
+:EmendCallers [name]    Find all call sites for [name].  Without an argument,
+                        uses the word under the cursor.  Results are shown in
+                        the search UI.
+
+                                                              *:EmendCallees*
+:EmendCallees [name]    Find all functions called by the symbol [name] (or
+                        the symbol under the cursor).  Results are shown in
+                        the search UI.
+
+                                                            *:EmendTypeHover*
+:EmendTypeHover         Show inferred type information for the symbol under
+                        the cursor in the echo area.
+
+                                                        *:EmendOutlineFilter*
+:EmendOutlineFilter     Open an interactive outline of the current file with
+                        real-time filtering.  As you type, the outline narrows
+                        to matching symbols.
+
                                                                 *:EmendStart*
 :EmendStart             Start the emend editor-server process.  This happens
                         automatically when a Python file is opened (see
@@ -138,12 +168,24 @@ g:emend_default_mappings
                         `<Leader>es`  →  |:Emend|
                         `<Leader>eo`  →  |:EmendOutline|
                         `<Leader>er`  →  |:EmendRefs|
+                        `<Leader>eR`  →  |:EmendReplace|
+                        `<Leader>em`  →  |:EmendMove|
+                        `<Leader>ec`  →  |:EmendCallers|
+                        `<Leader>eC`  →  |:EmendCallees|
+                        `<Leader>et`  →  |:EmendTypeHover|
+                        `<Leader>eO`  →  |:EmendOutlineFilter|
                         Default: 0 (no mappings created).
+
+                        These mappings are also enabled when the project
+                        configuration sets `default_mappings = true` (see
+                        |emend-project-config|).
 
 ==============================================================================
 5. KEY MAPPINGS                                             *emend-keymaps*
 
 Inside the search results window:
+
+    Navigation:~
 
     `j` / `<Down>`      Move selection down
     `k` / `<Up>`        Move selection up
@@ -155,8 +197,43 @@ Inside the search results window:
     `q` / `<Esc>`       Close the search UI
     `/`                 Start a new search
 
+    Actions:~
+
+    `r`                 Rename the selected symbol
+    `R`                 Find references to the selected symbol
+    `c`                 Find callers of the selected symbol
+    `C`                 Find callees of the selected symbol
+    `t`                 Show type information for the selected symbol
+    `m`                 Move the selected symbol to another file
+
 ==============================================================================
-6. ARCHITECTURE                                         *emend-architecture*
+6. PROJECT CONFIGURATION                              *emend-project-config*
+
+Plugin behavior can also be configured per-project via configuration files,
+which override the Vim global defaults.
+
+`.emend/config.toml`:~
+>
+    [vim]
+    limit = 50              # max results per search
+    preview_height = 60     # preview pane height (%)
+    default_mappings = true  # enable <Leader>e* mappings
+<
+
+`pyproject.toml`:~
+>
+    [tool.emend.vim]
+    limit = 50
+    preview_height = 60
+    default_mappings = true
+<
+
+The `limit` and `preview_height` keys correspond to |g:emend_limit| and
+|g:emend_preview_height|.  The `default_mappings` key corresponds to
+|g:emend_default_mappings|.
+
+==============================================================================
+7. ARCHITECTURE                                         *emend-architecture*
 
 The plugin spawns `emend editor-server` as a child process and communicates
 via newline-delimited JSON-RPC over stdin/stdout pipes.

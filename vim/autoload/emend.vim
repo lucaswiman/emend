@@ -288,6 +288,22 @@ function! s:handle_message(msg) abort
   endif
 endfunction
 
+
+
+function! s:apply_default_mappings() abort
+  nnoremap <silent> <Leader>es <Cmd>Emend<CR>
+  nnoremap <silent> <Leader>eo <Cmd>EmendOutline<CR>
+  nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
+  nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
+  nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
+  nnoremap <silent> <Leader>eR <Cmd>EmendReplace<CR>
+  nnoremap <silent> <Leader>em <Cmd>EmendMove<CR>
+  nnoremap <silent> <Leader>ec <Cmd>EmendCallers<CR>
+  nnoremap <silent> <Leader>eC <Cmd>EmendCallees<CR>
+  nnoremap <silent> <Leader>et <Cmd>EmendTypeHover<CR>
+  nnoremap <silent> <Leader>eO <Cmd>EmendOutlineFilter<CR>
+endfunction
+
 " ---------------------------------------------------------------------------
 " Helpers
 " ---------------------------------------------------------------------------
@@ -412,6 +428,163 @@ function! s:on_rename_resolve(result, new_name) abort
         \ 'new_name': a:new_name,
         \ 'file': l:file,
         \ }, {res -> emend#ui#show_rename_preview(res, l:qn, a:new_name, l:file)})
+endfunction
+
+" ---------------------------------------------------------------------------
+" Pattern Replace
+" ---------------------------------------------------------------------------
+
+function! emend#replace_prompt() abort
+  let l:pattern = input('Pattern: ')
+  if empty(l:pattern)
+    return
+  endif
+  let l:replacement = input('Replace with: ')
+  if empty(l:replacement)
+    return
+  endif
+
+  echo "\n"
+  echom 'emend: searching for matches...'
+  call emend#send('replace_preview', {
+        \ 'pattern': l:pattern,
+        \ 'replacement': l:replacement,
+        \ }, {res -> emend#ui#show_replace_preview(res, l:pattern, l:replacement)})
+endfunction
+
+" ---------------------------------------------------------------------------
+" Move Symbol
+" ---------------------------------------------------------------------------
+
+function! emend#move(dest_file) abort
+  " First resolve the symbol at cursor
+  let [l:line, l:col] = getpos('.')[1:2]
+  let l:dest = a:dest_file
+  if empty(l:dest)
+    let l:dest = input('Move to file: ', '', 'file')
+  endif
+  if empty(l:dest)
+    return
+  endif
+
+  call emend#send('goto_local', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_move_resolve(res, l:dest)})
+endfunction
+
+function! s:on_move_resolve(result, dest_file) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: could not resolve symbol at cursor' | echohl None
+    return
+  endif
+  let l:item = l:items[0]
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+
+  echom 'emend: previewing move of ' . l:qn . '...'
+  call emend#send('move_preview', {
+        \ 'qualified_name': l:qn,
+        \ 'dest_file': a:dest_file,
+        \ 'file': l:file,
+        \ }, {res -> emend#ui#show_move_preview(res, l:qn, a:dest_file, l:file)})
+endfunction
+
+" ---------------------------------------------------------------------------
+" Callers / Callees
+" ---------------------------------------------------------------------------
+
+function! emend#callers(name) abort
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('goto_local', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_callers_resolve(res, 'callers')})
+endfunction
+
+function! emend#callees(name) abort
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('goto_local', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_callers_resolve(res, 'callees')})
+endfunction
+
+function! s:on_callers_resolve(result, method) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: could not resolve symbol at cursor' | echohl None
+    return
+  endif
+  let l:item = l:items[0]
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+
+  call emend#send(a:method, {
+        \ 'qualified_name': l:qn,
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
+endfunction
+
+" ---------------------------------------------------------------------------
+" Type Hover
+" ---------------------------------------------------------------------------
+
+function! emend#type_hover() abort
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('types_at_cursor', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, function('s:on_type_hover'))
+endfunction
+
+function! s:on_type_hover(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echo 'emend: no type information available'
+    return
+  endif
+  let l:item = l:items[0]
+  let l:name = get(l:item, 'name', '?')
+  let l:type = get(l:item, 'type', '?')
+  echo l:name . ': ' . l:type
+endfunction
+
+" ---------------------------------------------------------------------------
+" Outline Filter (interactive outline)
+" ---------------------------------------------------------------------------
+
+function! emend#outline_filter() abort
+  call emend#ui#interactive()
+  " Pre-populate with file symbols, then allow filtering
+  call emend#file_symbols(expand('%:p'), function('s:on_outline_filter_result'))
+endfunction
+
+function! s:on_outline_filter_result(result) abort
+  if has_key(a:result, 'error')
+    call emend#ui#on_search_result(a:result)
+    return
+  endif
+  " Store original outline items for filtering
+  let s:outline_items = get(a:result, 'items', [])
+  call emend#ui#on_search_result(a:result)
 endfunction
 
 " ---------------------------------------------------------------------------

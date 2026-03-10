@@ -179,3 +179,107 @@ class TestStatus:
         info = result["items"][0]
         assert info["available"] is True
         assert info["symbol_count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Replace preview
+# ---------------------------------------------------------------------------
+
+
+class TestReplacePreview:
+    def test_replace_preview_returns_diffs(self, engine):
+        eng, proj = engine
+        target = proj / "target.py"
+        target.write_text("print('hello')\nprint('world')\n")
+        _dispatch(eng, "reindex", {})
+        result = _dispatch(eng, "replace_preview", {
+            "pattern": "print($X)",
+            "replacement": "log($X)",
+            "file": str(target),
+        })
+        assert result["mode"] == "replace_preview"
+        assert len(result["items"]) > 0
+        assert "diff" in result["items"][0]
+        assert "count" in result["items"][0]
+
+    def test_replace_preview_no_matches(self, engine):
+        eng, proj = engine
+        result = _dispatch(eng, "replace_preview", {
+            "pattern": "nonexistent_func($X)",
+            "replacement": "other($X)",
+            "file": str(proj / "app.py"),
+        })
+        assert result["items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: Move preview
+# ---------------------------------------------------------------------------
+
+
+class TestMovePreview:
+    def test_move_preview_returns_diffs(self, engine):
+        eng, proj = engine
+        dest = proj / "dest.py"
+        dest.write_text("")
+        result = _dispatch(eng, "move_preview", {
+            "qualified_name": "parse_request",
+            "dest_file": str(dest),
+            "file": str(proj / "app.py"),
+        })
+        assert result["mode"] == "move_preview"
+        assert len(result["items"]) > 0
+        assert "diff" in result["items"][0]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Callers
+# ---------------------------------------------------------------------------
+
+
+class TestCallers:
+    def test_callers_mode(self, engine):
+        eng, proj = engine
+        caller = proj / "caller.py"
+        caller.write_text("from app import parse_request\n\ndef main():\n    parse_request('test')\n")
+        _dispatch(eng, "reindex", {})
+        result = _dispatch(eng, "callers", {
+            "qualified_name": "parse_request",
+            "file": str(proj / "app.py"),
+        })
+        assert result["mode"] == "callers"
+        assert isinstance(result["items"], list)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Callees
+# ---------------------------------------------------------------------------
+
+
+class TestCallees:
+    def test_callees_mode(self, engine):
+        eng, proj = engine
+        result = _dispatch(eng, "callees", {
+            "qualified_name": "parse_request",
+            "file": str(proj / "app.py"),
+        })
+        assert result["mode"] == "callees"
+        assert isinstance(result["items"], list)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Types at cursor
+# ---------------------------------------------------------------------------
+
+
+class TestTypesAtCursor:
+    def test_types_at_cursor_returns_result(self, engine):
+        eng, proj = engine
+        result = _dispatch(eng, "types_at_cursor", {
+            "file": str(proj / "app.py"),
+            "line": 2,
+            "col": 0,
+        })
+        assert result["mode"] == "types"
+        # May or may not have items depending on whether type engine is available
+        assert isinstance(result["items"], list)

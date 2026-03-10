@@ -74,6 +74,24 @@ command! -nargs=0 EmendStop call emend#stop()
 command! -nargs=0 EmendStatus call emend#status()
 command! -nargs=0 EmendReindex call emend#reindex()
 
+" Pattern-based find and replace across the project.
+command! -nargs=0 EmendReplace call emend#replace_prompt()
+
+" Move symbol under cursor to another file.
+command! -nargs=? EmendMove call emend#move(<q-args>)
+
+" Find call sites for the symbol under cursor.
+command! -nargs=? EmendCallers call emend#callers(<q-args> ==# '' ? expand('<cword>') : <q-args>)
+
+" Find functions called by the symbol under cursor.
+command! -nargs=? EmendCallees call emend#callees(<q-args> ==# '' ? expand('<cword>') : <q-args>)
+
+" Show type information for the symbol under cursor.
+command! -nargs=0 EmendTypeHover call emend#type_hover()
+
+" Show symbols in the current file with interactive filtering.
+command! -nargs=0 EmendOutlineFilter call emend#outline_filter()
+
 " ---------------------------------------------------------------------------
 " Auto-start server (opt-out via g:emend_auto_start = 0)
 " ---------------------------------------------------------------------------
@@ -100,4 +118,10 @@ if get(g:, 'emend_default_mappings', 0)
   nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
   nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
   nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
+  nnoremap <silent> <Leader>eR <Cmd>EmendReplace<CR>
+  nnoremap <silent> <Leader>em <Cmd>EmendMove<CR>
+  nnoremap <silent> <Leader>ec <Cmd>EmendCallers<CR>
+  nnoremap <silent> <Leader>eC <Cmd>EmendCallees<CR>
+  nnoremap <silent> <Leader>et <Cmd>EmendTypeHover<CR>
+  nnoremap <silent> <Leader>eO <Cmd>EmendOutlineFilter<CR>
 endif
