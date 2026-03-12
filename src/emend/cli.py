@@ -2058,7 +2058,9 @@ def index_cmd(
             print(f"  {file_path}", file=sys.stderr)
         elif total and sys.stderr.isatty():
             pct = n_done * 100 // total
-            print(f"\r  [{pct:3d}%] {n_done}/{total} files indexed", end="", file=sys.stderr)
+            # Display progress in terms of file_count (total includes multiple phases per file)
+            display_done = min(n_done * file_count // total, file_count)
+            print(f"\r  [{pct:3d}%] {display_done}/{file_count} files indexed", end="", file=sys.stderr)
 
     # Quick count for progress bar
     from emend.transform import _collect_source_files_scandir
