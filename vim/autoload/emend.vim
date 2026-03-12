@@ -740,39 +740,6 @@ function! s:on_goto_result(result) abort
   call emend#ui#on_search_result(a:result)
 endfunction
 
-function! emend#kb_search(query, ...) abort
-  let l:Cb = a:0 > 0 ? a:1 : function('s:on_kb_result')
-  call emend#send('kb_search', {'query': a:query}, l:Cb)
-endfunction
-
-function! s:on_kb_result(result) abort
-  if s:show_rpc_error('emend kb: ', a:result)
-    return
-  endif
-  let l:items = get(a:result, 'items', [])
-  if empty(l:items)
-    echo 'emend: no matching knowledge notes'
-    return
-  endif
-
-  " Format notes for display in the quickfix list.
-  let l:entries = []
-  for l:note in l:items
-    let l:text = '[' . get(l:note, 'category', 'note') . '] '
-          \ . get(l:note, 'title', '')
-    let l:file = get(l:note, 'file_path', '')
-    call add(l:entries, {
-          \ 'filename': l:file !=# '' ? l:file : '',
-          \ 'text': l:text . ' — ' . get(l:note, 'content', ''),
-          \ })
-  endfor
-
-  call setqflist(l:entries, 'r')
-  copen
-  echo printf('emend: %d knowledge notes [%gms]',
-        \ len(l:items), get(a:result, 'elapsed_ms', 0))
-endfunction
-
 function! emend#module_resolve(module_name, ...) abort
   let l:Cb = a:0 > 0 ? a:1 : function('s:on_module_resolve')
   call emend#send('module_resolve', {'module': a:module_name}, l:Cb)

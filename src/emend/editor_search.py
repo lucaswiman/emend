@@ -1706,23 +1706,19 @@ class EditorSearchEngine:
         limit: int,
         seen: set[str],
     ) -> list[dict]:
-        """Resolve a symbol through KB module mappings and list its children.
+        """Resolve a symbol through module mappings and list its children.
 
         E.g. for ``DocumentOrderEntry.`` where DocumentOrderEntry is defined in
         a mapped external repo, resolve the selector, read that file's symbols,
         and return children matching *member_prefix*.
         """
         try:
-            from emend.knowledge import KnowledgeBase
+            from emend.knowledge import MappingStore
         except Exception:
             return []
 
-        kb_path = Path(self.project_root) / ".emend" / "knowledge.db"
-        if not kb_path.exists():
-            return []
-
-        kb = KnowledgeBase(str(kb_path))
-        selector = kb.resolve_selector(resolved_parent)
+        store = MappingStore(self.project_root)
+        selector = store.resolve_selector(resolved_parent)
         if not selector or "::" not in selector:
             return []
 
@@ -1813,11 +1809,7 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         col = int(params.get("col", 0))
         logger.debug(f"complete() called: prefix={prefix!r}, file={file!r}, line={line}, col={col}")
         return engine.complete(prefix, file=file, line=line, col=col).to_dict()
-    # -- Knowledge base methods --
-    elif method == "kb_search":
-        return _kb_search(engine, params)
-    elif method == "kb_add":
-        return _kb_add(engine, params)
+    # -- Mapping methods --
     elif method == "mapping_lookup":
         return _mapping_lookup(engine, params)
     elif method == "mapping_goto":
@@ -1885,54 +1877,15 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         raise ValueError(f"Unknown method: {method!r}")
 
 
-# -- Knowledge base RPC handlers --
+# -- Mapping RPC handlers --
 
 
-def _get_kb(engine: EditorSearchEngine):
-    """Lazy-init a KnowledgeBase on the engine."""
-    from emend.knowledge import KnowledgeBase
+def _get_store(engine: EditorSearchEngine):
+    """Lazy-init a MappingStore on the engine."""
+    from emend.knowledge import MappingStore
     if not hasattr(engine, '_kb'):
-        engine._kb = KnowledgeBase(engine.project_root)  # type: ignore[attr-defined]
+        engine._kb = MappingStore(engine.project_root)  # type: ignore[attr-defined]
     return engine._kb  # type: ignore[attr-defined]
-
-
-def _kb_search(engine: EditorSearchEngine, params: dict) -> dict:
-    """Search notes and return results in the standard items format."""
-    import time as _time
-    from emend.knowledge import note_to_dict
-    t0 = _time.monotonic()
-    kb = _get_kb(engine)
-    query = params.get("query", "")
-    results = kb.search_notes(
-        query,
-        category=params.get("category"),
-        project=params.get("project"),
-        file_path=params.get("file_path"),
-        symbol=params.get("symbol"),
-        limit=params.get("limit", 50),
-    )
-    items = [note_to_dict(n) for n in results]
-    elapsed = (_time.monotonic() - t0) * 1000
-    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "kb_search"}
-
-
-def _kb_add(engine: EditorSearchEngine, params: dict) -> dict:
-    """Add a knowledge note via RPC."""
-    from emend.knowledge import KnowledgeNote, note_to_dict
-    kb = _get_kb(engine)
-    note = KnowledgeNote(
-        title=params.get("title", ""),
-        content=params.get("content", ""),
-        category=params.get("category", "note"),
-        tags=params.get("tags", ""),
-        source=params.get("source", "user"),
-        project=params.get("project", ""),
-        file_path=params.get("file_path", ""),
-        symbol=params.get("symbol", ""),
-    )
-    nid = kb.add_note(note)
-    saved = kb.get_note(nid)
-    return {"item": note_to_dict(saved), "mode": "kb_add"}  # type: ignore[arg-type]
 
 
 def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
@@ -1940,11 +1893,11 @@ def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
     import time as _time
     from emend.knowledge import mapping_to_dict
     t0 = _time.monotonic()
-    kb = _get_kb(engine)
+    store = _get_store(engine)
     identifier = params.get("identifier", params.get("query", ""))
     project = params.get("project")
     direction = params.get("direction", "both")
-    results = kb.find_mappings_for(identifier, project=project, direction=direction)
+    results = store.find_mappings_for(identifier, project=project, direction=direction)
     items = [mapping_to_dict(m) for m in results]
     elapsed = (_time.monotonic() - t0) * 1000
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_lookup"}
@@ -1972,8 +1925,8 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
     base_symbol = parts[0]
     
     from emend.knowledge import make_resolve_module_cb
-    kb = _get_kb(engine)
-    resolve_cb = make_resolve_module_cb(kb)
+    store = _get_store(engine)
+    resolve_cb = make_resolve_module_cb(store)
 
     res = resolve_through_reexports(file_path, base_symbol, resolve_cb)
 
@@ -2008,10 +1961,10 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
 
 
 def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
-    """Go to definition: try local symbol lookup first, then KB mappings.
+    """Go to definition: try local symbol lookup first, then mappings.
 
     1. Search the local project index for the identifier (most common case).
-    2. If no local results, check the KB identifier_mapping table and resolve
+    2. If no local results, check the identifier mappings and resolve
        targets to local paths (cloning external repos via gh if needed).
     """
     import time as _time
@@ -2037,15 +1990,15 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
             "source": "local",
         }
 
-    # --- 2. KB cross-service mapping lookup (fallback) ---
+    # --- 2. Cross-service mapping lookup (fallback) ---
     from emend.knowledge import mapping_to_dict
-    kb = _get_kb(engine)
-    results = kb.find_mappings_for(identifier, direction="source")
+    store = _get_store(engine)
+    results = store.find_mappings_for(identifier, direction="source")
     items = []
     for m in results:
         entry = mapping_to_dict(m)
         # Try to resolve the target identifier to a local path.
-        resolved = kb.resolve_module_to_path(m.target_identifier)
+        resolved = store.resolve_module_to_path(m.target_identifier)
         if resolved:
             entry["resolved_path"] = resolved
         items.append(entry)
@@ -2055,20 +2008,20 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
         from emend.ast_utils import get_imports
         file_path = params["file"]
         imports = get_imports(file_path)
-        
+
         # Filter imports for the target identifier
         found_import = None
         for imp in imports:
             if (imp["asname"] or imp["name"]) == identifier:
                 found_import = imp
                 break
-        
+
         if found_import:
             module_path = found_import["module"] or ""
             imported_name = found_import["name"]
             # 'from common.domain_models import X' -> 'common.domain_models.X'
             fq_path = f"{module_path}.{imported_name}" if module_path else imported_name
-            resolved_selector = kb.resolve_selector(fq_path)
+            resolved_selector = store.resolve_selector(fq_path)
             if resolved_selector:
                 item = _resolve_selector_to_goto_item(engine, resolved_selector)
                 if item:
@@ -2086,14 +2039,14 @@ def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:
     import time as _time
     from emend.knowledge import module_mapping_to_dict
     t0 = _time.monotonic()
-    kb = _get_kb(engine)
+    store = _get_store(engine)
     module_name = params.get("module", params.get("query", ""))
-    mm = kb.resolve_module(module_name)
+    mm = store.resolve_module(module_name)
     if mm is None:
         elapsed = (_time.monotonic() - t0) * 1000
         return {"items": [], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
 
-    resolved_path = kb.resolve_module_to_path(module_name)
+    resolved_path = store.resolve_module_to_path(module_name)
     item = module_mapping_to_dict(mm)
     if resolved_path:
         item["resolved_path"] = resolved_path

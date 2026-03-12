@@ -60,9 +60,6 @@ command! -nargs=? EmendGoto call emend#goto(<q-args> ==# '' ? expand('<cword>') 
 " Rename the symbol under cursor across the project.
 command! -nargs=? EmendRename call emend#rename(<q-args>)
 
-" Search the knowledge base.
-command! -nargs=? EmendKB call emend#kb_search(<q-args> ==# '' ? expand('<cword>') : <q-args>)
-
 " Resolve a module to its external repo / local path.
 command! -nargs=1 EmendResolve call emend#module_resolve(<q-args>)
 
@@ -117,7 +114,6 @@ if get(g:, 'emend_default_mappings', 0)
   nnoremap <silent> <Leader>eo <Cmd>EmendOutline<CR>
   nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
   nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
-  nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
   nnoremap <silent> <Leader>eR <Cmd>EmendReplace<CR>
   nnoremap <silent> <Leader>em <Cmd>EmendMove<CR>
   nnoremap <silent> <Leader>ec <Cmd>EmendCallers<CR>
