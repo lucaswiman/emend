@@ -1,23 +1,21 @@
-"""Mapping knowledge base for cross-service identifier mappings and notes.
+"""Mapping store for cross-service identifier mappings and module mappings.
 
 Provides two capabilities:
 1. **Identifier mappings** — records that an identifier in one project
    maps to an identifier in another (e.g. ``users.UserService.create``
    → ``POST /api/v1/users`` in the gateway repo).
-2. **Knowledge notes** — a free-form, FTS-searchable scratchpad where
-   humans or LLMs can record architectural decisions, conventions,
-   patterns, or any other information relevant to the codebase.
+2. **Module mappings** — records that a dotted module prefix (e.g.
+   ``payments``) maps to a local directory or GitHub repo, enabling
+   cross-project symbol resolution.
 
-Both are stored in ``<project>/.emend/knowledge.db`` (SQLite,
-WAL mode) and indexed with FTS5 trigram for instant substring search.
+Both are stored in ``<project>/.emend/mappings.yaml`` as human-readable
+YAML, suitable for version control.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
@@ -25,7 +23,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .transform import _cache_db_dir, _knowledge_db_dir
+import yaml
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -38,235 +37,145 @@ class IdentifierMapping:
 
     source_project: str
     source_identifier: str
-    source_kind: str  # function, class, endpoint, model, field, ...
-    target_project: str
-    target_identifier: str
-    target_kind: str
+    source_kind: str = ""  # function, class, endpoint, model, field, ...
+    target_project: str = ""
+    target_identifier: str = ""
+    target_kind: str = ""
     relationship: str = "equivalent"  # equivalent, calls, implements, produces, consumes
     confidence: float = 1.0  # 0–1, useful for heuristic/LLM-generated
     provenance: str = "manual"  # manual, heuristic, llm
     evidence: str = ""  # human-readable explanation
     metadata: dict[str, Any] = field(default_factory=dict)
-    # set by DB
-    id: int | None = None
-    created_at: str = ""
-    updated_at: str = ""
-
-
-@dataclass
-class KnowledgeNote:
-    """A free-form knowledge entry with full-text search support."""
-
-    title: str
-    content: str
-    category: str = "note"  # note, architecture, convention, mapping, decision, pattern
-    tags: str = ""  # comma-separated
-    source: str = "user"  # user, llm, heuristic
-    project: str = ""  # repo/project scope
-    file_path: str = ""  # optional related file
-    symbol: str = ""  # optional related symbol
-    metadata: dict[str, Any] = field(default_factory=dict)
-    # set by DB
-    id: int | None = None
-    created_at: str = ""
-    updated_at: str = ""
 
 
 @dataclass
 class ModuleMapping:
-    """A coarse mapping from a Python module prefix to an external repo/directory.
+    """A mapping from a dotted module prefix to a repo/directory."""
 
-    Examples::
-
-        # "anything under payments.* lives in the payments repo"
-        ModuleMapping(module_prefix="payments", repo="org/payments-service")
-
-        # "utils.* lives in this local directory"
-        ModuleMapping(module_prefix="utils", local_path="/home/user/shared-utils")
-    """
-
-    module_prefix: str  # e.g. "payments", "users.models"
+    module_prefix: str
     repo: str = ""  # GitHub repo (org/name), cloned on demand via gh
     local_path: str = ""  # alternative: a local directory
     branch: str = ""  # optional branch/tag for gh clone
     subpath: str = ""  # subdirectory within the repo (e.g. "src/payments")
-    provenance: str = "manual"  # manual, llm, heuristic
+    provenance: str = "manual"  # manual, heuristic, llm
     metadata: dict[str, Any] = field(default_factory=dict)
-    # set by DB
-    id: int | None = None
-    created_at: str = ""
-    updated_at: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# YAML helpers
 # ---------------------------------------------------------------------------
 
-_KNOWLEDGE_SCHEMA_VERSION = "2"
-
-_DDL = """\
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-
-CREATE TABLE IF NOT EXISTS kb_meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
--- Identifier mappings -------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS identifier_mapping (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_project    TEXT NOT NULL,
-    source_identifier TEXT NOT NULL,
-    source_kind       TEXT NOT NULL DEFAULT '',
-    target_project    TEXT NOT NULL,
-    target_identifier TEXT NOT NULL,
-    target_kind       TEXT NOT NULL DEFAULT '',
-    relationship      TEXT NOT NULL DEFAULT 'equivalent',
-    confidence        REAL NOT NULL DEFAULT 1.0,
-    provenance        TEXT NOT NULL DEFAULT 'manual',
-    evidence          TEXT NOT NULL DEFAULT '',
-    metadata_json     TEXT NOT NULL DEFAULT '{}',
-    deleted           INTEGER NOT NULL DEFAULT 0,
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_map_src
-    ON identifier_mapping(source_project, source_identifier);
-CREATE INDEX IF NOT EXISTS idx_map_tgt
-    ON identifier_mapping(target_project, target_identifier);
-CREATE INDEX IF NOT EXISTS idx_map_rel
-    ON identifier_mapping(relationship);
-
--- Knowledge notes -----------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS knowledge_note (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    title         TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    category      TEXT NOT NULL DEFAULT 'note',
-    tags          TEXT NOT NULL DEFAULT '',
-    source        TEXT NOT NULL DEFAULT 'user',
-    project       TEXT NOT NULL DEFAULT '',
-    file_path     TEXT NOT NULL DEFAULT '',
-    symbol        TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    deleted       INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_note_cat ON knowledge_note(category);
-CREATE INDEX IF NOT EXISTS idx_note_proj ON knowledge_note(project);
-CREATE INDEX IF NOT EXISTS idx_note_file ON knowledge_note(file_path);
-CREATE INDEX IF NOT EXISTS idx_note_symbol ON knowledge_note(symbol);
-
--- Module mappings (coarse: module prefix -> repo/directory) -----------------
-
-CREATE TABLE IF NOT EXISTS module_mapping (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    module_prefix TEXT NOT NULL UNIQUE,
-    repo          TEXT NOT NULL DEFAULT '',
-    local_path    TEXT NOT NULL DEFAULT '',
-    branch        TEXT NOT NULL DEFAULT '',
-    subpath       TEXT NOT NULL DEFAULT '',
-    provenance    TEXT NOT NULL DEFAULT 'manual',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    deleted       INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_modmap_prefix ON module_mapping(module_prefix);
-"""
-
-# FTS5 tables live separately so we can rebuild without touching data.
-_FTS_DDL = """\
-CREATE VIRTUAL TABLE IF NOT EXISTS mapping_fts USING fts5(
-    source_identifier, target_identifier, evidence,
-    content=identifier_mapping,
-    content_rowid=id,
-    tokenize='trigram'
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(
-    title, content, tags, symbol,
-    content=knowledge_note,
-    content_rowid=id,
-    tokenize='trigram'
-);
-"""
-
-# Triggers keep the FTS indexes in sync with the base tables.
-_TRIGGER_DDL = """\
--- mapping triggers
-CREATE TRIGGER IF NOT EXISTS mapping_ai AFTER INSERT ON identifier_mapping BEGIN
-    INSERT INTO mapping_fts(rowid, source_identifier, target_identifier, evidence)
-    VALUES (new.id, new.source_identifier, new.target_identifier, new.evidence);
-END;
-
-CREATE TRIGGER IF NOT EXISTS mapping_ad AFTER DELETE ON identifier_mapping BEGIN
-    INSERT INTO mapping_fts(mapping_fts, rowid, source_identifier, target_identifier, evidence)
-    VALUES ('delete', old.id, old.source_identifier, old.target_identifier, old.evidence);
-END;
-
-CREATE TRIGGER IF NOT EXISTS mapping_au AFTER UPDATE ON identifier_mapping BEGIN
-    INSERT INTO mapping_fts(mapping_fts, rowid, source_identifier, target_identifier, evidence)
-    VALUES ('delete', old.id, old.source_identifier, old.target_identifier, old.evidence);
-    INSERT INTO mapping_fts(rowid, source_identifier, target_identifier, evidence)
-    VALUES (new.id, new.source_identifier, new.target_identifier, new.evidence);
-END;
-
--- note triggers
-CREATE TRIGGER IF NOT EXISTS note_ai AFTER INSERT ON knowledge_note BEGIN
-    INSERT INTO note_fts(rowid, title, content, tags, symbol)
-    VALUES (new.id, new.title, new.content, new.tags, new.symbol);
-END;
-
-CREATE TRIGGER IF NOT EXISTS note_ad AFTER DELETE ON knowledge_note BEGIN
-    INSERT INTO note_fts(note_fts, rowid, title, content, tags, symbol)
-    VALUES ('delete', old.id, old.title, old.content, old.tags, old.symbol);
-END;
-
-CREATE TRIGGER IF NOT EXISTS note_au AFTER UPDATE ON knowledge_note BEGIN
-    INSERT INTO note_fts(note_fts, rowid, title, content, tags, symbol)
-    VALUES ('delete', old.id, old.title, old.content, old.tags, old.symbol);
-    INSERT INTO note_fts(rowid, title, content, tags, symbol)
-    VALUES (new.id, new.title, new.content, new.tags, new.symbol);
-END;
-"""
+def _mappings_yaml_path(project_root: str | Path) -> Path:
+    """Return the path to the mappings YAML file."""
+    from .transform import _knowledge_db_dir
+    return _knowledge_db_dir(project_root) / "mappings.yaml"
 
 
-# ---------------------------------------------------------------------------
-# KnowledgeBase
-# ---------------------------------------------------------------------------
-
-
-def _fts5_available(conn: sqlite3.Connection) -> bool:
+def _load_yaml(path: Path) -> dict:
+    """Load YAML from path, returning empty dict on missing/error."""
+    if not path.is_file():
+        return {}
     try:
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe "
-            "USING fts5(x, tokenize='trigram')"
-        )
-        conn.execute("DROP TABLE IF EXISTS _fts5_probe")
-        return True
+        with open(path, "r") as fh:
+            data = yaml.safe_load(fh)
+            return data if isinstance(data, dict) else {}
     except Exception:
-        return False
+        return {}
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def _save_yaml(path: Path, data: dict) -> None:
+    """Save data as YAML to path, creating parent dirs as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        yaml.dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def _identifier_mapping_to_yaml(m: IdentifierMapping) -> dict:
+    """Serialize an IdentifierMapping to a YAML-friendly dict."""
+    d: dict[str, Any] = {
+        "source_project": m.source_project,
+        "source_identifier": m.source_identifier,
+    }
+    # Only include non-default fields to keep YAML clean
+    if m.source_kind:
+        d["source_kind"] = m.source_kind
+    d["target_project"] = m.target_project
+    d["target_identifier"] = m.target_identifier
+    if m.target_kind:
+        d["target_kind"] = m.target_kind
+    if m.relationship != "equivalent":
+        d["relationship"] = m.relationship
+    if m.confidence != 1.0:
+        d["confidence"] = m.confidence
+    if m.provenance != "manual":
+        d["provenance"] = m.provenance
+    if m.evidence:
+        d["evidence"] = m.evidence
+    if m.metadata:
+        d["metadata"] = m.metadata
+    return d
+
+
+def _yaml_to_identifier_mapping(d: dict) -> IdentifierMapping:
+    """Deserialize a dict from YAML into an IdentifierMapping."""
+    return IdentifierMapping(
+        source_project=d.get("source_project", ""),
+        source_identifier=d.get("source_identifier", ""),
+        source_kind=d.get("source_kind", ""),
+        target_project=d.get("target_project", ""),
+        target_identifier=d.get("target_identifier", ""),
+        target_kind=d.get("target_kind", ""),
+        relationship=d.get("relationship", "equivalent"),
+        confidence=d.get("confidence", 1.0),
+        provenance=d.get("provenance", "manual"),
+        evidence=d.get("evidence", ""),
+        metadata=d.get("metadata", {}),
+    )
+
+
+def _module_mapping_to_yaml(m: ModuleMapping) -> dict:
+    """Serialize a ModuleMapping to a YAML-friendly dict."""
+    d: dict[str, Any] = {"module_prefix": m.module_prefix}
+    if m.repo:
+        d["repo"] = m.repo
+    if m.local_path:
+        d["path"] = m.local_path
+    if m.branch:
+        d["branch"] = m.branch
+    if m.subpath:
+        d["subpath"] = m.subpath
+    if m.provenance != "manual":
+        d["provenance"] = m.provenance
+    if m.metadata:
+        d["metadata"] = m.metadata
+    return d
+
+
+def _yaml_to_module_mapping(d: dict) -> ModuleMapping:
+    """Deserialize a dict from YAML into a ModuleMapping."""
+    return ModuleMapping(
+        module_prefix=d.get("module_prefix", ""),
+        repo=d.get("repo", ""),
+        local_path=d.get("path", d.get("local_path", "")),
+        branch=d.get("branch", ""),
+        subpath=d.get("subpath", ""),
+        provenance=d.get("provenance", "manual"),
+        metadata=d.get("metadata", {}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# MappingStore (replaces KnowledgeBase)
+# ---------------------------------------------------------------------------
 
 
 def make_resolve_module_cb(
-    kb: "KnowledgeBase",
+    store: "MappingStore",
 ) -> Callable[[str, int, str], Optional[str]]:
     """Create a resolve_module_cb suitable for resolve_through_reexports().
 
     Handles relative imports by walking up directories, and absolute imports
-    by delegating to kb.resolve_module_to_path().
+    by delegating to store.resolve_module_to_path().
     """
     def resolve_module_cb(module: str, level: int, current_file: str) -> str | None:
         if level > 0:
@@ -284,7 +193,7 @@ def make_resolve_module_cb(
                 return str(target)
             return None
         try:
-            return kb.resolve_module_to_path(module)
+            return store.resolve_module_to_path(module)
         except Exception:
             return None
 
@@ -303,11 +212,11 @@ def resolve_dotted_path_to_selector(
     # If the mapped part is a file, the rest are symbols
     if os.path.isfile(resolved_base):
         return f"{resolved_base}::{'.'.join(rem_parts)}" if rem_parts else resolved_base
-    
+
     # If it was a directory, walk the remaining parts recursively.
     if os.path.isdir(resolved_base):
         current_path = Path(resolved_base)
-        
+
         if not rem_parts:
             return str(current_path)
 
@@ -317,7 +226,7 @@ def resolve_dotted_path_to_selector(
             snake = _to_snake_case(part)
             if snake != part:
                 names.append(snake)
-            
+
             found = False
             # 1. Try as directory first
             for name in names:
@@ -330,23 +239,23 @@ def resolve_dotted_path_to_selector(
                     # Consumed all parts as directories
                     return str(current_path)
                 continue
-            
+
             # 2. Try as file
             for name in names:
                 candidate_file = current_path / (name + ".py")
                 if candidate_file.is_file():
-                    # Found the file! 
+                    # Found the file!
                     symbol_parts = rem_parts[j+1:]
                     # Heuristic: if we matched a snake_case name and there are no remaining parts,
                     # the original part might be a symbol in this file.
                     if name != part and not symbol_parts:
                         symbol_parts = [part]
-                    
+
                     symbol_suffix = ".".join(symbol_parts)
                     if symbol_suffix:
                         return f"{candidate_file}::{symbol_suffix}"
                     return str(candidate_file)
-            
+
             # 3. Neither file nor dir found - check for re-export in __init__.py
             init_file = current_path / "__init__.py"
             if init_file.is_file():
@@ -361,13 +270,13 @@ def resolve_dotted_path_to_selector(
                     symbol_parts = [part] + rem_parts[j+1:]
                     symbol_suffix = ".".join(symbol_parts)
                     return f"{target_file}::{symbol_suffix}"
-                
+
                 # Fallback: just point to __init__.py with symbols
                 return f"{init_file}::{'.'.join(rem_parts[j:])}"
-            
+
             # Completely stuck
             break
-    
+
     return None
 
 
@@ -376,141 +285,155 @@ def _to_snake_case(name: str) -> str:
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)).lower()
 
 
-class KnowledgeBase:
-    """Interface to the knowledge DB.
+class MappingStore:
+    """Interface to the mappings YAML file.
 
     Usage::
 
-        kb = KnowledgeBase(".")          # project root
-        kb.add_note(KnowledgeNote(...))
-        results = kb.search_notes("auth")
-        kb.close()
+        store = MappingStore(".")          # project root
+        store.add_module_mapping(ModuleMapping(...))
+        results = store.list_module_mappings()
+        store.close()
     """
 
     def __init__(self, project_root: str = ".") -> None:
-        db_dir = _knowledge_db_dir(project_root)
-        db_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = db_dir / "knowledge.db"
+        self._yaml_path = _mappings_yaml_path(project_root)
 
-        # Migrate from old location (.emend/cache/knowledge.db) if needed.
-        if not self._db_path.exists():
-            old_path = _cache_db_dir(project_root) / "knowledge.db"
-            if old_path.exists():
-                import shutil
-                shutil.move(str(old_path), str(self._db_path))
-                # Also move WAL/SHM sidecar files if present.
-                for suffix in ("-wal", "-shm"):
-                    old_sidecar = old_path.with_name(old_path.name + suffix)
-                    if old_sidecar.exists():
-                        shutil.move(
-                            str(old_sidecar),
-                            str(self._db_path.with_name(self._db_path.name + suffix)),
+        # Migrate from old SQLite knowledge.db if it exists and YAML doesn't.
+        if not self._yaml_path.is_file():
+            self._migrate_from_sqlite(project_root)
+
+        self._data = _load_yaml(self._yaml_path)
+
+    def _migrate_from_sqlite(self, project_root: str) -> None:
+        """One-time migration from knowledge.db to mappings.yaml."""
+        from .transform import _knowledge_db_dir
+        db_path = _knowledge_db_dir(project_root) / "knowledge.db"
+        if not db_path.is_file():
+            return
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            data: dict[str, Any] = {}
+
+            # Migrate identifier_mappings
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM identifier_mapping WHERE deleted = 0 "
+                    "ORDER BY confidence DESC, updated_at DESC"
+                ).fetchall()
+                if rows:
+                    mappings = []
+                    for row in rows:
+                        m = IdentifierMapping(
+                            source_project=row["source_project"],
+                            source_identifier=row["source_identifier"],
+                            source_kind=row["source_kind"],
+                            target_project=row["target_project"],
+                            target_identifier=row["target_identifier"],
+                            target_kind=row["target_kind"],
+                            relationship=row["relationship"],
+                            confidence=row["confidence"],
+                            provenance=row["provenance"],
+                            evidence=row["evidence"],
                         )
+                        try:
+                            import json
+                            m.metadata = json.loads(row["metadata_json"])
+                        except Exception:
+                            pass
+                        mappings.append(_identifier_mapping_to_yaml(m))
+                    data["identifier_mappings"] = mappings
+            except Exception:
+                pass
 
-        self._conn = sqlite3.connect(str(self._db_path))
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+            # Migrate module_mappings
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM module_mapping WHERE deleted = 0 "
+                    "ORDER BY length(module_prefix) DESC"
+                ).fetchall()
+                if rows:
+                    modules = []
+                    for row in rows:
+                        m = ModuleMapping(
+                            module_prefix=row["module_prefix"],
+                            repo=row["repo"],
+                            local_path=row["local_path"],
+                            branch=row["branch"],
+                            subpath=row["subpath"],
+                            provenance=row["provenance"],
+                        )
+                        try:
+                            import json
+                            m.metadata = json.loads(row["metadata_json"])
+                        except Exception:
+                            pass
+                        modules.append(_module_mapping_to_yaml(m))
+                    data["module_mappings"] = modules
+            except Exception:
+                pass
 
-    def _init_schema(self) -> None:
-        conn = self._conn
-        conn.executescript(_DDL)
+            conn.close()
 
-        if _fts5_available(conn):
-            conn.executescript(_FTS_DDL)
-            conn.executescript(_TRIGGER_DDL)
-            self._has_fts = True
-        else:
-            self._has_fts = False
+            if data:
+                _save_yaml(self._yaml_path, data)
 
-        # Store schema version.
-        conn.execute(
-            "INSERT OR REPLACE INTO kb_meta(key, value) VALUES (?, ?)",
-            ("schema_version", _KNOWLEDGE_SCHEMA_VERSION),
-        )
-        conn.commit()
+        except Exception:
+            pass  # Migration is best-effort
+
+    def _save(self) -> None:
+        """Persist current state to YAML."""
+        _save_yaml(self._yaml_path, self._data)
 
     @property
-    def db_path(self) -> Path:
-        return self._db_path
+    def yaml_path(self) -> Path:
+        return self._yaml_path
 
     def close(self) -> None:
-        self._conn.close()
+        """No-op for API compatibility."""
+        pass
 
     # -- Identifier mappings -------------------------------------------------
 
-    def add_mapping(self, m: IdentifierMapping) -> int:
-        """Insert a mapping, returning its row id."""
-        now = _now_iso()
-        cur = self._conn.execute(
-            "INSERT INTO identifier_mapping "
-            "(source_project, source_identifier, source_kind, "
-            " target_project, target_identifier, target_kind, "
-            " relationship, confidence, provenance, evidence, metadata_json, "
-            " created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                m.source_project,
-                m.source_identifier,
-                m.source_kind,
-                m.target_project,
-                m.target_identifier,
-                m.target_kind,
-                m.relationship,
-                m.confidence,
-                m.provenance,
-                m.evidence,
-                json.dumps(m.metadata),
-                now,
-                now,
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+    def add_mapping(self, m: IdentifierMapping) -> None:
+        """Add an identifier mapping."""
+        mappings = self._data.setdefault("identifier_mappings", [])
+        mappings.append(_identifier_mapping_to_yaml(m))
+        self._save()
 
-    def get_mapping(self, mapping_id: int) -> IdentifierMapping | None:
-        row = self._conn.execute(
-            "SELECT * FROM identifier_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
-        ).fetchone()
-        return self._row_to_mapping(row) if row else None
+    def delete_mapping(
+        self,
+        source_identifier: str,
+        *,
+        source_project: str | None = None,
+        target_identifier: str | None = None,
+    ) -> bool:
+        """Delete identifier mappings matching the given criteria.
 
-    def update_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
-        """Update fields on an existing mapping. Returns True if found."""
-        row = self._conn.execute(
-            "SELECT id FROM identifier_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
-        ).fetchone()
-        if not row:
-            return False
-        sets = []
-        vals: list[Any] = []
-        for col in (
-            "source_project", "source_identifier", "source_kind",
-            "target_project", "target_identifier", "target_kind",
-            "relationship", "confidence", "provenance", "evidence",
-        ):
-            if col in kwargs:
-                sets.append(f"{col} = ?")
-                vals.append(kwargs[col])
-        if "metadata" in kwargs:
-            sets.append("metadata_json = ?")
-            vals.append(json.dumps(kwargs["metadata"]))
-        if not sets:
+        Returns True if any mappings were removed.
+        """
+        mappings = self._data.get("identifier_mappings", [])
+        original_len = len(mappings)
+        filtered = []
+        for m in mappings:
+            if m.get("source_identifier") != source_identifier:
+                filtered.append(m)
+                continue
+            if source_project and m.get("source_project") != source_project:
+                filtered.append(m)
+                continue
+            if target_identifier and m.get("target_identifier") != target_identifier:
+                filtered.append(m)
+                continue
+            # Match — skip this entry (delete it)
+        self._data["identifier_mappings"] = filtered
+        if len(filtered) < original_len:
+            self._save()
             return True
-        sets.append("updated_at = ?")
-        vals.append(_now_iso())
-        vals.append(mapping_id)
-        self._conn.execute(
-            f"UPDATE identifier_mapping SET {', '.join(sets)} WHERE id = ?", vals
-        )
-        self._conn.commit()
-        return True
-
-    def delete_mapping(self, mapping_id: int) -> bool:
-        cur = self._conn.execute(
-            "UPDATE identifier_mapping SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
-            (_now_iso(), mapping_id),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        return False
 
     def search_mappings(
         self,
@@ -521,40 +444,28 @@ class KnowledgeBase:
         relationship: str | None = None,
         limit: int = 50,
     ) -> list[IdentifierMapping]:
-        """Full-text search over mappings.
-
-        Falls back to LIKE if FTS5 is unavailable.
-        """
-        if self._has_fts and len(query) >= 3:
-            sql = (
-                "SELECT m.* FROM identifier_mapping m "
-                "JOIN mapping_fts f ON m.id = f.rowid "
-                "WHERE mapping_fts MATCH ? AND m.deleted = 0"
-            )
-            params: list[Any] = [_fts_escape(query)]
-        else:
-            like = f"%{query}%"
-            sql = (
-                "SELECT m.* FROM identifier_mapping m WHERE m.deleted = 0 AND "
-                "(m.source_identifier LIKE ? OR m.target_identifier LIKE ? OR m.evidence LIKE ?)"
-            )
-            params = [like, like, like]
-
-        if source_project:
-            sql += " AND m.source_project = ?"
-            params.append(source_project)
-        if target_project:
-            sql += " AND m.target_project = ?"
-            params.append(target_project)
-        if relationship:
-            sql += " AND m.relationship = ?"
-            params.append(relationship)
-
-        sql += " ORDER BY m.confidence DESC, m.updated_at DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_mapping(r) for r in rows]
+        """Search identifier mappings by substring match."""
+        results: list[IdentifierMapping] = []
+        query_lower = query.lower()
+        for d in self._data.get("identifier_mappings", []):
+            if source_project and d.get("source_project") != source_project:
+                continue
+            if target_project and d.get("target_project") != target_project:
+                continue
+            if relationship and d.get("relationship", "equivalent") != relationship:
+                continue
+            if query_lower:
+                searchable = " ".join([
+                    d.get("source_identifier", ""),
+                    d.get("target_identifier", ""),
+                    d.get("evidence", ""),
+                ]).lower()
+                if query_lower not in searchable:
+                    continue
+            results.append(_yaml_to_identifier_mapping(d))
+            if len(results) >= limit:
+                break
+        return results
 
     def list_mappings(
         self,
@@ -564,22 +475,14 @@ class KnowledgeBase:
         relationship: str | None = None,
         limit: int = 100,
     ) -> list[IdentifierMapping]:
-        """List mappings with optional filters (no full-text search)."""
-        sql = "SELECT * FROM identifier_mapping WHERE deleted = 0"
-        params: list[Any] = []
-        if source_project:
-            sql += " AND source_project = ?"
-            params.append(source_project)
-        if target_project:
-            sql += " AND target_project = ?"
-            params.append(target_project)
-        if relationship:
-            sql += " AND relationship = ?"
-            params.append(relationship)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_mapping(r) for r in rows]
+        """List identifier mappings with optional filters."""
+        return self.search_mappings(
+            "",
+            source_project=source_project,
+            target_project=target_project,
+            relationship=relationship,
+            limit=limit,
+        )
 
     def find_mappings_for(
         self,
@@ -589,302 +492,82 @@ class KnowledgeBase:
         direction: str = "both",  # source, target, both
     ) -> list[IdentifierMapping]:
         """Find all mappings where *identifier* appears as source or target."""
-        clauses = []
-        params: list[Any] = []
-        if direction in ("source", "both"):
-            if project:
-                clauses.append("(source_identifier = ? AND source_project = ?)")
-                params.extend([identifier, project])
-            else:
-                clauses.append("source_identifier = ?")
-                params.append(identifier)
-        if direction in ("target", "both"):
-            if project:
-                clauses.append("(target_identifier = ? AND target_project = ?)")
-                params.extend([identifier, project])
-            else:
-                clauses.append("target_identifier = ?")
-                params.append(identifier)
-
-        sql = f"SELECT * FROM identifier_mapping WHERE deleted = 0 AND ({' OR '.join(clauses)}) ORDER BY confidence DESC"
-        rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_mapping(r) for r in rows]
-
-    # -- Knowledge notes -----------------------------------------------------
-
-    def add_note(self, n: KnowledgeNote) -> int:
-        """Insert a knowledge note, returning its row id."""
-        now = _now_iso()
-        cur = self._conn.execute(
-            "INSERT INTO knowledge_note "
-            "(title, content, category, tags, source, project, "
-            " file_path, symbol, metadata_json, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                n.title,
-                n.content,
-                n.category,
-                n.tags,
-                n.source,
-                n.project,
-                n.file_path,
-                n.symbol,
-                json.dumps(n.metadata),
-                now,
-                now,
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
-
-    def get_note(self, note_id: int) -> KnowledgeNote | None:
-        row = self._conn.execute(
-            "SELECT * FROM knowledge_note WHERE id = ? AND deleted = 0", (note_id,)
-        ).fetchone()
-        return self._row_to_note(row) if row else None
-
-    def update_note(self, note_id: int, **kwargs: Any) -> bool:
-        """Update fields on an existing note. Returns True if found."""
-        row = self._conn.execute(
-            "SELECT id FROM knowledge_note WHERE id = ? AND deleted = 0", (note_id,)
-        ).fetchone()
-        if not row:
-            return False
-        sets = []
-        vals: list[Any] = []
-        for col in (
-            "title", "content", "category", "tags", "source",
-            "project", "file_path", "symbol",
-        ):
-            if col in kwargs:
-                sets.append(f"{col} = ?")
-                vals.append(kwargs[col])
-        if "metadata" in kwargs:
-            sets.append("metadata_json = ?")
-            vals.append(json.dumps(kwargs["metadata"]))
-        if not sets:
-            return True
-        sets.append("updated_at = ?")
-        vals.append(_now_iso())
-        vals.append(note_id)
-        self._conn.execute(
-            f"UPDATE knowledge_note SET {', '.join(sets)} WHERE id = ?", vals
-        )
-        self._conn.commit()
-        return True
-
-    def delete_note(self, note_id: int) -> bool:
-        cur = self._conn.execute(
-            "UPDATE knowledge_note SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
-            (_now_iso(), note_id),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def search_notes(
-        self,
-        query: str,
-        *,
-        category: str | None = None,
-        project: str | None = None,
-        file_path: str | None = None,
-        symbol: str | None = None,
-        source: str | None = None,
-        limit: int = 50,
-    ) -> list[KnowledgeNote]:
-        """Full-text search over notes. Falls back to LIKE without FTS5."""
-        # Always alias the base table as "n" so filter clauses work
-        # regardless of whether the FTS join is present.
-        if self._has_fts and len(query) >= 3:
-            sql = (
-                "SELECT n.* FROM knowledge_note n "
-                "JOIN note_fts f ON n.id = f.rowid "
-                "WHERE note_fts MATCH ? AND n.deleted = 0"
-            )
-            params: list[Any] = [_fts_escape(query)]
-        else:
-            like = f"%{query}%"
-            sql = (
-                "SELECT n.* FROM knowledge_note n WHERE n.deleted = 0 AND "
-                "(n.title LIKE ? OR n.content LIKE ? OR n.tags LIKE ? OR n.symbol LIKE ?)"
-            )
-            params = [like, like, like, like]
-
-        if category:
-            sql += " AND n.category = ?"
-            params.append(category)
-        if project:
-            sql += " AND n.project = ?"
-            params.append(project)
-        if file_path:
-            sql += " AND n.file_path = ?"
-            params.append(file_path)
-        if symbol:
-            sql += " AND n.symbol = ?"
-            params.append(symbol)
-        if source:
-            sql += " AND n.source = ?"
-            params.append(source)
-
-        sql += " ORDER BY n.updated_at DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_note(r) for r in rows]
-
-    def list_notes(
-        self,
-        *,
-        category: str | None = None,
-        project: str | None = None,
-        limit: int = 100,
-    ) -> list[KnowledgeNote]:
-        """List notes with optional filters."""
-        sql = "SELECT * FROM knowledge_note WHERE deleted = 0"
-        params: list[Any] = []
-        if category:
-            sql += " AND category = ?"
-            params.append(category)
-        if project:
-            sql += " AND project = ?"
-            params.append(project)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_note(r) for r in rows]
-
-    def list_tags(self) -> list[str]:
-        """Return all distinct tags across non-deleted notes."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT tags FROM knowledge_note WHERE deleted = 0 AND tags != ''"
-        ).fetchall()
-        seen: set[str] = set()
-        for row in rows:
-            for tag in row["tags"].split(","):
-                tag = tag.strip()
-                if tag:
-                    seen.add(tag)
-        return sorted(seen)
+        results: list[IdentifierMapping] = []
+        for d in self._data.get("identifier_mappings", []):
+            match = False
+            if direction in ("source", "both"):
+                if d.get("source_identifier") == identifier:
+                    if not project or d.get("source_project") == project:
+                        match = True
+            if direction in ("target", "both"):
+                if d.get("target_identifier") == identifier:
+                    if not project or d.get("target_project") == project:
+                        match = True
+            if match:
+                results.append(_yaml_to_identifier_mapping(d))
+        return results
 
     # -- Module mappings -----------------------------------------------------
 
-    def add_module_mapping(self, m: ModuleMapping) -> int:
-        """Insert a module mapping, returning its row id.
-
-        If a soft-deleted row with the same ``module_prefix`` exists, it is
-        undeleted and updated with the new values instead of inserting a new
-        row (avoids UNIQUE constraint failure).
-        """
-        now = _now_iso()
-
-        # Check for a soft-deleted row with the same prefix.
-        existing = self._conn.execute(
-            "SELECT id FROM module_mapping WHERE module_prefix = ? AND deleted = 1",
-            (m.module_prefix,),
-        ).fetchone()
-        if existing:
-            row_id = existing["id"]
-            self._conn.execute(
-                "UPDATE module_mapping SET "
-                "repo = ?, local_path = ?, branch = ?, subpath = ?, "
-                "provenance = ?, metadata_json = ?, deleted = 0, updated_at = ? "
-                "WHERE id = ?",
-                (
-                    m.repo, m.local_path, m.branch, m.subpath,
-                    m.provenance, json.dumps(m.metadata), now, row_id,
-                ),
-            )
-            self._conn.commit()
-            return row_id
-
-        cur = self._conn.execute(
-            "INSERT INTO module_mapping "
-            "(module_prefix, repo, local_path, branch, subpath, "
-            " provenance, metadata_json, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                m.module_prefix,
-                m.repo,
-                m.local_path,
-                m.branch,
-                m.subpath,
-                m.provenance,
-                json.dumps(m.metadata),
-                now,
-                now,
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
-
-    def get_module_mapping(self, mapping_id: int) -> ModuleMapping | None:
-        row = self._conn.execute(
-            "SELECT * FROM module_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
-        ).fetchone()
-        return self._row_to_module_mapping(row) if row else None
+    def add_module_mapping(self, m: ModuleMapping) -> None:
+        """Add a module mapping. Replaces an existing one with the same prefix."""
+        modules = self._data.setdefault("module_mappings", [])
+        # Replace existing mapping with same prefix if present
+        for i, existing in enumerate(modules):
+            if existing.get("module_prefix") == m.module_prefix:
+                modules[i] = _module_mapping_to_yaml(m)
+                self._save()
+                return
+        modules.append(_module_mapping_to_yaml(m))
+        self._save()
 
     def get_module_mapping_by_prefix(self, prefix: str) -> ModuleMapping | None:
         """Look up a module mapping by its exact prefix string."""
-        row = self._conn.execute(
-            "SELECT * FROM module_mapping WHERE module_prefix = ? AND deleted = 0",
-            (prefix,),
-        ).fetchone()
-        return self._row_to_module_mapping(row) if row else None
+        for d in self._data.get("module_mappings", []):
+            if d.get("module_prefix") == prefix:
+                return _yaml_to_module_mapping(d)
+        return None
 
     def delete_module_mapping_by_prefix(self, prefix: str) -> bool:
-        """Soft-delete a module mapping identified by its prefix string."""
-        cur = self._conn.execute(
-            "UPDATE module_mapping SET deleted = 1, updated_at = ? "
-            "WHERE module_prefix = ? AND deleted = 0",
-            (_now_iso(), prefix),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        """Delete a module mapping by its prefix string."""
+        modules = self._data.get("module_mappings", [])
+        for i, d in enumerate(modules):
+            if d.get("module_prefix") == prefix:
+                modules.pop(i)
+                self._save()
+                return True
+        return False
 
-    def update_module_mapping(self, mapping_id: int, **kwargs: Any) -> bool:
-        """Update fields on an existing module mapping."""
-        row = self._conn.execute(
-            "SELECT id FROM module_mapping WHERE id = ? AND deleted = 0", (mapping_id,)
-        ).fetchone()
-        if not row:
-            return False
-        sets = []
-        vals: list[Any] = []
-        for col in (
-            "module_prefix", "repo", "local_path", "branch",
-            "subpath", "provenance",
-        ):
-            if col in kwargs:
-                sets.append(f"{col} = ?")
-                vals.append(kwargs[col])
-        if "metadata" in kwargs:
-            sets.append("metadata_json = ?")
-            vals.append(json.dumps(kwargs["metadata"]))
-        if not sets:
+    def update_module_mapping(self, prefix: str, **kwargs: Any) -> bool:
+        """Update fields on an existing module mapping by prefix."""
+        modules = self._data.get("module_mappings", [])
+        for d in modules:
+            if d.get("module_prefix") != prefix:
+                continue
+            for key, value in kwargs.items():
+                if key == "local_path":
+                    d["path"] = value
+                elif key == "metadata":
+                    if value:
+                        d["metadata"] = value
+                    else:
+                        d.pop("metadata", None)
+                elif value:
+                    d[key] = value
+                else:
+                    d.pop(key, None)
+            self._save()
             return True
-        sets.append("updated_at = ?")
-        vals.append(_now_iso())
-        vals.append(mapping_id)
-        self._conn.execute(
-            f"UPDATE module_mapping SET {', '.join(sets)} WHERE id = ?", vals
-        )
-        self._conn.commit()
-        return True
-
-    def delete_module_mapping(self, mapping_id: int) -> bool:
-        cur = self._conn.execute(
-            "UPDATE module_mapping SET deleted = 1, updated_at = ? WHERE id = ? AND deleted = 0",
-            (_now_iso(), mapping_id),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        return False
 
     def list_module_mappings(self) -> list[ModuleMapping]:
         """List all module mappings ordered by prefix length (longest first)."""
-        rows = self._conn.execute(
-            "SELECT * FROM module_mapping WHERE deleted = 0 ORDER BY length(module_prefix) DESC"
-        ).fetchall()
-        return [self._row_to_module_mapping(r) for r in rows]
+        modules = self._data.get("module_mappings", [])
+        # Sort by prefix length descending
+        sorted_modules = sorted(
+            modules, key=lambda d: len(d.get("module_prefix", "")), reverse=True
+        )
+        return [_yaml_to_module_mapping(d) for d in sorted_modules]
 
     def resolve_module(self, module_name: str) -> ModuleMapping | None:
         """Find the best (longest-prefix) module mapping for *module_name*.
@@ -893,14 +576,15 @@ class KnowledgeBase:
         ``payments.models``, and *module_name* is ``payments.models.User``,
         the ``payments.models`` mapping wins.
         """
-        rows = self._conn.execute(
-            "SELECT * FROM module_mapping WHERE deleted = 0 ORDER BY length(module_prefix) DESC"
-        ).fetchall()
-        for row in rows:
-            prefix = row["module_prefix"]
+        best: ModuleMapping | None = None
+        best_len = -1
+        for d in self._data.get("module_mappings", []):
+            prefix = d.get("module_prefix", "")
             if module_name == prefix or module_name.startswith(prefix + "."):
-                return self._row_to_module_mapping(row)
-        return None
+                if len(prefix) > best_len:
+                    best = _yaml_to_module_mapping(d)
+                    best_len = len(prefix)
+        return best
 
     def resolve_module_to_path(
         self, module_name: str, *, cache_dir: str | None = None
@@ -944,7 +628,7 @@ class KnowledgeBase:
             candidate_dir = base / "/".join(parts)
             if candidate_dir.is_dir():
                 return str(candidate_dir)
-            
+
             # Try original name and snake_case variant for the file
             names_to_try = [parts[-1]]
             snake = _to_snake_case(parts[-1])
@@ -972,9 +656,6 @@ class KnowledgeBase:
         If it's a dotted selector like 'a.b.C', it tries to find a module
         mapping for 'a.b' or 'a', and returns an explicit selector like
         'path/to/a/b.py::C'.
-
-        Returns the resolved selector string, or None if no mapping found
-        and it wasn't already an explicit selector.
         """
         from emend.component_selector import parse_extended_selector
 
@@ -985,7 +666,7 @@ class KnowledgeBase:
             sel = parse_extended_selector(selector)
             if sel.file_path:
                 return selector
-            
+
             if not sel.symbol_path:
                 return None
 
@@ -1028,58 +709,14 @@ class KnowledgeBase:
         _maybe_fetch_branch(contents_dir, Path(local_root), ref, force=True)
         return local_root
 
-    # -- Helpers -------------------------------------------------------------
 
-    @staticmethod
-    def _row_to_module_mapping(row: sqlite3.Row) -> ModuleMapping:
-        return ModuleMapping(
-            id=row["id"],
-            module_prefix=row["module_prefix"],
-            repo=row["repo"],
-            local_path=row["local_path"],
-            branch=row["branch"],
-            subpath=row["subpath"],
-            provenance=row["provenance"],
-            metadata=json.loads(row["metadata_json"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+# Backward compatibility alias
+KnowledgeBase = MappingStore
 
-    @staticmethod
-    def _row_to_mapping(row: sqlite3.Row) -> IdentifierMapping:
-        return IdentifierMapping(
-            id=row["id"],
-            source_project=row["source_project"],
-            source_identifier=row["source_identifier"],
-            source_kind=row["source_kind"],
-            target_project=row["target_project"],
-            target_identifier=row["target_identifier"],
-            target_kind=row["target_kind"],
-            relationship=row["relationship"],
-            confidence=row["confidence"],
-            provenance=row["provenance"],
-            evidence=row["evidence"],
-            metadata=json.loads(row["metadata_json"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
 
-    @staticmethod
-    def _row_to_note(row: sqlite3.Row) -> KnowledgeNote:
-        return KnowledgeNote(
-            id=row["id"],
-            title=row["title"],
-            content=row["content"],
-            category=row["category"],
-            tags=row["tags"],
-            source=row["source"],
-            project=row["project"],
-            file_path=row["file_path"],
-            symbol=row["symbol"],
-            metadata=json.loads(row["metadata_json"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+# ---------------------------------------------------------------------------
+# Repo checkout helpers
+# ---------------------------------------------------------------------------
 
 
 @lru_cache(maxsize=1)
@@ -1263,38 +900,14 @@ def _maybe_fetch_branch(
         pass
 
 
-def _fts_escape(query: str) -> str:
-    """Escape a query for FTS5 trigram matching.
-
-    FTS5 trigram tokenizer uses literal substring matching,
-    so we just need to quote the string.
-    """
-    escaped = query.replace('"', '""')
-    return f'"{escaped}"'
-
-
 # ---------------------------------------------------------------------------
 # Serialization helpers (for CLI / MCP JSON output)
 # ---------------------------------------------------------------------------
 
 
 def mapping_to_dict(m: IdentifierMapping) -> dict[str, Any]:
-    d = asdict(m)
-    # Remove None id for unsaved objects
-    if d["id"] is None:
-        del d["id"]
-    return d
-
-
-def note_to_dict(n: KnowledgeNote) -> dict[str, Any]:
-    d = asdict(n)
-    if d["id"] is None:
-        del d["id"]
-    return d
+    return asdict(m)
 
 
 def module_mapping_to_dict(m: ModuleMapping) -> dict[str, Any]:
-    d = asdict(m)
-    if d["id"] is None:
-        del d["id"]
-    return d
+    return asdict(m)

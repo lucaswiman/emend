@@ -84,11 +84,10 @@ def _cache_db_dir(project_root: str | Path) -> Path:
 
 
 def _knowledge_db_dir(project_root: str | Path) -> Path:
-    """Return the directory for the knowledge DB (non-cache user data).
+    """Return the directory for user-managed mapping data.
 
-    Unlike cache data, the knowledge DB contains user-created content
-    (notes, identifier mappings, module mappings) that cannot be
-    recomputed, so it lives directly in ``.emend/`` rather than
+    Unlike cache data, mappings are user-created content that cannot be
+    recomputed, so they live directly in ``.emend/`` rather than
     ``.emend/cache/``.
     """
     main_root = _resolve_cache_root(str(project_root))
@@ -1037,17 +1036,17 @@ def _lookup_via_modmap(
     target symbol.
     """
     try:
-        from emend.knowledge import KnowledgeBase
+        from emend.knowledge import MappingStore
     except Exception:
         return []
 
     try:
-        kb = KnowledgeBase(project_root)
+        store = MappingStore(project_root)
     except Exception:
         return []
 
     try:
-        resolved = kb.resolve_module_to_path(qualified_name)
+        resolved = store.resolve_module_to_path(qualified_name)
         if resolved is None:
             return []
 
@@ -1055,7 +1054,7 @@ def _lookup_via_modmap(
 
         # Determine the symbol name to search for: the part of the
         # qualified name after the module mapping prefix.
-        mm = kb.resolve_module(qualified_name)
+        mm = store.resolve_module(qualified_name)
         if mm is None:
             return []
         prefix = mm.module_prefix

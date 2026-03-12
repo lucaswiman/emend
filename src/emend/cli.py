@@ -488,21 +488,18 @@ def search(
     is_line_selector = _shape.is_line_selector
 
     if include_map and "::" not in query:
-        from emend.knowledge import KnowledgeBase
-        kb = KnowledgeBase(project or ".")
-        try:
-            resolved_query = kb.resolve_selector(query)
-            if resolved_query and resolved_query != query:
-                # Re-detect shape with resolved query
-                query = resolved_query
-                _shape = detect_query_shape(query, path)
-                query = _shape.query
-                path = _shape.path
-                is_pattern_mode = _shape.is_pattern_mode
-                has_selector = _shape.has_selector
-                is_line_selector = _shape.is_line_selector
-        finally:
-            kb.close()
+        from emend.knowledge import MappingStore
+        store = MappingStore(project or ".")
+        resolved_query = store.resolve_selector(query)
+        if resolved_query and resolved_query != query:
+            # Re-detect shape with resolved query
+            query = resolved_query
+            _shape = detect_query_shape(query, path)
+            query = _shape.query
+            path = _shape.path
+            is_pattern_mode = _shape.is_pattern_mode
+            has_selector = _shape.has_selector
+            is_line_selector = _shape.is_line_selector
 
     # If query looks like a file path/glob/directory (no $ or ::) but --where
     # provides a pattern (has $), the user likely intended:
@@ -2215,129 +2212,6 @@ def editor_server_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Knowledge base commands
-# ---------------------------------------------------------------------------
-
-kb_app = typer.Typer(help="Knowledge base: notes and cross-service mappings.")
-app.add_typer(kb_app, name="kb")
-
-
-@kb_app.command("add")
-def kb_add_cmd(
-    title: Annotated[str, typer.Argument(help="Short title for the note.")],
-    content: Annotated[str, typer.Argument(help="Note content.")],
-    category: Annotated[str, typer.Option("--category", "-c", help="Category: note, architecture, convention, decision, pattern.")] = "note",
-    tags: Annotated[str, typer.Option("--tags", help="Comma-separated tags.")] = "",
-    source: Annotated[str, typer.Option("--source", help="Creator: user, llm, heuristic.")] = "user",
-    project: Annotated[str, typer.Option("--project", help="Related project name.")] = "",
-    file_path: Annotated[str, typer.Option("--file", help="Related file path.")] = "",
-    symbol: Annotated[str, typer.Option("--symbol", help="Related symbol.")] = "",
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
-):
-    """Add a note to the knowledge base."""
-    import json as _json
-    from emend.knowledge import KnowledgeBase, KnowledgeNote, note_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        note = KnowledgeNote(
-            title=title, content=content, category=category, tags=tags,
-            source=source, project=project, file_path=file_path, symbol=symbol,
-        )
-        nid = kb.add_note(note)
-        saved = kb.get_note(nid)
-        if json_output:
-            print(_json.dumps(note_to_dict(saved), indent=2))  # type: ignore[arg-type]
-        else:
-            print(f"Added note #{nid}: {saved.title}")  # type: ignore[union-attr]
-    finally:
-        kb.close()
-
-
-@kb_app.command("search")
-def kb_search_cmd(
-    query: Annotated[str, typer.Argument(help="Search query (substring match).")],
-    category: Annotated[Optional[str], typer.Option("--category", "-c")] = None,
-    project: Annotated[Optional[str], typer.Option("--project")] = None,
-    limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
-):
-    """Search knowledge notes (FTS5 trigram)."""
-    import json as _json
-    from emend.knowledge import KnowledgeBase, note_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.search_notes(query, category=category, project=project, limit=limit)
-        if json_output:
-            print(_json.dumps([note_to_dict(n) for n in results], indent=2))
-        elif not results:
-            print("No matching notes.")
-        else:
-            for n in results:
-                tags = f" [{n.tags}]" if n.tags else ""
-                print(f"#{n.id} [{n.category}]{tags} {n.title}")
-                # Show first line of content
-                first_line = n.content.split("\n", 1)[0]
-                if len(first_line) > 100:
-                    first_line = first_line[:97] + "..."
-                print(f"  {first_line}")
-    finally:
-        kb.close()
-
-
-@kb_app.command("show")
-def kb_show_cmd(
-    note_id: Annotated[int, typer.Argument(help="Note ID to show.")],
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON.")] = False,
-):
-    """Show a knowledge note by ID."""
-    import json as _json
-    from emend.knowledge import KnowledgeBase, note_to_dict
-
-    kb = KnowledgeBase(".")
-    try:
-        note = kb.get_note(note_id)
-        if not note:
-            print(f"Note #{note_id} not found.", file=sys.stderr)
-            raise typer.Exit(1)
-        if json_output:
-            print(_json.dumps(note_to_dict(note), indent=2))
-        else:
-            print(f"#{note.id} [{note.category}] {note.title}")
-            if note.tags:
-                print(f"Tags: {note.tags}")
-            if note.file_path:
-                print(f"File: {note.file_path}")
-            if note.symbol:
-                print(f"Symbol: {note.symbol}")
-            print(f"Source: {note.source} | Updated: {note.updated_at}")
-            print()
-            print(note.content)
-    finally:
-        kb.close()
-
-
-@kb_app.command("rm")
-def kb_rm_cmd(
-    note_id: Annotated[int, typer.Argument(help="Note ID to delete.")],
-):
-    """Delete a knowledge note."""
-    from emend.knowledge import KnowledgeBase
-
-    kb = KnowledgeBase(".")
-    try:
-        ok = kb.delete_note(note_id)
-        if ok:
-            print(f"Deleted note #{note_id}.")
-        else:
-            print(f"Note #{note_id} not found.", file=sys.stderr)
-            raise typer.Exit(1)
-    finally:
-        kb.close()
-
-
-# ---------------------------------------------------------------------------
 # Mapping commands
 # ---------------------------------------------------------------------------
 
@@ -2361,30 +2235,26 @@ def map_add_cmd(
 ):
     """Add a cross-service identifier mapping."""
     import json as _json
-    from emend.knowledge import KnowledgeBase, IdentifierMapping, mapping_to_dict
+    from emend.knowledge import MappingStore, IdentifierMapping, mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        m = IdentifierMapping(
-            source_project=source_project,
-            source_identifier=source_id,
-            source_kind=source_kind,
-            target_project=target_project,
-            target_identifier=target_id,
-            target_kind=target_kind,
-            relationship=relationship,
-            confidence=confidence,
-            provenance=provenance,
-            evidence=evidence,
-        )
-        mid = kb.add_mapping(m)
-        saved = kb.get_mapping(mid)
-        if json_output:
-            print(_json.dumps(mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
-        else:
-            print(f"Added mapping #{mid}: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    m = IdentifierMapping(
+        source_project=source_project,
+        source_identifier=source_id,
+        source_kind=source_kind,
+        target_project=target_project,
+        target_identifier=target_id,
+        target_kind=target_kind,
+        relationship=relationship,
+        confidence=confidence,
+        provenance=provenance,
+        evidence=evidence,
+    )
+    store.add_mapping(m)
+    if json_output:
+        print(_json.dumps(mapping_to_dict(m), indent=2))
+    else:
+        print(f"Added mapping: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
 
 
 @map_app.command("search")
@@ -2396,26 +2266,23 @@ def map_search_cmd(
     limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
-    """Search identifier mappings (FTS5 trigram)."""
+    """Search identifier mappings (substring match)."""
     import json as _json
-    from emend.knowledge import KnowledgeBase, mapping_to_dict
+    from emend.knowledge import MappingStore, mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.search_mappings(
-            query, source_project=source_project,
-            target_project=target_project, relationship=relationship, limit=limit,
-        )
-        if json_output:
-            print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
-        elif not results:
-            print("No matching mappings.")
-        else:
-            for m in results:
-                conf = f" ({m.confidence:.0%})" if m.confidence < 1.0 else ""
-                print(f"#{m.id} {m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]{conf}")
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    results = store.search_mappings(
+        query, source_project=source_project,
+        target_project=target_project, relationship=relationship, limit=limit,
+    )
+    if json_output:
+        print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+    elif not results:
+        print("No matching mappings.")
+    else:
+        for m in results:
+            conf = f" ({m.confidence:.0%})" if m.confidence < 1.0 else ""
+            print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]{conf}")
 
 
 @map_app.command("lookup")
@@ -2427,39 +2294,39 @@ def map_lookup_cmd(
 ):
     """Look up mappings for a specific identifier."""
     import json as _json
-    from emend.knowledge import KnowledgeBase, mapping_to_dict
+    from emend.knowledge import MappingStore, mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.find_mappings_for(identifier, project=project, direction=direction)
-        if json_output:
-            print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
-        elif not results:
-            print(f"No mappings found for '{identifier}'.")
-        else:
-            for m in results:
-                print(f"#{m.id} {m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]")
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    results = store.find_mappings_for(identifier, project=project, direction=direction)
+    if json_output:
+        print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+    elif not results:
+        print(f"No mappings found for '{identifier}'.")
+    else:
+        for m in results:
+            print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]")
 
 
 @map_app.command("rm")
 def map_rm_cmd(
-    mapping_id: Annotated[int, typer.Argument(help="Mapping ID to delete.")],
+    source_identifier: Annotated[str, typer.Argument(help="Source identifier to delete mappings for.")],
+    source_project: Annotated[Optional[str], typer.Option("--source-project")] = None,
+    target_identifier: Annotated[Optional[str], typer.Option("--target-identifier")] = None,
 ):
-    """Delete an identifier mapping."""
-    from emend.knowledge import KnowledgeBase
+    """Delete identifier mappings matching the given source identifier."""
+    from emend.knowledge import MappingStore
 
-    kb = KnowledgeBase(".")
-    try:
-        ok = kb.delete_mapping(mapping_id)
-        if ok:
-            print(f"Deleted mapping #{mapping_id}.")
-        else:
-            print(f"Mapping #{mapping_id} not found.", file=sys.stderr)
-            raise typer.Exit(1)
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    ok = store.delete_mapping(
+        source_identifier,
+        source_project=source_project,
+        target_identifier=target_identifier,
+    )
+    if ok:
+        print(f"Deleted mapping(s) for '{source_identifier}'.")
+    else:
+        print(f"No mappings found for '{source_identifier}'.", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 # Module mapping commands
@@ -2483,27 +2350,23 @@ def map_add_module_cmd(
         emend map add-module gateway --repo org/gateway --subpath src/gateway
     """
     import json as _json
-    from emend.knowledge import KnowledgeBase, ModuleMapping, module_mapping_to_dict
+    from emend.knowledge import MappingStore, ModuleMapping, module_mapping_to_dict
 
     if not repo and not path:
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
 
-    kb = KnowledgeBase(".")
-    try:
-        m = ModuleMapping(
-            module_prefix=module_prefix, repo=repo, local_path=path,
-            branch=branch, subpath=subpath, provenance=provenance,
-        )
-        mid = kb.add_module_mapping(m)
-        saved = kb.get_module_mapping(mid)
-        if json_output:
-            print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
-        else:
-            target = repo if repo else path
-            print(f"Added module mapping #{mid}: {module_prefix} -> {target}")
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    m = ModuleMapping(
+        module_prefix=module_prefix, repo=repo, local_path=path,
+        branch=branch, subpath=subpath, provenance=provenance,
+    )
+    store.add_module_mapping(m)
+    if json_output:
+        print(_json.dumps(module_mapping_to_dict(m), indent=2))
+    else:
+        target = repo if repo else path
+        print(f"Added module mapping: {module_prefix} -> {target}")
 
 
 @map_app.command("list-modules")
@@ -2512,22 +2375,19 @@ def map_list_modules_cmd(
 ):
     """List all module mappings."""
     import json as _json
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+    from emend.knowledge import MappingStore, module_mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        results = kb.list_module_mappings()
-        if json_output:
-            print(_json.dumps([module_mapping_to_dict(m) for m in results], indent=2))
-        elif not results:
-            print("No module mappings registered.")
-        else:
-            for m in results:
-                target = m.repo if m.repo else m.local_path
-                sub = f" (subpath: {m.subpath})" if m.subpath else ""
-                print(f"#{m.id} {m.module_prefix} -> {target}{sub}")
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    results = store.list_module_mappings()
+    if json_output:
+        print(_json.dumps([module_mapping_to_dict(m) for m in results], indent=2))
+    elif not results:
+        print("No module mappings registered.")
+    else:
+        for m in results:
+            target = m.repo if m.repo else m.local_path
+            sub = f" (subpath: {m.subpath})" if m.subpath else ""
+            print(f"{m.module_prefix} -> {target}{sub}")
 
 
 
@@ -2550,71 +2410,58 @@ def map_update_module_cmd(
         emend map update-module payments --fetch
     """
     import json as _json
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+    from emend.knowledge import MappingStore, module_mapping_to_dict
 
-    kb = KnowledgeBase(".")
-    try:
-        mm = kb.get_module_mapping_by_prefix(module_prefix)
-        if mm is None:
-            print(f"No module mapping for '{module_prefix}'.", file=sys.stderr)
-            raise typer.Exit(1)
+    store = MappingStore(".")
+    mm = store.get_module_mapping_by_prefix(module_prefix)
+    if mm is None:
+        print(f"No module mapping for '{module_prefix}'.", file=sys.stderr)
+        raise typer.Exit(1)
 
-        kwargs: dict[str, str] = {}
-        if repo:
-            kwargs["repo"] = repo
-        if path:
-            kwargs["local_path"] = path
-        if branch:
-            kwargs["branch"] = branch
-        if subpath:
-            kwargs["subpath"] = subpath
+    kwargs: dict[str, str] = {}
+    if repo:
+        kwargs["repo"] = repo
+    if path:
+        kwargs["local_path"] = path
+    if branch:
+        kwargs["branch"] = branch
+    if subpath:
+        kwargs["subpath"] = subpath
 
-        if not kwargs and not fetch:
-            print("Nothing to update (provide --repo, --path, --branch, --subpath, or --fetch).", file=sys.stderr)
-            raise typer.Exit(1)
+    if not kwargs and not fetch:
+        print("Nothing to update (provide --repo, --path, --branch, --subpath, or --fetch).", file=sys.stderr)
+        raise typer.Exit(1)
 
-        if kwargs:
-            kb.update_module_mapping(mm.id, **kwargs)  # type: ignore[arg-type]
+    if kwargs:
+        store.update_module_mapping(module_prefix, **kwargs)
 
-        if fetch:
-            result = kb.fetch_module_repo(module_prefix)
-            if result is None:
-                print(f"Module mapping '{module_prefix}' has no repo to fetch.", file=sys.stderr)
+    if fetch:
+        result = store.fetch_module_repo(module_prefix)
+        if result is None:
+            print(f"Module mapping '{module_prefix}' has no repo to fetch.", file=sys.stderr)
 
-        saved = kb.get_module_mapping(mm.id)  # type: ignore[arg-type]
-        if json_output:
-            print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
-        else:
-            target = saved.repo if saved.repo else saved.local_path  # type: ignore[union-attr]
-            print(f"Updated module mapping '{module_prefix}' -> {target}")
-    finally:
-        kb.close()
+    saved = store.get_module_mapping_by_prefix(module_prefix)
+    if json_output:
+        print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+    else:
+        target = saved.repo if saved.repo else saved.local_path  # type: ignore[union-attr]
+        print(f"Updated module mapping '{module_prefix}' -> {target}")
 
 
 @map_app.command("rm-module")
 def map_rm_module_cmd(
-    identifier: Annotated[str, typer.Argument(help="Module prefix or numeric mapping ID to delete.")],
+    prefix: Annotated[str, typer.Argument(help="Module prefix to delete.")],
 ):
-    """Delete a module mapping by prefix name or ID."""
-    from emend.knowledge import KnowledgeBase
+    """Delete a module mapping by prefix name."""
+    from emend.knowledge import MappingStore
 
-    kb = KnowledgeBase(".")
-    try:
-        # Try as numeric ID first, then as module prefix.
-        try:
-            mapping_id = int(identifier)
-            ok = kb.delete_module_mapping(mapping_id)
-            label = f"#{mapping_id}"
-        except ValueError:
-            ok = kb.delete_module_mapping_by_prefix(identifier)
-            label = f"'{identifier}'"
-        if ok:
-            print(f"Deleted module mapping {label}.")
-        else:
-            print(f"Module mapping {label} not found.", file=sys.stderr)
-            raise typer.Exit(1)
-    finally:
-        kb.close()
+    store = MappingStore(".")
+    ok = store.delete_module_mapping_by_prefix(prefix)
+    if ok:
+        print(f"Deleted module mapping '{prefix}'.")
+    else:
+        print(f"Module mapping '{prefix}' not found.", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 # Unified resolution commands
@@ -2633,107 +2480,104 @@ def map_resolve_cmd(
     where 'a.b' lives, then treats 'C' as a symbol.
     """
     import json as _json
-    from emend.knowledge import KnowledgeBase, module_mapping_to_dict
+    from emend.knowledge import MappingStore, module_mapping_to_dict
     import os
 
-    kb = KnowledgeBase(".")
-    try:
-        if location:
+    store = MappingStore(".")
+    if location:
+        from emend.component_selector import parse_extended_selector
+        from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
+
+        # Resolve to a selector with an explicit file path first.
+        file_path = None
+        symbol_parts = []
+
+        try:
+            sel = parse_extended_selector(selector)
+        except Exception:
+            sel = None
+        if sel and sel.file_path:
+            file_path = sel.file_path
+            symbol_parts = sel.symbol_path
+        else:
+            # Use resolve_selector which handles deep paths and __init__.py re-exports.
+            resolved_sel = store.resolve_selector(selector)
+            if resolved_sel and "::" in resolved_sel:
+                parsed = parse_extended_selector(resolved_sel)
+                file_path = parsed.file_path
+                symbol_parts = parsed.symbol_path
+            elif resolved_sel and os.path.isfile(resolved_sel):
+                file_path = resolved_sel
+            elif resolved_sel and os.path.isdir(resolved_sel):
+                init_py = os.path.join(resolved_sel, "__init__.py")
+                if os.path.isfile(init_py):
+                    file_path = init_py
+
+        if not file_path or not os.path.isfile(file_path):
+            print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # Follow re-exports if the symbol isn't defined in the file.
+        from emend.knowledge import make_resolve_module_cb
+        resolve_cb = make_resolve_module_cb(store)
+
+        if symbol_parts:
+            res = resolve_through_reexports(file_path, symbol_parts[0], resolve_cb)
+            if res:
+                file_path, _ = res
+
+        # Now find the symbol in the file to get the line number.
+        if symbol_parts:
+            symbols = find_nested_definitions(file_path)
+            target = find_symbol_by_path(symbols, symbol_parts)
+            if target:
+                if json_output:
+                    print(_json.dumps({
+                        "file": file_path,
+                        "line": target.line_start,
+                        "kind": target.kind
+                    }, indent=2))
+                else:
+                    print(f"File: {file_path}")
+                    print(f"Line: {target.line_start}")
+                    print(f"Kind: {target.kind}")
+                return
+
+        # If no symbol parts or symbol not found, just return the file.
+        if json_output:
+            print(_json.dumps({"file": file_path, "line": 1}, indent=2))
+        else:
+            print(f"File: {file_path}")
+            print("Line: 1")
+        return
+
+    # First, try resolving as a pure module.
+    mm = store.resolve_module(selector)
+    if mm and mm.module_prefix == selector:
+        # Exact module match
+        resolved = store.resolve_module_to_path(selector)
+        if json_output:
+            d = module_mapping_to_dict(mm)
+            if resolved: d["resolved_path"] = resolved
+            print(_json.dumps(d, indent=2))
+        else:
+            print(f"Module '{selector}' -> {mm.repo or mm.local_path}")
+            if resolved: print(f"Local path: {resolved}")
+        return
+
+    # Use unified resolve_selector logic
+    resolved_sel = store.resolve_selector(selector)
+    if resolved_sel:
+        if json_output:
             from emend.component_selector import parse_extended_selector
-            from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
-            
-            # Resolve to a selector with an explicit file path first.
-            file_path = None
-            symbol_parts = []
+            sel = parse_extended_selector(resolved_sel)
+            print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
+        else:
+            print(resolved_sel)
+        return
 
-            try:
-                sel = parse_extended_selector(selector)
-            except Exception:
-                sel = None
-            if sel and sel.file_path:
-                file_path = sel.file_path
-                symbol_parts = sel.symbol_path
-            else:
-                # Use resolve_selector which handles deep paths and __init__.py re-exports.
-                resolved_sel = kb.resolve_selector(selector)
-                if resolved_sel and "::" in resolved_sel:
-                    parsed = parse_extended_selector(resolved_sel)
-                    file_path = parsed.file_path
-                    symbol_parts = parsed.symbol_path
-                elif resolved_sel and os.path.isfile(resolved_sel):
-                    file_path = resolved_sel
-                elif resolved_sel and os.path.isdir(resolved_sel):
-                    init_py = os.path.join(resolved_sel, "__init__.py")
-                    if os.path.isfile(init_py):
-                        file_path = init_py
-
-            if not file_path or not os.path.isfile(file_path):
-                print(f"Could not resolve '{selector}' to a file.", file=sys.stderr)
-                raise typer.Exit(1)
-
-            # Follow re-exports if the symbol isn't defined in the file.
-            from emend.knowledge import make_resolve_module_cb
-            resolve_cb = make_resolve_module_cb(kb)
-
-            if symbol_parts:
-                res = resolve_through_reexports(file_path, symbol_parts[0], resolve_cb)
-                if res:
-                    file_path, _ = res
-
-            # Now find the symbol in the file to get the line number.
-            if symbol_parts:
-                symbols = find_nested_definitions(file_path)
-                target = find_symbol_by_path(symbols, symbol_parts)
-                if target:
-                    if json_output:
-                        print(_json.dumps({
-                            "file": file_path,
-                            "line": target.line_start,
-                            "kind": target.kind
-                        }, indent=2))
-                    else:
-                        print(f"File: {file_path}")
-                        print(f"Line: {target.line_start}")
-                        print(f"Kind: {target.kind}")
-                    return
-            
-            # If no symbol parts or symbol not found, just return the file.
-            if json_output:
-                print(_json.dumps({"file": file_path, "line": 1}, indent=2))
-            else:
-                print(f"File: {file_path}")
-                print("Line: 1")
-            return
-
-        # First, try resolving as a pure module.
-        mm = kb.resolve_module(selector)
-        if mm and mm.module_prefix == selector:
-            # Exact module match
-            resolved = kb.resolve_module_to_path(selector)
-            if json_output:
-                d = module_mapping_to_dict(mm)
-                if resolved: d["resolved_path"] = resolved
-                print(_json.dumps(d, indent=2))
-            else:
-                print(f"Module '{selector}' -> {mm.repo or mm.local_path}")
-                if resolved: print(f"Local path: {resolved}")
-            return
-
-        # Use unified resolve_selector logic
-        resolved_sel = kb.resolve_selector(selector)
-        if resolved_sel:
-            if json_output:
-                from emend.component_selector import parse_extended_selector
-                sel = parse_extended_selector(resolved_sel)
-                print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
-            else:
-                print(resolved_sel)
-            return
-
-        print(f"Could not resolve '{selector}'.", file=sys.stderr)
-        raise typer.Exit(1)
-    finally:
-        kb.close()
+    print(f"Could not resolve '{selector}'.", file=sys.stderr)
+    raise typer.Exit(1)
 
 
 @app.command("mcp")

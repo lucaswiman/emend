@@ -15,6 +15,7 @@
 | `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
+| `knowledge.py` | Mapping store: `MappingStore` (YAML-backed), `IdentifierMapping`, `ModuleMapping`, module resolution, repo checkout helpers |
 | `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial pattern normalization |
 | `grammars/selector.lark` | Lark grammar for selector syntax |
 | `grammars/pattern.lark` | Lark grammar for pattern syntax |
@@ -73,6 +74,8 @@
 | `test_transform_inside.py` | `--inside` / `--not-inside` constraints |
 | `test_type_oracle.py` | `TypeOracle` unit tests: `parse_type_string`, `TypeDescriptor`, `FileTypes`, cache, parsers, `detect_type_engine`, stress tests, optional pyrefly/pyright integration |
 | `test_typeoracle_integration.py` | End-to-end integration: `:type[X]`/`:returns[X]` pattern constraints, oracle-aware lookup, `cmd_edit`/`cmd_add` wiring |
+| `test_knowledge.py` | Mapping store tests: `MappingStore`, identifier mappings, module mappings, YAML persistence, SQLite migration, repo checkouts, editor RPC, MCP tools |
+| `test_map_unified.py` | Integration tests for `map resolve` command |
 | `test_vim_rpc.py` | Vim plugin JSON-RPC protocol tests: dispatch, search, selector, file_symbols, status, reindex, error handling, serialization |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 
@@ -87,7 +90,7 @@
 | `copy-to` | Copy a symbol to another file |
 | `move` | Move a symbol to another file or a module to another package, updating imports |
 | `rename` | Rename a symbol or module across the project (`--docs`, `--no-hierarchy`, `--unsure` for symbols; auto-detects mode by `::` in selector) |
-| `map` | Unified identifier and module mappings. Subcommands: `add`, `add-module`, `lookup`, `search`, `resolve`, `resolve-file`, `rm`, `rm-module`, `list-modules`, `update-module`. |
+| `map` | Identifier and module mappings (YAML-backed in `.emend/mappings.yaml`). Subcommands: `add`, `add-module`, `lookup`, `search`, `resolve`, `rm`, `rm-module`, `list-modules`, `update-module`. |
 | `refs` | Find all references to a symbol (`--writes-only`, `--reads-only`, `--calls-only` for call sites only) |
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
