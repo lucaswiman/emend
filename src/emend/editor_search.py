@@ -193,9 +193,10 @@ def _score_file(file_path: str, query: str) -> float:
     if basename.startswith(q):
         return 1080.0 - (len(basename) - len(q))
 
-    # Path substring (below symbol exact 1000 and prefix 900)
+    # Path substring — ranked above symbol matches so file navigation
+    # is prioritised when the user starts typing a filename.
     if q in p:
-        return 750.0 - min((len(p) - len(q)), 100)
+        return 1050.0 - min((len(p) - len(q)), 100)
 
     # Fuzzy subsequence (below most symbol matches)
     if is_fuzzy_subsequence(q, p):
