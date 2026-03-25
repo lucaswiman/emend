@@ -568,3 +568,698 @@ def format_violations(
                     f"{step.description} (variable: {step.variable})"
                 )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Interprocedural taint analysis (Phase 5)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FunctionSummary:
+    """Summary of a function's taint behavior for interprocedural analysis.
+
+    Maps parameter positions/names to return value taint and sink violations.
+    """
+    qualified_name: str
+    file_path: str
+    # Which parameters propagate taint to the return value
+    # param_name -> set of labels that flow through
+    param_to_return: dict[str, set[str]] = field(default_factory=dict)
+    # Which parameters flow to sinks (violations if tainted)
+    # param_name -> list of (label, sink_pattern, line)
+    param_to_sink: dict[str, list[tuple[str, str, int]]] = field(default_factory=dict)
+    # Which parameters propagate to other parameters (via mutation)
+    param_to_param: dict[str, set[str]] = field(default_factory=dict)
+
+
+@dataclass
+class InterproceduralResult:
+    violations: list[TaintViolation]
+    summaries: dict[str, FunctionSummary]  # qn -> summary
+    iterations: int  # how many fixed-point iterations
+
+
+def _collect_function_params(
+    source: str,
+    func_start: int,
+    func_end: int,
+) -> list[str]:
+    """Extract parameter names from a function definition using tree-sitter.
+
+    Parses the def line at *func_start* and returns the list of parameter
+    names (excluding ``self`` and ``cls``).
+
+    Args:
+        source: Full file source text.
+        func_start: 1-based start line of the function.
+        func_end: 1-based end line of the function.
+
+    Returns:
+        List of parameter name strings.
+    """
+    from emend import emend_core
+
+    lines = source.split("\n")
+    if func_start < 1 or func_start > len(lines):
+        return []
+
+    # Use statement ranges on the def line to find parameters
+    # The def line is at func_start (1-based)
+    def_line = lines[func_start - 1].strip()
+
+    # Quick regex parse of the def line for parameter names
+    # Handles: def foo(a, b, c=1, *args, **kwargs, d: int = 5)
+    m = re.match(r"(?:async\s+)?def\s+\w+\s*\(([^)]*)\)", def_line)
+    if not m:
+        # Multi-line signature: gather lines until we find the closing paren
+        sig_lines = [lines[func_start - 1]]
+        for i in range(func_start, min(func_end, len(lines))):
+            sig_lines.append(lines[i])
+            if ")" in lines[i]:
+                break
+        combined = " ".join(l.strip() for l in sig_lines)
+        m = re.match(r"(?:async\s+)?def\s+\w+\s*\(([^)]*)\)", combined)
+        if not m:
+            return []
+
+    params_str = m.group(1)
+    if not params_str.strip():
+        return []
+
+    params: list[str] = []
+    for part in params_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # Strip leading * or **
+        name = part.lstrip("*")
+        # Strip type annotation and default
+        name = name.split(":")[0].split("=")[0].strip()
+        if name and name not in ("self", "cls") and re.match(r"^[A-Za-z_]\w*$", name):
+            params.append(name)
+
+    return params
+
+
+def _compute_function_summary(
+    file_path: str,
+    source: str,
+    func_start: int,
+    func_end: int,
+    config: TaintConfig,
+    func_qn: str,
+    param_names: list[str],
+    language: str = "python",
+) -> FunctionSummary:
+    """Compute a taint summary for a single function.
+
+    For each parameter, simulates that parameter being tainted with each
+    configured label, then runs the intraprocedural analysis to see which
+    labels reach the return value or a sink.
+
+    Args:
+        file_path: Path to the source file.
+        source: Full file source text.
+        func_start: 1-based start line of the function.
+        func_end: 1-based end line of the function.
+        config: Taint configuration.
+        func_qn: Qualified name of the function.
+        param_names: Names of the function's parameters.
+        language: Source language.
+
+    Returns:
+        A FunctionSummary describing the function's taint behavior.
+    """
+    import textwrap
+
+    summary = FunctionSummary(qualified_name=func_qn, file_path=file_path)
+
+    if not param_names or not config.labels:
+        return summary
+
+    lines = source.split("\n")
+    body_start = func_start + 1
+    if body_start > func_end:
+        return summary
+
+    body_text_lines = lines[body_start - 1 : func_end]
+    body_text = "\n".join(body_text_lines) + "\n"
+    body_dedented = textwrap.dedent(body_text)
+
+    # Collect return statements in the function body to check which variables
+    # flow to the return value.
+    return_idents: set[str] = set()
+    for line_idx in range(func_start, func_end + 1):
+        if line_idx - 1 >= len(lines):
+            break
+        stripped = lines[line_idx - 1].strip()
+        ret_m = re.match(r"return\s+(.+)", stripped)
+        if ret_m:
+            return_idents |= _extract_identifiers(ret_m.group(1))
+
+    body_assignments = _find_assignments_in_source(body_dedented)
+
+    for param_name in param_names:
+        for label in config.labels:
+            # Simulate this param being tainted with this label
+            taint_state: dict[str, dict[str, bool]] = {
+                param_name: {label: True},
+            }
+
+            # Propagate through assignments
+            for _stmt_line_rel, target, rhs in body_assignments:
+                rhs_idents = _extract_identifiers(rhs)
+                for ident in rhs_idents:
+                    if ident in taint_state and label in taint_state[ident]:
+                        if target not in taint_state:
+                            taint_state[target] = {}
+                        taint_state[target][label] = True
+
+            # Check if taint reaches return
+            for ret_id in return_idents:
+                if ret_id in taint_state and label in taint_state[ret_id]:
+                    if param_name not in summary.param_to_return:
+                        summary.param_to_return[param_name] = set()
+                    summary.param_to_return[param_name].add(label)
+                    break
+
+            # Check if taint reaches a sink
+            for sink_def in config.sinks:
+                if sink_def.label != label:
+                    continue
+                try:
+                    matches = find_pattern(
+                        sink_def.pattern, file_path,
+                        source_override=source,
+                        language=language,
+                    )
+                except Exception:
+                    continue
+
+                for match in matches:
+                    match_line = match.line or 1
+                    if not (func_start <= match_line <= func_end):
+                        continue
+                    sink_idents: set[str] = set()
+                    for _cap_name, cap_val in (match.captures or {}).items():
+                        if cap_val:
+                            sink_idents |= _extract_identifiers(cap_val)
+                    if match.matched_text:
+                        sink_idents |= _extract_identifiers(match.matched_text)
+
+                    for ident in sink_idents:
+                        if ident in taint_state and label in taint_state[ident]:
+                            if param_name not in summary.param_to_sink:
+                                summary.param_to_sink[param_name] = []
+                            summary.param_to_sink[param_name].append(
+                                (label, sink_def.pattern, match_line)
+                            )
+                            break
+
+            # Check param-to-param propagation (via assignments)
+            for other_param in param_names:
+                if other_param == param_name:
+                    continue
+                if other_param in taint_state and label in taint_state[other_param]:
+                    if param_name not in summary.param_to_param:
+                        summary.param_to_param[param_name] = set()
+                    summary.param_to_param[param_name].add(other_param)
+
+    return summary
+
+
+def _summaries_equal(
+    a: dict[str, FunctionSummary],
+    b: dict[str, FunctionSummary],
+) -> bool:
+    """Check if two summary dictionaries are equivalent for convergence."""
+    if a.keys() != b.keys():
+        return False
+    for qn in a:
+        sa, sb = a[qn], b[qn]
+        if sa.param_to_return != sb.param_to_return:
+            return False
+        if sa.param_to_sink != sb.param_to_sink:
+            return False
+        if sa.param_to_param != sb.param_to_param:
+            return False
+    return True
+
+
+def _copy_summaries(
+    summaries: dict[str, FunctionSummary],
+) -> dict[str, FunctionSummary]:
+    """Deep-copy summaries for convergence comparison."""
+    import copy
+    return copy.deepcopy(summaries)
+
+
+def run_interprocedural_taint_analysis(
+    paths: list[str],
+    config: TaintConfig,
+    label_filter: str | None = None,
+    language: str = "python",
+    max_iterations: int = 10,
+) -> InterproceduralResult:
+    """Run interprocedural taint analysis across the given files.
+
+    Builds function summaries describing how taint flows through parameters
+    to return values and sinks, then iterates to a fixed point so that
+    callers inherit callee taint behavior.
+
+    Args:
+        paths: List of source file paths to analyze.
+        config: Taint configuration (sources, sinks, sanitizers, labels).
+        label_filter: If set, only check this specific taint label.
+        language: Source language (default: "python").
+        max_iterations: Maximum number of fixed-point iterations.
+
+    Returns:
+        An InterproceduralResult with violations, summaries, and iteration count.
+    """
+    if not config.sources or not config.sinks:
+        return InterproceduralResult(violations=[], summaries={}, iterations=0)
+
+    from emend.ast_utils import find_nested_definitions
+
+    # ------------------------------------------------------------------
+    # Phase 1: Collect all function definitions and compute initial summaries
+    # ------------------------------------------------------------------
+    # func_info: qn -> (file_path, source, func_start, func_end, param_names)
+    func_info: dict[str, tuple[str, str, int, int, list[str]]] = {}
+    file_sources: dict[str, str] = {}
+
+    for file_path in paths:
+        path_obj = Path(file_path)
+        if not path_obj.exists():
+            continue
+        try:
+            source = path_obj.read_text()
+        except Exception:
+            logger.debug("Could not read %s", file_path, exc_info=True)
+            continue
+
+        file_sources[file_path] = source
+
+        try:
+            symbols = find_nested_definitions(file_path)
+        except Exception:
+            logger.debug("Could not parse %s", file_path, exc_info=True)
+            continue
+
+        functions = _collect_functions(symbols)
+        for func_name, func_start, func_end in functions:
+            params = _collect_function_params(source, func_start, func_end)
+            # Use file_path::func_name as qualified name
+            qn = f"{file_path}::{func_name}"
+            func_info[qn] = (file_path, source, func_start, func_end, params)
+
+    # Compute initial summaries
+    summaries: dict[str, FunctionSummary] = {}
+    for qn, (fp, src, fs, fe, params) in func_info.items():
+        summaries[qn] = _compute_function_summary(
+            file_path=fp,
+            source=src,
+            func_start=fs,
+            func_end=fe,
+            config=config,
+            func_qn=qn,
+            param_names=params,
+            language=language,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2: Fixed-point iteration
+    # ------------------------------------------------------------------
+    # Build a reverse map from short function name -> list of qns
+    name_to_qn: dict[str, list[str]] = {}
+    for qn in func_info:
+        short_name = qn.rsplit("::", 1)[-1]
+        if short_name not in name_to_qn:
+            name_to_qn[short_name] = []
+        name_to_qn[short_name].append(qn)
+
+    iterations = 0
+    for iteration in range(max_iterations):
+        iterations = iteration + 1
+        prev_summaries = _copy_summaries(summaries)
+
+        for qn, (fp, src, fs, fe, params) in func_info.items():
+            if not params:
+                continue
+
+            lines = src.split("\n")
+            import textwrap
+
+            body_start = fs + 1
+            if body_start > fe:
+                continue
+            body_text_lines = lines[body_start - 1 : fe]
+            body_text = "\n".join(body_text_lines) + "\n"
+            body_dedented = textwrap.dedent(body_text)
+            body_assignments = _find_assignments_in_source(body_dedented)
+
+            # Collect return identifiers
+            return_idents: set[str] = set()
+            for line_idx in range(fs, fe):
+                if line_idx - 1 >= len(lines):
+                    break
+                stripped = lines[line_idx - 1].strip()
+                ret_m = re.match(r"return\s+(.+)", stripped)
+                if ret_m:
+                    return_idents |= _extract_identifiers(ret_m.group(1))
+
+            # For each param+label, simulate taint with callee summaries
+            for param_name in params:
+                labels_to_check = [label_filter] if label_filter else config.labels
+                for label in labels_to_check:
+                    if not label:
+                        continue
+                    taint_state: dict[str, dict[str, bool]] = {
+                        param_name: {label: True},
+                    }
+
+                    # Propagate through assignments
+                    for _stmt_line_rel, target, rhs in body_assignments:
+                        rhs_idents = _extract_identifiers(rhs)
+
+                        # Direct propagation from tainted variables
+                        for ident in rhs_idents:
+                            if ident in taint_state and label in taint_state[ident]:
+                                if target not in taint_state:
+                                    taint_state[target] = {}
+                                taint_state[target][label] = True
+
+                        # Interprocedural: check if the RHS is a call to a
+                        # known function whose summary says param->return
+                        call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
+                        if call_m:
+                            callee_name = call_m.group(1)
+                            # Extract call arguments (simplified)
+                            args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
+                            if args_m:
+                                arg_strs = [
+                                    a.strip()
+                                    for a in args_m.group(1).split(",")
+                                    if a.strip()
+                                ]
+                                # Look up callee summaries
+                                callee_qns = name_to_qn.get(callee_name, [])
+                                for callee_qn in callee_qns:
+                                    callee_summary = summaries.get(callee_qn)
+                                    if not callee_summary:
+                                        continue
+                                    callee_params = func_info[callee_qn][4]
+                                    # Map positional args to callee params
+                                    for arg_idx, arg_str in enumerate(arg_strs):
+                                        if arg_idx >= len(callee_params):
+                                            break
+                                        callee_param = callee_params[arg_idx]
+                                        arg_idents = _extract_identifiers(arg_str)
+                                        # Check if any arg ident is tainted
+                                        for ai in arg_idents:
+                                            if ai in taint_state and label in taint_state[ai]:
+                                                # If callee param flows to return, taint target
+                                                if callee_param in callee_summary.param_to_return:
+                                                    if label in callee_summary.param_to_return[callee_param]:
+                                                        if target not in taint_state:
+                                                            taint_state[target] = {}
+                                                        taint_state[target][label] = True
+
+                    # Update summary: check return
+                    for ret_id in return_idents:
+                        if ret_id in taint_state and label in taint_state[ret_id]:
+                            if param_name not in summaries[qn].param_to_return:
+                                summaries[qn].param_to_return[param_name] = set()
+                            summaries[qn].param_to_return[param_name].add(label)
+                            break
+
+                    # Update summary: check sinks
+                    for sink_def in config.sinks:
+                        if sink_def.label != label:
+                            continue
+                        try:
+                            matches = find_pattern(
+                                sink_def.pattern, fp,
+                                source_override=src,
+                                language=language,
+                            )
+                        except Exception:
+                            continue
+                        for match in matches:
+                            match_line = match.line or 1
+                            if not (fs <= match_line <= fe):
+                                continue
+                            sink_idents: set[str] = set()
+                            for _cn, cv in (match.captures or {}).items():
+                                if cv:
+                                    sink_idents |= _extract_identifiers(cv)
+                            if match.matched_text:
+                                sink_idents |= _extract_identifiers(match.matched_text)
+                            for ident in sink_idents:
+                                if ident in taint_state and label in taint_state[ident]:
+                                    if param_name not in summaries[qn].param_to_sink:
+                                        summaries[qn].param_to_sink[param_name] = []
+                                    entry = (label, sink_def.pattern, match_line)
+                                    if entry not in summaries[qn].param_to_sink[param_name]:
+                                        summaries[qn].param_to_sink[param_name].append(entry)
+                                    break
+
+        # Check convergence
+        if _summaries_equal(prev_summaries, summaries):
+            break
+
+    # ------------------------------------------------------------------
+    # Phase 3: Use final summaries to find cross-function violations
+    # ------------------------------------------------------------------
+    violations: list[TaintViolation] = []
+
+    # First, collect intraprocedural violations (existing behavior)
+    for file_path in paths:
+        if file_path not in file_sources:
+            continue
+        source = file_sources[file_path]
+        try:
+            symbols = find_nested_definitions(file_path)
+        except Exception:
+            continue
+
+        functions = _collect_functions(symbols)
+        functions.append(("__module__", 1, len(source.split("\n"))))
+
+        for func_name, func_start, func_end in functions:
+            func_violations = _analyze_function(
+                file_path=file_path,
+                source=source,
+                func_start=func_start,
+                func_end=func_end,
+                config=config,
+                label_filter=label_filter,
+                language=language,
+            )
+            violations.extend(func_violations)
+
+    # Now find interprocedural violations: at each call site, if a tainted
+    # argument is passed to a callee whose summary says that param flows to
+    # a sink, report a violation with a cross-function trace.
+    for caller_qn, (fp, src, fs, fe, caller_params) in func_info.items():
+        lines = src.split("\n")
+        import textwrap
+
+        body_start = fs + 1
+        if body_start > fe:
+            continue
+
+        # Run intraprocedural taint to know which variables are tainted
+        # at each point (reuse the source-finding logic)
+        taint_state: dict[str, dict[str, TaintTraceStep]] = {}
+
+        # Find sources in this function
+        for src_def in config.sources:
+            if label_filter and src_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    src_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+
+            for match in matches:
+                match_line = match.line or 1
+                match_col = match.col or 0
+                if not (fs <= match_line <= fe):
+                    continue
+                tainted_vars: set[str] = set()
+                stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
+                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                if assign_m:
+                    tainted_vars.add(assign_m.group(1))
+                for _cn, cv in (match.captures or {}).items():
+                    if cv and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cv):
+                        tainted_vars.add(cv)
+                if not tainted_vars and match.matched_text:
+                    for ident in _extract_identifiers(match.matched_text):
+                        tainted_vars.add(ident)
+
+                step = TaintTraceStep(
+                    file_path=fp,
+                    line=match_line,
+                    col=match_col,
+                    description=f"source: {src_def.label} via {src_def.pattern}",
+                    variable=", ".join(sorted(tainted_vars)) or "?",
+                )
+                for var in tainted_vars:
+                    if var not in taint_state:
+                        taint_state[var] = {}
+                    taint_state[var][src_def.label] = step
+
+        # Propagate through assignments
+        body_text_lines = lines[body_start - 1 : fe]
+        body_text = "\n".join(body_text_lines) + "\n"
+        body_dedented = textwrap.dedent(body_text)
+        body_assignments = _find_assignments_in_source(body_dedented)
+
+        for stmt_line_rel, target, rhs in body_assignments:
+            stmt_line_abs = stmt_line_rel + body_start - 1
+            rhs_idents = _extract_identifiers(rhs)
+            propagated: dict[str, TaintTraceStep] = {}
+            for ident in rhs_idents:
+                if ident in taint_state:
+                    for lbl, origin_step in taint_state[ident].items():
+                        if label_filter and lbl != label_filter:
+                            continue
+                        propagated[lbl] = TaintTraceStep(
+                            file_path=fp,
+                            line=stmt_line_abs,
+                            col=0,
+                            description=f"propagation: {target} = ... {ident} ...",
+                            variable=target,
+                        )
+            if propagated:
+                if target not in taint_state:
+                    taint_state[target] = {}
+                for lbl, step in propagated.items():
+                    if lbl not in taint_state[target]:
+                        taint_state[target][lbl] = step
+
+        # Apply sanitizers
+        for san_def in config.sanitizers:
+            if label_filter and san_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    san_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+            for match in matches:
+                match_line = match.line or 1
+                if not (fs <= match_line <= fe):
+                    continue
+                stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
+                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                sanitized_vars: set[str] = set()
+                if assign_m:
+                    sanitized_vars.add(assign_m.group(1))
+                for _cn, cv in (match.captures or {}).items():
+                    if cv and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cv):
+                        sanitized_vars.add(cv)
+                for var in sanitized_vars:
+                    if var in taint_state and san_def.label in taint_state[var]:
+                        del taint_state[var][san_def.label]
+                        if not taint_state[var]:
+                            del taint_state[var]
+
+        # Now scan call sites in the function body for interprocedural flow
+        for line_idx in range(fs, fe + 1):
+            if line_idx - 1 >= len(lines):
+                break
+            line_text = lines[line_idx - 1]
+            # Find function calls: name(args)
+            for call_match in re.finditer(
+                r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)", line_text
+            ):
+                callee_name = call_match.group(1)
+                args_str = call_match.group(2)
+                arg_list = [a.strip() for a in args_str.split(",") if a.strip()]
+
+                callee_qns = name_to_qn.get(callee_name, [])
+                for callee_qn in callee_qns:
+                    callee_summary = summaries.get(callee_qn)
+                    if not callee_summary:
+                        continue
+                    callee_params = func_info[callee_qn][4]
+
+                    for arg_idx, arg_str in enumerate(arg_list):
+                        if arg_idx >= len(callee_params):
+                            break
+                        callee_param = callee_params[arg_idx]
+
+                        # Check if this arg is tainted
+                        arg_idents = _extract_identifiers(arg_str)
+                        for ai in arg_idents:
+                            if ai not in taint_state:
+                                continue
+                            for lbl, origin_step in taint_state[ai].items():
+                                if label_filter and lbl != label_filter:
+                                    continue
+                                # Check if callee summary says this param goes to a sink
+                                if callee_param in callee_summary.param_to_sink:
+                                    for sink_label, sink_pat, sink_line in callee_summary.param_to_sink[callee_param]:
+                                        if sink_label != lbl:
+                                            continue
+                                        # Build interprocedural trace
+                                        trace = [
+                                            origin_step,
+                                            TaintTraceStep(
+                                                file_path=fp,
+                                                line=line_idx,
+                                                col=call_match.start(),
+                                                description=f"call: {callee_name}({arg_str}) passes tainted '{ai}' as param '{callee_param}'",
+                                                variable=ai,
+                                            ),
+                                            TaintTraceStep(
+                                                file_path=callee_summary.file_path,
+                                                line=sink_line,
+                                                col=0,
+                                                description=f"sink: {sink_label} via {sink_pat} (in callee {callee_name})",
+                                                variable=callee_param,
+                                            ),
+                                        ]
+
+                                        # Find the sink message
+                                        sink_msg = "Tainted value reaches sink via function call"
+                                        for sd in config.sinks:
+                                            if sd.pattern == sink_pat and sd.label == sink_label:
+                                                sink_msg = sd.message + f" (via {callee_name})"
+                                                break
+
+                                        violations.append(TaintViolation(
+                                            file_path=fp,
+                                            line=line_idx,
+                                            col=call_match.start(),
+                                            label=lbl,
+                                            sink_pattern=sink_pat,
+                                            message=sink_msg,
+                                            trace=trace,
+                                        ))
+
+    # De-duplicate violations
+    seen: set[tuple[str, int, str, str]] = set()
+    unique: list[TaintViolation] = []
+    for v in violations:
+        key = (v.file_path, v.line, v.label, v.sink_pattern)
+        if key not in seen:
+            seen.add(key)
+            unique.append(v)
+
+    return InterproceduralResult(
+        violations=unique,
+        summaries=summaries,
+        iterations=iterations,
+    )
