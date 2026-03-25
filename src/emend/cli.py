@@ -1251,12 +1251,17 @@ def taint_cmd(
     trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+    interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function taint tracking")] = False,
+    max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
 ):
     """Run taint analysis to detect unsafe data flows.
 
     Tracks value flow from sources (e.g. user input) to sinks
     (e.g. SQL queries, eval) within individual functions, reporting
     violations when tainted data reaches a sink without sanitization.
+
+    With --interprocedural, tracks taint across function boundaries using
+    function summaries and fixed-point iteration.
 
     Configuration is read from the ``taint`` section of .emend/patterns.yaml
     (or the file specified by --config).
@@ -1266,6 +1271,7 @@ def taint_cmd(
         emend taint app.py --label user_input
         emend taint src/ --trace
         emend taint src/ --json
+        emend taint src/ --interprocedural
     """
     try:
         from emend.taint import load_taint_config, run_taint_analysis, format_violations
@@ -1290,11 +1296,27 @@ def taint_cmd(
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        violations = run_taint_analysis(
-            files, taint_config,
-            label_filter=label,
-            language=_lang,
-        )
+        if interprocedural:
+            from emend.taint import run_interprocedural_taint_analysis
+            result = run_interprocedural_taint_analysis(
+                files, taint_config,
+                label_filter=label,
+                language=_lang,
+                max_iterations=max_iterations,
+            )
+            violations = result.violations
+            if not json_output:
+                print(
+                    f"Interprocedural analysis: {result.iterations} iteration(s), "
+                    f"{len(result.summaries)} function summary(ies)",
+                    file=sys.stderr,
+                )
+        else:
+            violations = run_taint_analysis(
+                files, taint_config,
+                label_filter=label,
+                language=_lang,
+            )
 
         output = format_violations(violations, show_trace=trace, json_output=json_output)
         if output:
@@ -2743,6 +2765,288 @@ def map_resolve_cmd(
 
     print(f"Could not resolve '{selector}'.", file=sys.stderr)
     raise typer.Exit(1)
+
+
+# ============================================================================
+# Fact Graph / Query Commands (Phase 4)
+# ============================================================================
+
+
+@app.command("facts")
+def facts_cmd(
+    project: Annotated[str, typer.Argument(help="Project root directory")] = ".",
+    fact_type: Annotated[str, typer.Option("--type", "-t", help="Fact type: symbols, calls, references, taint_flows, types, imports")] = "symbols",
+    name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by name (symbols)")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by kind (symbols)")] = None,
+    file: Annotated[Optional[str], typer.Option("--file", "-f", help="Filter by file path")] = None,
+    symbol: Annotated[Optional[str], typer.Option("--symbol", "-s", help="Symbol qualified name (calls/references/types)")] = None,
+    label: Annotated[Optional[str], typer.Option("--label", help="Taint label filter (taint_flows)")] = None,
+    transitive: Annotated[bool, typer.Option("--transitive", help="Compute transitive closure (calls)")] = False,
+    max_depth: Annotated[int, typer.Option("--max-depth", help="Max depth for transitive queries")] = 10,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    limit: Annotated[int, typer.Option("--limit", help="Max results")] = 100,
+):
+    """Query the relational fact graph for code invariants.
+
+    Builds and queries a unified graph of code facts extracted from
+    the project. Supports symbols, call relationships, references,
+    taint flows, type information, and imports.
+
+    Examples:
+        emend facts .                                   # list all symbols
+        emend facts . --type calls --symbol mod.func    # call graph for func
+        emend facts . --type calls --symbol mod.func --transitive
+        emend facts . --type references --symbol mod.Class
+        emend facts . --type taint_flows --label user_input
+        emend facts . --type imports --file src/app.py
+    """
+    import json as json_mod
+    import dataclasses
+
+    try:
+        from emend.fact_graph import FactGraph
+
+        graph = FactGraph.build_from_project(project)
+
+        results: list = []
+        extra: dict | None = None
+
+        if fact_type == "symbols":
+            results = graph.symbols(name=name, kind=kind, file_path=file)
+        elif fact_type == "calls":
+            if not symbol:
+                print("Error: --symbol required for call queries", file=sys.stderr)
+                raise typer.Exit(2)
+            if transitive:
+                callers = graph.transitive_callers(symbol, max_depth=max_depth)
+                extra = {"symbol": symbol, "transitive_callers": sorted(callers)}
+            else:
+                from_calls = graph.calls_from(symbol)
+                to_calls = graph.calls_to(symbol)
+                extra = {
+                    "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
+                    "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
+                }
+        elif fact_type == "references":
+            if not symbol:
+                print("Error: --symbol required for reference queries", file=sys.stderr)
+                raise typer.Exit(2)
+            results = graph.references_to(symbol)
+        elif fact_type == "taint_flows":
+            results = graph.taint_flows(label=label, file_path=file)
+        elif fact_type == "types":
+            if not symbol:
+                print("Error: --symbol required for type queries", file=sys.stderr)
+                raise typer.Exit(2)
+            results = graph.types_for(symbol)
+        elif fact_type == "imports":
+            if not file:
+                print("Error: --file required for import queries", file=sys.stderr)
+                raise typer.Exit(2)
+            results = graph.imports_in(file)
+        else:
+            print(f"Error: unknown fact type '{fact_type}'", file=sys.stderr)
+            raise typer.Exit(2)
+
+        if extra:
+            if json_output:
+                print(json_mod.dumps(extra, indent=2))
+            else:
+                for key, val in extra.items():
+                    if isinstance(val, list):
+                        print(f"{key}:")
+                        for item in val[:limit]:
+                            print(f"  {item}")
+                    else:
+                        print(f"{key}: {val}")
+        elif results:
+            data = [dataclasses.asdict(f) for f in results[:limit]]
+            if json_output:
+                print(json_mod.dumps(data, indent=2))
+            else:
+                for item in data:
+                    parts = [f"{k}={v}" for k, v in item.items() if v is not None]
+                    print("  ".join(parts))
+            print(f"\n{min(len(results), limit)} of {len(results)} results.", file=sys.stderr)
+        else:
+            print("No results found.")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ============================================================================
+# Policy Commands (Phase 8)
+# ============================================================================
+
+
+@app.command("policy")
+def policy_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to check")],
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to policies.yaml")] = None,
+    policy_name: Annotated[Optional[str], typer.Option("--policy", "-p", help="Run only a specific policy")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+):
+    """Run policy checks against source code.
+
+    Policies combine flow analysis, structural checks, type constraints,
+    and dead code detection into named, reusable compliance rules loaded
+    from .emend/policies.yaml.
+
+    Examples:
+        emend policy src/
+        emend policy src/ --config .emend/policies.yaml
+        emend policy src/ --policy no-sql-injection
+        emend policy src/ --json
+    """
+    try:
+        from emend.policy import load_policies, run_policy_checks, format_policy_violations
+
+        if config is None:
+            config = ".emend/policies.yaml"
+        config_path = Path(config)
+        if not config_path.exists():
+            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            raise typer.Exit(2)
+
+        policies = load_policies(str(config_path))
+        if policy_name:
+            policies = [p for p in policies if p.name == policy_name]
+            if not policies:
+                print(f"Error: Policy '{policy_name}' not found.", file=sys.stderr)
+                raise typer.Exit(2)
+
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved]
+
+        violations = run_policy_checks(files, policies, language=_lang)
+
+        output = format_policy_violations(violations, json_output=json_output)
+        if output:
+            print(output, end='' if not output.endswith('\n') else '')
+
+        if violations:
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# ============================================================================
+# Rewrite / Saturation Commands (Phase 7)
+# ============================================================================
+
+
+@app.command("saturate")
+def saturate_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to rewrite")],
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rewrites.yaml")] = None,
+    apply: Annotated[bool, typer.Option("--apply", "-a", help="Apply rewrites")] = False,
+    max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max saturation iterations")] = 30,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+):
+    """Experimental: apply equality saturation rewrites.
+
+    Uses e-graph equality saturation to find optimal rewrites for
+    expressions matching rules in .emend/rewrites.yaml.
+
+    This is an experimental feature. Use --apply to write changes.
+
+    Examples:
+        emend saturate src/                      # dry-run with default config
+        emend saturate src/ --config rules.yaml  # custom rules
+        emend saturate file.py --apply           # apply rewrites
+        emend saturate src/ --json               # JSON output
+    """
+    try:
+        from emend.rewrite_engine import load_rewrite_rules, run_saturation
+
+        if config is None:
+            config = ".emend/rewrites.yaml"
+        config_path = Path(config)
+        if not config_path.exists():
+            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            raise typer.Exit(2)
+
+        rules = load_rewrite_rules(str(config_path))
+        if not rules:
+            print("No rewrite rules configured.", file=sys.stderr)
+            raise typer.Exit(0)
+
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved]
+
+        all_results = []
+        for file_path in files:
+            results = run_saturation(
+                str(file_path), rules,
+                max_iterations=max_iterations,
+            )
+            all_results.extend(results)
+
+        if json_output:
+            import json
+            data = [
+                {
+                    "file": r.file_path,
+                    "line": r.line,
+                    "col": r.col,
+                    "original": r.original_text,
+                    "rewritten": r.rewritten_text,
+                    "rules": r.rules_applied,
+                }
+                for r in all_results
+            ]
+            print(json.dumps(data, indent=2))
+        elif not all_results:
+            print("No rewrites found.")
+        else:
+            for r in all_results:
+                print(f"{r.file_path}:{r.line}:{r.col}")
+                print(f"  - {r.original_text}")
+                print(f"  + {r.rewritten_text}")
+                print(f"  rules: {', '.join(r.rules_applied)}")
+            print(f"\nFound {len(all_results)} rewrite(s).", file=sys.stderr)
+            if not apply:
+                print("Dry-run. Use --apply to write changes.", file=sys.stderr)
+
+        if apply and all_results:
+            # Apply rewrites by file, bottom-up to preserve offsets
+            from collections import defaultdict
+            by_file: dict[str, list] = defaultdict(list)
+            for r in all_results:
+                by_file[r.file_path].append(r)
+
+            for fpath, results in by_file.items():
+                source = Path(fpath).read_text()
+                lines = source.split("\n")
+                # Sort by line desc to apply bottom-up
+                for r in sorted(results, key=lambda x: x.line, reverse=True):
+                    if 1 <= r.line <= len(lines):
+                        lines[r.line - 1] = lines[r.line - 1].replace(
+                            r.original_text, r.rewritten_text, 1
+                        )
+                Path(fpath).write_text("\n".join(lines))
+            print(f"Applied {len(all_results)} rewrite(s).", file=sys.stderr)
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 @app.command("mcp")

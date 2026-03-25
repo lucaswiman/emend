@@ -1,0 +1,261 @@
+"""Tests for interprocedural taint analysis (Phase 5)."""
+
+import pytest
+
+from emend.taint import (
+    FunctionSummary,
+    InterproceduralResult,
+    TaintConfig,
+    TaintSanitizer,
+    TaintSink,
+    TaintSource,
+    _collect_function_params,
+    _compute_function_summary,
+    run_interprocedural_taint_analysis,
+)
+
+
+def _make_sql_config():
+    """Reusable SQL injection taint config."""
+    return TaintConfig(
+        labels=["user_input"],
+        sources=[
+            TaintSource(pattern="request.args.get($X)", label="user_input"),
+        ],
+        sinks=[
+            TaintSink(
+                pattern="cursor.execute($X)",
+                label="user_input",
+                message="SQL injection: user input reaches cursor.execute()",
+            ),
+        ],
+        sanitizers=[
+            TaintSanitizer(pattern="escape($X)", label="user_input"),
+        ],
+    )
+
+
+class TestCollectFunctionParams:
+    def test_simple_params(self, tmp_path):
+        source = "def foo(a, b, c):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == ["a", "b", "c"]
+
+    def test_params_with_defaults(self, tmp_path):
+        source = "def foo(a, b=1, c='x'):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == ["a", "b", "c"]
+
+    def test_params_with_annotations(self, tmp_path):
+        source = "def foo(a: int, b: str = 'x'):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == ["a", "b"]
+
+    def test_skip_self_cls(self, tmp_path):
+        source = "def method(self, a, b):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == ["a", "b"]
+
+    def test_star_args(self, tmp_path):
+        source = "def foo(a, *args, **kwargs):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert "a" in params
+        assert "args" in params
+        assert "kwargs" in params
+
+    def test_no_params(self, tmp_path):
+        source = "def foo():\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == []
+
+    def test_async_def(self, tmp_path):
+        source = "async def foo(a, b):\n    pass\n"
+        params = _collect_function_params(source, 1, 2)
+        assert params == ["a", "b"]
+
+
+class TestComputeFunctionSummary:
+    def test_param_to_return(self, tmp_path):
+        """Parameter that flows to return value via assignment."""
+        test_file = tmp_path / "test.py"
+        source = "def identity(x):\n    result = x\n    return result\n"
+        test_file.write_text(source)
+
+        config = _make_sql_config()
+        summary = _compute_function_summary(
+            file_path=str(test_file),
+            source=source,
+            func_start=1,
+            func_end=3,
+            config=config,
+            func_qn="test::identity",
+            param_names=["x"],
+        )
+        assert "x" in summary.param_to_return
+        assert "user_input" in summary.param_to_return["x"]
+
+    def test_param_to_sink(self, tmp_path):
+        """Parameter that flows to a sink."""
+        test_file = tmp_path / "test.py"
+        source = (
+            "def run_query(cursor, query):\n"
+            "    cursor.execute(query)\n"
+        )
+        test_file.write_text(source)
+
+        config = _make_sql_config()
+        summary = _compute_function_summary(
+            file_path=str(test_file),
+            source=source,
+            func_start=1,
+            func_end=2,
+            config=config,
+            func_qn="test::run_query",
+            param_names=["cursor", "query"],
+        )
+        assert "query" in summary.param_to_sink
+        assert any(s[0] == "user_input" for s in summary.param_to_sink["query"])
+
+    def test_no_flow(self, tmp_path):
+        """Parameter that doesn't flow to return or sink."""
+        test_file = tmp_path / "test.py"
+        source = "def foo(x):\n    return 42\n"
+        test_file.write_text(source)
+
+        config = _make_sql_config()
+        summary = _compute_function_summary(
+            file_path=str(test_file),
+            source=source,
+            func_start=1,
+            func_end=2,
+            config=config,
+            func_qn="test::foo",
+            param_names=["x"],
+        )
+        assert "x" not in summary.param_to_return
+
+
+class TestInterproceduralAnalysis:
+    def test_cross_function_violation(self, tmp_path):
+        """Taint flows from source through a helper function to a sink."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def run_query(cursor, query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def handle_request(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    run_query(cursor, name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis(
+            [str(test_file)], config,
+        )
+
+        assert isinstance(result, InterproceduralResult)
+        assert result.iterations >= 1
+        assert len(result.summaries) > 0
+
+        # Should find at least one violation (the interprocedural one)
+        assert len(result.violations) >= 1
+        # At least one violation should mention the function call
+        messages = [v.message for v in result.violations]
+        assert any("SQL injection" in m or "cursor.execute" in m.lower() for m in messages)
+
+    def test_intraprocedural_still_found(self, tmp_path):
+        """Interprocedural mode still finds direct (intraprocedural) violations."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def handle_request(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    cursor.execute(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis(
+            [str(test_file)], config,
+        )
+
+        assert len(result.violations) >= 1
+        assert result.violations[0].label == "user_input"
+
+    def test_sanitizer_blocks_interprocedural(self, tmp_path):
+        """Sanitizer in caller prevents interprocedural violation."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def run_query(cursor, query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def handle_request(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    name = escape(name)\n"
+            "    run_query(cursor, name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis(
+            [str(test_file)], config,
+        )
+
+        # After sanitization, the interprocedural violation should not appear
+        interprocedural_violations = [
+            v for v in result.violations
+            if "via" in v.message.lower() or "function call" in v.message.lower()
+        ]
+        assert len(interprocedural_violations) == 0
+
+    def test_convergence(self, tmp_path):
+        """Fixed-point iteration converges within max_iterations."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def pass_through(x):\n"
+            "    return x\n"
+            "\n"
+            "def another(x):\n"
+            "    return pass_through(x)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis(
+            [str(test_file)], config, max_iterations=5,
+        )
+
+        assert result.iterations <= 5
+
+    def test_empty_files(self, tmp_path):
+        """Handles empty file list gracefully."""
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis([], config)
+        assert result.violations == []
+        assert result.summaries == {}
+        # With no functions to iterate over, converges immediately (1 iteration)
+        assert result.iterations <= 1
+
+    def test_no_sources(self, tmp_path):
+        """Returns empty result when no sources configured."""
+        config = TaintConfig(labels=["x"], sources=[], sinks=[
+            TaintSink(pattern="sink($X)", label="x", message="test"),
+        ])
+        result = run_interprocedural_taint_analysis(["/nonexistent"], config)
+        assert result.violations == []
+
+    def test_label_filter(self, tmp_path):
+        """Label filter restricts analysis to specific label."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def handle(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    cursor.execute(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_taint_analysis(
+            [str(test_file)], config, label_filter="user_input",
+        )
+        assert len(result.violations) >= 1
+
+        result_no_match = run_interprocedural_taint_analysis(
+            [str(test_file)], config, label_filter="nonexistent",
+        )
+        assert len(result_no_match.violations) == 0

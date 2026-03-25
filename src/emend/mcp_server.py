@@ -38,6 +38,7 @@ from emend.transform import (
     find_callers,
     generate_graph,
     find_dead_code,
+    find_impact,
 )
 from emend import ast_commands
 
@@ -653,6 +654,220 @@ def lint(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# impact
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def impact(
+    selector: Annotated[str | None, Field(description="Symbol selector (file.py::Symbol). Provide this or diff.")] = None,
+    diff: Annotated[str | None, Field(description="Git diff spec (e.g. HEAD, abc..def).")] = None,
+    output: Annotated[str, Field(description="Output mode: symbols, tests, graph.")] = "symbols",
+    max_depth: Annotated[int, Field(description="Maximum BFS depth for transitive closure.")] = 10,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
+) -> str:
+    """Compute transitive set of impacted symbols from a change.
+
+    Given a changed symbol or git diff, computes impacted symbols,
+    files, and tests via reverse-caller closure.
+    """
+    if not selector and not diff:
+        return json.dumps({"error": "Provide a selector or diff parameter."})
+
+    selectors_list = None
+    if selector:
+        parsed = parse_extended_selector(selector)
+        selectors_list = [parsed]
+
+    result = find_impact(
+        selectors=selectors_list,
+        diff_spec=diff,
+        project_path=project,
+        max_depth=max_depth,
+    )
+
+    data = {
+        "changed_symbols": result.changed_symbols,
+        "impacted_symbols": result.impacted_symbols,
+        "impacted_tests": result.impacted_tests,
+        "edges": [
+            {"source": e.source, "target": e.target, "kind": e.kind}
+            for e in result.edges
+        ],
+    }
+    return json.dumps(data, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# taint
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def taint(
+    path: Annotated[str, Field(description="File or directory to analyze.")],
+    config: Annotated[str | None, Field(description="Path to patterns.yaml (default: .emend/patterns.yaml).")] = None,
+    label: Annotated[str | None, Field(description="Only check a specific taint label.")] = None,
+    trace: Annotated[bool, Field(description="Include propagation traces.")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable interprocedural analysis (cross-function taint tracking).")] = False,
+) -> str:
+    """Run taint analysis to detect unsafe data flows.
+
+    Tracks value flow from sources to sinks within functions.
+    Set interprocedural=True for cross-function analysis.
+    """
+    from pathlib import Path as _Path
+    from emend.taint import load_taint_config, run_taint_analysis, format_violations
+    from emend.cli import resolve_files
+
+    config_path = _Path(config or ".emend/patterns.yaml")
+    if not config_path.exists():
+        return json.dumps({"error": f"Config file not found: {config_path}"})
+
+    taint_config = load_taint_config(str(config_path))
+    if not taint_config.sources or not taint_config.sinks:
+        return json.dumps({"error": "No taint sources or sinks configured."})
+
+    resolved, _ = resolve_files(path)
+    files = [str(f) for f in resolved]
+
+    if interprocedural:
+        from emend.taint import run_interprocedural_taint_analysis
+        result = run_interprocedural_taint_analysis(
+            files, taint_config, label_filter=label,
+        )
+        violations = result.violations
+        # Build violation dicts directly to avoid serialize-deserialize-reserialize
+        violation_data = []
+        for v in violations:
+            entry: dict = {
+                "file": v.file_path, "line": v.line, "col": v.col,
+                "label": v.label, "sink_pattern": v.sink_pattern, "message": v.message,
+            }
+            if trace:
+                entry["trace"] = [
+                    {"file": s.file_path, "line": s.line, "col": s.col,
+                     "description": s.description, "variable": s.variable}
+                    for s in v.trace
+                ]
+            violation_data.append(entry)
+        data = {
+            "violations": violation_data,
+            "summaries_count": len(result.summaries),
+            "iterations": result.iterations,
+        }
+        return json.dumps(data, indent=2)
+
+    violations = run_taint_analysis(files, taint_config, label_filter=label)
+    return format_violations(violations, show_trace=trace, json_output=True)
+
+
+# ---------------------------------------------------------------------------
+# fact_graph (query interface)
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def query_facts(
+    project: Annotated[str, Field(description="Project root directory.")] = ".",
+    fact_type: Annotated[str, Field(description="Fact type to query: symbols, calls, references, taint_flows, types, imports.")] = "symbols",
+    name: Annotated[str | None, Field(description="Filter by name (symbols).")] = None,
+    kind: Annotated[str | None, Field(description="Filter by kind (symbols).")] = None,
+    file_path: Annotated[str | None, Field(description="Filter by file path.")] = None,
+    symbol: Annotated[str | None, Field(description="Symbol qualified name (calls/references/types).")] = None,
+    label: Annotated[str | None, Field(description="Taint label filter (taint_flows).")] = None,
+    transitive: Annotated[bool, Field(description="Compute transitive closure (calls).")] = False,
+    max_depth: Annotated[int, Field(description="Max depth for transitive queries.")] = 10,
+    limit: Annotated[int, Field(description="Max results to return.")] = 100,
+) -> str:
+    """Query the relational fact graph for code invariants.
+
+    Provides structured access to symbols, call relationships,
+    references, taint flows, type information, and imports.
+    """
+    from emend.fact_graph import FactGraph
+    import dataclasses
+
+    graph = FactGraph.build_from_project(project)
+
+    if fact_type == "symbols":
+        results = graph.symbols(name=name, kind=kind, file_path=file_path)
+        return json.dumps([dataclasses.asdict(f) for f in results[:limit]], indent=2)
+
+    elif fact_type == "calls":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for call queries."})
+        if transitive:
+            callers = graph.transitive_callers(symbol, max_depth=max_depth)
+            return json.dumps({"symbol": symbol, "transitive_callers": sorted(callers)}, indent=2)
+        from_calls = graph.calls_from(symbol)
+        to_calls = graph.calls_to(symbol)
+        return json.dumps({
+            "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
+            "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
+        }, indent=2)
+
+    elif fact_type == "references":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for reference queries."})
+        refs = graph.references_to(symbol)
+        return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
+
+    elif fact_type == "taint_flows":
+        flows = graph.taint_flows(label=label, file_path=file_path)
+        return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
+
+    elif fact_type == "types":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for type queries."})
+        types = graph.types_for(symbol)
+        return json.dumps([dataclasses.asdict(t) for t in types[:limit]], indent=2)
+
+    elif fact_type == "imports":
+        if not file_path:
+            return json.dumps({"error": "Provide 'file_path' parameter for import queries."})
+        imports = graph.imports_in(file_path)
+        return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
+
+    return json.dumps({"error": f"Unknown fact_type: {fact_type}"})
+
+
+# ---------------------------------------------------------------------------
+# policy
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def check_policies(
+    path: Annotated[str, Field(description="File or directory to check.")],
+    config: Annotated[str | None, Field(description="Path to policies.yaml (default: .emend/policies.yaml).")] = None,
+    policy_name: Annotated[str | None, Field(description="Run only a specific policy by name.")] = None,
+) -> str:
+    """Run policy checks against source code.
+
+    Policies combine flow analysis, structural checks, type constraints,
+    and dead code detection into named, reusable compliance rules.
+    """
+    from pathlib import Path as _Path
+    from emend.policy import load_policies, run_policy_checks, format_policy_violations
+    from emend.cli import resolve_files
+
+    config_path = _Path(config or ".emend/policies.yaml")
+    if not config_path.exists():
+        return json.dumps({"error": f"Config file not found: {config_path}"})
+
+    policies = load_policies(str(config_path))
+    if policy_name:
+        policies = [p for p in policies if p.name == policy_name]
+        if not policies:
+            return json.dumps({"error": f"Policy '{policy_name}' not found."})
+
+    resolved, _ = resolve_files(path)
+    files = [str(f) for f in resolved]
+
+    violations = run_policy_checks(files, policies)
+    return format_policy_violations(violations, json_output=True)
 
 
 # ---------------------------------------------------------------------------
