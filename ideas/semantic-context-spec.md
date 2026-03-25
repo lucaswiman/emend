@@ -267,3 +267,99 @@ building toward the deeper semantic manipulation tools.
 
 It's a **situational awareness engine for code agents**. The thing that
 turns a flashlight into floodlights.
+
+## Reality Check: The Avatar Bug Walkthrough
+
+### The scenario
+
+Agent dropped into a Django project. CLAUDE.md is useless platitudes.
+User says: "Users complain their profile picture doesn't update sometimes."
+
+### Without semantic_context: 16+ tool calls
+
+```
+1.  grep "profile picture" / "avatar" / "profile_pic"   → find the right term
+2.  find the upload view                                  → locate it
+3.  read the upload view                                  → saves to S3, updates User model
+4.  grep for the model field                              → find the model
+5.  read the model                                        → ImageField, looks normal
+6.  grep for template/frontend                            → find 2 templates
+7.  read those                                            → user.avatar.url
+8.  grep for caching                                      → find cache_page decorator
+9.  read that view                                        → cache_page(60*15), no invalidation
+10. grep for signals/post_save                            → find async resize signal
+11. read that                                             → celery task resize_avatar
+12. grep for the celery task                              → read it
+13. realize resize updates avatar_thumbnail, not avatar
+14. grep for CDN config                                   → find settings
+15. read settings                                         → CloudFront, 24hr TTL
+16. piece it all together in context window
+```
+
+45+ seconds. Massive context burn. And the agent likely fixates on the
+FIRST problem it finds and misses the others.
+
+### With semantic_context: 2 tool calls
+
+```
+1. grep "avatar"                                          → find upload view
+2. semantic_context("myapp/views.py::upload_avatar")      → full picture
+```
+
+Returns:
+```json
+{
+  "dangers": [
+    {"level": "high", "category": "async_side_effect",
+     "message": "Triggers celery task resize_avatar which modifies avatar_thumbnail after response",
+     "evidence": "tasks.py:34"},
+    {"level": "high", "category": "caching",
+     "message": "Downstream get_profile_api is cached (15min) with no invalidation on avatar change",
+     "evidence": "views.py:89"},
+    {"level": "medium", "category": "infrastructure",
+     "message": "avatar.url served through CloudFront CDN — may be cached at edge",
+     "evidence": "settings.py:142 (requires config)"}
+  ],
+  "flow": {
+    "data_out": [
+      {"name": "avatar field", "flows_to": ["get_profile_api (cached)", "profile_template.html"]},
+      {"name": "resize_avatar task", "flows_to": ["avatar_thumbnail"], "note": "async, after response"}
+    ],
+    "side_effects": [
+      {"kind": "storage_write", "target": "S3"},
+      {"kind": "async_task", "target": "resize_avatar"},
+      {"kind": "db_write", "target": "User.avatar"}
+    ]
+  }
+}
+```
+
+Agent immediately sees THREE independent caching/timing issues and
+can address all of them instead of tunnel-visioning on the first.
+
+### The honesty: what can emend ACTUALLY detect today?
+
+Not everything. Let's be real about what maps to existing primitives
+vs what requires new work vs what needs explicit config:
+
+| Danger | Detection method | Status |
+|--------|-----------------|--------|
+| Celery `.delay()` as async side effect | Callees analysis + `.delay()` pattern | **Buildable now** |
+| `cache_page` with no invalidation on write path | Decorator scan + absence of `cache.delete`/`cache.clear` in callers of the mutating view | **Buildable now** (decorator + negative pattern) |
+| String references to symbol name | Dead-code string scanning | **Already exists** |
+| External interface decorators | Configurable pattern list | **Buildable now** |
+| High fan-out / many callers | `find_callers()` count | **Already exists** |
+| Dynamic dispatch (`getattr`) | Callees pattern matching | **Buildable now** |
+| CDN/infrastructure caching | Settings analysis | **Requires explicit config** |
+| Race conditions between async + sync | Temporal ordering analysis | **Research problem** |
+
+The first six are the real Phase 1. They're buildable from existing
+emend primitives with composition logic. The CDN thing requires the
+user to declare `[semantic_context.infrastructure]` patterns. The
+race condition detection is genuinely hard.
+
+**But the tool that catches the celery timing issue AND the missing
+cache invalidation IN ONE CALL is already a massive win.** The agent
+would have found those eventually via grep-and-read, but might have
+stopped after finding one and declared victory. The tool's value is
+not omniscience — it's BREADTH. Wider than the agent's flashlight beam.**
