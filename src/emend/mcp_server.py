@@ -39,6 +39,7 @@ from emend.transform import (
     generate_graph,
     find_dead_code,
     find_impact,
+    semantic_context as _semantic_context,
 )
 from emend import ast_commands
 
@@ -697,6 +698,53 @@ def impact(
         ],
     }
     return json.dumps(data, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# semantic_context — situational awareness for code agents
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def semantic_context(
+    selector: Annotated[str, Field(description=(
+        "Symbol selector (e.g. 'file.py::func_name', 'file.py::Class.method'). "
+        "Use this BEFORE editing a symbol to understand its full semantic context: "
+        "dangers, callers, callees, side effects, test coverage."
+    ))],
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
+    interface_decorators: Annotated[list[str] | None, Field(description=(
+        "Additional decorator names that indicate external interfaces "
+        "(e.g. 'rpc_endpoint', 'message_handler'). "
+        "Built-in detection already covers common web frameworks, Celery, Click, etc."
+    ))] = None,
+) -> str:
+    """Get semantic context for a symbol — full situational awareness in one call.
+
+    Returns a structured JSON dossier with:
+    - **dangers**: things that could bite you during edits (external interfaces,
+      async side effects, dynamic string references, high fan-out, caching,
+      missing test coverage)
+    - **signature**: parameters, return type, decorators, async status
+    - **flow**: data inputs, data outputs, side effects (DB writes, network
+      calls, async tasks, file I/O)
+    - **callers**: who calls this symbol (with test/non-test classification)
+    - **callees**: what this symbol calls
+    - **tests**: direct test coverage
+
+    Use this tool BEFORE making changes to understand what you're dealing with.
+    The dangers section surfaces things you'd otherwise miss — dynamic references
+    that renaming won't catch, external APIs where signature changes break
+    protocols, async tasks that complete after return, cached results that go
+    stale on mutation.
+    """
+    parsed = parse_extended_selector(selector)
+    result = _semantic_context(
+        parsed,
+        project_path=project,
+        extra_interface_decorators=interface_decorators,
+    )
+    return json.dumps(result.to_dict(), indent=2)
 
 
 # ---------------------------------------------------------------------------
