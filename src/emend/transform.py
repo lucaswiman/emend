@@ -4452,6 +4452,288 @@ def _find_dead_code_cached(
         raise
 
 
+# ---------------------------------------------------------------------------
+# Impact analysis
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ImpactEdge:
+    """A witness edge showing why a symbol is impacted."""
+    source: str  # selector of the causing symbol
+    target: str  # selector of the impacted symbol
+    kind: str  # "calls", "references", "test"
+
+
+@dataclass
+class ImpactResult:
+    """Result of impact analysis."""
+    changed_symbols: list[str]  # selectors of directly changed symbols
+    impacted_symbols: list[str]  # selectors of transitively impacted symbols
+    impacted_tests: list[str]  # test file paths or test selectors
+    edges: list[ImpactEdge]  # witness edges
+
+
+def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
+    """Parse unified diff output to extract changed file paths and line numbers.
+
+    Returns a list of (file_path, changed_lines) tuples where changed_lines
+    are the line numbers in the *new* version of the file that were modified.
+    """
+    results: list[tuple[str, list[int]]] = []
+    current_file: str | None = None
+    changed_lines: list[int] = []
+
+    for line in diff_text.splitlines():
+        # Detect file header: +++ b/path/to/file.py
+        if line.startswith('+++ b/'):
+            # Save previous file if any
+            if current_file is not None:
+                results.append((current_file, changed_lines))
+            current_file = line[6:]  # strip '+++ b/'
+            changed_lines = []
+        # Detect hunk header: @@ -old_start,old_count +new_start,new_count @@
+        elif line.startswith('@@') and current_file is not None:
+            m = re.search(r'\+(\d+)(?:,(\d+))?', line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) else 1
+                # Track all lines in the hunk range as potentially changed
+                changed_lines.extend(range(start, start + count))
+
+    # Don't forget the last file
+    if current_file is not None:
+        results.append((current_file, changed_lines))
+
+    return results
+
+
+def _parse_diff_to_selectors(
+    diff_spec: str,
+    project_path: str,
+) -> list[str]:
+    """Run ``git diff`` and map changed lines to symbol selectors.
+
+    Args:
+        diff_spec: Git diff specification (e.g. ``"HEAD"``, ``"abc..def"``).
+        project_path: Project root directory (used as cwd for git).
+
+    Returns:
+        List of selector strings for symbols touched by the diff.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        ['git', 'diff', '-U0', diff_spec],
+        capture_output=True, text=True, timeout=30,
+        cwd=project_path,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+    changed_files = _parse_diff_to_changed_files(result.stdout)
+    if not changed_files:
+        return []
+
+    from .ast_utils import find_nested_definitions, find_symbol_by_line
+
+    selectors: list[str] = []
+    seen: set[str] = set()
+
+    for file_rel, lines in changed_files:
+        file_path = str(Path(project_path) / file_rel)
+        if not Path(file_path).is_file():
+            continue
+
+        # Only process source files we can parse
+        from emend.language_registry import is_source_file
+        if not is_source_file(file_path):
+            continue
+
+        try:
+            symbols = find_nested_definitions(file_path)
+        except Exception:
+            continue
+
+        for line_no in lines:
+            sym = find_symbol_by_line(symbols, line_no)
+            if sym is not None:
+                sel = f"{file_path}::{'.'.join(sym.path)}"
+                if sel not in seen:
+                    seen.add(sel)
+                    selectors.append(sel)
+
+    return selectors
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Check if a file is a test file by path heuristics."""
+    p = Path(file_path)
+    name = p.name
+    if name.startswith('test_') or name.endswith('_test.py'):
+        return True
+    parts = p.parts
+    if 'tests' in parts or 'test' in parts:
+        return True
+    return False
+
+
+def _is_test_symbol(selector: str) -> bool:
+    """Check if a selector refers to a test symbol."""
+    if '::' in selector:
+        sym_part = selector.split('::', 1)[1]
+        # e.g. test_foo or TestFoo or TestFoo.test_method
+        first_name = sym_part.split('.')[0]
+        return first_name.startswith('test_') or first_name.startswith('Test')
+    return False
+
+
+def find_impact(
+    selectors: list[ExtendedSelector] | None = None,
+    diff_spec: str | None = None,
+    project_path: str | None = None,
+    max_depth: int = 10,
+) -> ImpactResult:
+    """Compute the transitive set of impacted symbols from changed symbols or a diff.
+
+    Either *selectors* or *diff_spec* must be provided.
+
+    Args:
+        selectors: Directly specified changed symbols.
+        diff_spec: Git diff specification (e.g. ``"HEAD"``, ``"abc..def"``).
+            Parsed to extract changed symbols automatically.
+        project_path: Project root (auto-detected if None).
+        max_depth: Maximum BFS depth for transitive closure (default 10).
+
+    Returns:
+        ImpactResult with changed symbols, impacted symbols, tests, and edges.
+
+    Raises:
+        ValueError: If neither selectors nor diff_spec is provided, or on git errors.
+    """
+    if not selectors and not diff_spec:
+        raise ValueError("Either selectors or diff_spec must be provided")
+
+    # Resolve project root
+    if project_path:
+        proj_root = project_path
+    elif selectors:
+        proj_root = _find_project_root(selectors[0].file_path)
+    else:
+        proj_root = _find_project_root('.')
+
+    # Step 1: Determine changed symbols
+    changed_selectors: list[str] = []
+
+    if selectors:
+        for sel in selectors:
+            if sel.symbol_path:
+                changed_selectors.append(
+                    f"{sel.file_path}::{'.'.join(sel.symbol_path)}"
+                )
+
+    if diff_spec:
+        diff_sels = _parse_diff_to_selectors(diff_spec, proj_root)
+        changed_selectors.extend(diff_sels)
+
+    if not changed_selectors:
+        return ImpactResult(
+            changed_symbols=[],
+            impacted_symbols=[],
+            impacted_tests=[],
+            edges=[],
+        )
+
+    # Step 2: BFS to compute transitive reverse-caller closure
+    all_edges: list[ImpactEdge] = []
+    visited: set[str] = set(changed_selectors)
+    impacted: list[str] = []
+    frontier: list[str] = list(changed_selectors)
+
+    for _depth in range(max_depth):
+        next_frontier: list[str] = []
+
+        for sel_str in frontier:
+            # Parse selector to find callers
+            try:
+                sel = parse_extended_selector(sel_str)
+            except Exception:
+                continue
+
+            if not sel.symbol_path:
+                continue
+
+            try:
+                callers = list(find_callers(sel, project_path=proj_root))
+            except (ValueError, FileNotFoundError):
+                continue
+
+            for caller_ref in callers:
+                # Map caller reference back to a symbol selector
+                caller_file = caller_ref.file_path
+                caller_line = caller_ref.line
+
+                try:
+                    from .ast_utils import find_nested_definitions, find_symbol_by_line
+                    symbols = find_nested_definitions(caller_file)
+                    caller_sym = find_symbol_by_line(symbols, caller_line)
+                except Exception:
+                    continue
+
+                if caller_sym is None:
+                    continue
+
+                caller_sel = f"{caller_file}::{'.'.join(caller_sym.path)}"
+
+                all_edges.append(ImpactEdge(
+                    source=sel_str,
+                    target=caller_sel,
+                    kind="calls",
+                ))
+
+                if caller_sel not in visited:
+                    visited.add(caller_sel)
+                    impacted.append(caller_sel)
+                    next_frontier.append(caller_sel)
+
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    # Step 3: Identify impacted tests
+    impacted_tests: list[str] = []
+    all_impacted = changed_selectors + impacted
+
+    for sel_str in all_impacted:
+        if '::' in sel_str:
+            file_part = sel_str.split('::', 1)[0]
+        else:
+            file_part = sel_str
+
+        if _is_test_file(file_part) or _is_test_symbol(sel_str):
+            if sel_str not in impacted_tests:
+                impacted_tests.append(sel_str)
+                # Add a "test" edge from the changed symbol to the test
+                # Find the first edge that led to this test
+                for edge in all_edges:
+                    if edge.target == sel_str:
+                        # Already has a "calls" edge; add a "test" annotation
+                        all_edges.append(ImpactEdge(
+                            source=edge.source,
+                            target=sel_str,
+                            kind="test",
+                        ))
+                        break
+
+    return ImpactResult(
+        changed_symbols=changed_selectors,
+        impacted_symbols=impacted,
+        impacted_tests=impacted_tests,
+        edges=all_edges,
+    )
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
