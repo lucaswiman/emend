@@ -493,7 +493,11 @@ def run_taint_analysis(
             )
             violations.extend(func_violations)
 
-    # De-duplicate violations (same file, line, label, sink_pattern)
+    return _deduplicate_violations(violations)
+
+
+def _deduplicate_violations(violations: list[TaintViolation]) -> list[TaintViolation]:
+    """Remove duplicate violations keyed by (file, line, label, sink_pattern)."""
     seen: set[tuple[str, int, str, str]] = set()
     unique: list[TaintViolation] = []
     for v in violations:
@@ -501,7 +505,6 @@ def run_taint_analysis(
         if key not in seen:
             seen.add(key)
             unique.append(v)
-
     return unique
 
 
@@ -1237,17 +1240,8 @@ def run_interprocedural_taint_analysis(
                                             trace=trace,
                                         ))
 
-    # De-duplicate violations
-    seen: set[tuple[str, int, str, str]] = set()
-    unique: list[TaintViolation] = []
-    for v in violations:
-        key = (v.file_path, v.line, v.label, v.sink_pattern)
-        if key not in seen:
-            seen.add(key)
-            unique.append(v)
-
     return InterproceduralResult(
-        violations=unique,
+        violations=_deduplicate_violations(violations),
         summaries=summaries,
         iterations=iterations,
     )
