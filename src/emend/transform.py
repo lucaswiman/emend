@@ -4646,6 +4646,8 @@ def find_impact(
         )
 
     # Step 2: BFS to compute transitive reverse-caller closure
+    from .ast_utils import find_nested_definitions, find_symbol_by_line
+
     all_edges: list[ImpactEdge] = []
     visited: set[str] = set(changed_selectors)
     impacted: list[str] = []
@@ -4655,7 +4657,6 @@ def find_impact(
         next_frontier: list[str] = []
 
         for sel_str in frontier:
-            # Parse selector to find callers
             try:
                 sel = parse_extended_selector(sel_str)
             except Exception:
@@ -4670,12 +4671,10 @@ def find_impact(
                 continue
 
             for caller_ref in callers:
-                # Map caller reference back to a symbol selector
                 caller_file = caller_ref.file_path
                 caller_line = caller_ref.line
 
                 try:
-                    from .ast_utils import find_nested_definitions, find_symbol_by_line
                     symbols = find_nested_definitions(caller_file)
                     caller_sym = find_symbol_by_line(symbols, caller_line)
                 except Exception:

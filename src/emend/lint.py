@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
+from emend.taint import _extract_identifiers
 
 
 @dataclass
@@ -220,41 +222,21 @@ def load_rules(
     return rules, macros, deadcode_config
 
 
-def _extract_names_from_text(text: str) -> set[str]:
-    """Extract Python identifier names from matched text.
-
-    Simple heuristic: split on non-identifier characters and keep tokens
-    that look like Python identifiers (not keywords, not all-uppercase constants).
-    """
-    import re as _re
-    tokens = _re.findall(r'[a-zA-Z_]\w*', text)
-    # Filter out common keywords and builtins
-    _SKIP = frozenset({
-        'if', 'else', 'elif', 'for', 'while', 'return', 'def', 'class',
-        'import', 'from', 'as', 'try', 'except', 'finally', 'with',
-        'raise', 'pass', 'break', 'continue', 'and', 'or', 'not', 'in',
-        'is', 'None', 'True', 'False', 'lambda', 'yield', 'assert',
-        'global', 'nonlocal', 'del', 'async', 'await',
-    })
-    return {t for t in tokens if t not in _SKIP}
+# Reuse shared helpers from taint module
+_extract_names_from_text = _extract_identifiers
 
 
 def _find_assignments_in_source(source: str) -> list[tuple[int, str, str]]:
-    """Find simple assignments in source code.
+    """Find simple assignments in source code via line-by-line regex.
 
     Returns list of (line_number, target_name, rhs_text).
-    Handles patterns like: ``x = expr``, ``x = f(y)``.
     """
-    import re as _re
     assignments: list[tuple[int, str, str]] = []
     for i, line_text in enumerate(source.splitlines(), 1):
         stripped = line_text.strip()
-        # Simple assignment: identifier = expression
-        m = _re.match(r'^([a-zA-Z_]\w*)\s*=\s*(.+)$', stripped)
+        m = re.match(r'^([a-zA-Z_]\w*)\s*=\s*(.+)$', stripped)
         if m:
-            target = m.group(1)
-            rhs = m.group(2)
-            assignments.append((i, target, rhs))
+            assignments.append((i, m.group(1), m.group(2)))
     return assignments
 
 
@@ -292,30 +274,36 @@ def _check_flow_rule(
                 yield sym
             yield from _all_functions(sym.children)
 
-    for sym in _all_functions(symbols):
-        # Find source and sink matches within this function
-        source_matches = find_pattern(
-            rule.flows_from, file_path, source_override=source, language=language
+    # Hoist pattern matching and line splitting out of the per-function loop
+    all_source_matches = find_pattern(
+        rule.flows_from, file_path, source_override=source, language=language
+    )
+    all_sink_matches = find_pattern(
+        rule.flows_to, file_path, source_override=source, language=language
+    )
+    all_sanitizer_matches = None
+    if rule.not_through:
+        all_sanitizer_matches = find_pattern(
+            rule.not_through, file_path,
+            source_override=source, language=language
         )
-        sink_matches = find_pattern(
-            rule.flows_to, file_path, source_override=source, language=language
-        )
+    all_lines = source.splitlines()
 
+    for sym in _all_functions(symbols):
         # Filter to matches within this function's line range
         func_sources = [
-            m for m in source_matches
+            m for m in all_source_matches
             if m.line is not None and sym.line_start <= m.line <= sym.line_end
         ]
         func_sinks = [
-            m for m in sink_matches
+            m for m in all_sink_matches
             if m.line is not None and sym.line_start <= m.line <= sym.line_end
         ]
 
         if not func_sources or not func_sinks:
             continue
 
-        # Extract function body lines for assignment tracking
-        all_lines = source.splitlines()
+        # Extract function body for assignment tracking
         func_lines = all_lines[sym.line_start - 1:sym.line_end]
         func_source_text = '\n'.join(func_lines)
 
@@ -329,25 +317,18 @@ def _check_flow_rule(
 
         for src_match in func_sources:
             src_line = src_match.line or 0
-            # Collect initial tainted names from the source match captures
             tainted: dict[str, int] = {}  # name -> line where it became tainted
 
-            # Names from captures
             for cap_name, cap_text in src_match.captures.items():
                 for name in _extract_names_from_text(cap_text):
                     tainted[name] = src_line
 
-            # Also extract names from the matched text itself (LHS of assignment)
             if src_match.matched_text:
-                # Check if the matched line is an assignment
                 matched_line_text = all_lines[src_line - 1].strip() if src_line <= len(all_lines) else ""
-                import re as _re
-                assign_match = _re.match(r'^([a-zA-Z_]\w*)\s*=\s*', matched_line_text)
+                assign_match = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', matched_line_text)
                 if assign_match:
                     tainted[assign_match.group(1)] = src_line
 
-            # Propagate taint through assignments
-            # Sort assignments by line number
             taint_chain: list[tuple[int, str]] = [
                 (src_line, ', '.join(sorted(tainted.keys())))
             ]
@@ -355,7 +336,6 @@ def _check_flow_rule(
             for assign_line, target, rhs in sorted(assignments, key=lambda a: a[0]):
                 if assign_line <= src_line:
                     continue
-                # Check if any tainted name appears in the RHS
                 rhs_names = _extract_names_from_text(rhs)
                 if rhs_names & set(tainted.keys()):
                     tainted[target] = assign_line
@@ -366,7 +346,6 @@ def _check_flow_rule(
                 if sink_line <= src_line:
                     continue
 
-                # Check if any tainted name appears in the sink
                 sink_names: set[str] = set()
                 for cap_name, cap_text in sink_match.captures.items():
                     sink_names |= _extract_names_from_text(cap_text)
@@ -381,17 +360,11 @@ def _check_flow_rule(
                 if not (sink_names & tainted_at_sink):
                     continue
 
-                # Check for sanitizer (not-through)
                 sanitized = False
-                if rule.not_through:
-                    sanitizer_matches = find_pattern(
-                        rule.not_through, file_path,
-                        source_override=source, language=language
-                    )
-                    for san_match in sanitizer_matches:
+                if all_sanitizer_matches:
+                    for san_match in all_sanitizer_matches:
                         san_line = san_match.line or 0
                         if src_line <= san_line < sink_line:
-                            # Check if the sanitizer operates on a tainted name
                             san_names: set[str] = set()
                             for cap_name, cap_text in san_match.captures.items():
                                 san_names |= _extract_names_from_text(cap_text)
@@ -400,11 +373,9 @@ def _check_flow_rule(
                             if san_names & tainted_at_sink:
                                 sanitized = True
                                 break
-                            # Also check if sanitizer output is assigned to a tainted var
                             if san_line <= len(all_lines):
                                 san_line_text = all_lines[san_line - 1].strip()
-                                import re as _re2
-                                san_assign = _re2.match(r'^([a-zA-Z_]\w*)\s*=\s*', san_line_text)
+                                san_assign = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', san_line_text)
                                 if san_assign and san_assign.group(1) in tainted_at_sink:
                                     sanitized = True
                                     break
@@ -412,7 +383,6 @@ def _check_flow_rule(
                 if sanitized:
                     continue
 
-                # Build witness
                 src_text = (src_match.matched_text or "").strip()
                 sink_text = (sink_match.matched_text or "").strip()
                 witness = FlowWitness(

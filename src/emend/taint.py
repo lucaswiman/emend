@@ -24,12 +24,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TaintLabel:
-    """A taint label (e.g. 'user_input', 'sensitive_data')."""
-    name: str
-
-
-@dataclass
 class TaintSource:
     """A pattern that introduces taint."""
     pattern: str  # emend pattern string
@@ -141,13 +135,11 @@ def load_taint_config(config_path: str) -> TaintConfig:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-# Regex to extract simple identifiers from an expression string.
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
 
 
 def _extract_identifiers(expr: str) -> set[str]:
     """Return all simple identifiers appearing in *expr*."""
-    # Skip common Python keywords that aren't variable names
     _KEYWORDS = frozenset({
         "False", "None", "True", "and", "as", "assert", "async", "await",
         "break", "class", "continue", "def", "del", "elif", "else",
