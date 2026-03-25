@@ -4775,6 +4775,22 @@ _SIDE_EFFECT_CALLEE_PATTERNS = {
     'cache': {'set', 'delete', 'clear', 'invalidate'},
 }
 
+# Caching decorators that may need invalidation on mutations
+_CACHE_DECORATORS = frozenset({
+    'cache', 'lru_cache', 'cached_property', 'cache_page',
+    'cache_control', 'memoize', 'cacheable',
+})
+
+# Regex for detecting a name inside string literals (matches dead code approach)
+_STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _parse_decorator_name(dec: str) -> tuple[str, str]:
+    """Return (full_name, basename) from a raw decorator string."""
+    dec_clean = dec.lstrip('@').split('(')[0].strip()
+    dec_basename = dec_clean.rsplit('.', 1)[-1] if '.' in dec_clean else dec_clean
+    return dec_clean, dec_basename
+
 
 @dataclass
 class Danger:
@@ -4941,31 +4957,27 @@ def semantic_context(
     qualified_name = f"{file_path}::{'.'.join(symbol_path)}"
     is_async = target.kind in ('async_function', 'async_method')
 
-    # Read source for later analysis
-    try:
-        source_content = Path(file_path).read_text()
-    except FileNotFoundError:
+    if not Path(file_path).exists():
         raise ValueError(f"File not found: {file_path}")
 
-    # ---- Gather callers ---------------------------------------------------
+    # ---- Gather callers (partition test/non-test in one pass) -------------
     callers_list: list[CallerInfo] = []
+    test_caller_count = 0
+    non_test_caller_count = 0
     try:
         for ref in find_callers(selector, project_path=project_root):
-            # Determine if this is a test file (check basename, not full path)
-            _basename = Path(ref.file_path).name
-            is_test = (
-                _basename.startswith('test_') or
-                _basename.endswith('_test.py') or
-                '/tests/' in ref.file_path or
-                '\\tests\\' in ref.file_path
-            )
+            is_test = _is_test_file(ref.file_path)
             callers_list.append(CallerInfo(
                 symbol=ref.file_path + f":{ref.line}",
                 file=ref.file_path,
                 line=ref.line,
                 kind="test" if is_test else "direct",
             ))
-    except (ValueError, Exception) as exc:
+            if is_test:
+                test_caller_count += 1
+            else:
+                non_test_caller_count += 1
+    except Exception as exc:
         logger.debug("semantic_context: find_callers failed: %s", exc)
 
     # ---- Gather callees ---------------------------------------------------
@@ -4973,7 +4985,7 @@ def semantic_context(
     try:
         for callee in find_callees(selector, project_path=project_root):
             callees_list.append(callee.qualified_name or callee.name)
-    except (ValueError, Exception) as exc:
+    except Exception as exc:
         logger.debug("semantic_context: find_callees failed: %s", exc)
 
     # ---- Count references -------------------------------------------------
@@ -4982,7 +4994,7 @@ def semantic_context(
         for _ in find_references(selector, project_path=project_root,
                                  include_definition=False, include_imports=False):
             ref_count += 1
-    except (ValueError, Exception) as exc:
+    except Exception as exc:
         logger.debug("semantic_context: find_references failed: %s", exc)
 
     # ---- Build interface decorators set -----------------------------------
@@ -4999,10 +5011,11 @@ def semantic_context(
     # ---- Detect dangers ---------------------------------------------------
     dangers: list[Danger] = []
 
+    # Parse decorators once, reuse for interface + caching checks
+    parsed_decorators = [_parse_decorator_name(dec) for dec in target.decorators]
+
     # 1. External interface decorators
-    for dec in target.decorators:
-        dec_clean = dec.lstrip('@').split('(')[0].strip()
-        dec_basename = dec_clean.rsplit('.', 1)[-1] if '.' in dec_clean else dec_clean
+    for dec_clean, dec_basename in parsed_decorators:
         if dec_clean in iface_decorators or dec_basename in iface_basenames:
             dangers.append(Danger(
                 level="high",
@@ -5023,38 +5036,22 @@ def semantic_context(
             ))
 
     # 3. String references to this symbol (dynamic dispatch risk)
+    # Uses same regex approach as dead code string scanning
     symbol_name = symbol_path[-1]
     if len(symbol_name) > 3:
         try:
             source_files = _collect_source_files(project_root)
             matched = _rust.read_and_filter_files(source_files, [symbol_name])
             str_ref_files: list[str] = []
-            resolved_self = str(Path(file_path).resolve())
             for fp, content in matched:
-                # Check if the name appears in string literals
                 for line_text in content.splitlines():
-                    # Quick check: name in a string on this line?
-                    if symbol_name in line_text:
-                        # Check if it appears inside quotes
-                        in_str = False
-                        for quote in ('"', "'"):
-                            idx = 0
-                            while True:
-                                start = line_text.find(quote, idx)
-                                if start == -1:
-                                    break
-                                end = line_text.find(quote, start + 1)
-                                if end == -1:
-                                    break
-                                if symbol_name in line_text[start:end + 1]:
-                                    in_str = True
-                                    break
-                                idx = end + 1
-                            if in_str:
-                                break
-                        if in_str:
-                            str_ref_files.append(fp)
-                            break
+                    if symbol_name not in line_text:
+                        continue
+                    # Strip non-string content; if name disappears, it was in a string
+                    stripped = _STRING_LITERAL_RE.sub("", line_text)
+                    if symbol_name in line_text and symbol_name not in stripped:
+                        str_ref_files.append(fp)
+                        break
             if str_ref_files:
                 dangers.append(Danger(
                     level="medium",
@@ -5068,29 +5065,24 @@ def semantic_context(
             pass  # best-effort
 
     # 4. High fan-out (many callers)
-    non_test_callers = [c for c in callers_list if c.kind != "test"]
-    if len(non_test_callers) >= 10:
+    if non_test_caller_count >= 10:
         dangers.append(Danger(
             level="high",
             category="high_fan_out",
-            message=f"Called from {len(non_test_callers)} non-test locations — changes have wide blast radius",
-            evidence=f"{len(callers_list)} total callers ({len(non_test_callers)} non-test)",
+            message=f"Called from {non_test_caller_count} non-test locations — changes have wide blast radius",
+            evidence=f"{len(callers_list)} total callers ({non_test_caller_count} non-test)",
         ))
-    elif len(non_test_callers) >= 5:
+    elif non_test_caller_count >= 5:
         dangers.append(Danger(
             level="medium",
             category="high_fan_out",
-            message=f"Called from {len(non_test_callers)} non-test locations",
-            evidence=f"{len(callers_list)} total callers ({len(non_test_callers)} non-test)",
+            message=f"Called from {non_test_caller_count} non-test locations",
+            evidence=f"{len(callers_list)} total callers ({non_test_caller_count} non-test)",
         ))
 
     # 5. Caching decorators (may need invalidation on mutations)
-    cache_decorators = {'cache', 'lru_cache', 'cached_property', 'cache_page',
-                        'cache_control', 'memoize', 'cacheable'}
-    for dec in target.decorators:
-        dec_clean = dec.lstrip('@').split('(')[0].strip()
-        dec_basename = dec_clean.rsplit('.', 1)[-1] if '.' in dec_clean else dec_clean
-        if dec_basename in cache_decorators:
+    for dec_clean, dec_basename in parsed_decorators:
+        if dec_basename in _CACHE_DECORATORS:
             dangers.append(Danger(
                 level="medium",
                 category="caching",
@@ -5098,13 +5090,8 @@ def semantic_context(
                 evidence=f"{file_path}:{target.decorator_line_start or target.line_start}",
             ))
 
-    # 6. Global state access (module-level variable references in body)
-    # Detect if function reads/writes module-level names
-    # (heuristic: references to names not in params or local scope)
-
-    # 7. No test coverage
-    test_callers = [c for c in callers_list if c.kind == "test"]
-    if not test_callers and target.kind in ('function', 'async_function', 'method', 'async_method'):
+    # 6. No test coverage
+    if test_caller_count == 0 and target.kind in ('function', 'async_function', 'method', 'async_method'):
         dangers.append(Danger(
             level="medium",
             category="no_test_coverage",
@@ -5161,11 +5148,7 @@ def semantic_context(
 
     # ---- Classify tests ---------------------------------------------------
     direct_tests = [c.symbol for c in callers_list if c.kind == "test"]
-    # Indirect tests: tests that call our callers (1-hop)
-    indirect_tests: list[str] = []
-    # (skip for now — would require find_callers on each caller)
-
-    tests = TestInfo(direct=direct_tests, indirect=indirect_tests)
+    tests = TestInfo(direct=direct_tests, indirect=[])
 
     return SemanticContext(
         symbol=qualified_name,
