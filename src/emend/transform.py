@@ -5128,9 +5128,17 @@ def semantic_context(
         pass
 
     # ---- Detect side effects from callees ---------------------------------
+    # Build a prefix to identify local-scope callees (e.g., set.add on local vars)
+    _module = _file_to_module(file_path, project_root)
+    _local_prefix = f"{_module}.{'.'.join(symbol_path)}."
     side_effects: list[SideEffect] = []
     for callee_name in callees_list:
-        short = callee_name.rsplit('.', 1)[-1] if '.' in callee_name else callee_name
+        # Skip builtins, unqualified names, and local-scope operations
+        if (callee_name.startswith('builtins.') or
+                '.' not in callee_name or
+                callee_name.startswith(_local_prefix)):
+            continue
+        short = callee_name.rsplit('.', 1)[-1]
         for effect_kind, patterns in _SIDE_EFFECT_CALLEE_PATTERNS.items():
             if short in patterns:
                 side_effects.append(SideEffect(
