@@ -9,7 +9,7 @@ smaller spec documents and a staged implementation order.
   Spec: [impact-analysis.md](impact-analysis.md)
 - [ ] Phase 2: Ship intraprocedural taint analysis with path traces.
   Spec: [taint-analysis.md](taint-analysis.md)
-- [ ] Phase 3: Add compliance-sensitive value tracking as a layer on top of taint.
+- [x] ~Phase 3: Add compliance-sensitive value tracking as a layer on top of taint.~ **Won't do** — this is a labeled special case of taint analysis (Phase 2).
   Spec: [compliance-sensitive-value-tracking.md](compliance-sensitive-value-tracking.md)
 - [ ] Phase 4: Stabilize a relational/query model for code invariants.
   Spec: [query-language-for-code-invariants.md](query-language-for-code-invariants.md)
