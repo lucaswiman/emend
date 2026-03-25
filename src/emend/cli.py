@@ -15,7 +15,7 @@ from emend.transform import (
     find_pattern, replace_pattern,
     find_references, rename_symbol, move_symbol,
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
-    find_callers, generate_graph, find_dead_code,
+    find_callers, generate_graph, find_dead_code, find_impact,
     extract_pattern_literals, warm_caches,
     find_pattern_in_project,
 )
@@ -1243,6 +1243,75 @@ def lint_cmd(
         raise typer.Exit(1)
 
 
+@app.command("taint")
+def taint_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to patterns.yaml")] = None,
+    label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific taint label")] = None,
+    trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+):
+    """Run taint analysis to detect unsafe data flows.
+
+    Tracks value flow from sources (e.g. user input) to sinks
+    (e.g. SQL queries, eval) within individual functions, reporting
+    violations when tainted data reaches a sink without sanitization.
+
+    Configuration is read from the ``taint`` section of .emend/patterns.yaml
+    (or the file specified by --config).
+
+    Examples:
+        emend taint src/
+        emend taint app.py --label user_input
+        emend taint src/ --trace
+        emend taint src/ --json
+    """
+    try:
+        from emend.taint import load_taint_config, run_taint_analysis, format_violations
+
+        # Find config file
+        if config is None:
+            config = ".emend/patterns.yaml"
+        config_path = Path(config)
+        if not config_path.exists():
+            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            raise typer.Exit(2)
+
+        taint_config = load_taint_config(str(config_path))
+        if not taint_config.sources:
+            print("No taint sources configured.", file=sys.stderr)
+            raise typer.Exit(0)
+        if not taint_config.sinks:
+            print("No taint sinks configured.", file=sys.stderr)
+            raise typer.Exit(0)
+
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved]
+
+        violations = run_taint_analysis(
+            files, taint_config,
+            label_filter=label,
+            language=_lang,
+        )
+
+        output = format_violations(violations, show_trace=trace, json_output=json_output)
+        if output:
+            print(output, end='' if not output.endswith('\n') else '')
+
+        if violations:
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 @app.command("cp")
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
@@ -1857,6 +1926,102 @@ def dead_code_cmd(
 
 app.command("dead-code", hidden=True)(dead_code_cmd)
 app.command("dead_code", hidden=True)(dead_code_cmd)
+
+
+@app.command("impact")
+def impact_cmd(
+    selector: Annotated[Optional[str], typer.Argument(help="Selector (file.py::Symbol)")] = None,
+    diff: Annotated[Optional[str], typer.Option("--diff", help="Git diff spec (e.g. HEAD, abc..def)")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="Output mode: symbols, tests, graph")] = "symbols",
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
+    max_depth: Annotated[int, typer.Option("--max-depth", help="Maximum BFS depth for transitive closure")] = 10,
+):
+    """Compute the transitive set of impacted symbols from a change.
+
+    Given a changed symbol (selector) or git diff, computes the transitive
+    set of impacted symbols, files, and tests via reverse-caller closure.
+
+    Output modes:
+    - symbols: List impacted symbol selectors (default)
+    - tests: List impacted test files/symbols
+    - graph: Show witness edges explaining why each symbol is impacted
+
+    Examples:
+        emend impact mymodule.py::MyClass.method
+        emend impact --diff HEAD
+        emend impact --diff abc123..def456
+        emend impact mymodule.py::func --output tests
+        emend impact mymodule.py::func --output graph --json
+    """
+    if not selector and not diff:
+        print("Error: provide a selector argument or --diff option", file=sys.stderr)
+        raise typer.Exit(2)
+
+    try:
+        selectors_list = None
+        if selector:
+            sel = parse_extended_selector(selector)
+            selectors_list = [sel]
+
+        result = find_impact(
+            selectors=selectors_list,
+            diff_spec=diff,
+            project_path=project,
+            max_depth=max_depth,
+        )
+
+        if json_output:
+            import json
+            data = {
+                "changed_symbols": result.changed_symbols,
+                "impacted_symbols": result.impacted_symbols,
+                "impacted_tests": result.impacted_tests,
+                "edges": [
+                    {"source": e.source, "target": e.target, "kind": e.kind}
+                    for e in result.edges
+                ],
+            }
+            print(json.dumps(data, indent=2))
+        elif output == "tests":
+            if not result.impacted_tests:
+                print("No impacted tests found.")
+            else:
+                for t in result.impacted_tests:
+                    print(t)
+        elif output == "graph":
+            if not result.edges:
+                print("No impact edges found.")
+            else:
+                for edge in result.edges:
+                    print(f"{edge.source} --[{edge.kind}]--> {edge.target}")
+        else:
+            # Default: symbols mode
+            if not result.changed_symbols and not result.impacted_symbols:
+                print("No impacted symbols found.")
+            else:
+                if result.changed_symbols:
+                    print("Changed:")
+                    for s in result.changed_symbols:
+                        print(f"  {s}")
+                if result.impacted_symbols:
+                    print("Impacted:")
+                    for s in result.impacted_symbols:
+                        print(f"  {s}")
+                if result.impacted_tests:
+                    print("Tests:")
+                    for t in result.impacted_tests:
+                        print(f"  {t}")
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 # ============================================================================

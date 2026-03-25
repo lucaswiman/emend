@@ -7,13 +7,14 @@
 | File | Purpose |
 |------|---------|
 | `cli.py` | CLI entry point (Typer), all command definitions |
-| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code |
+| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code, impact |
 | `pattern.py` | Pattern parsing and Rust IR compilation with `$METAVAR` support |
 | `component_selector.py` | Selector parsing (`file.py::Sym[component][accessor]`) |
 | `ast_commands.py` | List-symbols and copy-to commands (uses Rust `emend_core` for symbol collection) |
 | `ast_utils.py` | AST traversal utilities (uses Rust `emend_core.collect_symbols_from_str()`) |
 | `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
-| `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, dead code detection config |
+| `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
+| `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink`, `TaintSanitizer`, `TaintViolation`, intraprocedural source-to-sink tracking with sanitizer support |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
 | `knowledge.py` | Mapping store: `MappingStore` (YAML-backed), `IdentifierMapping`, `ModuleMapping`, module resolution, repo checkout helpers |
 | `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial pattern normalization |
@@ -77,6 +78,9 @@
 | `test_knowledge.py` | Mapping store tests: `MappingStore`, identifier mappings, module mappings, YAML persistence, SQLite migration, repo checkouts, editor RPC, MCP tools |
 | `test_map_unified.py` | Integration tests for `map resolve` command |
 | `test_vim_rpc.py` | Vim plugin JSON-RPC protocol tests: dispatch, search, selector, file_symbols, status, reindex, error handling, serialization |
+| `test_impact.py` | `impact` command (transitive reverse-caller closure, diff parsing, test detection) |
+| `test_taint.py` | `taint` command (source-to-sink detection, sanitizers, propagation, config loading, traces) |
+| `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 
 ## Commands
@@ -94,8 +98,10 @@
 | `refs` | Find all references to a symbol (`--writes-only`, `--reads-only`, `--calls-only` for call sites only) |
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
-| `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section) |
+| `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section and flow rules with `flows-from`/`flows-to`/`not-through`) |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
+| `taint` | Intraprocedural taint analysis: tracks value flow from sources to sinks within functions (`--config`, `--label`, `--trace`, `--json`, `--project`) |
+| `impact` | Compute transitive set of impacted symbols from a change via reverse-caller closure (`--diff`, `--output symbols\|tests\|graph`, `--json`, `--max-depth`) |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
 | `index` | Pre-build parse, QN-index, and type-cache schema in `parse.db` for faster cross-project operations (`--jobs`) |
 | `editor-search` | One-shot JSON search for editor integration (auto-detects symbol/pattern/selector mode) |
@@ -126,8 +132,25 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 `lint.py` loads rules from `.emend/patterns.yaml`:
 - `macros` section: named reusable pattern fragments
 - `rules` section: `find` + optional `not-inside` + `message` + optional `replace`
+- Flow rules: `flows-from` + `flows-to` + optional `not-through` for intraprocedural taint-based linting (checked by `_check_flow_rule()`)
 - `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass (supports `entry-point-decorators`, `entry-point-names`, `exclude-paths` with glob patterns)
 - `--fix` flag auto-applies associated `replace` patterns
+
+### Taint Analysis
+
+`taint.py` provides intraprocedural taint analysis:
+- Configuration via `taint` section in `.emend/patterns.yaml`: `labels`, `sources`, `sinks`, `sanitizers`
+- `_analyze_function()` — per-function analysis: finds sources, propagates taint through assignments, applies sanitizers, checks sinks
+- `run_taint_analysis()` — iterates files, collects function definitions, analyzes each + module-level code
+- `format_violations()` — text and JSON output with optional propagation traces
+
+### Impact Analysis
+
+`transform.py` contains `find_impact()`:
+- BFS transitive reverse-caller closure via `find_callers()`
+- `_parse_diff_to_selectors()` maps git diff hunks to symbol selectors
+- Automatically identifies impacted test files/symbols via path and name heuristics
+- Witness edges track why each symbol is impacted
 
 ### Type Oracle
 

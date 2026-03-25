@@ -76,8 +76,9 @@ Each rule is a mapping with a unique key (the rule name) and the following field
 +-----------------+----------+-----------------------------------------------+
 | Field           | Required | Description                                   |
 +=================+==========+===============================================+
-| ``find``        | Yes      | Pattern to search for (same syntax as          |
-|                 |          | ``emend search``)                             |
+| ``find``        | Yes*     | Pattern to search for (same syntax as          |
+|                 |          | ``emend search``). *Not required for flow      |
+|                 |          | rules that use ``flows-from``/``flows-to``.   |
 +-----------------+----------+-----------------------------------------------+
 | ``message``     | Yes      | Human-readable violation message               |
 +-----------------+----------+-----------------------------------------------+
@@ -87,6 +88,12 @@ Each rule is a mapping with a unique key (the rule name) and the following field
 +-----------------+----------+-----------------------------------------------+
 | ``replace``     | No       | Replacement pattern for auto-fix (same syntax  |
 |                 |          | as ``emend replace``)                         |
++-----------------+----------+-----------------------------------------------+
+| ``flows-from``  | No       | Source pattern for flow rules (see below)      |
++-----------------+----------+-----------------------------------------------+
+| ``flows-to``    | No       | Sink pattern for flow rules (see below)        |
++-----------------+----------+-----------------------------------------------+
+| ``not-through`` | No       | Sanitizer pattern for flow rules (see below)   |
 +-----------------+----------+-----------------------------------------------+
 
 Patterns support the full emend pattern syntax including metavariables (``$X``, ``$...ARGS``), type constraints (``$X:str``), and all expression/statement forms. See :doc:`patterns` for the complete reference.
@@ -313,6 +320,79 @@ Enforce testing conventions
        find: "self.assertTrue($X)"
        message: "Use pytest assert instead of unittest assertTrue"
        replace: "assert $X"
+
+
+Flow rules (data-flow linting)
+------------------------------
+
+In addition to pattern-matching rules, emend supports **flow rules** that detect
+when a value matching a source pattern reaches a sink pattern without passing
+through a sanitizer. This is useful for catching security issues like SQL
+injection, XSS, or code injection.
+
+Configuration
+~~~~~~~~~~~~~
+
+Flow rules use ``flows-from``, ``flows-to``, and optionally ``not-through``
+instead of ``find``:
+
+.. code-block:: yaml
+
+   rules:
+     sql-injection:
+       flows-from: "request.args.get($X)"
+       flows-to: "cursor.execute($QUERY)"
+       not-through: "sanitize($X)"
+       message: "SQL injection: user input flows to cursor.execute()"
+
+     no-eval-user-input:
+       flows-from: "input($PROMPT)"
+       flows-to: "eval($CODE)"
+       message: "User input flows to eval()"
+
++-----------------+----------+-----------------------------------------------+
+| Field           | Required | Description                                   |
++=================+==========+===============================================+
+| ``flows-from``  | Yes      | Source pattern (introduces taint)              |
++-----------------+----------+-----------------------------------------------+
+| ``flows-to``    | Yes      | Sink pattern (should not receive tainted data) |
++-----------------+----------+-----------------------------------------------+
+| ``not-through`` | No       | Sanitizer pattern (removes taint)             |
++-----------------+----------+-----------------------------------------------+
+| ``message``     | Yes      | Violation message                             |
++-----------------+----------+-----------------------------------------------+
+
+How it works
+~~~~~~~~~~~~
+
+For each function in the file, emend:
+
+1. Finds all matches of the source pattern within the function
+2. Extracts variable names from the source match (assignment targets and captures)
+3. Propagates taint through assignments: if a tainted variable appears on the RHS
+   of an assignment, the LHS becomes tainted
+4. Checks if any tainted variable appears in a sink pattern match
+5. If a sanitizer (``not-through``) pattern matches between the source and sink,
+   the violation is suppressed
+
+Analysis is intraprocedural (within each function body) and field-insensitive.
+
+Violations include a ``FlowWitness`` trace showing the source, propagation chain,
+and sink.
+
+Example output
+~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   src/app.py:15:0: [sql-injection] SQL injection: user input flows to cursor.execute()
+
+Flow rules integrate with ``# noqa`` suppression and ``--rule`` filtering just
+like regular pattern rules.
+
+For standalone taint analysis with more configuration options (labels, multiple
+source/sink/sanitizer groups, full traces), see the ``taint`` command in
+:doc:`commands`.
 
 
 Dead code detection

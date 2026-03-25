@@ -4,6 +4,29 @@
 
 ### Features
 
+#### Impact Analysis (`impact` command)
+
+- **New `impact` command**: Compute the transitive set of impacted symbols from a change via reverse-caller BFS closure
+  - `emend impact mymodule.py::func` — from a selector
+  - `emend impact --diff HEAD` — from a git diff (auto-maps changed lines to symbols)
+  - `--output symbols` (default), `tests`, or `graph` for witness edges
+  - `--json` for structured output, `--max-depth` to limit traversal
+
+#### Taint Analysis (`taint` command)
+
+- **New `taint` command**: Intraprocedural taint analysis tracking value flow from sources to sinks within individual functions
+  - Configurable via `taint` section in `.emend/patterns.yaml` with `sources`, `sinks`, `sanitizers`, and `labels`
+  - Propagates taint through variable assignments; sanitizers remove taint before sink checks
+  - `--trace` shows full propagation path from source to sink
+  - `--label` filters to a specific taint label; `--json` for structured output
+
+#### Flow-Based Lint Rules
+
+- **New `flows-from` / `flows-to` / `not-through` lint rule predicates**: Define data-flow lint rules in `.emend/patterns.yaml` that detect when values matching a source pattern reach a sink pattern without passing through a sanitizer
+  - Intraprocedural analysis within each function body
+  - `FlowWitness` traces show source, propagation chain, and sink
+  - Integrates with existing `# noqa` suppression and `--rule` filtering
+
 #### Unified Module Mapping System (`map` command)
 
 - **New `map` command**: Unified identifier and module mappings with subcommands:

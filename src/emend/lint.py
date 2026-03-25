@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,17 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
+from emend.taint import _extract_identifiers
+
+
+@dataclass
+class FlowWitness:
+    """A witness trace for a flow violation."""
+    source_line: int
+    source_text: str
+    sink_line: int
+    sink_text: str
+    taint_chain: list[tuple[int, str]]  # (line, variable_name) steps from source to sink
 
 
 @dataclass
@@ -20,6 +32,10 @@ class LintRule:
     message: str
     not_inside: str | None = None
     replace: str | None = None
+    # Flow predicates
+    flows_from: str | None = None  # source pattern
+    flows_to: str | None = None  # sink pattern
+    not_through: str | None = None  # sanitizer pattern
 
 
 @dataclass
@@ -45,6 +61,7 @@ class LintViolation:
     line: int
     col: int = 0
     match_text: str = ""
+    witness: FlowWitness | None = None
 
 
 def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
@@ -143,13 +160,30 @@ def load_rules(
 
     rules = []
     for name, rule_def in raw_rules.items():
-        find_pattern_str = expand_macros(rule_def["find"], macros)
+        flows_from = rule_def.get("flows-from")
+        flows_to = rule_def.get("flows-to")
+        not_through = rule_def.get("not-through")
+
+        if flows_from and flows_to:
+            # Flow rule: find is not required
+            find_pattern_str = rule_def.get("find", "")
+            flows_from = expand_macros(flows_from, macros)
+            flows_to = expand_macros(flows_to, macros)
+            if not_through:
+                not_through = expand_macros(not_through, macros)
+        else:
+            # Pattern rule: find is required
+            find_pattern_str = expand_macros(rule_def["find"], macros)
+
         rules.append(LintRule(
             name=name,
             find=find_pattern_str,
             message=rule_def.get("message", ""),
             not_inside=rule_def.get("not-inside"),
             replace=rule_def.get("replace"),
+            flows_from=flows_from if flows_from else None,
+            flows_to=flows_to if flows_to else None,
+            not_through=not_through if not_through else None,
         ))
 
     # Parse deadcode section
@@ -188,6 +222,191 @@ def load_rules(
     return rules, macros, deadcode_config
 
 
+# Reuse shared helpers from taint module
+_extract_names_from_text = _extract_identifiers
+
+
+def _find_assignments_in_source(source: str) -> list[tuple[int, str, str]]:
+    """Find simple assignments in source code via line-by-line regex.
+
+    Returns list of (line_number, target_name, rhs_text).
+    """
+    assignments: list[tuple[int, str, str]] = []
+    for i, line_text in enumerate(source.splitlines(), 1):
+        stripped = line_text.strip()
+        m = re.match(r'^([a-zA-Z_]\w*)\s*=\s*(.+)$', stripped)
+        if m:
+            assignments.append((i, m.group(1), m.group(2)))
+    return assignments
+
+
+def _check_flow_rule(
+    rule: LintRule,
+    file_path: str,
+    source: str,
+    language: str,
+) -> list[LintViolation]:
+    """Check a flow-based lint rule within each function in the file.
+
+    For each function body, finds source and sink pattern matches, then
+    does simple intraprocedural taint propagation through assignments.
+    """
+    from emend import emend_core
+    from emend.ast_utils import _rust_dict_to_nested_symbol
+
+    assert rule.flows_from is not None
+    assert rule.flows_to is not None
+
+    violations: list[LintViolation] = []
+
+    # Get function definitions from source
+    ext = Path(file_path).suffix.lstrip('.') or 'py'
+    rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
+    symbols = [
+        _rust_dict_to_nested_symbol(d) for d in rust_syms
+        if d.get("kind") not in ("variable", "reference")
+    ]
+
+    # Flatten to get all functions (including nested methods)
+    def _all_functions(syms):
+        for sym in syms:
+            if sym.kind in ('function', 'async_function', 'method', 'async_method'):
+                yield sym
+            yield from _all_functions(sym.children)
+
+    # Hoist pattern matching and line splitting out of the per-function loop
+    all_source_matches = find_pattern(
+        rule.flows_from, file_path, source_override=source, language=language
+    )
+    all_sink_matches = find_pattern(
+        rule.flows_to, file_path, source_override=source, language=language
+    )
+    all_sanitizer_matches = None
+    if rule.not_through:
+        all_sanitizer_matches = find_pattern(
+            rule.not_through, file_path,
+            source_override=source, language=language
+        )
+    all_lines = source.splitlines()
+
+    for sym in _all_functions(symbols):
+        # Filter to matches within this function's line range
+        func_sources = [
+            m for m in all_source_matches
+            if m.line is not None and sym.line_start <= m.line <= sym.line_end
+        ]
+        func_sinks = [
+            m for m in all_sink_matches
+            if m.line is not None and sym.line_start <= m.line <= sym.line_end
+        ]
+
+        if not func_sources or not func_sinks:
+            continue
+
+        # Extract function body for assignment tracking
+        func_lines = all_lines[sym.line_start - 1:sym.line_end]
+        func_source_text = '\n'.join(func_lines)
+
+        # Find assignments within the function
+        assignments = _find_assignments_in_source(func_source_text)
+        # Adjust line numbers to be absolute
+        assignments = [
+            (line_num + sym.line_start - 1, target, rhs)
+            for line_num, target, rhs in assignments
+        ]
+
+        for src_match in func_sources:
+            src_line = src_match.line or 0
+            tainted: dict[str, int] = {}  # name -> line where it became tainted
+
+            for cap_name, cap_text in src_match.captures.items():
+                for name in _extract_names_from_text(cap_text):
+                    tainted[name] = src_line
+
+            if src_match.matched_text:
+                matched_line_text = all_lines[src_line - 1].strip() if src_line <= len(all_lines) else ""
+                assign_match = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', matched_line_text)
+                if assign_match:
+                    tainted[assign_match.group(1)] = src_line
+
+            taint_chain: list[tuple[int, str]] = [
+                (src_line, ', '.join(sorted(tainted.keys())))
+            ]
+
+            for assign_line, target, rhs in sorted(assignments, key=lambda a: a[0]):
+                if assign_line <= src_line:
+                    continue
+                rhs_names = _extract_names_from_text(rhs)
+                if rhs_names & set(tainted.keys()):
+                    tainted[target] = assign_line
+                    taint_chain.append((assign_line, target))
+
+            for sink_match in func_sinks:
+                sink_line = sink_match.line or 0
+                if sink_line <= src_line:
+                    continue
+
+                sink_names: set[str] = set()
+                for cap_name, cap_text in sink_match.captures.items():
+                    sink_names |= _extract_names_from_text(cap_text)
+                if sink_match.matched_text:
+                    sink_names |= _extract_names_from_text(sink_match.matched_text or "")
+
+                tainted_at_sink = {
+                    name for name, line in tainted.items()
+                    if line <= sink_line
+                }
+
+                if not (sink_names & tainted_at_sink):
+                    continue
+
+                sanitized = False
+                if all_sanitizer_matches:
+                    for san_match in all_sanitizer_matches:
+                        san_line = san_match.line or 0
+                        if src_line <= san_line < sink_line:
+                            san_names: set[str] = set()
+                            for cap_name, cap_text in san_match.captures.items():
+                                san_names |= _extract_names_from_text(cap_text)
+                            if san_match.matched_text:
+                                san_names |= _extract_names_from_text(san_match.matched_text or "")
+                            if san_names & tainted_at_sink:
+                                sanitized = True
+                                break
+                            if san_line <= len(all_lines):
+                                san_line_text = all_lines[san_line - 1].strip()
+                                san_assign = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', san_line_text)
+                                if san_assign and san_assign.group(1) in tainted_at_sink:
+                                    sanitized = True
+                                    break
+
+                if sanitized:
+                    continue
+
+                src_text = (src_match.matched_text or "").strip()
+                sink_text = (sink_match.matched_text or "").strip()
+                witness = FlowWitness(
+                    source_line=src_line,
+                    source_text=src_text,
+                    sink_line=sink_line,
+                    sink_text=sink_text,
+                    taint_chain=[
+                        step for step in taint_chain if step[0] <= sink_line
+                    ],
+                )
+
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path,
+                    line=sink_line,
+                    match_text=f"flow: {src_text} -> {sink_text}",
+                    witness=witness,
+                ))
+
+    return violations
+
+
 def run_lint(
     rules: list[LintRule],
     paths: list[str],
@@ -214,9 +433,13 @@ def run_lint(
     if rule_filter:
         rules = [r for r in rules if r.name == rule_filter]
 
-    # Split rules into find-only and fix rules
-    find_only_rules = [r for r in rules if not (fix and r.replace)]
-    fix_rules = [r for r in rules if fix and r.replace]
+    # Separate flow rules from pattern rules
+    flow_rules = [r for r in rules if r.flows_from and r.flows_to]
+    pattern_rules = [r for r in rules if not (r.flows_from and r.flows_to)]
+
+    # Split pattern rules into find-only and fix rules
+    find_only_rules = [r for r in pattern_rules if not (fix and r.replace)]
+    fix_rules = [r for r in pattern_rules if fix and r.replace]
 
     violations = []
 
@@ -437,6 +660,52 @@ def run_lint(
                     line=0,
                     match_text=f"{count} replacement(s) applied",
                 ))
+
+    # --- Flow rules: intraprocedural taint analysis ---
+    if flow_rules:
+        for file_path in paths:
+            source = all_file_contents.get(file_path)
+            if source is None:
+                continue
+
+            # Build noqa ranges for this file (reuse cache if available)
+            if file_path not in noqa_ranges_cache:
+                noqa_comments = parse_noqa_comments(source)
+                noqa_ranges_for_file_flow: list[tuple[int, int, set[str] | None]] = []
+                if noqa_comments:
+                    line_map = _build_statement_line_map(source)
+                    noqa_ranges_for_file_flow = build_noqa_ranges(
+                        noqa_comments, line_map
+                    )
+                noqa_ranges_cache[file_path] = noqa_ranges_for_file_flow
+
+            for rule in flow_rules:
+                # Pre-filter: check if source and sink literals exist in file
+                from_literals = extract_pattern_literals(rule.flows_from or "")
+                to_literals = extract_pattern_literals(rule.flows_to or "")
+                if not all(lit in source for lit in from_literals):
+                    continue
+                if not all(lit in source for lit in to_literals):
+                    continue
+
+                try:
+                    flow_violations = _check_flow_rule(
+                        rule, file_path, source, language
+                    )
+                except Exception:
+                    logger.debug(
+                        "Flow rule %s failed on %s",
+                        rule.name, file_path, exc_info=True,
+                    )
+                    continue
+
+                for v in flow_violations:
+                    if is_noqa_suppressed(
+                        v.line, v.rule_name,
+                        noqa_ranges_cache.get(file_path, []),
+                    ):
+                        continue
+                    violations.append(v)
 
     # --- Dead code analysis (if configured) ---
     if (deadcode_config is not None

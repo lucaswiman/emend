@@ -948,3 +948,148 @@ Claude Code. See :doc:`installation` for details on scopes and configuration
 options.
 
 ---
+
+impact
+------
+
+Compute the transitive set of impacted symbols from a change. Given a changed
+symbol (selector) or git diff, computes which symbols, files, and tests are
+transitively affected via reverse-caller closure.
+
+.. code-block:: text
+
+   emend impact [SELECTOR] [OPTIONS]
+
+**Arguments:**
+
+- ``SELECTOR`` -- Selector of the changed symbol (e.g. ``mymodule.py::func``)
+
+**Options:**
+
++-----------------------------+-----------------------------------------------+
+| Option                      | Description                                   |
++=============================+===============================================+
+| ``--diff TEXT``             | Git diff spec (e.g. ``HEAD``, ``abc..def``)   |
++-----------------------------+-----------------------------------------------+
+| ``--output``, ``-o``       | Output mode: ``symbols`` (default), ``tests``,|
+|                             | ``graph``                                     |
++-----------------------------+-----------------------------------------------+
+| ``--json``                  | Output as JSON                                |
++-----------------------------+-----------------------------------------------+
+| ``--max-depth INT``         | Maximum BFS depth (default: 10)               |
++-----------------------------+-----------------------------------------------+
+| ``--project``, ``-p``      | Project root directory                        |
++-----------------------------+-----------------------------------------------+
+
+**Output modes:**
+
++----------+------------------------------------------------------------------+
+| Mode     | Description                                                      |
++==========+==================================================================+
+| symbols  | List changed and impacted symbol selectors                       |
++----------+------------------------------------------------------------------+
+| tests    | List impacted test files/symbols                                 |
++----------+------------------------------------------------------------------+
+| graph    | Show witness edges explaining why each symbol is impacted        |
++----------+------------------------------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # From a selector
+   emend impact mymodule.py::MyClass.method
+
+   # From a git diff
+   emend impact --diff HEAD
+   emend impact --diff abc123..def456
+
+   # Show impacted tests
+   emend impact mymodule.py::func --output tests
+
+   # Witness graph as JSON
+   emend impact mymodule.py::func --output graph --json
+
+---
+
+taint
+-----
+
+Run intraprocedural taint analysis to detect unsafe data flows. Tracks value
+flow from sources (e.g. user input) to sinks (e.g. SQL queries, ``eval``)
+within individual functions, reporting violations when tainted data reaches a
+sink without sanitization.
+
+Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
+
+.. code-block:: text
+
+   emend taint PATH [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- File or directory to analyze
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--config FILE``   | Path to config file                           |
+|                     | (default: ``.emend/patterns.yaml``)           |
++---------------------+-----------------------------------------------+
+| ``--label TEXT``    | Only check a specific taint label             |
++---------------------+-----------------------------------------------+
+| ``--trace``         | Show full propagation traces                  |
++---------------------+-----------------------------------------------+
+| ``--json``          | Output as JSON                                |
++---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory                      |
++---------------------+-----------------------------------------------+
+
+**Config file format:**
+
+.. code-block:: yaml
+
+   taint:
+     labels:
+       - user_input
+       - sensitive_data
+
+     sources:
+       - pattern: "request.args.get($X)"
+         label: user_input
+       - pattern: "input($PROMPT)"
+         label: user_input
+
+     sinks:
+       - pattern: "cursor.execute($QUERY)"
+         label: user_input
+         message: "SQL injection: user input reaches cursor.execute()"
+       - pattern: "eval($CODE)"
+         label: user_input
+         message: "Code injection: user input reaches eval()"
+
+     sanitizers:
+       - pattern: "sanitize($X)"
+         label: user_input
+       - pattern: "escape($X)"
+         label: user_input
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Analyze a directory
+   emend taint src/
+
+   # Filter to a specific label
+   emend taint app.py --label user_input
+
+   # Show propagation traces
+   emend taint src/ --trace
+
+   # JSON output
+   emend taint src/ --json
+
+---
