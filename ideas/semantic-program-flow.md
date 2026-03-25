@@ -279,33 +279,167 @@ The rewrite engine already knows that expressions can be equivalent. Scale this 
 The e-graph becomes the MEDIUM of thought. You explore the space of equivalent
 programs, choosing the one that best expresses your intent.
 
-## What to Build First
+## The Reframe: This Is Tooling for the Agent
 
-Concretely, for emend as an MCP server:
+The first draft of this doc designed tools for a human. But the human already
+has an agent (hi). The question is: **what does the AGENT need from emend to
+stop being a fancy text editor and start being a semantic surgeon?**
 
-### Phase 1: Flow Materialization
-- `flow/trace` — build on taint analysis but make it bidirectional and
-  value-centric rather than taint-centric
-- `flow/phases` — automatically segment a function into semantic phases
-  using heuristics (variable state changes, function call boundaries,
-  branch points)
-- `flow/visualize` — render as structured data an AI can reason about
+### What the Agent Actually Does (Poorly) Today
 
-### Phase 2: Semantic Assertions
-- `flow/assert` — declare properties about flows, checked against fact graph
-- `concept/define` — register reusable semantic patterns
-- `concept/find` — find all instances of a concept
+When a coding agent (Claude, Copilot, Codex, whatever) modifies a codebase:
 
-### Phase 3: Semantic Manipulation
-- `flow/reshape` — insert/remove/reorder phases
-- `concept/unify` — declare equivalences, get consolidation suggestions
-- `flow/diff` — semantic diff: not "what lines changed" but "what MEANING changed"
+1. **Read a bunch of files** to build a mental model in the context window
+2. **Grep around** to find related code
+3. **Make edits** based on the model in its head
+4. **Hope** the cascading effects are handled
 
-### Phase 4: Intent Bridge
-- `intent/declare` — natural language intent → semantic operations → code changes
-- This is where the LLM becomes part of the tool, not just the user of it
-- The MCP server provides the SEMANTIC INFRASTRUCTURE that makes LLM code
-  manipulation reliable and verifiable
+Steps 1-2 are expensive, lossy, and re-derived every session. Step 3 is
+text surgery — the agent understands meaning but operates on characters.
+Step 4 is where bugs come from.
+
+emend already has a persistent semantic model that could replace ALL of this
+with something better. The fact graph, the scope resolver, the taint engine —
+these are the agent's missing senses.
+
+### What the Agent Actually Needs
+
+#### `semantic_context` — "Where am I and what matters here?"
+
+When the agent lands on a symbol, give it the full semantic neighborhood
+in one call:
+
+```json
+{
+  "symbol": "process_order",
+  "incoming_data": [{"name": "order", "type": "Order", "taint": "user_input"}],
+  "outgoing_data": [{"name": "return", "type": "Receipt", "flows_to": ["send_email", "update_db"]}],
+  "phases": ["validate", "charge_payment", "create_receipt"],
+  "side_effects": ["db_write", "payment_api_call"],
+  "callers": ["handle_request", "retry_order"],
+  "invariants": ["order must be validated before charge"]
+}
+```
+
+This replaces 15 tool calls (read file, grep for references, grep for
+callers, read those files, read tests...) with ONE call that gives the
+agent a complete semantic picture. The agent can reason about this
+structured data far better than raw code text.
+
+#### `blast_radius` — "What breaks if I do this?"
+
+Before making a change, the agent describes the intended change and gets
+back the full causal impact:
+
+```json
+{
+  "proposed_change": "add parameter 'priority: int' to process_order",
+  "direct_impacts": [
+    {"symbol": "handle_request", "reason": "calls process_order", "action_needed": "pass priority arg"},
+    {"symbol": "retry_order", "reason": "calls process_order", "action_needed": "pass priority arg"}
+  ],
+  "transitive_impacts": [
+    {"symbol": "test_handle_request", "reason": "exercises handle_request"}
+  ],
+  "invariant_risks": [
+    {"invariant": "retry preserves original order semantics", "risk": "priority might differ on retry"}
+  ],
+  "suggested_edit_plan": [
+    {"file": "handler.py", "symbol": "handle_request", "edit": "add priority=order.priority to call"},
+    {"file": "retry.py", "symbol": "retry_order", "edit": "add priority=original.priority to call"},
+    {"file": "tests/test_handler.py", "edit": "add priority param to test fixtures"}
+  ]
+}
+```
+
+This is impact analysis but PRE-EDIT and PRESCRIPTIVE. Not "what changed"
+but "what WILL need to change, and here's the plan." The agent can then
+execute the plan mechanically instead of reasoning about each step.
+
+#### `reshape` — "Make this semantic change across the project"
+
+The atomic unit of agent work should not be "edit line 47 of foo.py." It
+should be a SEMANTIC OPERATION:
+
+```json
+{
+  "operation": "insert_phase",
+  "target": "request_lifecycle",
+  "phase": "rate_limiting",
+  "after": "authentication",
+  "before": "authorization",
+  "constraint": "must reject with 429 if limit exceeded"
+}
+```
+
+```json
+{
+  "operation": "enforce_invariant",
+  "invariant": "all database writes go through the audit log",
+  "scope": "project",
+  "action": "insert audit_log.record() before every db.write() call"
+}
+```
+
+```json
+{
+  "operation": "split_concern",
+  "symbol": "UserService",
+  "into": ["UserAuthService", "UserProfileService"],
+  "criterion": "methods touching auth vs methods touching profile data"
+}
+```
+
+emend computes the COMPLETE SET of file edits. The agent reviews and
+applies. No missed call sites, no forgotten test updates, no broken
+invariants.
+
+### The Key Insight: Structured Intermediate Representation for Agent Actions
+
+Right now, agent ↔ codebase interaction is:
+```
+Agent → [read text] → [think] → [write text] → Codebase
+```
+
+With semantic flow tools:
+```
+Agent → [query semantic model] → [reason about meaning] → [declare semantic operation] → emend → [compute edits] → Codebase
+```
+
+The agent never touches raw text for structural changes. It works at the
+level of meaning. emend handles the translation to actual code. This is
+more reliable (emend knows ALL the call sites, the agent might miss one),
+faster (one semantic operation vs. N file edits), and verifiable (emend
+can check invariants after the transformation).
+
+### This Is Also the Right Abstraction for Multi-Agent
+
+When you have multiple agents working on the same codebase:
+- Agent A can declare "I'm adding a rate-limiting phase to the request lifecycle"
+- Agent B, working on the payment system, can query the semantic model and
+  SEE that rate limiting now exists, without reading Agent A's code changes
+- Conflicts surface at the semantic level ("you both modified the request
+  lifecycle") not the text level ("merge conflict on line 47")
+
+The fact graph becomes the SHARED UNDERSTANDING between agents.
+
+## What to Build First (For Real)
+
+### Phase 1: Semantic Context for Agents
+- **`semantic_context`** MCP tool — one call gives full semantic neighborhood
+- Built on: fact graph + taint analysis + scope resolver + type oracle
+- This alone makes agents 5x more effective — less reading, better understanding
+
+### Phase 2: Pre-Edit Impact
+- **`blast_radius`** MCP tool — describe a change, get causal impact + edit plan
+- Built on: impact analysis + reference finding + test detection
+- This is where agent reliability jumps — you catch cascading breaks BEFORE they happen
+
+### Phase 3: Semantic Operations
+- **`reshape`** MCP tool — declare semantic transformations, get computed edits
+- Built on: everything (patterns, rewrites, scope resolver, reference updating)
+- Start with simple operations: enforce_invariant, insert_phase, split_concern
+- This is the endgame — agents stop editing text and start editing meaning
 
 ## The Engelbart Connection
 
