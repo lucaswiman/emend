@@ -1243,6 +1243,75 @@ def lint_cmd(
         raise typer.Exit(1)
 
 
+@app.command("taint")
+def taint_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to patterns.yaml")] = None,
+    label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific taint label")] = None,
+    trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+):
+    """Run taint analysis to detect unsafe data flows.
+
+    Tracks value flow from sources (e.g. user input) to sinks
+    (e.g. SQL queries, eval) within individual functions, reporting
+    violations when tainted data reaches a sink without sanitization.
+
+    Configuration is read from the ``taint`` section of .emend/patterns.yaml
+    (or the file specified by --config).
+
+    Examples:
+        emend taint src/
+        emend taint app.py --label user_input
+        emend taint src/ --trace
+        emend taint src/ --json
+    """
+    try:
+        from emend.taint import load_taint_config, run_taint_analysis, format_violations
+
+        # Find config file
+        if config is None:
+            config = ".emend/patterns.yaml"
+        config_path = Path(config)
+        if not config_path.exists():
+            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            raise typer.Exit(2)
+
+        taint_config = load_taint_config(str(config_path))
+        if not taint_config.sources:
+            print("No taint sources configured.", file=sys.stderr)
+            raise typer.Exit(0)
+        if not taint_config.sinks:
+            print("No taint sinks configured.", file=sys.stderr)
+            raise typer.Exit(0)
+
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved]
+
+        violations = run_taint_analysis(
+            files, taint_config,
+            label_filter=label,
+            language=_lang,
+        )
+
+        output = format_violations(violations, show_trace=trace, json_output=json_output)
+        if output:
+            print(output, end='' if not output.endswith('\n') else '')
+
+        if violations:
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 @app.command("cp")
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
