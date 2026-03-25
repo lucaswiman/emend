@@ -239,43 +239,40 @@ class FactGraph:
         """Return all imports declared in *file_path*."""
         return list(self._idx_imports_by_file.get(file_path, []))
 
-    def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
-        """Compute the transitive set of callers of *symbol_qn* via BFS.
-
-        Returns a set of qualified names (excluding the start symbol).
-        """
+    def _transitive_closure(
+        self,
+        symbol_qn: str,
+        index: dict[str, list[CallFact]],
+        extract_qn: Callable[[CallFact], str],
+        max_depth: int,
+    ) -> set[str]:
+        """BFS transitive closure over call edges."""
         visited: set[str] = set()
         frontier = {symbol_qn}
-        depth = 0
-        while frontier and depth < max_depth:
+        for _ in range(max_depth):
+            if not frontier:
+                break
             next_frontier: set[str] = set()
             for qn in frontier:
-                for call in self._idx_calls_to.get(qn, []):
-                    if call.caller_qn not in visited and call.caller_qn != symbol_qn:
-                        visited.add(call.caller_qn)
-                        next_frontier.add(call.caller_qn)
+                for call in index.get(qn, []):
+                    neighbor = extract_qn(call)
+                    if neighbor not in visited and neighbor != symbol_qn:
+                        visited.add(neighbor)
+                        next_frontier.add(neighbor)
             frontier = next_frontier
-            depth += 1
         return visited
+
+    def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
+        """Compute the transitive set of callers of *symbol_qn* via BFS."""
+        return self._transitive_closure(
+            symbol_qn, self._idx_calls_to, lambda c: c.caller_qn, max_depth,
+        )
 
     def transitive_callees(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
-        """Compute the transitive set of callees of *symbol_qn* via BFS.
-
-        Returns a set of qualified names (excluding the start symbol).
-        """
-        visited: set[str] = set()
-        frontier = {symbol_qn}
-        depth = 0
-        while frontier and depth < max_depth:
-            next_frontier: set[str] = set()
-            for qn in frontier:
-                for call in self._idx_calls_from.get(qn, []):
-                    if call.callee_qn not in visited and call.callee_qn != symbol_qn:
-                        visited.add(call.callee_qn)
-                        next_frontier.add(call.callee_qn)
-            frontier = next_frontier
-            depth += 1
-        return visited
+        """Compute the transitive set of callees of *symbol_qn* via BFS."""
+        return self._transitive_closure(
+            symbol_qn, self._idx_calls_from, lambda c: c.callee_qn, max_depth,
+        )
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
         """Return all facts matching *predicate*.
@@ -512,7 +509,7 @@ def _build_symbol_line_index(
     Used to resolve which function encloses a given line number.
     """
     entries: list[tuple[int, int, str]] = []
-    for sym in graph._idx_symbols_by_file.get(file_path, []):
+    for sym in graph.symbols(file_path=file_path):
         if sym.kind in ("function", "async_function", "method", "async_method"):
             entries.append((sym.line, sym.end_line, sym.qualified_name))
     # Sort by start line descending so the innermost (most-nested) function

@@ -788,30 +788,13 @@ def _compute_function_summary(
     return summary
 
 
-def _summaries_equal(
-    a: dict[str, FunctionSummary],
-    b: dict[str, FunctionSummary],
-) -> bool:
-    """Check if two summary dictionaries are equivalent for convergence."""
-    if a.keys() != b.keys():
-        return False
-    for qn in a:
-        sa, sb = a[qn], b[qn]
-        if sa.param_to_return != sb.param_to_return:
-            return False
-        if sa.param_to_sink != sb.param_to_sink:
-            return False
-        if sa.param_to_param != sb.param_to_param:
-            return False
-    return True
-
-
-def _copy_summaries(
-    summaries: dict[str, FunctionSummary],
-) -> dict[str, FunctionSummary]:
-    """Deep-copy summaries for convergence comparison."""
-    import copy
-    return copy.deepcopy(summaries)
+def _snapshot_summary(s: FunctionSummary) -> tuple:
+    """Return an immutable snapshot of a summary for convergence comparison."""
+    return (
+        tuple(sorted((k, frozenset(v)) for k, v in s.param_to_return.items())),
+        tuple(sorted((k, tuple(sorted(v))) for k, v in s.param_to_sink.items())),
+        tuple(sorted((k, frozenset(v)) for k, v in s.param_to_param.items())),
+    )
 
 
 def run_interprocedural_taint_analysis(
@@ -899,35 +882,40 @@ def run_interprocedural_taint_analysis(
             name_to_qn[short_name] = []
         name_to_qn[short_name].append(qn)
 
+    # Precompute per-function invariants (unchanged across iterations)
+    import textwrap as _textwrap
+
+    _func_precomputed: dict[str, tuple[list[tuple[int, str, str]], set[str]]] = {}
+    for qn, (fp, src, fs, fe, params) in func_info.items():
+        if not params:
+            continue
+        lines = src.split("\n")
+        body_start = fs + 1
+        if body_start > fe:
+            continue
+        body_text_lines = lines[body_start - 1 : fe]
+        body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
+        body_assignments = _find_assignments_in_source(body_dedented)
+        return_idents: set[str] = set()
+        for line_idx in range(fs, fe + 1):
+            if line_idx - 1 >= len(lines):
+                break
+            stripped = lines[line_idx - 1].strip()
+            ret_m = re.match(r"return\s+(.+)", stripped)
+            if ret_m:
+                return_idents |= _extract_identifiers(ret_m.group(1))
+        _func_precomputed[qn] = (body_assignments, return_idents)
+
     iterations = 0
     for iteration in range(max_iterations):
         iterations = iteration + 1
-        prev_summaries = _copy_summaries(summaries)
+        prev_snapshots = {qn: _snapshot_summary(s) for qn, s in summaries.items()}
 
         for qn, (fp, src, fs, fe, params) in func_info.items():
-            if not params:
+            if qn not in _func_precomputed:
                 continue
 
-            lines = src.split("\n")
-            import textwrap
-
-            body_start = fs + 1
-            if body_start > fe:
-                continue
-            body_text_lines = lines[body_start - 1 : fe]
-            body_text = "\n".join(body_text_lines) + "\n"
-            body_dedented = textwrap.dedent(body_text)
-            body_assignments = _find_assignments_in_source(body_dedented)
-
-            # Collect return identifiers
-            return_idents: set[str] = set()
-            for line_idx in range(fs, fe):
-                if line_idx - 1 >= len(lines):
-                    break
-                stripped = lines[line_idx - 1].strip()
-                ret_m = re.match(r"return\s+(.+)", stripped)
-                if ret_m:
-                    return_idents |= _extract_identifiers(ret_m.group(1))
+            body_assignments, return_idents = _func_precomputed[qn]
 
             # For each param+label, simulate taint with callee summaries
             for param_name in params:
@@ -1025,8 +1013,9 @@ def run_interprocedural_taint_analysis(
                                         summaries[qn].param_to_sink[param_name].append(entry)
                                     break
 
-        # Check convergence
-        if _summaries_equal(prev_summaries, summaries):
+        # Check convergence via snapshots (avoids deepcopy)
+        new_snapshots = {qn: _snapshot_summary(s) for qn, s in summaries.items()}
+        if new_snapshots == prev_snapshots:
             break
 
     # ------------------------------------------------------------------
@@ -1064,7 +1053,6 @@ def run_interprocedural_taint_analysis(
     # a sink, report a violation with a cross-function trace.
     for caller_qn, (fp, src, fs, fe, caller_params) in func_info.items():
         lines = src.split("\n")
-        import textwrap
 
         body_start = fs + 1
         if body_start > fe:
@@ -1119,7 +1107,7 @@ def run_interprocedural_taint_analysis(
         # Propagate through assignments
         body_text_lines = lines[body_start - 1 : fe]
         body_text = "\n".join(body_text_lines) + "\n"
-        body_dedented = textwrap.dedent(body_text)
+        body_dedented = _textwrap.dedent(body_text)
         body_assignments = _find_assignments_in_source(body_dedented)
 
         for stmt_line_rel, target, rhs in body_assignments:

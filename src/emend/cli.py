@@ -2856,10 +2856,7 @@ def facts_cmd(
                     if isinstance(val, list):
                         print(f"{key}:")
                         for item in val[:limit]:
-                            if isinstance(item, dict):
-                                print(f"  {item}")
-                            else:
-                                print(f"  {item}")
+                            print(f"  {item}")
                     else:
                         print(f"{key}: {val}")
         elif results:

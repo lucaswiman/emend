@@ -738,8 +738,22 @@ def taint(
             files, taint_config, label_filter=label,
         )
         violations = result.violations
+        # Build violation dicts directly to avoid serialize-deserialize-reserialize
+        violation_data = []
+        for v in violations:
+            entry: dict = {
+                "file": v.file_path, "line": v.line, "col": v.col,
+                "label": v.label, "sink_pattern": v.sink_pattern, "message": v.message,
+            }
+            if trace:
+                entry["trace"] = [
+                    {"file": s.file_path, "line": s.line, "col": s.col,
+                     "description": s.description, "variable": s.variable}
+                    for s in v.trace
+                ]
+            violation_data.append(entry)
         data = {
-            "violations": json.loads(format_violations(violations, show_trace=trace, json_output=True)),
+            "violations": violation_data,
             "summaries_count": len(result.summaries),
             "iterations": result.iterations,
         }
