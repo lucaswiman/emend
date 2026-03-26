@@ -68,6 +68,7 @@
 | `test_rename_symbol.py` | `rename` / `rename-symbol` command |
 | `test_rope_commands.py` | Module-level refactoring commands (move module mode) |
 | `test_semantic_context.py` | `semantic_context()` function (dangers, callers, callees, side effects, data flow, test coverage) |
+| `test_safe_delete.py` | `delete --cascade` command (safe delete with transitive dead code removal) |
 | `test_search.py` | `search` command (unified find/lookup) |
 | `test_show.py` | `show` command |
 | `test_show_unified.py` | Unified show output |
@@ -107,6 +108,7 @@
 | `graph` | Generate a call graph in plain/json/dot format |
 | `batch` | Apply batch refactoring from YAML/JSON operation files |
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section and flow rules with `flows-from`/`flows-to`/`not-through`) |
+| `delete` | Safe delete a symbol with optional cascading removal of newly-dead dependents (`--cascade`, `--apply`, `--json`, `--project`). Without `--cascade`, acts like `rm`. With it, transitively identifies and removes symbols whose only callers are in the delete set. |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
 | `taint` | Taint analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`) |
 | `impact` | Compute transitive set of impacted symbols from a change via reverse-caller closure (`--diff`, `--output symbols\|tests\|graph`, `--json`, `--max-depth`) |

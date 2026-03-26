@@ -5255,6 +5255,225 @@ def find_dead_code(
         yield from dead_symbols
 
 
+@dataclass
+class DeletePlan:
+    """A plan for safe-deleting a symbol and its cascade targets."""
+    target: str  # selector of the original target
+    deletions: list[dict]  # [{selector, file_path, name, kind, line, reason}]
+    diffs: dict[str, str]  # file_path -> unified diff
+
+
+def safe_delete(
+    selector: ExtendedSelector,
+    cascade: bool = False,
+    project_path: str | None = None,
+    apply: bool = False,
+) -> DeletePlan:
+    """Delete a symbol and optionally cascade to newly-dead dependents.
+
+    Without ``--cascade``, removes the target symbol only.  With cascade,
+    iteratively identifies symbols that become dead after the deletion
+    (i.e. symbols whose *only* remaining callers are in the delete set)
+    and includes them in the plan.
+
+    Args:
+        selector: Symbol to delete.
+        cascade: If True, transitively delete newly-dead dependents.
+        project_path: Project root (auto-detected if None).
+        apply: If True, write changes to files.
+
+    Returns:
+        A ``DeletePlan`` with the list of deletions and per-file diffs.
+    """
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+
+    scan_root = project_path or _find_project_root(selector.file_path)
+
+    # ----- Phase 1: Build the delete set via BFS -------------------------
+    delete_set: list[dict] = []  # [{selector_str, file_path, name, kind, line, reason}]
+    delete_qns: set[str] = set()  # qualified names already scheduled
+
+    # Seed with the target.
+    file_path = str(Path(selector.file_path).resolve())
+    symbols = find_nested_definitions(file_path)
+    target_sym = find_symbol_by_path(symbols, selector.symbol_path)
+    if target_sym is None:
+        raise ValueError(
+            f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}"
+        )
+
+    module_root = _find_project_root(selector.file_path)
+    target_module = _file_to_module(selector.file_path, module_root)
+    target_name = selector.symbol_path[-1]
+    target_qn = f"{target_module}.{target_name}" if target_module else target_name
+    selector_str = f"{selector.file_path}::{'::'.join(selector.symbol_path)}"
+
+    delete_set.append({
+        "selector": selector_str,
+        "file_path": file_path,
+        "name": target_name,
+        "kind": target_sym.kind,
+        "line": target_sym.line_start,
+        "reason": "target of delete",
+    })
+    delete_qns.add(target_qn)
+
+    if cascade:
+        # BFS: for each symbol in the delete set, find its callees, then
+        # check whether each callee has references outside the delete set.
+        queue_idx = 0
+        while queue_idx < len(delete_set):
+            entry = delete_set[queue_idx]
+            queue_idx += 1
+
+            # Build a selector for the current entry.
+            entry_sel = parse_extended_selector(entry["selector"])
+
+            try:
+                callees = find_callees(entry_sel, project_path=scan_root)
+            except (ValueError, FileNotFoundError):
+                continue
+
+            for callee in callees:
+                qn = callee.qualified_name
+                if not qn or qn in delete_qns:
+                    continue
+
+                # Resolve callee to a file via the symbol index.
+                sym_rows = query_symbol_index(scan_root, qualified_name=qn)
+                if not sym_rows:
+                    # Try just the name — the QN might be short.
+                    sym_rows = query_symbol_index(
+                        scan_root, name_pattern=callee.name
+                    )
+                    if sym_rows:
+                        sym_rows = [
+                            r for r in sym_rows
+                            if r.get("qualified_name", "").endswith(callee.name)
+                        ]
+                if not sym_rows:
+                    continue
+
+                # For each matching symbol, check remaining references.
+                for sym_row in sym_rows:
+                    sym_qn = sym_row.get("qualified_name", "")
+                    sym_fp = sym_row["file_path"]
+                    sym_name = sym_row["name"]
+                    if sym_qn in delete_qns:
+                        continue
+
+                    # Skip entry points / dunders / test functions.
+                    if sym_row.get("is_entry_point") or sym_row.get("is_exported"):
+                        continue
+                    if sym_name.startswith("__") and sym_name.endswith("__"):
+                        continue
+                    if sym_name.startswith("test_") or sym_name.startswith("Test"):
+                        continue
+
+                    # Query all non-definition references.  The reference
+                    # index stores target_qn as the module-qualified name,
+                    # so try both the short qualified_name and the full
+                    # module_qn (derived from the file path).
+                    all_refs = query_reference_index(scan_root, sym_qn)
+                    if all_refs is None or not all_refs:
+                        # Try with the module-qualified name.
+                        mod_qn = _file_to_module(sym_fp, scan_root)
+                        full_qn = f"{mod_qn}.{sym_name}" if mod_qn else sym_name
+                        refs2 = query_reference_index(scan_root, full_qn)
+                        if refs2:
+                            all_refs = refs2
+                        elif all_refs is None:
+                            continue
+
+                    # Filter out definition/import references and refs from
+                    # symbols we are already planning to delete.  Import
+                    # refs are excluded because they become unused once
+                    # all call-site references are removed.
+                    external_refs = []
+                    for ref in all_refs:
+                        if ref["ref_kind"] in ("definition", "import"):
+                            continue
+                        # Check if the reference comes from a file+line
+                        # that is inside a symbol we're deleting.
+                        ref_from_deleted = False
+                        for d in delete_set:
+                            if ref["file_path"] == d["file_path"]:
+                                # Rough containment check: if ref line is
+                                # within the symbol's range.
+                                d_sel = parse_extended_selector(d["selector"])
+                                try:
+                                    d_syms = find_nested_definitions(d["file_path"])
+                                    d_sym = find_symbol_by_path(
+                                        d_syms, d_sel.symbol_path
+                                    )
+                                    if d_sym and d_sym.line_start <= ref["line"] <= d_sym.line_end:
+                                        ref_from_deleted = True
+                                        break
+                                except Exception:
+                                    pass
+                        if not ref_from_deleted:
+                            external_refs.append(ref)
+
+                    if not external_refs:
+                        sym_selector = f"{sym_fp}::{sym_name}"
+                        delete_set.append({
+                            "selector": sym_selector,
+                            "file_path": sym_fp,
+                            "name": sym_name,
+                            "kind": sym_row.get("kind", "function"),
+                            "line": sym_row.get("line", 0),
+                            "reason": f"only referenced by deleted symbol(s)",
+                        })
+                        delete_qns.add(sym_qn)
+
+    # ----- Phase 2: Apply deletions and collect diffs --------------------
+    # Group by file, process in reverse line order to avoid offset shifts.
+    from collections import defaultdict
+    by_file: dict[str, list[dict]] = defaultdict(list)
+    for d in delete_set:
+        by_file[d["file_path"]].append(d)
+
+    all_diffs: dict[str, str] = {}
+
+    for fpath, entries in by_file.items():
+        fp = Path(fpath)
+        if not fp.exists():
+            continue
+        source_code = fp.read_text()
+        lines = source_code.splitlines(keepends=True)
+
+        # Sort by line descending so we remove from bottom first.
+        entries.sort(key=lambda e: e["line"], reverse=True)
+
+        for entry in entries:
+            sel = parse_extended_selector(entry["selector"])
+            syms = find_nested_definitions(fpath)
+            sym = find_symbol_by_path(syms, sel.symbol_path)
+            if sym is None:
+                continue
+
+            start_line = (
+                sym.decorator_line_start
+                if sym.decorator_line_start is not None
+                else sym.line_start
+            )
+            start_idx = start_line - 1
+            end_idx = sym.line_end
+            lines = lines[:start_idx] + lines[end_idx:]
+
+        new_code = "".join(lines)
+        diff = _generate_diff(fpath, source_code, new_code)
+        if diff:
+            all_diffs[fpath] = diff
+            if apply:
+                fp.write_text(new_code)
+
+    return DeletePlan(
+        target=selector_str,
+        deletions=delete_set,
+        diffs=all_diffs,
+    )
+
 
 # visit_project_ts yields (py_file, content, resolver)
 

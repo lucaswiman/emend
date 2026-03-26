@@ -17,7 +17,7 @@ from emend.transform import (
     move_module, rename_module, cmd_lookup, cmd_edit, cmd_add,
     find_callers, generate_graph, find_dead_code, find_impact,
     extract_pattern_literals, warm_caches,
-    find_pattern_in_project,
+    find_pattern_in_project, safe_delete,
 )
 from emend import ast_commands
 
@@ -952,8 +952,95 @@ def remove_cmd(
 
 
 app.command("remove", hidden=True)(remove_cmd)
-app.command("delete", hidden=True)(remove_cmd)
 app.command("set", hidden=True)(edit)
+
+
+@app.command("delete")
+def delete_cmd(
+    selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol)")],
+    cascade: Annotated[
+        bool,
+        typer.Option("--cascade", help="Transitively delete symbols that become dead after removal")
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Apply changes to files (default: dry-run)")
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON")
+    ] = False,
+    project: Annotated[
+        Optional[str],
+        typer.Option("--project", help="Project root directory")
+    ] = None,
+):
+    """Delete a symbol with optional cascading removal of newly-dead code.
+
+    Without --cascade, removes the target symbol only (like ``rm``).
+    With --cascade, identifies symbols that become unreferenced after
+    the deletion and removes them transitively.
+
+    Dry-run by default: prints the plan and diffs without modifying files.
+
+    Examples:
+        # Preview what would be deleted
+        emend delete models.py::LegacyUser --cascade
+
+        # Apply the deletion
+        emend delete models.py::LegacyUser --cascade --apply
+
+        # Simple single-symbol delete (same as rm)
+        emend delete api.py::deprecated_function --apply
+
+        # JSON output for tooling
+        emend delete models.py::LegacyUser --cascade --json
+    """
+    from emend.component_selector import parse_extended_selector
+
+    try:
+        sel = parse_extended_selector(selector)
+        plan = safe_delete(
+            sel, cascade=cascade, project_path=project, apply=apply,
+        )
+
+        if json_output:
+            import json
+            data = {
+                "target": plan.target,
+                "deletions": plan.deletions,
+                "files_affected": list(plan.diffs.keys()),
+                "applied": apply,
+            }
+            print(json.dumps(data, indent=2))
+        else:
+            if not plan.deletions:
+                print("Nothing to delete.")
+                raise typer.Exit(0)
+
+            action = "Deleted" if apply else "Would remove"
+            print(f"{action}:")
+            for d in plan.deletions:
+                print(f"  {d['file_path']}:{d['line']}  {d['name']} ({d['kind']}) - {d['reason']}")
+
+            count = len(plan.deletions)
+            files = len(plan.diffs)
+            print(f"\n{count} symbol(s) across {files} file(s).", file=sys.stderr)
+
+            if plan.diffs:
+                print()
+                for diff in plan.diffs.values():
+                    print(diff, end='')
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 @app.command("add")

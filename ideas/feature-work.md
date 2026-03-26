@@ -1,6 +1,6 @@
 # Feature Ideas for Agentic Coding Workflows
 
-## 1. Safe Delete (`emend delete`)
+## 1. ✅ Safe Delete (`emend delete`)
 
 **Problem:** `deadcode` finds unreferenced symbols. But removing a symbol creates
 cascading effects: its imports become unused, helper functions that only it called become
@@ -33,6 +33,10 @@ emend delete models.py::LegacyUser --apply   # Non-cascading: just the symbol + 
 **Implementation:** Remove the symbol. Run unused-import detection on the file. Identify
 symbols that were previously referenced only by the deleted code (intersection of the
 symbol's callees with `deadcode` results after deletion). Recurse until stable.
+
+**Status:** Implemented as `safe_delete()` in `transform.py` + `emend delete --cascade`
+CLI command. Uses BFS over callees, reference index queries to check for remaining
+callers, and fixed-point iteration to transitively identify cascade targets.
 
 ---
 
