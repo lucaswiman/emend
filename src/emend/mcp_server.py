@@ -39,6 +39,7 @@ from emend.transform import (
     generate_graph,
     find_dead_code,
     find_impact,
+    semantic_context as _semantic_context,
 )
 from emend import ast_commands
 
@@ -697,6 +698,81 @@ def impact(
         ],
     }
     return json.dumps(data, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# semantic_context — situational awareness for code agents
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def semantic_context(
+    selector: Annotated[str, Field(description=(
+        "Symbol selector (e.g. 'file.py::func_name', 'file.py::Class.method'). "
+        "Call this when you're about to change a function/class and want to know "
+        "what could go wrong — hidden API contracts, async side effects, dynamic "
+        "string references, missing tests, caching issues."
+    ))],
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
+    interface_decorators: Annotated[list[str] | None, Field(description=(
+        "Additional decorator names that indicate external interfaces "
+        "(e.g. 'rpc_endpoint', 'message_handler')."
+    ))] = None,
+) -> str:
+    """Check a symbol for hidden dangers before editing it.
+
+    Returns dangers (things you'd miss from just reading the code), plus
+    a compact summary of callers, side effects, and test coverage.
+
+    Danger categories:
+    - external_interface: decorator exposes this as API/RPC/CLI (signature = contract)
+    - async_side_effect: calls .delay()/.apply_async() (work finishes after return)
+    - dynamic_reference: name appears as string literal (renaming won't catch it)
+    - high_fan_out: 5+ non-test callers (wide blast radius)
+    - caching: @lru_cache etc (mutations may serve stale data)
+    - no_test_coverage: no test files call this directly
+    """
+    parsed = parse_extended_selector(selector)
+    result = _semantic_context(
+        parsed,
+        project_path=project,
+        extra_interface_decorators=interface_decorators,
+    )
+
+    # Return compact output focused on actionable information
+    compact: dict = {
+        "symbol": result.symbol,
+        "kind": result.kind,
+        "file": result.file,
+        "line": result.line,
+    }
+    if result.decorators:
+        compact["decorators"] = result.decorators
+    if result.is_async:
+        compact["is_async"] = True
+
+    # Dangers are the whole point
+    if result.dangers:
+        compact["dangers"] = [
+            {"level": d.level, "category": d.category,
+             "message": d.message, "evidence": d.evidence}
+            for d in result.dangers
+        ]
+    else:
+        compact["dangers"] = "none detected"
+
+    # Compact summary — counts, not full lists
+    compact["callers_count"] = len(result.callers)
+    compact["test_callers_count"] = sum(1 for c in result.callers if c.kind == "test")
+    compact["references_count"] = result.references_count
+
+    if result.side_effects:
+        compact["side_effects"] = [
+            {"kind": se.kind, "target": se.target}
+            for se in result.side_effects
+        ]
+
+    return json.dumps(compact, indent=2)
 
 
 # ---------------------------------------------------------------------------

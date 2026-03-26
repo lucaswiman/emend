@@ -7,7 +7,7 @@
 | File | Purpose |
 |------|---------|
 | `cli.py` | CLI entry point (Typer), all command definitions |
-| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code, impact |
+| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, find-references, callers, callees, graph, dead-code, impact, semantic-context |
 | `pattern.py` | Pattern parsing and Rust IR compilation with `$METAVAR` support |
 | `component_selector.py` | Selector parsing (`file.py::Sym[component][accessor]`) |
 | `ast_commands.py` | List-symbols and copy-to commands (uses Rust `emend_core` for symbol collection) |
@@ -67,6 +67,7 @@
 | `test_rename_module.py` | `rename-module` command |
 | `test_rename_symbol.py` | `rename` / `rename-symbol` command |
 | `test_rope_commands.py` | Module-level refactoring commands (move module mode) |
+| `test_semantic_context.py` | `semantic_context()` function (dangers, callers, callees, side effects, data flow, test coverage) |
 | `test_search.py` | `search` command (unified find/lookup) |
 | `test_show.py` | `show` command |
 | `test_show_unified.py` | Unified show output |

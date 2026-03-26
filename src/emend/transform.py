@@ -4733,6 +4733,452 @@ def find_impact(
     )
 
 
+# ---------------------------------------------------------------------------
+# Semantic context — situational awareness for code agents
+# ---------------------------------------------------------------------------
+
+# Default decorators that indicate a symbol is an external interface
+_EXTERNAL_INTERFACE_DECORATORS = frozenset({
+    'app.route', 'app.get', 'app.post', 'app.put', 'app.delete', 'app.patch',
+    'router.get', 'router.post', 'router.put', 'router.delete', 'router.patch',
+    'api_view', 'action',
+    'rpc_endpoint', 'grpc_method',
+    'click.command', 'click.group',
+    'app.command',
+    'strawberry.mutation', 'strawberry.query', 'strawberry.subscription',
+    'graphene.resolve',
+    'task', 'celery.task', 'shared_task',
+    'webhook', 'endpoint',
+    'message_handler', 'event_handler',
+})
+
+_EXTERNAL_INTERFACE_BASENAMES = frozenset({
+    'route', 'get', 'post', 'put', 'delete', 'patch', 'head', 'options',
+    'command', 'task', 'endpoint', 'webhook',
+    'mutation', 'query', 'subscription',
+    'rpc', 'grpc', 'api',
+})
+
+# Patterns in callees that indicate async side effects
+_ASYNC_SIDE_EFFECT_PATTERNS = frozenset({
+    'delay', 'apply_async', 'send_task',
+    'submit', 'create_task', 'ensure_future',
+    'run_in_executor',
+})
+
+# Patterns in callees that indicate I/O or external effects
+_SIDE_EFFECT_CALLEE_PATTERNS = {
+    'db_write': {'save', 'commit', 'add', 'delete', 'update', 'insert',
+                 'execute', 'executemany', 'bulk_create', 'bulk_update'},
+    'network': {'request', 'get', 'post', 'put', 'fetch', 'urlopen', 'send'},
+    'file_io': {'write', 'open', 'unlink', 'remove', 'rename', 'mkdir'},
+    'cache': {'set', 'delete', 'clear', 'invalidate'},
+}
+
+# Caching decorators that may need invalidation on mutations
+_CACHE_DECORATORS = frozenset({
+    'cache', 'lru_cache', 'cached_property', 'cache_page',
+    'cache_control', 'memoize', 'cacheable',
+})
+
+# Regex for detecting a name inside string literals (matches dead code approach)
+_STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _parse_decorator_name(dec: str) -> tuple[str, str]:
+    """Return (full_name, basename) from a raw decorator string."""
+    dec_clean = dec.lstrip('@').split('(')[0].strip()
+    dec_basename = dec_clean.rsplit('.', 1)[-1] if '.' in dec_clean else dec_clean
+    return dec_clean, dec_basename
+
+
+@dataclass
+class Danger:
+    """A potential hazard the agent should know about before editing."""
+    level: str  # "high", "medium", "low"
+    category: str
+    message: str
+    evidence: str  # file:line or brief code snippet
+
+
+@dataclass
+class DataFlow:
+    """A data input or output of the symbol."""
+    name: str
+    type_annotation: str | None = None
+    flows_to: list[str] | None = None
+    flows_from: list[str] | None = None
+    note: str | None = None
+
+
+@dataclass
+class SideEffect:
+    """A side effect performed by the symbol."""
+    kind: str  # 'db_write', 'network', 'file_io', 'cache', 'async_task', 'external_call'
+    target: str
+    evidence: str
+
+
+@dataclass
+class CallerInfo:
+    """A caller of the symbol."""
+    symbol: str  # selector-style path
+    file: str
+    line: int
+    kind: str = "direct"  # "direct", "test", "indirect"
+
+
+@dataclass
+class TestInfo:
+    """Test coverage information."""
+    direct: list[str]
+    indirect: list[str]
+
+
+@dataclass
+class SemanticContext:
+    """Full semantic dossier on a symbol — the agent's situational awareness."""
+    symbol: str  # qualified name
+    kind: str
+    file: str
+    line: int
+    end_line: int
+
+    # Signature
+    parameters: list[str]
+    returns: str | None
+    decorators: list[str]
+    is_async: bool
+
+    # The whole point — what could bite you
+    dangers: list[Danger]
+
+    # Data flow
+    data_in: list[DataFlow]
+    data_out: list[DataFlow]
+    side_effects: list[SideEffect]
+
+    # Relationships
+    callers: list[CallerInfo]
+    callees: list[str]
+    references_count: int
+
+    # Tests
+    tests: TestInfo
+
+    def to_dict(self) -> dict:
+        """Serialize to JSON-friendly dict."""
+        d: dict = {
+            "symbol": self.symbol,
+            "kind": self.kind,
+            "file": self.file,
+            "line": self.line,
+            "end_line": self.end_line,
+            "signature": {
+                "parameters": self.parameters,
+                "returns": self.returns,
+                "decorators": self.decorators,
+                "is_async": self.is_async,
+            },
+            "dangers": [
+                {"level": dg.level, "category": dg.category,
+                 "message": dg.message, "evidence": dg.evidence}
+                for dg in self.dangers
+            ],
+            "flow": {
+                "data_in": [
+                    {k: v for k, v in {
+                        "name": di.name, "type": di.type_annotation,
+                        "flows_from": di.flows_from, "note": di.note,
+                    }.items() if v is not None}
+                    for di in self.data_in
+                ],
+                "data_out": [
+                    {k: v for k, v in {
+                        "name": do.name, "type": do.type_annotation,
+                        "flows_to": do.flows_to, "note": do.note,
+                    }.items() if v is not None}
+                    for do in self.data_out
+                ],
+                "side_effects": [
+                    {"kind": se.kind, "target": se.target, "evidence": se.evidence}
+                    for se in self.side_effects
+                ],
+            },
+            "callers": [
+                {"symbol": c.symbol, "file": c.file, "line": c.line, "kind": c.kind}
+                for c in self.callers
+            ],
+            "callees": self.callees,
+            "references_count": self.references_count,
+            "tests": {
+                "direct": self.tests.direct,
+                "indirect": self.tests.indirect,
+            },
+        }
+        return d
+
+
+def semantic_context(
+    selector: ExtendedSelector,
+    project_path: str | None = None,
+    extra_interface_decorators: list[str] | None = None,
+) -> SemanticContext:
+    """Build a semantic dossier on a symbol.
+
+    Composes callers, callees, references, and heuristic danger
+    detection into a single structured result that gives an agent
+    full situational awareness before making changes.
+
+    Args:
+        selector: Symbol to analyze.
+        project_path: Project root (auto-detected if None).
+        extra_interface_decorators: Additional decorator names that
+            indicate external interfaces.
+
+    Returns:
+        SemanticContext with dangers, flow, callers, tests, etc.
+    """
+    from .ast_utils import find_nested_definitions, find_symbol_by_path
+
+    file_path = selector.file_path
+    symbol_path = selector.symbol_path
+    if not symbol_path:
+        raise ValueError("Symbol path is required for semantic_context")
+
+    project_root = project_path or _find_project_root(file_path)
+
+    # ---- Resolve the symbol -----------------------------------------------
+    symbols = find_nested_definitions(file_path)
+    target = find_symbol_by_path(symbols, symbol_path)
+    if target is None:
+        raise ValueError(f"Symbol not found: {'.'.join(symbol_path)}")
+
+    qualified_name = f"{file_path}::{'.'.join(symbol_path)}"
+    is_async = target.kind in ('async_function', 'async_method')
+
+    if not Path(file_path).exists():
+        raise ValueError(f"File not found: {file_path}")
+
+    # ---- Gather callers (partition test/non-test in one pass) -------------
+    callers_list: list[CallerInfo] = []
+    test_caller_count = 0
+    non_test_caller_count = 0
+    try:
+        for ref in find_callers(selector, project_path=project_root):
+            is_test = _is_test_file(ref.file_path)
+            callers_list.append(CallerInfo(
+                symbol=ref.file_path + f":{ref.line}",
+                file=ref.file_path,
+                line=ref.line,
+                kind="test" if is_test else "direct",
+            ))
+            if is_test:
+                test_caller_count += 1
+            else:
+                non_test_caller_count += 1
+    except Exception as exc:
+        logger.debug("semantic_context: find_callers failed: %s", exc)
+
+    # ---- Gather callees ---------------------------------------------------
+    callees_list: list[str] = []
+    try:
+        for callee in find_callees(selector, project_path=project_root):
+            callees_list.append(callee.qualified_name or callee.name)
+    except Exception as exc:
+        logger.debug("semantic_context: find_callees failed: %s", exc)
+
+    # ---- Count references -------------------------------------------------
+    ref_count = 0
+    try:
+        for _ in find_references(selector, project_path=project_root,
+                                 include_definition=False, include_imports=False):
+            ref_count += 1
+    except Exception as exc:
+        logger.debug("semantic_context: find_references failed: %s", exc)
+
+    # ---- Build interface decorators set -----------------------------------
+    iface_decorators = set(_EXTERNAL_INTERFACE_DECORATORS)
+    iface_basenames = set(_EXTERNAL_INTERFACE_BASENAMES)
+    if extra_interface_decorators:
+        for d in extra_interface_decorators:
+            iface_decorators.add(d)
+            if '.' in d:
+                iface_basenames.add(d.rsplit('.', 1)[-1])
+            else:
+                iface_basenames.add(d)
+
+    # ---- Detect dangers ---------------------------------------------------
+    dangers: list[Danger] = []
+
+    # Parse decorators once, reuse for interface + caching checks
+    parsed_decorators = [_parse_decorator_name(dec) for dec in target.decorators]
+
+    # 1. External interface decorators
+    for dec_clean, dec_basename in parsed_decorators:
+        if dec_clean in iface_decorators or dec_basename in iface_basenames:
+            dangers.append(Danger(
+                level="high",
+                category="external_interface",
+                message=f"Decorated with @{dec_clean} — signature is part of external API/protocol",
+                evidence=f"{file_path}:{target.decorator_line_start or target.line_start}",
+            ))
+
+    # 2. Async side effects in callees
+    for callee_name in callees_list:
+        short_name = callee_name.rsplit('.', 1)[-1] if '.' in callee_name else callee_name
+        if short_name in _ASYNC_SIDE_EFFECT_PATTERNS:
+            dangers.append(Danger(
+                level="high",
+                category="async_side_effect",
+                message=f"Calls {callee_name}() — triggers async/background work that completes after return",
+                evidence=f"{file_path} (callee)",
+            ))
+
+    # 3. String references to this symbol (dynamic dispatch risk)
+    # Uses same regex approach as dead code string scanning
+    symbol_name = symbol_path[-1]
+    if len(symbol_name) > 3:
+        try:
+            source_files = _collect_source_files(project_root)
+            matched = _rust.read_and_filter_files(source_files, [symbol_name])
+            str_ref_files: list[str] = []
+            for fp, content in matched:
+                for line_text in content.splitlines():
+                    if symbol_name not in line_text:
+                        continue
+                    # Strip non-string content; if name disappears, it was in a string
+                    stripped = _STRING_LITERAL_RE.sub("", line_text)
+                    if symbol_name in line_text and symbol_name not in stripped:
+                        str_ref_files.append(fp)
+                        break
+            if str_ref_files:
+                dangers.append(Danger(
+                    level="medium",
+                    category="dynamic_reference",
+                    message=f"Name '{symbol_name}' appears as string literal — renaming may miss dynamic references",
+                    evidence=", ".join(str_ref_files[:3]) + (
+                        f" (+{len(str_ref_files) - 3} more)" if len(str_ref_files) > 3 else ""
+                    ),
+                ))
+        except Exception:
+            pass  # best-effort
+
+    # 4. High fan-out (many callers)
+    if non_test_caller_count >= 10:
+        dangers.append(Danger(
+            level="high",
+            category="high_fan_out",
+            message=f"Called from {non_test_caller_count} non-test locations — changes have wide blast radius",
+            evidence=f"{len(callers_list)} total callers ({non_test_caller_count} non-test)",
+        ))
+    elif non_test_caller_count >= 5:
+        dangers.append(Danger(
+            level="medium",
+            category="high_fan_out",
+            message=f"Called from {non_test_caller_count} non-test locations",
+            evidence=f"{len(callers_list)} total callers ({non_test_caller_count} non-test)",
+        ))
+
+    # 5. Caching decorators (may need invalidation on mutations)
+    for dec_clean, dec_basename in parsed_decorators:
+        if dec_basename in _CACHE_DECORATORS:
+            dangers.append(Danger(
+                level="medium",
+                category="caching",
+                message=f"Decorated with @{dec_clean} — results are cached, mutations may serve stale data",
+                evidence=f"{file_path}:{target.decorator_line_start or target.line_start}",
+            ))
+
+    # 6. No test coverage
+    if test_caller_count == 0 and target.kind in ('function', 'async_function', 'method', 'async_method'):
+        dangers.append(Danger(
+            level="medium",
+            category="no_test_coverage",
+            message="No test files call this symbol directly",
+            evidence="0 test callers found",
+        ))
+
+    # ---- Build data flow info ---------------------------------------------
+    data_in: list[DataFlow] = []
+    for param in target.parameters:
+        # Parse "name: type = default" or just "name"
+        param_name = param.split(':')[0].split('=')[0].strip()
+        param_type = None
+        if ':' in param:
+            param_type = param.split(':', 1)[1].split('=')[0].strip()
+        if param_name and param_name not in ('self', 'cls'):
+            data_in.append(DataFlow(
+                name=param_name,
+                type_annotation=param_type,
+            ))
+
+    data_out: list[DataFlow] = []
+    # Get return type from source if available
+    # (NestedSymbol doesn't have returns, so we check SymbolInfo)
+    try:
+        from .query import query_symbols
+        sym_infos = query_symbols(file_path, selector_str=qualified_name)
+        if sym_infos and sym_infos[0].returns:
+            data_out.append(DataFlow(
+                name="return",
+                type_annotation=sym_infos[0].returns,
+            ))
+    except Exception:
+        pass
+
+    # ---- Detect side effects from callees ---------------------------------
+    # Build a prefix to identify local-scope callees (e.g., set.add on local vars)
+    _module = _file_to_module(file_path, project_root)
+    _local_prefix = f"{_module}.{'.'.join(symbol_path)}."
+    side_effects: list[SideEffect] = []
+    for callee_name in callees_list:
+        # Skip builtins, unqualified names, and local-scope operations
+        if (callee_name.startswith('builtins.') or
+                '.' not in callee_name or
+                callee_name.startswith(_local_prefix)):
+            continue
+        short = callee_name.rsplit('.', 1)[-1]
+        for effect_kind, patterns in _SIDE_EFFECT_CALLEE_PATTERNS.items():
+            if short in patterns:
+                side_effects.append(SideEffect(
+                    kind=effect_kind,
+                    target=callee_name,
+                    evidence=f"calls {callee_name}()",
+                ))
+                break
+        if short in _ASYNC_SIDE_EFFECT_PATTERNS:
+            side_effects.append(SideEffect(
+                kind="async_task",
+                target=callee_name,
+                evidence=f"calls {callee_name}()",
+            ))
+
+    # ---- Classify tests ---------------------------------------------------
+    direct_tests = [c.symbol for c in callers_list if c.kind == "test"]
+    tests = TestInfo(direct=direct_tests, indirect=[])
+
+    return SemanticContext(
+        symbol=qualified_name,
+        kind=target.kind,
+        file=file_path,
+        line=target.line_start,
+        end_line=target.line_end,
+        parameters=target.parameters,
+        returns=data_out[0].type_annotation if data_out else None,
+        decorators=target.decorators,
+        is_async=is_async,
+        dangers=dangers,
+        data_in=data_in,
+        data_out=data_out,
+        side_effects=side_effects,
+        callers=callers_list,
+        callees=callees_list,
+        references_count=ref_count,
+        tests=tests,
+    )
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
