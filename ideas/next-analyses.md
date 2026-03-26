@@ -6,7 +6,22 @@ ranked by feasibility and value given emend's existing infrastructure.
 See [static-analysis-literature-review.md](static-analysis-literature-review.md)
 for full details, papers, and implementation strategies.
 
-## Top 10 Priorities
+## Key Insight: Most Analyses Are Datalog Queries
+
+Many of the techniques in the literature review reduce to "transitive closure
+over program-graph edges with different filters."  Once a Datalog engine exists
+on the fact graph, these become rule sets rather than separate implementations:
+
+- **Program slicing** — `InSlice(def) :- InSlice(use), UsesVar(use, V), DefinesVar(def, V).`
+- **CFL-reachability** — matched-parenthesis reachability is expressible as recursive Datalog rules
+- **IFDS/IDE** — IFDS problems *are* Datalog programs (this is how Doop and CodeQL work)
+- **Points-to analysis** — Andersen's analysis is the canonical Datalog textbook example
+- **Effect inference** — `HasEffect(f, e) :- Calls(f, g), HasEffect(g, e).`
+
+These are marked **won't do separately** below — they'll ship as example
+rule sets for the Datalog engine rather than as bespoke implementations.
+
+## Priorities
 
 ### 1. Datalog Engine on the Fact Graph
 
@@ -20,25 +35,12 @@ Smaragdakis & Bravenboer (FTPL 2011).
 
 **Reuses:** fact_graph.py, policy engine YAML parsing.
 **Enables:** User-defined analyses, a query language for the MCP server, and a
-unification layer for taint, dead code, and type checks.
+unification layer for taint, dead code, and type checks.  Also subsumes
+program slicing, CFL-reachability, IFDS/IDE, points-to, and effect inference
+as rule sets rather than separate implementations.
 **Effort:** Medium.
 
-### 2. Program Slicing
-
-Given a variable at a program point, compute the set of statements that affect
-its value (backward slice) or are affected by its definition (forward slice).
-Thin slicing (Sridharan et al., PLDI 2007) produces much smaller, more
-actionable slices by skipping control dependence.
-
-**Key papers:** Weiser (IEEE TSE 1984), Horwitz/Reps/Binkley (TOPLAS 1990),
-Sridharan/Fink/Bodik (PLDI 2007).
-
-**Reuses:** Taint engine (already a specialized forward slicer), scope resolver,
-fact graph, call graph.
-**Enables:** `emend slice file.py::func.x --backward`, stronger impact analysis.
-**Effort:** Medium-low.
-
-### 3. Typestate Analysis
+### 2. Typestate Analysis
 
 Track object protocol states (e.g., file: unopened -> opened -> closed) and
 detect violations (reading from a closed file, forgetting to close).
@@ -51,8 +53,11 @@ policy engine for protocol definitions.
 **Enables:** Resource leak detection, protocol checking for Python files,
 connections, locks, iterators.
 **Effort:** Medium.
+**Note:** The dataflow part is Datalog-expressible, but the protocol
+definitions, aliasing handling, and must-close-on-all-paths logic need
+dedicated machinery beyond just rules.
 
-### 4. API Migration
+### 3. API Migration
 
 Automated library upgrade patterns: given migration rules (old API -> new API),
 rewrite callsites across a project with import updates.
@@ -66,7 +71,7 @@ command, replace engine, rename/move infrastructure.
 migration YAML files.
 **Effort:** Medium (infrastructure is mostly there).
 
-### 5. Specification Mining
+### 4. Specification Mining
 
 Infer likely invariants and coding conventions from patterns in the codebase.
 Flag anomalies where the convention is violated.
@@ -79,7 +84,7 @@ Flag anomalies where the convention is violated.
 Convention enforcement via the policy engine.
 **Effort:** Low-medium.
 
-### 6. Advanced Change Impact Analysis
+### 5. Advanced Change Impact Analysis
 
 Extend current caller-closure impact analysis with co-change detection (from
 git history), field-sensitive impact, and test-coverage mapping.
@@ -90,8 +95,10 @@ git history), field-sensitive impact, and test-coverage mapping.
 **Reuses:** Impact analysis, git log integration, fact graph.
 **Enables:** Files that historically co-change, field-level impact precision.
 **Effort:** Low-medium.
+**Note:** The transitive-closure part of impact analysis is a Datalog query,
+but co-change mining from git history and field-sensitive tracking are not.
 
-### 7. Incremental / Demand-Driven Analysis
+### 6. Incremental / Demand-Driven Analysis
 
 Only re-analyze what changed rather than re-processing the whole project.
 Critical for editor integration and large codebases.
@@ -103,20 +110,7 @@ Critical for editor integration and large codebases.
 **Enables:** Sub-second analysis updates after file saves.
 **Effort:** Medium.
 
-### 8. Effect Inference
-
-Track side effects (I/O, mutations, exceptions) through the call graph. A
-function is "pure" if it and all callees produce no effects.
-
-**Key papers:** Lucassen & Gifford (POPL 1988), Benton et al. (JFP 2009),
-Gordon et al. (OOPSLA 2013).
-
-**Reuses:** semantic_context() (already detects side effects), call graph.
-**Enables:** Purity checking, safe-to-parallelize analysis, effect-based
-policy rules.
-**Effort:** Medium.
-
-### 9. None/Optional Abstract Domain
+### 7. None/Optional Abstract Domain
 
 A focused abstract interpretation that tracks whether variables may be None.
 Python's most common runtime error is AttributeError on None.
@@ -128,7 +122,7 @@ Logozzo & Fähndrich (SAS 2008).
 **Enables:** None-safety checking without full type annotations.
 **Effort:** Medium.
 
-### 10. LLM-Guided False Positive Reduction
+### 8. LLM-Guided False Positive Reduction
 
 Use the MCP server to let an LLM review analysis results and filter false
 positives using semantic understanding.
@@ -137,30 +131,46 @@ positives using semantic understanding.
 **Enables:** Higher precision without sacrificing recall.
 **Effort:** Low (infrastructure is already there).
 
+## Won't Do Separately (Subsumed by Datalog Engine)
+
+These are all transitive-closure or reachability computations over program
+graphs.  Once the Datalog engine ships, they become example rule sets:
+
+| Technique | Why it's a Datalog query | Example rule |
+|-----------|-------------------------|--------------|
+| Program slicing | Transitive closure over def-use edges | `InSlice(d) :- InSlice(u), Uses(u,V), Defs(d,V).` |
+| CFL-reachability | Matched-parenthesis reachability | `Reaches(a,b) :- Call(a,f,cs), Reaches(f,b), Ret(b,cs).` |
+| IFDS/IDE | IFDS problems are Datalog programs | (Doop, CodeQL are existence proofs) |
+| Points-to analysis | Andersen's = subset constraints | `PtsTo(p,o) :- Assign(p,q), PtsTo(q,o).` |
+| Effect inference | Transitive effect propagation | `HasEffect(f,e) :- Calls(f,g), HasEffect(g,e).` |
+
+**Key papers for these are preserved in the literature review** for reference
+when writing the rule sets.
+
 ## Summary Matrix
 
-| # | Technique | Tier | Key Reuse | Effort |
-|---|-----------|------|-----------|--------|
-| 1 | Datalog engine | 2 | fact_graph | Medium |
-| 2 | Program slicing | 1 | taint engine | Medium-low |
-| 3 | Typestate analysis | 1 | taint engine | Medium |
-| 4 | API migration | 2 | mapping store, batch | Medium |
-| 5 | Spec mining | 1 | pattern matching | Low-medium |
-| 6 | Adv. impact analysis | 1 | impact, git | Low-medium |
-| 7 | Incremental analysis | 2 | parse.db, editor | Medium |
-| 8 | Effect inference | 2 | semantic_context() | Medium |
-| 9 | None/Optional domain | 2 | taint engine | Medium |
-| 10 | LLM false positive filtering | 1 | MCP server | Low |
+| # | Technique | Status | Key Reuse | Effort |
+|---|-----------|--------|-----------|--------|
+| 1 | Datalog engine | **TODO** | fact_graph | Medium |
+| 2 | Typestate analysis | **TODO** | taint engine | Medium |
+| 3 | API migration | **TODO** | mapping store, batch | Medium |
+| 4 | Spec mining | **TODO** | pattern matching | Low-medium |
+| 5 | Adv. impact analysis | **TODO** | impact, git | Low-medium |
+| 6 | Incremental analysis | **TODO** | parse.db, editor | Medium |
+| 7 | None/Optional domain | **TODO** | taint engine | Medium |
+| 8 | LLM false positive filtering | **TODO** | MCP server | Low |
+| — | Program slicing | **Datalog rules** | — | — |
+| — | CFL-reachability | **Datalog rules** | — | — |
+| — | IFDS/IDE | **Datalog rules** | — | — |
+| — | Points-to analysis | **Datalog rules** | — | — |
+| — | Effect inference | **Datalog rules** | — | — |
 
 ## Longer-Term (Tier 3-4)
 
 These require significant new infrastructure but have high potential:
 
-- **IFDS/IDE framework** — context-sensitive interprocedural analysis
-- **Points-to analysis** — precise call graphs and alias analysis
 - **Bounded model checking** — property verification for Python
 - **Shape analysis** — data structure invariant checking
 - **Semantic code search** — embedding-based code search
-- **CFL-reachability** — unified framework for interprocedural analyses
 
 See the full literature review for details on these.

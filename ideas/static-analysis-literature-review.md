@@ -8,7 +8,7 @@ These techniques can be built directly on emend's existing fact graph, taint eng
 
 ---
 
-### 1. Program Slicing
+### 1. Program Slicing — *won't do separately; Datalog rules once engine ships*
 
 **Seminal papers:**
 - Mark Weiser, "Program Slicing," *IEEE TSE*, 1984 — introduced the concept of backward slicing: given a variable at a program point, compute the set of statements that could affect its value.
@@ -35,7 +35,7 @@ These techniques can be built directly on emend's existing fact graph, taint eng
 
 ---
 
-### 2. CFL-Reachability Based Analysis
+### 2. CFL-Reachability Based Analysis — *won't do separately; Datalog rules once engine ships*
 
 **Seminal papers:**
 - Reps, "Program Analysis via Graph Reachability," *Information and Software Technology*, 1998 — showed that many program analyses (points-to, slicing, taint) can be formulated as context-free language reachability problems on graphs.
@@ -285,7 +285,7 @@ The engine evaluates all rules to a fixed point using semi-naive evaluation.
 
 ---
 
-### 9. IFDS/IDE Framework
+### 9. IFDS/IDE Framework — *won't do separately; Datalog rules once engine ships*
 
 **Seminal papers:**
 - Reps, Horwitz, Sagiv, "Precise Interprocedural Dataflow Analysis via Graph Reachability," *POPL 1995* — the IFDS framework. Key insight: interprocedural dataflow problems where the domain is a finite set and the transfer functions distribute over meet can be solved precisely (context-sensitively) in polynomial time by reducing to CFL-reachability on an "exploded supergraph."
@@ -380,7 +380,7 @@ For taint analysis: the data-flow domain is the set of variables/access paths. A
 
 ---
 
-### 12. Points-to Analysis
+### 12. Points-to Analysis — *won't do separately; Datalog rules once engine ships*
 
 **Seminal papers:**
 - Andersen, "Program Analysis and Specialization for the C Programming Language," *PhD thesis, DIKU*, 1994 — inclusion-based (subset) points-to analysis. For each pointer p, computes pts(p) = {objects p may point to}. Constraint: `p = q` implies pts(q) ⊆ pts(p). Cubic complexity.
@@ -416,7 +416,7 @@ For taint analysis: the data-flow domain is the set of variables/access paths. A
 
 ---
 
-### 13. Effect Systems
+### 13. Effect Systems — *won't do separately; Datalog rules once engine ships*
 
 **Seminal papers:**
 - Gifford and Lucassen, "Integrating Functional and Imperative Programming," *LFP 1986* — early effect systems tracking read/write side effects.
@@ -667,19 +667,19 @@ These require substantial new components but would be transformative.
 
 | Technique | Tier | Reuses Existing | New Capability | Effort |
 |-----------|------|----------------|----------------|--------|
-| Program Slicing | 1 | Taint engine, fact graph, call graph | "What affects this value?" / "What does this change affect?" | Medium-low |
-| CFL-Reachability | 1 | Fact graph, call graph | Unified framework for interprocedural analysis | Medium |
+| Program Slicing | ~~1~~ | ~~Taint engine, fact graph, call graph~~ | *Won't do separately — Datalog rules* | — |
+| CFL-Reachability | ~~1~~ | ~~Fact graph, call graph~~ | *Won't do separately — Datalog rules* | — |
 | Specification Mining | 1 | Pattern matching, fact graph | Anomaly detection, convention enforcement | Low-medium |
 | Provenance Tracking | 1 | Taint engine | Richer data lineage than taint traces | Low-medium |
 | Code Clone Detection | 1 | Pattern engine, tree-sitter | Refactoring opportunities, diverged copies | Low (Type 1-2) |
 | Advanced Impact Analysis | 1 | Impact analysis, git, fact graph | Co-change, field-sensitive impact, test mapping | Low-medium |
 | Typestate Analysis | 1 | Taint engine, policy engine | Resource leak detection, protocol checking | Medium |
 | Datalog Engine | 2 | Fact graph, taint engine | User-defined analyses, query language | Medium |
-| IFDS/IDE | 2 | Taint engine, call graph | Context-sensitive interprocedural analysis | Medium-high |
+| IFDS/IDE | ~~2~~ | ~~Taint engine, call graph~~ | *Won't do separately — Datalog rules* | — |
 | Abstract Interpretation | 2 | Taint engine, type oracle | Runtime error detection, range analysis | Medium-high |
 | Incremental Analysis | 2 | parse.db cache, editor server | Real-time analysis after edits | Medium |
-| Points-to Analysis | 2 | Type oracle, scope resolver | Precise call graphs, alias analysis | High |
-| Effect Systems | 2 | semantic_context(), call graph | Purity checking, effect-based policies | Medium |
+| Points-to Analysis | ~~2~~ | ~~Type oracle, scope resolver~~ | *Won't do separately — Datalog rules* | — |
+| Effect Systems | ~~2~~ | ~~semantic_context(), call graph~~ | *Won't do separately — Datalog rules* | — |
 | Symbolic Execution | 2 | Type oracle, tree-sitter | Assertion checking, test generation | High |
 | PBT Integration | 2 | Type oracle, pattern matching | Auto-generated property-based tests | Medium |
 | Shape Analysis | 3 | Limited | Data structure invariants | Very high |
@@ -692,15 +692,18 @@ These require substantial new components but would be transformative.
 
 ## Recommended Priority Ordering
 
-Based on feasibility, value, and synergy with existing infrastructure:
+Based on feasibility, value, and synergy with existing infrastructure.
 
-1. **Datalog engine on the fact graph** — unifies and generalizes multiple existing analyses; enables a user-facing query language; moderate effort.
-2. **Program slicing** — direct generalization of the taint engine; immediately useful for debugging and impact analysis.
-3. **Typestate analysis** — direct reuse of taint engine for resource leak detection; high practical value for Python (files, connections, locks).
-4. **API migration** — the mapping store, batch, and replace infrastructure is already there; high commercial value.
-5. **Specification mining** — low effort, feeds into the policy engine and lint rules.
-6. **Advanced impact analysis** (co-change, field-sensitive) — builds directly on existing impact analysis.
-7. **Incremental analysis** for the editor server — necessary for scaling.
-8. **Effect inference** — extends semantic_context() into a proper analysis.
-9. **None/Optional abstract domain** — a focused abstract interpretation that catches Python's most common runtime error.
-10. **LLM-guided false positive reduction** — the MCP server enables this immediately.
+**Key insight:** Program slicing, CFL-reachability, IFDS/IDE, points-to
+analysis, and effect inference are all transitive-closure / reachability
+computations that reduce to Datalog rule sets.  They won't be implemented
+separately — they ship as example rules once the Datalog engine exists.
+
+1. **Datalog engine on the fact graph** — unifies and generalizes multiple existing analyses; enables a user-facing query language; subsumes slicing, CFL-reachability, IFDS, points-to, and effect inference as rule sets.
+2. **Typestate analysis** — direct reuse of taint engine for resource leak detection; high practical value for Python (files, connections, locks). Needs dedicated machinery beyond Datalog for aliasing and must-close-on-all-paths.
+3. **API migration** — the mapping store, batch, and replace infrastructure is already there; high commercial value.
+4. **Specification mining** — low effort, feeds into the policy engine and lint rules.
+5. **Advanced impact analysis** (co-change, field-sensitive) — builds directly on existing impact analysis. Co-change mining from git is not a Datalog query.
+6. **Incremental analysis** for the editor server — necessary for scaling.
+7. **None/Optional abstract domain** — a focused abstract interpretation that catches Python's most common runtime error.
+8. **LLM-guided false positive reduction** — the MCP server enables this immediately.
