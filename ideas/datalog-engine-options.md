@@ -20,9 +20,7 @@ We need:
 5. **Performance** — competitive with current SQLite queries on ~100k-line
    projects.
 
-## Recommended Architecture: Two Layers
-
-### Layer 1: CozoDB for Storage + Runtime Queries
+## Recommended Engine: CozoDB
 
 [CozoDB](https://github.com/cozodb/cozo) is an embedded transactional
 database with a Datalog query language (CozoScript).  It was explicitly
@@ -82,34 +80,6 @@ because:
 - We'd pin to a specific version anyway.
 - The alternative (building a custom semi-naive evaluator) is more code to
   maintain than adopting a working 30k-line codebase.
-
-### Layer 2: Ascent for Compiled Hot-Path Analyses
-
-[Ascent](https://github.com/s-arash/ascent) is a Datalog DSL embedded in
-Rust via proc macros.  Rules are defined at compile time and compiled to
-efficient parallel Rust code.
-
-**Why Ascent (for the Rust layer only):**
-
-- Rules known at compile time get maximum performance — no interpretation
-  overhead.
-- Supports lattices (needed for abstract domains like None/Optional tracking).
-- Parallel execution via `ascent_par!`.
-- BYODS (Bring Your Own Data Structures) for custom indexing.
-- MIT license, actively maintained (v0.8.0, 2025).
-
-**What it's for:**
-
-- CFG-based intraprocedural taint propagation (hot path, called per function).
-- Typestate analysis (fixed protocol rules, compiled once).
-- Dominator/post-dominator computation.
-- Any analysis where the rules are fixed and performance matters.
-
-**What it's NOT for:**
-
-- User-defined rules (compile-time only).
-- Persistence (in-memory only).
-- The MCP query interface or policy engine (those need runtime rules → CozoDB).
 
 ## Other Options Considered
 
@@ -182,12 +152,6 @@ Pure-Python Datalog.  Abandoned (last release 2022).  LGPL.  Do not adopt.
 - Remove the hand-written SQL queries and `parse.db` fact tables.
 - Keep SQLite only for the FTS5 trigram index (editor search) and type
   cache, unless CozoDB's full-text capabilities suffice.
-
-### Phase 5 (optional): Add Ascent for hot paths
-
-- Implement CFG-based taint propagation as an Ascent program in Rust.
-- Expose results via PyO3.
-- Benchmark against CozoScript equivalent to validate the two-layer split.
 
 ## References
 

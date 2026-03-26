@@ -28,11 +28,9 @@ rule sets for the Datalog engine rather than as bespoke implementations.
 Replace the hand-written SQL in parse.db with an embedded Datalog database.
 **CozoDB** is the recommended engine: Rust-native, persistent (RocksDB/SQLite
 backends), runtime-definable rules (CozoScript), Python bindings via PyO3.
-For compiled hot-path analyses in Rust, **Ascent** (compile-time Datalog
-macros) complements CozoDB.
 
 **Design:** See [datalog-engine-options.md](datalog-engine-options.md) for
-the full comparison of 12 engines and a 5-phase migration path.
+the full comparison of 12 engines and a 4-phase migration path.
 
 **Key papers:** Whaley & Lam (PLDI 2004), Scholz et al. (CC 2016) (Soufflé),
 Smaragdakis & Bravenboer (FTPL 2011).
