@@ -67,7 +67,7 @@
 | `test_rename_module.py` | `rename-module` command |
 | `test_rename_symbol.py` | `rename` / `rename-symbol` command |
 | `test_rope_commands.py` | Module-level refactoring commands (move module mode) |
-| `test_semantic_context.py` | `semantic-context` command (dangers, callers, callees, side effects, data flow, test coverage, CLI, MCP) |
+| `test_semantic_context.py` | `semantic_context()` function (dangers, callers, callees, side effects, data flow, test coverage) |
 | `test_search.py` | `search` command (unified find/lookup) |
 | `test_show.py` | `show` command |
 | `test_show_unified.py` | Unified show output |
@@ -110,7 +110,6 @@
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
 | `taint` | Taint analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`) |
 | `impact` | Compute transitive set of impacted symbols from a change via reverse-caller closure (`--diff`, `--output symbols\|tests\|graph`, `--json`, `--max-depth`) |
-| `semantic-context` | Situational awareness for code agents: structured dossier on a symbol with dangers (external interfaces, async side effects, dynamic references, high fan-out, caching, test gaps), data flow, callers/callees, side effects (`--json`, `--interface-decorator`) |
 | `facts` | Query the relational fact graph for code invariants (`--type symbols\|calls\|references\|taint_flows\|types\|imports`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`, `--json`) |
 | `policy` | Run declarative policy checks from `.emend/policies.yaml` (`--config`, `--policy`, `--json`; supports flow, structural, type, deadcode, and custom checks) |
 | `saturate` | Experimental equality saturation rewrites from `.emend/rewrites.yaml` (`--config`, `--apply`, `--max-iterations`, `--json`) |

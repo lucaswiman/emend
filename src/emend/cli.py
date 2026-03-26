@@ -18,7 +18,6 @@ from emend.transform import (
     find_callers, generate_graph, find_dead_code, find_impact,
     extract_pattern_literals, warm_caches,
     find_pattern_in_project,
-    semantic_context,
 )
 from emend import ast_commands
 
@@ -2035,91 +2034,6 @@ def impact_cmd(
                     print("Tests:")
                     for t in result.impacted_tests:
                         print(f"  {t}")
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
-
-
-# ============================================================================
-# Semantic Context Command
-# ============================================================================
-
-
-@app.command("semantic-context")
-def semantic_context_cmd(
-    selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::func_name or file.py::Class.method)")],
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
-    interface_decorators: Annotated[Optional[list[str]], typer.Option(
-        "--interface-decorator",
-        help="Additional decorator names that indicate external interfaces",
-    )] = None,
-):
-    """Get semantic context for a symbol — the agent's situational awareness.
-
-    Returns a structured dossier including dangers (things that could bite
-    you during edits), data flow, callers, callees, side effects, and test
-    coverage. Designed to give a coding agent full situational awareness
-    in one call.
-
-    Examples:
-        emend semantic-context mymodule.py::process_order
-        emend semantic-context mymodule.py::MyClass.method --json
-        emend semantic-context app.py::handler --interface-decorator rpc_endpoint
-    """
-    import json as json_mod
-    from emend.transform import semantic_context
-
-    try:
-        sel = parse_extended_selector(selector)
-        result = semantic_context(
-            sel,
-            project_path=project,
-            extra_interface_decorators=interface_decorators,
-        )
-
-        if json_output:
-            print(json_mod.dumps(result.to_dict(), indent=2))
-        else:
-            # Human-readable output
-            print(f"Symbol: {result.symbol}")
-            print(f"Kind: {result.kind}{'  (async)' if result.is_async else ''}")
-            print(f"Location: {result.file}:{result.line}-{result.end_line}")
-
-            if result.decorators:
-                print(f"Decorators: {', '.join(result.decorators)}")
-            if result.parameters:
-                print(f"Parameters: {', '.join(result.parameters)}")
-            if result.returns:
-                print(f"Returns: {result.returns}")
-
-            if result.dangers:
-                print(f"\nDangers ({len(result.dangers)}):")
-                for d in result.dangers:
-                    icon = "!!" if d.level == "high" else "!" if d.level == "medium" else "."
-                    print(f"  [{icon}] [{d.category}] {d.message}")
-                    print(f"       Evidence: {d.evidence}")
-
-            if result.side_effects:
-                print(f"\nSide Effects ({len(result.side_effects)}):")
-                for se in result.side_effects:
-                    print(f"  [{se.kind}] {se.target}")
-
-            print(f"\nCallers: {len(result.callers)} ({len([c for c in result.callers if c.kind == 'test'])} tests)")
-            print(f"Callees: {len(result.callees)}")
-            print(f"References: {result.references_count}")
-
-            if result.tests.direct:
-                print(f"\nDirect tests ({len(result.tests.direct)}):")
-                for t in result.tests.direct[:10]:
-                    print(f"  {t}")
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)

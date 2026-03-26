@@ -709,34 +709,28 @@ def impact(
 def semantic_context(
     selector: Annotated[str, Field(description=(
         "Symbol selector (e.g. 'file.py::func_name', 'file.py::Class.method'). "
-        "Use this BEFORE editing a symbol to understand its full semantic context: "
-        "dangers, callers, callees, side effects, test coverage."
+        "Call this when you're about to change a function/class and want to know "
+        "what could go wrong — hidden API contracts, async side effects, dynamic "
+        "string references, missing tests, caching issues."
     ))],
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
     interface_decorators: Annotated[list[str] | None, Field(description=(
         "Additional decorator names that indicate external interfaces "
-        "(e.g. 'rpc_endpoint', 'message_handler'). "
-        "Built-in detection already covers common web frameworks, Celery, Click, etc."
+        "(e.g. 'rpc_endpoint', 'message_handler')."
     ))] = None,
 ) -> str:
-    """Get semantic context for a symbol — full situational awareness in one call.
+    """Check a symbol for hidden dangers before editing it.
 
-    Returns a structured JSON dossier with:
-    - **dangers**: things that could bite you during edits (external interfaces,
-      async side effects, dynamic string references, high fan-out, caching,
-      missing test coverage)
-    - **signature**: parameters, return type, decorators, async status
-    - **flow**: data inputs, data outputs, side effects (DB writes, network
-      calls, async tasks, file I/O)
-    - **callers**: who calls this symbol (with test/non-test classification)
-    - **callees**: what this symbol calls
-    - **tests**: direct test coverage
+    Returns dangers (things you'd miss from just reading the code), plus
+    a compact summary of callers, side effects, and test coverage.
 
-    Use this tool BEFORE making changes to understand what you're dealing with.
-    The dangers section surfaces things you'd otherwise miss — dynamic references
-    that renaming won't catch, external APIs where signature changes break
-    protocols, async tasks that complete after return, cached results that go
-    stale on mutation.
+    Danger categories:
+    - external_interface: decorator exposes this as API/RPC/CLI (signature = contract)
+    - async_side_effect: calls .delay()/.apply_async() (work finishes after return)
+    - dynamic_reference: name appears as string literal (renaming won't catch it)
+    - high_fan_out: 5+ non-test callers (wide blast radius)
+    - caching: @lru_cache etc (mutations may serve stale data)
+    - no_test_coverage: no test files call this directly
     """
     parsed = parse_extended_selector(selector)
     result = _semantic_context(
@@ -744,7 +738,41 @@ def semantic_context(
         project_path=project,
         extra_interface_decorators=interface_decorators,
     )
-    return json.dumps(result.to_dict(), indent=2)
+
+    # Return compact output focused on actionable information
+    compact: dict = {
+        "symbol": result.symbol,
+        "kind": result.kind,
+        "file": result.file,
+        "line": result.line,
+    }
+    if result.decorators:
+        compact["decorators"] = result.decorators
+    if result.is_async:
+        compact["is_async"] = True
+
+    # Dangers are the whole point
+    if result.dangers:
+        compact["dangers"] = [
+            {"level": d.level, "category": d.category,
+             "message": d.message, "evidence": d.evidence}
+            for d in result.dangers
+        ]
+    else:
+        compact["dangers"] = "none detected"
+
+    # Compact summary — counts, not full lists
+    compact["callers_count"] = len(result.callers)
+    compact["test_callers_count"] = sum(1 for c in result.callers if c.kind == "test")
+    compact["references_count"] = result.references_count
+
+    if result.side_effects:
+        compact["side_effects"] = [
+            {"kind": se.kind, "target": se.target}
+            for se in result.side_effects
+        ]
+
+    return json.dumps(compact, indent=2)
 
 
 # ---------------------------------------------------------------------------
