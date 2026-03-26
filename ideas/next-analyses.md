@@ -25,10 +25,14 @@ rule sets for the Datalog engine rather than as bespoke implementations.
 
 ### 1. Datalog Engine on the Fact Graph
 
-Expose the fact graph via a Datalog-style query language so users can write
-custom analyses without Python code.  The fact graph already has the right
-relational structure (symbols, calls, references, taint flows, types, imports);
-the main work is parsing Datalog rules and implementing a semi-naive evaluator.
+Replace the hand-written SQL in parse.db with an embedded Datalog database.
+**CozoDB** is the recommended engine: Rust-native, persistent (RocksDB/SQLite
+backends), runtime-definable rules (CozoScript), Python bindings via PyO3.
+For compiled hot-path analyses in Rust, **Ascent** (compile-time Datalog
+macros) complements CozoDB.
+
+**Design:** See [datalog-engine-options.md](datalog-engine-options.md) for
+the full comparison of 12 engines and a 5-phase migration path.
 
 **Key papers:** Whaley & Lam (PLDI 2004), Scholz et al. (CC 2016) (Soufflé),
 Smaragdakis & Bravenboer (FTPL 2011).
