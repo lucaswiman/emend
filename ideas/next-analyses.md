@@ -40,7 +40,22 @@ program slicing, CFL-reachability, IFDS/IDE, points-to, and effect inference
 as rule sets rather than separate implementations.
 **Effort:** Medium.
 
-### 2. Typestate Analysis
+### 2. Per-Function Control Flow Graphs
+
+Build CFGs in Rust as part of the existing tree-sitter parse pass, expose
+via PyO3.  This is the intraprocedural counterpart of the Datalog engine:
+the Datalog engine unlocks interprocedural query-side analyses, while CFGs
+unlock intraprocedural path-sensitive analyses.
+
+**Design:** See [control-flow-graphs.md](control-flow-graphs.md).
+
+**Reuses:** emend_core tree-sitter infrastructure, scope resolver's AST walk.
+**Enables:** Path-sensitive taint, must-close-on-all-paths typestate,
+`if x is not None` guard narrowing, unreachable code detection within
+functions, `ControlDependsOn` / `DefUse` facts for the Datalog engine.
+**Effort:** Medium (~1000 lines of Rust for core, ~200-300 lines Python per consumer).
+
+### 3. Typestate Analysis
 
 Track object protocol states (e.g., file: unopened -> opened -> closed) and
 detect violations (reading from a closed file, forgetting to close).
@@ -57,7 +72,7 @@ connections, locks, iterators.
 definitions, aliasing handling, and must-close-on-all-paths logic need
 dedicated machinery beyond just rules.
 
-### 3. API Migration
+### 4. API Migration
 
 Automated library upgrade patterns: given migration rules (old API -> new API),
 rewrite callsites across a project with import updates.
@@ -71,7 +86,7 @@ command, replace engine, rename/move infrastructure.
 migration YAML files.
 **Effort:** Medium (infrastructure is mostly there).
 
-### 4. Specification Mining
+### 5. Specification Mining
 
 Infer likely invariants and coding conventions from patterns in the codebase.
 Flag anomalies where the convention is violated.
@@ -84,7 +99,7 @@ Flag anomalies where the convention is violated.
 Convention enforcement via the policy engine.
 **Effort:** Low-medium.
 
-### 5. Advanced Change Impact Analysis
+### 6. Advanced Change Impact Analysis
 
 Extend current caller-closure impact analysis with co-change detection (from
 git history), field-sensitive impact, and test-coverage mapping.
@@ -98,7 +113,7 @@ git history), field-sensitive impact, and test-coverage mapping.
 **Note:** The transitive-closure part of impact analysis is a Datalog query,
 but co-change mining from git history and field-sensitive tracking are not.
 
-### 6. Incremental / Demand-Driven Analysis
+### 7. Incremental / Demand-Driven Analysis
 
 Only re-analyze what changed rather than re-processing the whole project.
 Critical for editor integration and large codebases.
@@ -110,7 +125,7 @@ Critical for editor integration and large codebases.
 **Enables:** Sub-second analysis updates after file saves.
 **Effort:** Medium.
 
-### 7. None/Optional Abstract Domain
+### 8. None/Optional Abstract Domain
 
 A focused abstract interpretation that tracks whether variables may be None.
 Python's most common runtime error is AttributeError on None.
@@ -122,7 +137,7 @@ Logozzo & Fähndrich (SAS 2008).
 **Enables:** None-safety checking without full type annotations.
 **Effort:** Medium.
 
-### 8. LLM-Guided False Positive Reduction
+### 9. LLM-Guided False Positive Reduction
 
 Use the MCP server to let an LLM review analysis results and filter false
 positives using semantic understanding.
@@ -152,13 +167,14 @@ when writing the rule sets.
 | # | Technique | Status | Key Reuse | Effort |
 |---|-----------|--------|-----------|--------|
 | 1 | Datalog engine | **TODO** | fact_graph | Medium |
-| 2 | Typestate analysis | **TODO** | taint engine | Medium |
-| 3 | API migration | **TODO** | mapping store, batch | Medium |
-| 4 | Spec mining | **TODO** | pattern matching | Low-medium |
-| 5 | Adv. impact analysis | **TODO** | impact, git | Low-medium |
-| 6 | Incremental analysis | **TODO** | parse.db, editor | Medium |
-| 7 | None/Optional domain | **TODO** | taint engine | Medium |
-| 8 | LLM false positive filtering | **TODO** | MCP server | Low |
+| 2 | Per-function CFGs | **TODO** | emend_core, scope resolver | Medium |
+| 3 | Typestate analysis | **TODO** | taint engine, CFGs | Medium |
+| 4 | API migration | **TODO** | mapping store, batch | Medium |
+| 5 | Spec mining | **TODO** | pattern matching | Low-medium |
+| 6 | Adv. impact analysis | **TODO** | impact, git | Low-medium |
+| 7 | Incremental analysis | **TODO** | parse.db, editor | Medium |
+| 8 | None/Optional domain | **TODO** | taint engine, CFGs | Medium |
+| 9 | LLM false positive filtering | **TODO** | MCP server | Low |
 | — | Program slicing | **Datalog rules** | — | — |
 | — | CFL-reachability | **Datalog rules** | — | — |
 | — | IFDS/IDE | **Datalog rules** | — | — |
