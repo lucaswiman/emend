@@ -2173,7 +2173,13 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
         if tsconfig.is_file():
             try:
                 import json
-                data = json.loads(tsconfig.read_text())
+                import re as _re
+                raw = tsconfig.read_text()
+                # Strip JSONC features: // comments, /* */ comments, trailing commas
+                raw = _re.sub(r'//[^\n]*', '', raw)
+                raw = _re.sub(r'/\*.*?\*/', '', raw, flags=_re.DOTALL)
+                raw = _re.sub(r',\s*([}\]])', r'\1', raw)
+                data = json.loads(raw)
                 root_dir = data.get("compilerOptions", {}).get("rootDir")
                 if root_dir:
                     candidate = root / root_dir
@@ -3224,8 +3230,8 @@ def find_pattern(
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
 
-    # Auto-detect language from file extension when using the default
-    if file_path:
+    # Auto-detect language from file extension when caller used the default
+    if language == "python" and file_path:
         from emend.language_registry import detect_language
         detected = detect_language(file_path)
         if detected:

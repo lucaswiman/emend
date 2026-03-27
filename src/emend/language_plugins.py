@@ -158,12 +158,10 @@ class TreeSitterImportHandler(ImportHandler):
             if stripped.startswith(kw + " ") or stripped.startswith(kw + "("):
                 return True
             # Handle lines that begin with visibility modifiers (e.g. ``pub use``)
-            if stripped.startswith("pub ") and kw in stripped:
+            # Use word-boundary check to avoid "use" matching "excuse"
+            if stripped.startswith("pub ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
                 return True
-            if stripped.startswith("export ") and kw in stripped:
-                return True
-            # Node.js require: ``const X = require('Y')`` or ``var X = require('Y')``
-            if kw == "require" and kw + "(" in stripped:
+            if stripped.startswith("export ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
                 return True
         # TypeScript/JavaScript re-exports: ``export { X } from 'Y'``
         # These act as imports and should be included.
@@ -293,11 +291,13 @@ class TreeSitterImportHandler(ImportHandler):
         """
         lines = source.splitlines(keepends=True)
         result: list[str] = []
+        mod_pat = re.compile(r'\b' + re.escape(module) + r'\b')
+        name_pat = re.compile(r'\b' + re.escape(name) + r'\b')
         for line in lines:
             stripped = line.strip()
             if (self._is_import_line(stripped)
-                    and module in stripped
-                    and name in stripped):
+                    and mod_pat.search(stripped)
+                    and name_pat.search(stripped)):
                 continue
             result.append(line)
         return "".join(result)
@@ -313,8 +313,13 @@ class RegexCommentHandler(CommentHandler):
     def __init__(self, prefix: str) -> None:
         self._prefix = prefix
         escaped = re.escape(prefix)
-        self._noqa_pat = re.compile(
+        # Match "noqa: tag1,tag2" with tags
+        self._noqa_tagged_pat = re.compile(
             escaped + r"\s*noqa:\s*(\S+)"
+        )
+        # Match bare "noqa" (no colon, no tags) to suppress all checks
+        self._noqa_bare_pat = re.compile(
+            escaped + r"\s*noqa\s*$"
         )
 
     @property
@@ -329,10 +334,12 @@ class RegexCommentHandler(CommentHandler):
     def find_noqa_comments(self, source: str) -> dict[int, set[str] | None]:
         result: dict[int, set[str] | None] = {}
         for lineno, line in enumerate(source.splitlines(), 1):
-            m = self._noqa_pat.search(line)
+            m = self._noqa_tagged_pat.search(line)
             if m:
                 tags = {t.strip() for t in m.group(1).split(",") if t.strip()}
                 result[lineno] = tags
+            elif self._noqa_bare_pat.search(line):
+                result[lineno] = None  # bare noqa suppresses all
         return result
 
     def rename_in_docstrings(
@@ -436,9 +443,11 @@ class DocCommentHandler(RegexCommentHandler):
                     doc_line_indices.add(idx)
 
         changed = False
+        word_pat = re.compile(r'\b' + re.escape(old_name) + r'\b')
         for idx in doc_line_indices:
-            if old_name in lines[idx]:
-                lines[idx] = lines[idx].replace(old_name, new_name)
+            new_line = word_pat.sub(new_name, lines[idx])
+            if new_line != lines[idx]:
+                lines[idx] = new_line
                 changed = True
 
         if changed:
