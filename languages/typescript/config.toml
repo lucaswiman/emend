@@ -4,6 +4,7 @@
 name = "typescript"
 tree_sitter_grammar = "tree-sitter-typescript"
 file_extensions = ["ts", "tsx", "js", "jsx"]
+comment_prefix = "//"
 keywords = ["undefined", "null", "true", "false"]
 
 [scoping]

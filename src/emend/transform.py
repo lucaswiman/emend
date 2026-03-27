@@ -755,6 +755,7 @@ def _ensure_index_fresh(
     project_path: str,
     *,
     max_inline_reindex: int = 50,
+    language: str = "python",
 ) -> bool:
     """Lightweight freshness check for the index.
 
@@ -839,7 +840,7 @@ def _ensure_index_fresh(
             conn.commit()
 
         if files_to_index:
-            _src_root = _find_python_source_root(project_root)
+            _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
             # Update manifest for re-indexed files
             import os as _os
@@ -908,6 +909,7 @@ def query_symbol_index(
     file_path: str | None = None,
     qualified_name: str | None = None,
     limit: int = 0,
+    language: str = "python",
 ) -> list[dict] | None:
     """Query the symbol_index table directly for fast symbol lookup.
 
@@ -916,7 +918,7 @@ def query_symbol_index(
     """
     import sqlite3 as _sql3
 
-    if not _ensure_index_fresh(project_path):
+    if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
@@ -1390,6 +1392,7 @@ def query_reference_index(
     target_qn: str,
     *,
     ref_kind: str | None = None,
+    language: str = "python",
 ) -> list[dict] | None:
     """Query the reference_index table for fast find-references.
 
@@ -1398,7 +1401,7 @@ def query_reference_index(
     """
     import sqlite3 as _sql3
 
-    if not _ensure_index_fresh(project_path):
+    if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
@@ -1529,6 +1532,7 @@ def warm_caches(
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
+    language: str = "python",
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
@@ -1596,7 +1600,7 @@ def warm_caches(
         pass
 
     # Resolve source root once so _index_batch workers can compute module_qn.
-    source_root = _find_source_root(project_root)
+    source_root = _find_source_root(project_root, language=language)
 
     # Split files into batches — one batch per worker.
     batch_size = max(1, len(file_contents) // max_workers)
@@ -2059,10 +2063,18 @@ def _find_project_root(start_path: str) -> str:
 def _find_source_root(project_root: str, language: str = "python") -> str:
     """Find the source root directory for a project.
 
-    Detects ``src/`` layout by checking (in order):
+    Language-specific detection:
+
+    **Python** -- checks (in order):
     1. ``pyproject.toml`` settings (maturin, setuptools, hatch)
     2. ``setup.cfg`` [options] package_dir
     3. Heuristic: ``src/`` exists and contains a package (dir with ``__init__.py``)
+
+    **Rust** -- checks ``Cargo.toml`` for ``[lib] path`` and ``src/`` directory.
+
+    **TypeScript** -- checks ``tsconfig.json`` for ``rootDir``/``baseUrl`` and ``src/``.
+
+    **Other languages** -- heuristic: ``src/`` exists.
 
     Returns the resolved source root (e.g. ``/repo/src``), or the
     project root itself if no ``src/`` layout is detected.
@@ -2133,6 +2145,60 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
             for child in src_dir.iterdir():
                 if child.is_dir() and (child / "__init__.py").is_file():
                     return str(src_dir)
+
+    elif language == "rust":
+        # Rust: check Cargo.toml for [lib] path or default src/
+        cargo_toml = root / "Cargo.toml"
+        if cargo_toml.is_file():
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                try:
+                    import tomli as tomllib  # type: ignore[no-redef]
+                except ModuleNotFoundError:
+                    tomllib = None  # type: ignore[assignment]
+            if tomllib is not None:
+                try:
+                    data = tomllib.loads(cargo_toml.read_text())
+                    lib_path = data.get("lib", {}).get("path")
+                    if lib_path:
+                        candidate = (root / lib_path).parent
+                        if candidate.is_dir():
+                            return str(candidate)
+                except Exception:
+                    pass
+        src_dir = root / "src"
+        if src_dir.is_dir():
+            return str(src_dir)
+
+    elif language == "typescript":
+        # TypeScript: check tsconfig.json for rootDir/baseUrl
+        tsconfig = root / "tsconfig.json"
+        if tsconfig.is_file():
+            try:
+                import json
+                import re as _re
+                raw = tsconfig.read_text()
+                # Strip JSONC features: // comments, /* */ comments, trailing commas
+                raw = _re.sub(r'//[^\n]*', '', raw)
+                raw = _re.sub(r'/\*.*?\*/', '', raw, flags=_re.DOTALL)
+                raw = _re.sub(r',\s*([}\]])', r'\1', raw)
+                data = json.loads(raw)
+                root_dir = data.get("compilerOptions", {}).get("rootDir")
+                if root_dir:
+                    candidate = root / root_dir
+                    if candidate.is_dir():
+                        return str(candidate)
+                base_url = data.get("compilerOptions", {}).get("baseUrl")
+                if base_url and base_url != ".":
+                    candidate = root / base_url
+                    if candidate.is_dir():
+                        return str(candidate)
+            except Exception:
+                pass
+        src_dir = root / "src"
+        if src_dir.is_dir():
+            return str(src_dir)
 
     else:
         # Generic heuristic for other languages: src/ exists
@@ -2350,10 +2416,10 @@ def visit_project_ts(
     logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
 
 
-def _get_imports(source_code: str) -> str:
+def _get_imports(source_code: str, language: str = "python") -> str:
     """Extract all top-level import statements as a single string."""
     from emend.language_plugins import load_plugin
-    return load_plugin("python").import_handler.extract_imports(source_code)
+    return load_plugin(language).import_handler.extract_imports(source_code)
 
 
 def _add_import_text(
@@ -2361,7 +2427,8 @@ def _add_import_text(
     position: int,
     file_path: Path,
     apply: bool,
-    source_code: str
+    source_code: str,
+    language: str = "python",
 ) -> str:
     """Add an import statement to a file using text manipulation.
 
@@ -2371,13 +2438,14 @@ def _add_import_text(
         file_path: Path to the file
         apply: Whether to apply changes
         source_code: Original source code
+        language: Source language for import handling
 
     Returns:
         Unified diff showing changes
     """
     from emend.language_plugins import load_plugin
     try:
-        new_code = load_plugin("python").import_handler.add_import_text(
+        new_code = load_plugin(language).import_handler.add_import_text(
             import_str, position, source_code
         )
     except SyntaxError:
@@ -2420,7 +2488,7 @@ def get_component(selector: ExtendedSelector) -> str:
     # Handle module-level components (empty symbol_path)
     if not selector.symbol_path:
         if selector.component == "imports":
-            return _get_imports(source_code)
+            return _get_imports(source_code, language=selector.language)
         else:
             raise ValueError(f"Component '{selector.component}' requires a symbol path")
 
@@ -2585,7 +2653,7 @@ def add_to_component(
 
     # Handle module-level imports component
     if selector.component == "imports" and not selector.symbol_path:
-        return _add_import_text(value, position, file_path, apply, source_code)
+        return _add_import_text(value, position, file_path, apply, source_code, language=selector.language)
 
     # Get items and their ranges
     _ext = _ext_from_path(selector.file_path)
@@ -3127,7 +3195,7 @@ def find_pattern(
 
     Args:
         pattern_str: Pattern string with metavariables like "print($X)"
-        file_path: Path to Python file to search
+        file_path: Path to source file to search
         scope: Optional symbol path to limit matches to (e.g., ["MyClass", "method"])
         inside: Optional constraint - only match inside this structure.
         not_inside: Optional constraint - only match outside this structure.
@@ -3166,10 +3234,12 @@ def find_pattern(
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
 
-    # Detect language from file extension if not provided
+    # Auto-detect language from file extension when caller used the default
     if language == "python" and file_path:
         from emend.language_registry import detect_language
-        language = detect_language(file_path) or "python"
+        detected = detect_language(file_path)
+        if detected:
+            language = detected
 
     # Compile pattern and constraints to Rust IR
     rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
@@ -3527,20 +3597,35 @@ def copy_symbol(
     return diff
 
 
-def _is_valid_replacement(code: str) -> bool:
-    """Verify if the given code string parses as a valid Python expression or statement.
+def _is_valid_replacement(code: str, language: str = "python") -> bool:
+    """Verify if the given code string parses as valid syntax.
 
-    This ensures that replacements don't produce syntactically invalid code.
+    For Python, uses the stdlib ``ast`` module.  For other languages, attempts
+    a tree-sitter parse and checks that the tree has no ERROR nodes.  Falls
+    back to ``True`` (accept the replacement) if parsing is unavailable.
     """
-    try:
-        ast.parse(code, mode='eval')
-        return True
-    except SyntaxError:
+    if language == "python":
         try:
-            ast.parse(code, mode='exec')
+            ast.parse(code, mode='eval')
             return True
         except SyntaxError:
-            return False
+            try:
+                ast.parse(code, mode='exec')
+                return True
+            except SyntaxError:
+                return False
+    else:
+        # For non-Python languages, use tree-sitter validation via Rust
+        try:
+            from emend.language_registry import get_extensions
+            exts = get_extensions(language)
+            ext = exts[0] if exts else None
+            if ext:
+                return _rust.validate_syntax(code, ext)
+        except (AttributeError, Exception):
+            pass
+        # If no tree-sitter validation is available, accept the replacement
+        return True
 
 
 def _substitute_metavars(
@@ -3609,7 +3694,7 @@ def replace_pattern(
     Args:
         pattern_str: Pattern string with metavariables like "print($X)"
         replacement_str: Replacement template like "logger.info($X)"
-        file_path: Path to Python file to transform
+        file_path: Path to source file to transform
         scope: Optional symbol path to limit replacements to (e.g., ["MyClass", "method"])
         apply: If True, write changes to file. If False, return diff only.
         inside: Optional constraint - only replace inside this structure.
@@ -3695,8 +3780,8 @@ def replace_pattern(
         if replacement_code is None:
             continue
 
-        # Verify replacement parses as valid Python
-        if not _is_valid_replacement(replacement_code):
+        # Verify replacement parses as valid syntax
+        if not _is_valid_replacement(replacement_code, language=language):
             continue
 
         # Apply replacement to the transform
@@ -3739,10 +3824,10 @@ class Reference:
     is_write: bool
 
 
-def _rename_in_docstrings(content: str, old_name: str, new_name: str) -> str | None:
-    """Replace old_name with new_name in all docstrings."""
+def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: str = "python") -> str | None:
+    """Replace old_name with new_name in all docstrings/doc comments."""
     from emend.language_plugins import load_plugin
-    return load_plugin("python").comment_handler.rename_in_docstrings(content, old_name, new_name)
+    return load_plugin(language).comment_handler.rename_in_docstrings(content, old_name, new_name)
 
 
 def find_references(
@@ -4172,6 +4257,7 @@ def _find_dead_code_cached(
     entry_point_decorators: list[str] | None = None,
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    language: str = "python",
 ) -> list[DeadSymbol]:
     """Index-accelerated dead code detection — single SQL query.
 
@@ -4208,9 +4294,9 @@ def _find_dead_code_cached(
         return pattern
 
     # Ensure the index is fresh; build it if necessary.
-    if not _ensure_index_fresh(scan_root):
+    if not _ensure_index_fresh(scan_root, language=language):
         logger.info("dead_code: index stale/missing — warming caches")
-        warm_caches(scan_root, type_engine="none")
+        warm_caches(scan_root, type_engine="none", language=language)
 
     project_root = _find_project_root(scan_root)
     worktree_id = _get_worktree_id(project_root)
@@ -5557,7 +5643,7 @@ def rename_symbol(
         # Apply docstring renaming if requested -- but only in files where
         # the scope-aware code rename found changes.
         if docs:
-            docs_result = _rename_in_docstrings(new_content, symbol_name, new_name)
+            docs_result = _rename_in_docstrings(new_content, symbol_name, new_name, language=language)
             if docs_result is not None:
                 new_content = docs_result
 
@@ -6053,13 +6139,14 @@ def cmd_lookup(
 
         # Expand file globs for query mode
         import glob as glob_mod
-        from emend.language_registry import matches_language
+        from emend.language_registry import is_source_file, get_extensions
         files_to_query = []
         fop = Path(file_or_pattern)
         if fop.is_dir():
-            files_to_query = [str(f) for f in fop.rglob("*.py")]
+            # Collect all known source files under the directory
+            files_to_query = [str(f) for f in fop.rglob("*") if f.is_file() and is_source_file(str(f))]
         elif '*' in file_or_pattern or '?' in file_or_pattern:
-            files_to_query = [f for f in glob_mod.glob(file_or_pattern, recursive=True) if matches_language(f, "python")]
+            files_to_query = [f for f in glob_mod.glob(file_or_pattern, recursive=True) if is_source_file(f)]
         else:
             files_to_query = [file_or_pattern]
 

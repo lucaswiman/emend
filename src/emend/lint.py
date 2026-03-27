@@ -64,7 +64,7 @@ class LintViolation:
     witness: FlowWitness | None = None
 
 
-def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
+def parse_noqa_comments(source: str, language: str = "python") -> dict[int, set[str] | None]:
     """Find real ``# noqa`` comments via the tokenizer.
 
     Returns a mapping of line number to either ``None`` (bare noqa, suppresses
@@ -72,7 +72,7 @@ def parse_noqa_comments(source: str) -> dict[int, set[str] | None]:
     ``emend:<rule>`` entries.
     """
     from emend.language_plugins import load_plugin
-    return load_plugin("python").comment_handler.find_noqa_comments(source)
+    return load_plugin(language).comment_handler.find_noqa_comments(source)
 
 
 def _build_statement_line_map(source: str, ext: str = "py") -> dict[int, tuple[int, int]]:
@@ -504,7 +504,7 @@ def run_lint(
 
             if file_path_str not in noqa_ranges_cache:
                 src = all_file_contents.get(file_path_str, "")
-                noqa_comments = parse_noqa_comments(src)
+                noqa_comments = parse_noqa_comments(src, language=language)
                 noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
                     line_map = _build_statement_line_map(src)
@@ -560,7 +560,7 @@ def run_lint(
             # First match for this file: build noqa ranges now
             if noqa_ranges is None:
                 noqa_ranges = []
-                noqa_comments = parse_noqa_comments(source)
+                noqa_comments = parse_noqa_comments(source, language=language)
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)
                     noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
@@ -603,7 +603,7 @@ def run_lint(
         source = all_file_contents.get(file_path)
         if source is None:
             continue
-        noqa_comments = parse_noqa_comments(source)
+        noqa_comments = parse_noqa_comments(source, language=language)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
             line_map = _build_statement_line_map(source)
@@ -670,7 +670,7 @@ def run_lint(
 
             # Build noqa ranges for this file (reuse cache if available)
             if file_path not in noqa_ranges_cache:
-                noqa_comments = parse_noqa_comments(source)
+                noqa_comments = parse_noqa_comments(source, language=language)
                 noqa_ranges_for_file_flow: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)
