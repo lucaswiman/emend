@@ -1528,7 +1528,7 @@ def warm_caches(
     *,
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
-    type_engine: str | None = "auto",
+    type_engine: str | None = "pyrefly",
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
