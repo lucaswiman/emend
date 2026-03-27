@@ -128,6 +128,181 @@ class NoOpImportHandler(ImportHandler):
         return source
 
 
+class TreeSitterImportHandler(ImportHandler):
+    """Import handler using tree-sitter scope resolver for any language.
+
+    Works for any language whose ``config.toml`` defines an ``[imports]``
+    section (TypeScript, Rust, Go, etc.).  Uses ``emend_core.PyScopeResolver``
+    to identify import bindings and then maps them back to source lines.
+    """
+
+    def __init__(self, language: str, extensions: list[str],
+                 import_keywords: tuple[str, ...] | None = None) -> None:
+        self._language = language
+        self._extensions = extensions
+        # Keywords that mark import lines in source (used as fallback and
+        # for ``add_import_text`` / ``remove_import`` heuristics).
+        self._import_keywords: tuple[str, ...] = import_keywords or ("import",)
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _ext(self) -> str:
+        return self._extensions[0] if self._extensions else "ts"
+
+    def _is_import_line(self, stripped: str) -> bool:
+        """Return True if *stripped* (a ``str.strip()``-ed line) looks like an
+        import statement for this language."""
+        for kw in self._import_keywords:
+            if stripped.startswith(kw + " ") or stripped.startswith(kw + "("):
+                return True
+            # Handle lines that begin with visibility modifiers (e.g. ``pub use``)
+            if stripped.startswith("pub ") and kw in stripped:
+                return True
+            if stripped.startswith("export ") and kw in stripped:
+                return True
+            # Node.js require: ``const X = require('Y')`` or ``var X = require('Y')``
+            if kw == "require" and kw + "(" in stripped:
+                return True
+        # TypeScript/JavaScript re-exports: ``export { X } from 'Y'``
+        # These act as imports and should be included.
+        if stripped.startswith("export ") and " from " in stripped:
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # ImportHandler API
+    # ------------------------------------------------------------------
+
+    def extract_imports(self, source: str) -> str:
+        """Return all top-level import statements as a single string.
+
+        Tries the scope resolver first for precise results.  When the scope
+        resolver does not return any imports (e.g. because the language config
+        does not yet fully support import extraction) falls back to
+        keyword-based line scanning.
+        """
+        lines = source.splitlines(keepends=True)
+        import_line_indices: set[int] = set()
+
+        # --- Phase 1: try the scope resolver for precision ---------------
+        try:
+            from emend import emend_core
+            ext = self._ext()
+            fake_path = "__temp__." + ext
+            resolver = emend_core.PyScopeResolver(".", ext)
+            resolver.index_file(fake_path, source)
+            imports = resolver.imports_in_file(fake_path)
+        except Exception:
+            imports = []
+
+        if imports:
+            module_paths: set[str] = set()
+            imported_names: set[str] = set()
+            for local_name, module_path, imported_name, _is_star in imports:
+                module_paths.add(module_path)
+                imported_names.add(local_name)
+                if imported_name:
+                    imported_names.add(imported_name)
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+                    continue
+                if not self._is_import_line(stripped):
+                    continue
+                for mp in module_paths:
+                    if mp in line:
+                        import_line_indices.add(i)
+                        break
+                else:
+                    for name in imported_names:
+                        if name in line:
+                            import_line_indices.add(i)
+                            break
+
+        # --- Phase 2: keyword fallback -----------------------------------
+        if not import_line_indices:
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if self._is_import_line(stripped):
+                    import_line_indices.add(i)
+
+        if not import_line_indices:
+            return ""
+
+        # --- Phase 3: expand multi-line imports --------------------------
+        expanded: set[int] = set()
+        for idx in sorted(import_line_indices):
+            expanded.add(idx)
+            j = idx + 1
+            while j < len(lines):
+                sj = lines[j].strip()
+                if not sj:
+                    break
+                if self._is_import_line(sj):
+                    break
+                preceding = "".join(lines[idx:j])
+                if (preceding.count("{") > preceding.count("}")
+                        or preceding.count("(") > preceding.count(")")):
+                    expanded.add(j)
+                    j += 1
+                else:
+                    break
+
+        return "".join(lines[i] for i in sorted(expanded))
+
+    def add_import_text(
+        self, import_str: str, position: int, source_code: str
+    ) -> str:
+        """Insert *import_str* into *source_code*.
+
+        *position* == 0 inserts before the first import; any other value
+        inserts after the last import.
+        """
+        lines = source_code.splitlines(keepends=True)
+        import_line = import_str.rstrip("\n") + "\n"
+
+        first_import_idx: int | None = None
+        last_import_idx: int | None = None
+        for i, line in enumerate(lines):
+            if self._is_import_line(line.strip()):
+                if first_import_idx is None:
+                    first_import_idx = i
+                last_import_idx = i
+
+        if position == 0:
+            insert_at = first_import_idx if first_import_idx is not None else 0
+            lines.insert(insert_at, import_line)
+        else:
+            if last_import_idx is not None:
+                lines.insert(last_import_idx + 1, import_line)
+            else:
+                lines.insert(0, import_line)
+
+        return "".join(lines)
+
+    def remove_import(self, source: str, module: str, name: str) -> str:
+        """Remove the import of *name* from *module*.
+
+        Uses a simple heuristic: drop lines that contain both *module* and
+        *name* and look like imports.
+        """
+        lines = source.splitlines(keepends=True)
+        result: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if (self._is_import_line(stripped)
+                    and module in stripped
+                    and name in stripped):
+                continue
+            result.append(line)
+        return "".join(result)
+
+
 class RegexCommentHandler(CommentHandler):
     """Generic comment handler for languages with a simple line-comment prefix.
 
@@ -163,6 +338,111 @@ class RegexCommentHandler(CommentHandler):
     def rename_in_docstrings(
         self, content: str, old_name: str, new_name: str
     ) -> str | None:
+        return None
+
+
+class DocCommentHandler(RegexCommentHandler):
+    """Extended comment handler with doc comment detection and renaming.
+
+    Supports two doc comment styles:
+    - ``"block"``: JSDoc-style ``/** ... */`` blocks (TypeScript/JavaScript)
+    - ``"line"``: consecutive ``///`` or ``//!`` lines (Rust)
+    """
+
+    # JSDoc: /** ... */ (multiline, non-greedy)
+    _JSDOC_RE = re.compile(r'/\*\*.*?\*/', re.DOTALL)
+    # Rust doc comments: consecutive lines starting with /// or //!
+    _RUST_DOC_LINE_RE = re.compile(r'^[ \t]*(?:///|//!)', re.MULTILINE)
+
+    def __init__(self, prefix: str, doc_style: str = "block") -> None:
+        """
+        Args:
+            prefix: line comment prefix (e.g. ``//``)
+            doc_style: ``"block"`` for ``/** */`` style (JS/TS),
+                ``"line"`` for ``///`` style (Rust)
+        """
+        super().__init__(prefix)
+        self._doc_style = doc_style
+
+    def _find_doc_comment_ranges(
+        self, source: str
+    ) -> list[tuple[int, int, str]]:
+        """Return ``(start_byte, end_byte, text)`` for all doc comments."""
+        encoded = source.encode("utf-8")
+        results: list[tuple[int, int, str]] = []
+
+        if self._doc_style == "block":
+            for m in self._JSDOC_RE.finditer(source):
+                text = m.group(0)
+                start_byte = len(source[:m.start()].encode("utf-8"))
+                end_byte = start_byte + len(text.encode("utf-8"))
+                results.append((start_byte, end_byte, text))
+        else:
+            # "line" style: find runs of consecutive /// or //! lines
+            lines = source.splitlines(keepends=True)
+            i = 0
+            while i < len(lines):
+                if self._RUST_DOC_LINE_RE.match(lines[i]):
+                    start_line = i
+                    while i < len(lines) and self._RUST_DOC_LINE_RE.match(lines[i]):
+                        i += 1
+                    block_text = "".join(lines[start_line:i])
+                    start_byte = len("".join(lines[:start_line]).encode("utf-8"))
+                    end_byte = start_byte + len(block_text.encode("utf-8"))
+                    results.append((start_byte, end_byte, block_text))
+                else:
+                    i += 1
+
+        return results
+
+    def find_docstrings(
+        self, source: str, symbol_byte_range: tuple[int, int]
+    ) -> list[tuple[int, int, str]]:
+        """Return doc comments that fall within *symbol_byte_range*."""
+        all_docs = self._find_doc_comment_ranges(source)
+        start, end = symbol_byte_range
+        return [
+            (ds, de, text)
+            for ds, de, text in all_docs
+            if ds >= start and de <= end
+        ]
+
+    def rename_in_docstrings(
+        self, content: str, old_name: str, new_name: str
+    ) -> str | None:
+        """Replace *old_name* with *new_name* inside doc comments.
+
+        Returns new content if changes were made, ``None`` otherwise.
+        """
+        all_docs = self._find_doc_comment_ranges(content)
+        if not all_docs:
+            return None
+
+        # Work on lines for simpler replacement
+        lines = content.splitlines(keepends=True)
+        # Build a set of line indices that belong to doc comments
+        doc_line_indices: set[int] = set()
+        running_byte = 0
+        byte_to_line: list[int] = []
+        for idx, line in enumerate(lines):
+            line_bytes = len(line.encode("utf-8"))
+            byte_to_line.append(running_byte)
+            running_byte += line_bytes
+
+        for ds, de, _text in all_docs:
+            for idx, line_start in enumerate(byte_to_line):
+                line_end = line_start + len(lines[idx].encode("utf-8"))
+                if line_start < de and line_end > ds:
+                    doc_line_indices.add(idx)
+
+        changed = False
+        for idx in doc_line_indices:
+            if old_name in lines[idx]:
+                lines[idx] = lines[idx].replace(old_name, new_name)
+                changed = True
+
+        if changed:
+            return "".join(lines)
         return None
 
 
@@ -312,7 +592,8 @@ class TreeSitterPatternCompiler(PatternCompiler):
 # Plugin registry and loader
 # ---------------------------------------------------------------------------
 
-_COMMENT_PREFIXES: dict[str, str] = {
+# Hardcoded fallback comment prefixes, used when config.toml is unavailable.
+_COMMENT_PREFIXES_FALLBACK: dict[str, str] = {
     "python": "#",
     "typescript": "//",
     "rust": "//",
@@ -320,21 +601,43 @@ _COMMENT_PREFIXES: dict[str, str] = {
 }
 
 
+def _get_comment_prefix(language: str) -> str:
+    """Return the line-comment prefix for *language*.
+
+    Reads from the language's ``config.toml`` (``[language].comment_prefix``
+    field) if available, falling back to the hardcoded table for known
+    languages, and finally to ``"#"`` as a last resort.
+    """
+    try:
+        from emend.language_registry import load_config
+        config = load_config(language)
+        prefix = config.get("language", {}).get("comment_prefix")
+        if prefix:
+            return prefix
+    except Exception:
+        pass
+    return _COMMENT_PREFIXES_FALLBACK.get(language, "#")
+
+
 def load_plugin(language: str) -> LanguagePlugin:
     """Return a ``LanguagePlugin`` for *language*.
 
-    Returns the full Python plugin for ``"python"``; stubs for other languages.
+    Returns the full Python plugin for ``"python"``; for other languages,
+    tries built-in plugin files and entry-point plugins before falling back
+    to a generic stub with the correct comment prefix.
     """
     if language == "python":
         from emend.python_plugin import create_python_plugin
         return create_python_plugin()
 
-    from emend.language_registry import _find_languages_dir
+    from emend.language_registry import _find_languages_dir, _discover_entry_point_languages
+    import importlib.util
+
+    # 1. Check built-in languages directory
     lang_dir = _find_languages_dir()
     if lang_dir:
         plugin_py = lang_dir / language / "plugin.py"
         if plugin_py.is_file():
-            import importlib.util
             spec = importlib.util.spec_from_file_location(
                 f"emend.plugins.{language}", plugin_py
             )
@@ -344,7 +647,21 @@ def load_plugin(language: str) -> LanguagePlugin:
                 if hasattr(mod, "create_plugin"):
                     return mod.create_plugin()
 
-    prefix = _COMMENT_PREFIXES.get(language, "#")
+    # 2. Check entry-point plugins from third-party packages
+    ep_langs = _discover_entry_point_languages()
+    if language in ep_langs:
+        plugin_py = ep_langs[language] / "plugin.py"
+        if plugin_py.is_file():
+            spec = importlib.util.spec_from_file_location(
+                f"emend.plugins.{language}", plugin_py
+            )
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "create_plugin"):
+                    return mod.create_plugin()
+
+    prefix = _get_comment_prefix(language)
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),
         comment_handler=RegexCommentHandler(prefix),

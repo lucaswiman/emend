@@ -12,6 +12,7 @@
 name = "python"
 tree_sitter_grammar = "tree-sitter-python"
 file_extensions = ["py", "pyi"]
+comment_prefix = "#"
 keywords = ["True", "False", "None"]
 
 # ---------------------------------------------------------------------------

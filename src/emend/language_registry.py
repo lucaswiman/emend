@@ -52,6 +52,45 @@ def _find_languages_dir() -> Path | None:
     return None
 
 
+def _discover_entry_point_languages() -> dict[str, Path]:
+    """Discover language configs from installed entry-point plugins.
+
+    Third-party packages register via::
+
+        [project.entry-points."emend.languages"]
+        go = "emend_golang"
+
+    The entry point value is a module whose directory must contain a
+    ``config.toml`` file.  Returns ``{language_name: config_dir_path}``.
+    """
+    import importlib.metadata
+
+    result: dict[str, Path] = {}
+    try:
+        eps = importlib.metadata.entry_points()
+        # Python 3.12+ returns a SelectableGroups; 3.10-3.11 may return a dict
+        if hasattr(eps, "select"):
+            lang_eps = eps.select(group="emend.languages")
+        else:
+            lang_eps = eps.get("emend.languages", [])  # type: ignore[union-attr]
+
+        for ep in lang_eps:
+            try:
+                mod = ep.load()
+                mod_dir = (
+                    Path(mod.__file__).parent
+                    if hasattr(mod, "__file__") and mod.__file__
+                    else None
+                )
+                if mod_dir and (mod_dir / "config.toml").is_file():
+                    result[ep.name] = mod_dir
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return result
+
+
 def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
     try:
@@ -103,6 +142,18 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
                 lang_to_exts[name] = exts
                 for ext in exts:
                     ext_to_lang.setdefault(ext, name)
+
+    # Discover languages from installed entry-point plugins.
+    # These are loaded AFTER built-in languages so they cannot override them.
+    for lang_name, config_dir in _discover_entry_point_languages().items():
+        if lang_name in lang_to_exts:
+            continue  # built-in takes precedence
+        result = _parse_toml_extensions(config_dir / "config.toml")
+        if result:
+            name, exts = result
+            lang_to_exts[name] = exts
+            for ext in exts:
+                ext_to_lang.setdefault(ext, name)
 
     # Fill in any gaps from hardcoded builtins
     for lang, exts in _BUILTIN.items():
@@ -171,19 +222,39 @@ def get_module_separator(language: str) -> str:
     return config.get("qualified_names", {}).get("module_separator", ".")
 
 
+def get_comment_prefix(language: str) -> str:
+    """Return the line-comment prefix for *language* (e.g. ``"#"`` or ``"//"``)."""
+    config = load_config(language)
+    return config.get("language", {}).get("comment_prefix", "#")
+
+
 @lru_cache(maxsize=16)
 def load_config(language: str) -> dict:
     """Load the full TOML configuration for *language*.
 
     Returns an empty dict if the language or config file is not found.
+    Checks built-in languages first, then entry-point plugins.
     """
     import sys
-    lang_dir = _find_languages_dir()
-    if not lang_dir:
-        return {}
 
-    config_path = lang_dir / language / "config.toml"
-    if not config_path.is_file():
+    config_path: Path | None = None
+
+    # 1. Check built-in languages directory
+    lang_dir = _find_languages_dir()
+    if lang_dir:
+        candidate = lang_dir / language / "config.toml"
+        if candidate.is_file():
+            config_path = candidate
+
+    # 2. Check entry-point plugins
+    if config_path is None:
+        ep_langs = _discover_entry_point_languages()
+        if language in ep_langs:
+            candidate = ep_langs[language] / "config.toml"
+            if candidate.is_file():
+                config_path = candidate
+
+    if config_path is None:
         return {}
 
     try:
