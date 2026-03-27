@@ -25,7 +25,7 @@ from emend import ast_commands
 def _maybe_create_oracle(type_engine: str | None):
     """Create a TypeOracle if *type_engine* is specified, returning ``None`` if unavailable."""
     from emend.type_oracle import create_type_oracle
-    engine = type_engine or "auto"
+    engine = type_engine or "pyrefly"
     oracle = create_type_oracle(engine=engine)
     if not oracle.is_available():
         logging.getLogger("emend.type_oracle").warning(
@@ -2143,7 +2143,7 @@ def types_cmd(
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import, diagnostic")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: auto, pyrefly, pyright, ty")] = "auto",
+    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: pyrefly, pyright, ty, auto")] = "pyrefly",
     definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
 ):
     """Show inferred types for symbols in a file.
@@ -2151,9 +2151,8 @@ def types_cmd(
     Uses a type inference engine (Pyrefly, Pyright, or ty) to analyze
     source files and display inferred types for all symbols and expressions.
 
-    The engine is auto-detected from project configuration files
-    (pyrightconfig.json, ty.toml, pyrefly.toml, or pyproject.toml sections)
-    and installed tools.  Use --engine to override.
+    Defaults to Pyrefly.  Use --engine to override (pyright, ty, or auto
+    to detect from project configuration).
 
     Examples:
         emend types src/models/user.py

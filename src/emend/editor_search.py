@@ -1503,7 +1503,7 @@ class EditorSearchEngine:
         items: list[dict] = []
         try:
             from emend.type_oracle import create_type_oracle
-            oracle = create_type_oracle(engine="auto", project_root=str(self.project_root))
+            oracle = create_type_oracle(engine="pyrefly", project_root=str(self.project_root))
             file_types = oracle.get_file_types(file)
             if file_types:
                 file_types.build_index()

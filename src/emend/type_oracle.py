@@ -1410,16 +1410,16 @@ _ENGINE_NAMES = ("pyrefly", "pyright", "ty", "auto")
 
 
 def create_type_oracle(
-    engine: str = "auto",
+    engine: str = "pyrefly",
     project_root: Path | None = None,
     **kwargs,
 ) -> TypeOracle:
     """Create a TypeOracle instance for the specified engine.
 
     Args:
-        engine: The type inference engine to use.  ``"auto"`` detects the
-                engine from project config files and installed tools.
-                Explicit choices: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
+        engine: The type inference engine to use.  Defaults to ``"pyrefly"``.
+                ``"auto"`` detects the engine from project config files and
+                installed tools.  Other choices: ``"pyright"``, ``"ty"``.
         project_root: Project root directory used for config-file detection
                       when *engine* is ``"auto"``.
         **kwargs: Additional keyword arguments passed to the adapter constructor.
