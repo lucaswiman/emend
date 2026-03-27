@@ -296,21 +296,12 @@ _FACTS_SCHEMA = """\
 """
 
 
-def _facts_db_path_from_parse_db(parse_db_path: str | Path) -> str:
-    """Derive the CozoDB facts.db path from a parse.db path."""
-    return str(Path(parse_db_path).parent / "facts.db")
-
-
 def _open_facts_db(db_path: str):
     """Open (or create) a CozoDB facts database at *db_path*."""
-    try:
-        from emend import emend_core as _rust
-        client = _rust.PyCozoDb("sqlite", db_path)
-    except (ImportError, AttributeError):
-        from pycozo import Client  # type: ignore[import-untyped]
-        client = Client("sqlite", db_path)
+    from emend.fact_graph import _create_cozo_client
 
-    # Create relations if they don't exist.
+    client = _create_cozo_client(db_path)
+    # Ensure relations exist (idempotent).
     for stmt in _FACTS_SCHEMA.strip().split("\n\n"):
         stmt = stmt.strip()
         if stmt:
@@ -360,101 +351,20 @@ def _get_facts_db(project_root: str | None = None):
             return None
 
 
-def _write_facts_batch(
-    facts_db_path: str,
-    file_paths_to_clear: list[str],
-    sym_rows: list[tuple],
-    import_rows: list[tuple],
-    ref_rows: list[tuple],
-) -> None:
-    """Write a batch of facts to the CozoDB facts database.
-
-    Called from ``_index_batch`` subprocesses.  Each subprocess opens its
-    own CozoDB connection (SQLite WAL handles concurrent writers).
-
-    Args:
-        facts_db_path: Path to the facts.db file.
-        file_paths_to_clear: File paths whose old facts should be removed.
-        sym_rows: Symbol tuples from _index_batch (17-element).
-        import_rows: Import tuples (content_hash, file_path, module).
-        ref_rows: Reference tuples (content_hash, qn, file_path, line, col, kind).
-    """
-    try:
-        fdb = _open_facts_db(facts_db_path)
-    except BaseException:
-        return
-
-    try:
-        # Delete old facts for changed files
-        if file_paths_to_clear:
-            for fp in file_paths_to_clear:
-                try:
-                    fdb.run(
-                        "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
-                        "fp == $fp  :rm fact_symbol {fp => }", {"fp": fp}
-                    )
-                except Exception:
-                    pass
-                try:
-                    fdb.run(
-                        "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _], "
-                        "fp == $fp  :rm fact_reference {tqn, fp, line, col => }", {"fp": fp}
-                    )
-                except Exception:
-                    pass
-                try:
-                    fdb.run(
-                        "?[fp, mod] := *fact_import[fp, mod], "
-                        "fp == $fp  :rm fact_import {fp, mod}", {"fp": fp}
-                    )
-                except Exception:
-                    pass
-
-        # Insert symbols
-        if sym_rows:
-            # sym_rows: (hash, file_path, name, qn, module_qn, kind, line, end_line,
-            #            depth, parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa)
-            cozo_sym = [
-                [r[1], r[4], r[2], r[3], r[5], r[6], r[7], r[8],
-                 r[9] or "", r[10] or "", r[11] or "", r[12] or "", r[13] or "",
-                 bool(r[14]), bool(r[15]), bool(r[16])]
-                for r in sym_rows
-            ]
-            fdb.run(
-                "?[fp, mqn, name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
-                ":put fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
-                {"rows": cozo_sym},
-            )
-
-        # Insert references
-        if ref_rows:
-            # ref_rows: (hash, target_qn, file_path, line, col, kind)
-            cozo_ref = [[r[1], r[2], r[3], r[4], r[5]] for r in ref_rows]
-            fdb.run(
-                "?[tqn, fp, line, col, kind] <- $rows "
-                ":put fact_reference {tqn, fp, line, col => kind}",
-                {"rows": cozo_ref},
-            )
-
-        # Insert imports
-        if import_rows:
-            # import_rows: (hash, file_path, module)
-            cozo_imp = [[r[1], r[2]] for r in import_rows]
-            fdb.run(
-                "?[fp, mod] <- $rows "
-                ":put fact_import {fp, mod}",
-                {"rows": cozo_imp},
-            )
-
-    except BaseException:
-        logger.debug("facts db write failed", exc_info=True)
-
-    try:
-        fdb.close()
-    except BaseException:
-        pass
+def _delete_facts_for_file(fdb, file_path: str) -> None:
+    """Delete all facts (symbol, reference, import) for a given file path."""
+    for query in (
+        "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+        "fp == $fp  :rm fact_symbol {fp => }",
+        "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _], "
+        "fp == $fp  :rm fact_reference {tqn, fp, line, col => }",
+        "?[fp, mod] := *fact_import[fp, mod], "
+        "fp == $fp  :rm fact_import {fp, mod}",
+    ):
+        try:
+            fdb.run(query, {"fp": file_path})
+        except BaseException:
+            pass
 
 
 def _populate_facts_db(project_root: str) -> None:
@@ -1210,21 +1120,7 @@ def _ensure_index_fresh(
                 fdb = _get_facts_db(project_root)
                 if fdb is not None:
                     for dp in scan.deleted:
-                        try:
-                            fdb.run(
-                                "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
-                                "fp == $fp  :rm fact_symbol {fp => }", {"fp": dp}
-                            )
-                            fdb.run(
-                                "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _], "
-                                "fp == $fp  :rm fact_reference {tqn, fp, line, col => }", {"fp": dp}
-                            )
-                            fdb.run(
-                                "?[fp, mod] := *fact_import[fp, mod], "
-                                "fp == $fp  :rm fact_import {fp, mod}", {"fp": dp}
-                            )
-                        except BaseException:
-                            pass
+                        _delete_facts_for_file(fdb, dp)
             except BaseException:
                 pass
 
@@ -4887,7 +4783,7 @@ def _dead_code_postfilter(
 
 
 def _find_dead_code_cozo(
-    scan_root: str,
+    project_root: str,
     kind: str | None,
     include_private: bool,
     exclude_references_from: list[str] | None,
@@ -4900,7 +4796,7 @@ def _find_dead_code_cozo(
     tuples, or None if CozoDB is unavailable.  Post-filtering for
     entry_point_decorators and string literals is done by the caller.
     """
-    fdb = _get_facts_db(_find_project_root(scan_root))
+    fdb = _get_facts_db(project_root)
     if fdb is None:
         return None
 
@@ -5043,24 +4939,19 @@ def _find_dead_code_cached(
         logger.info("dead_code: index stale/missing — warming caches")
         warm_caches(scan_root, type_engine="none", language=language)
 
+    project_root = _find_project_root(scan_root)
+
     # Try CozoDB Datalog path first (returns candidate rows or None).
     cozo_rows = _find_dead_code_cozo(
-        scan_root, kind, include_private, exclude_references_from,
+        project_root, kind, include_private, exclude_references_from,
         entry_point_names=entry_point_names,
         exclude_paths=exclude_paths,
     )
     if cozo_rows is not None:
-        # cozo_rows: (name, qn, kind, file_path, line, decorators)
-        # Apply the same post-filtering as the SQLite path below.
-        rows = cozo_rows
-        # Jump past the SQL query section to the shared post-filter.
-        # (We reuse the exact same decorator and string-literal logic.)
         return _dead_code_postfilter(
-            rows, scan_root, all_files, strings_count_as_references,
+            cozo_rows, scan_root, all_files, strings_count_as_references,
             entry_point_decorators, exclude_references_from,
         )
-
-    project_root = _find_project_root(scan_root)
     worktree_id = _get_worktree_id(project_root)
     cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
