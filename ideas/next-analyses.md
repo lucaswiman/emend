@@ -23,17 +23,14 @@ rule sets for the Datalog engine rather than as bespoke implementations.
 
 ## Priorities
 
-### 1. Datalog Engine on the Fact Graph ✅ (Phase 1+3 complete, Phase 2 in progress)
+### 1. Datalog Engine on the Fact Graph ✅
 
 CozoDB v0.7.6 integrated as a Rust dependency in `emend_core`.
 `FactGraph` is now CozoDB-backed with Datalog recursive rules for
 transitive closures and dead code.  `emend query` command and
-`DatalogCheck` policy type are live.
-
-**Remaining:** Migrate the `parse.db` cache queries
+`DatalogCheck` policy type are live.  All `parse.db` fact queries
 (`query_symbol_index`, `query_reference_index`, `query_import_graph`,
-`_find_dead_code_cached`) to CozoDB.  See
-[datalog-engine-options.md](datalog-engine-options.md) for status.
+`_find_dead_code_cached`) now use CozoDB with SQLite fallback.
 
 **Key papers:** Whaley & Lam (PLDI 2004), Scholz et al. (CC 2016) (Soufflé),
 Smaragdakis & Bravenboer (FTPL 2011).
@@ -171,7 +168,7 @@ when writing the rule sets.
 
 | # | Technique | Status | Key Reuse | Effort |
 |---|-----------|--------|-----------|--------|
-| 1 | Datalog engine | **Phase 1+3 ✅, Phase 2 in progress** | fact_graph | Medium |
+| 1 | Datalog engine | **✅ Complete** | fact_graph | Medium |
 | 2 | Per-function CFGs | **TODO** | emend_core, scope resolver | Medium |
 | 3 | Typestate analysis | **TODO** | taint engine, CFGs | Medium |
 | 4 | API migration | **TODO** | mapping store, batch | Medium |

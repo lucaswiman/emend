@@ -145,22 +145,37 @@ The `compact` feature (which includes `graph-algo`) has a `rayon`
 compatibility bug in `graph_builder` 0.4.1; using `minimal` + `rayon`
 features avoids it while still providing Datalog + SQLite persistence.
 
-### Phase 2: Migrate parse.db queries (IN PROGRESS)
+### Phase 2: Migrate parse.db queries ✅
 
 - ✅ `FactGraph.transitive_callers()` and `transitive_callees()` are
   now Datalog recursive rules.
 - ✅ `emend facts` CLI uses CozoDB-backed FactGraph.
-- [ ] Dual-write: `warm_caches()` / `_index_batch()` populates CozoDB
-  `facts.db` alongside SQLite `parse.db`.
-- [ ] `query_symbol_index()` reads from CozoDB.
-- [ ] `query_reference_index()` reads from CozoDB.
-- [ ] `query_import_graph()` reads from CozoDB.
-- [ ] `_find_dead_code_cached()` becomes a CozoScript query.
+- ✅ `_populate_facts_db()` bulk-loads parse.db data into CozoDB
+  `facts.db` after indexing completes (main process, single-threaded).
+- ✅ `query_symbol_index()` reads from CozoDB with SQLite fallback.
+- ✅ `query_reference_index()` reads from CozoDB with SQLite fallback.
+- ✅ `query_import_graph()` reads from CozoDB with SQLite fallback.
+- ✅ `_find_dead_code_cached()` is a CozoScript Datalog query with
+  SQLite fallback (for complex glob patterns in exclude_paths).
+- ✅ `_dead_code_postfilter()` extracted as shared post-filter for both
+  CozoDB and SQLite dead code paths.
 
-**Design note:** The CozoDB `facts.db` is a *separate file* from
-`parse.db`.  CozoDB's SQLite backend uses its own internal KV schema,
-incompatible with hand-written tables.  The two databases live in
-`.emend/cache/` side by side.
+**Design notes:**
+
+- The CozoDB `facts.db` is a *separate file* from `parse.db`.  CozoDB's
+  SQLite backend uses its own internal KV schema, incompatible with
+  hand-written tables.  The two databases live in `.emend/cache/` side
+  by side.
+- CozoDB writes are done from the main process after all
+  `ProcessPoolExecutor` workers complete, to avoid SQLite lock panics.
+  CozoDB's SQLite backend calls `unwrap()` on lock errors, which causes
+  a Rust panic (`PanicException`) that can't be pickled across process
+  boundaries.
+- Schema uses short column names (`fp`, `mqn`, `tqn`, `sig`, `decs`,
+  `is_entry`) matching the query variable names, since CozoDB `:put`
+  and `:rm` operations match by column name, not position.
+- `_get_facts_db()` is keyed by project root (not a CWD singleton) to
+  correctly handle tests and multi-project scenarios.
 
 ### Phase 3: User-facing Datalog ✅
 
