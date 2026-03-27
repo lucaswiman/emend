@@ -1,6 +1,8 @@
-"""Tests for the relational fact graph (Phase 4)."""
+"""Tests for the CozoDB-backed relational fact graph."""
 
 import json
+
+import pytest
 
 from emend.fact_graph import (
     CallFact,
@@ -201,3 +203,143 @@ class TestPredicateHelpers:
         results = g.query(pred)
         assert len(results) == 1
         assert results[0].symbol_qn == "app.main"
+
+
+# ---------------------------------------------------------------------------
+# CozoDB-specific tests
+# ---------------------------------------------------------------------------
+
+
+class TestCozoScriptQueries:
+    """Test raw CozoScript queries against the fact graph."""
+
+    def test_raw_query_symbols(self):
+        g = _make_graph()
+        result = g.run_query(
+            '?[name, kind] := *symbol[qn, fp, name, kind, line, end, parent]'
+        )
+        assert len(result["rows"]) == 5
+        names = {r[0] for r in result["rows"]}
+        assert "main" in names
+        assert "compute" in names
+
+    def test_raw_query_dead_code(self):
+        g = _make_graph()
+        result = g.run_query(
+            'has_ref[qn] := *reference[qn, _, _, _, _]\n'
+            'dead[name, qn] := *symbol[qn, _, name, _, _, _, _], not has_ref[qn]\n'
+            '?[name, qn] := dead[name, qn]'
+        )
+        dead_names = {r[0] for r in result["rows"]}
+        # main and helper have no direct references in our test data
+        assert "main" in dead_names
+        assert "helper" in dead_names
+        # compute and MyClass have references
+        assert "compute" not in dead_names
+        assert "MyClass" not in dead_names
+
+    def test_raw_query_transitive_closure(self):
+        g = _make_graph()
+        result = g.run_query(
+            'reaches[b] := *call["app.main", b, _, _, _]\n'
+            'reaches[b] := *call[mid, b, _, _, _], reaches[mid]\n'
+            '?[b] := reaches[b]'
+        )
+        reached = {r[0] for r in result["rows"]}
+        assert "app.helper" in reached
+        assert "lib.compute" in reached
+
+    def test_raw_query_with_params(self):
+        g = _make_graph()
+        result = g.run_query(
+            '?[name, fp] := *symbol[qn, fp, name, kind, _, _, _], kind == "class"'
+        )
+        assert len(result["rows"]) == 1
+        assert result["rows"][0][0] == "MyClass"
+
+
+class TestDeadCodeDatalog:
+    """Test the dead_code() Datalog query method."""
+
+    def test_dead_code_finds_unreferenced(self):
+        g = _make_graph()
+        dead = g.dead_code()
+        dead_qns = {s.qualified_name for s in dead}
+        # main and helper have no incoming references
+        assert "app.main" in dead_qns
+        assert "app.helper" in dead_qns
+        # method has no refs either
+        assert "lib.MyClass.method" in dead_qns
+
+    def test_dead_code_excludes_referenced(self):
+        g = _make_graph()
+        dead = g.dead_code()
+        dead_qns = {s.qualified_name for s in dead}
+        assert "lib.compute" not in dead_qns
+        assert "lib.MyClass" not in dead_qns
+
+
+class TestBatchOperations:
+    """Test bulk insert operations."""
+
+    def test_batch_symbols(self):
+        g = FactGraph()
+        facts = [
+            SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None),
+            SymbolFact("a.py", "bar", "a.bar", "function", 7, 10, None),
+            SymbolFact("b.py", "baz", "b.baz", "class", 1, 20, None),
+        ]
+        g.add_symbols_batch(facts)
+        assert len(g.symbols()) == 3
+        assert len(g.symbols(file_path="a.py")) == 2
+
+    def test_batch_calls(self):
+        g = FactGraph()
+        g.add_symbols_batch([
+            SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None),
+            SymbolFact("a.py", "bar", "a.bar", "function", 7, 10, None),
+        ])
+        g.add_calls_batch([
+            CallFact("a.foo", "a.bar", "a.py", 3, 0),
+        ])
+        assert len(g.calls_from("a.foo")) == 1
+
+    def test_batch_references(self):
+        g = FactGraph()
+        g.add_references_batch([
+            ReferenceFact("mod.func", "app.py", 10, 0, "call"),
+            ReferenceFact("mod.func", "app.py", 20, 0, "read"),
+        ])
+        refs = g.references_to("mod.func")
+        assert len(refs) == 2
+
+    def test_batch_imports(self):
+        g = FactGraph()
+        g.add_imports_batch([
+            ImportFact("app.py", "os", "path", None, 1),
+            ImportFact("app.py", "sys", None, None, 2),
+        ])
+        imports = g.imports_in("app.py")
+        assert len(imports) == 2
+
+
+class TestPersistence:
+    """Test that CozoDB SQLite backend persists data."""
+
+    def test_persist_and_reload(self, tmp_path):
+        db_file = str(tmp_path / "test.db")
+
+        # Create and populate
+        g1 = FactGraph(db_path=db_file)
+        g1.add_symbol(SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None))
+        g1.add_call(CallFact("a.foo", "a.bar", "a.py", 3, 0))
+        g1.close()
+
+        # Reopen and verify
+        g2 = FactGraph(db_path=db_file)
+        syms = g2.symbols()
+        assert len(syms) == 1
+        assert syms[0].name == "foo"
+        calls = g2.calls_from("a.foo")
+        assert len(calls) == 1
+        g2.close()

@@ -23,14 +23,14 @@ rule sets for the Datalog engine rather than as bespoke implementations.
 
 ## Priorities
 
-### 1. Datalog Engine on the Fact Graph
+### 1. Datalog Engine on the Fact Graph ✅
 
-Replace the hand-written SQL in parse.db with an embedded Datalog database.
-**CozoDB** is the recommended engine: Rust-native, persistent (RocksDB/SQLite
-backends), runtime-definable rules (CozoScript), Python bindings via PyO3.
-
-**Design:** See [datalog-engine-options.md](datalog-engine-options.md) for
-the full comparison of 12 engines and a 4-phase migration path.
+CozoDB v0.7.6 integrated as a Rust dependency in `emend_core`.
+`FactGraph` is now CozoDB-backed with Datalog recursive rules for
+transitive closures and dead code.  `emend query` command and
+`DatalogCheck` policy type are live.  All `parse.db` fact queries
+(`query_symbol_index`, `query_reference_index`, `query_import_graph`,
+`_find_dead_code_cached`) now use CozoDB with SQLite fallback.
 
 **Key papers:** Whaley & Lam (PLDI 2004), Scholz et al. (CC 2016) (Soufflé),
 Smaragdakis & Bravenboer (FTPL 2011).
@@ -168,7 +168,7 @@ when writing the rule sets.
 
 | # | Technique | Status | Key Reuse | Effort |
 |---|-----------|--------|-----------|--------|
-| 1 | Datalog engine | **TODO** | fact_graph | Medium |
+| 1 | Datalog engine | **✅ Complete** | fact_graph | Medium |
 | 2 | Per-function CFGs | **TODO** | emend_core, scope resolver | Medium |
 | 3 | Typestate analysis | **TODO** | taint engine, CFGs | Medium |
 | 4 | API migration | **TODO** | mapping store, batch | Medium |

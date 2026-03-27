@@ -15,6 +15,7 @@ mod scope;
 mod scope_py;
 mod transform;
 mod transform_py;
+mod cozo_db;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -268,5 +269,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matcher::compile_pattern_treesitter, m)?)?;
     m.add_class::<scope_py::PyScopeResolver>()?;
     m.add_class::<transform_py::PyFileTransform>()?;
+    m.add_class::<cozo_db::PyCozoDb>()?;
     Ok(())
 }
