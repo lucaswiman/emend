@@ -126,32 +126,59 @@ Pure-Python Datalog.  Abandoned (last release 2022).  LGPL.  Do not adopt.
 
 ## Migration Path
 
-### Phase 1: Add CozoDB alongside SQLite
+### Phase 1: Add CozoDB alongside SQLite ✅
 
-- Add `cozo` as a Rust dependency in `emend_core`.
-- Create a `CozoFactStore` that mirrors the current parse.db schema as
-  CozoDB stored relations.
-- Wire `warm_caches()` to populate CozoDB in parallel with SQLite.
-- Run both backends, compare results, benchmark.
+- ✅ Added `cozo` v0.7.6 Rust crate to `emend_core` (`Cargo.toml`).
+- ✅ Created `PyCozoDb` PyO3 wrapper (`rust/src/cozo_db.rs`) exposing
+  CozoDB to Python — supports `"mem"` and `"sqlite"` backends.
+- ✅ Rewrote `FactGraph` (`fact_graph.py`) to use CozoDB stored relations
+  as its backing store.  Six relations: `symbol`, `call`, `reference`,
+  `taint_flow`, `type_binding`, `import`.
+- ✅ Transitive closures use native Datalog recursive rules (no Python BFS).
+- ✅ `dead_code()` method is a pure Datalog query.
+- ✅ Fallback to `pycozo` Python package for standalone testing.
 
-### Phase 2: Migrate queries
+**Design note:** The `cozo-embedded` PyPI wheel lacks a `cp314t`
+(free-threaded Python 3.14) build.  Integrating via the Rust crate
+in `emend_core` sidesteps this entirely and is the more robust path.
+The `compact` feature (which includes `graph-algo`) has a `rayon`
+compatibility bug in `graph_builder` 0.4.1; using `minimal` + `rayon`
+features avoids it while still providing Datalog + SQLite persistence.
 
-- Rewrite `_find_dead_code_cached()` as a CozoScript query.
-- Rewrite `query_reference_index()` and `query_symbol_index()` as CozoScript.
-- Rewrite `FactGraph.transitive_callers()` and other closures.
-- The `emend facts` CLI and MCP `query_facts` tool switch to CozoDB.
+### Phase 2: Migrate parse.db queries (IN PROGRESS)
 
-### Phase 3: User-facing Datalog
+- ✅ `FactGraph.transitive_callers()` and `transitive_callees()` are
+  now Datalog recursive rules.
+- ✅ `emend facts` CLI uses CozoDB-backed FactGraph.
+- [ ] Dual-write: `warm_caches()` / `_index_batch()` populates CozoDB
+  `facts.db` alongside SQLite `parse.db`.
+- [ ] `query_symbol_index()` reads from CozoDB.
+- [ ] `query_reference_index()` reads from CozoDB.
+- [ ] `query_import_graph()` reads from CozoDB.
+- [ ] `_find_dead_code_cached()` becomes a CozoScript query.
 
-- Add `emend query` command that accepts CozoScript strings.
-- Policy engine `custom` checks become CozoScript queries.
-- MCP server exposes a `datalog_query` tool.
+**Design note:** The CozoDB `facts.db` is a *separate file* from
+`parse.db`.  CozoDB's SQLite backend uses its own internal KV schema,
+incompatible with hand-written tables.  The two databases live in
+`.emend/cache/` side by side.
+
+### Phase 3: User-facing Datalog ✅
+
+- ✅ `emend query` command accepts CozoScript strings.
+- ✅ Policy engine `DatalogCheck` type runs CozoScript queries as
+  declarative policy checks (parsed from YAML with `type: datalog`).
+- [ ] MCP server `datalog_query` tool (deferred — MCP is optional).
 
 ### Phase 4: Drop SQLite for fact storage
 
-- Remove the hand-written SQL queries and `parse.db` fact tables.
-- Keep SQLite only for the FTS5 trigram index (editor search) and type
-  cache, unless CozoDB's full-text capabilities suffice.
+- [ ] Remove `symbol_index`, `reference_index`, `import_graph` tables
+  from `parse.db` once Phase 2 is complete.
+- Keep SQLite for: `qn_index` (content-hash blob cache),
+  `type_cache` (type oracle cache), `file_manifest` (indexing state),
+  `index_meta` (schema version), and FTS5 trigram indexes (editor search).
+- CozoDB's built-in FTS uses word-level tokenizers (Simple, Raw), not
+  trigram.  Sub-string matching for the editor search still needs
+  SQLite FTS5 trigram or a regex fallback.
 
 ## References
 

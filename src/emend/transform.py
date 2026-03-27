@@ -253,6 +253,312 @@ def _get_disk_cache() -> sqlite3.Connection | None:
 
 
 # ---------------------------------------------------------------------------
+# CozoDB facts database (lazy singleton, separate from parse.db)
+# ---------------------------------------------------------------------------
+
+_facts_db_cache: dict[str, object] = {}  # project_root → CozoDB client
+_facts_db_lock = _threading.Lock()
+
+_FACTS_SCHEMA = """\
+{:create fact_symbol {
+    fp: String,
+    mqn: String
+    =>
+    name: String,
+    qn: String default "",
+    kind: String,
+    line: Int,
+    end_line: Int,
+    depth: Int default 1,
+    parent: String default "",
+    bases: String default "",
+    sig: String default "",
+    returns: String default "",
+    decs: String default "",
+    is_entry: Bool default false,
+    is_exported: Bool default false,
+    has_noqa: Bool default false
+}}
+
+{:create fact_reference {
+    tqn: String,
+    fp: String,
+    line: Int,
+    col: Int
+    =>
+    kind: String
+}}
+
+{:create fact_import {
+    fp: String,
+    mod: String
+}}
+"""
+
+
+def _facts_db_path_from_parse_db(parse_db_path: str | Path) -> str:
+    """Derive the CozoDB facts.db path from a parse.db path."""
+    return str(Path(parse_db_path).parent / "facts.db")
+
+
+def _open_facts_db(db_path: str):
+    """Open (or create) a CozoDB facts database at *db_path*."""
+    try:
+        from emend import emend_core as _rust
+        client = _rust.PyCozoDb("sqlite", db_path)
+    except (ImportError, AttributeError):
+        from pycozo import Client  # type: ignore[import-untyped]
+        client = Client("sqlite", db_path)
+
+    # Create relations if they don't exist.
+    for stmt in _FACTS_SCHEMA.strip().split("\n\n"):
+        stmt = stmt.strip()
+        if stmt:
+            try:
+                client.run(stmt)
+            except Exception:
+                pass  # Already exists
+    return client
+
+
+def _get_facts_db(project_root: str | None = None):
+    """Return a lazily-initialized CozoDB facts database for *project_root*, or None.
+
+    If *project_root* is None, derives from the current working directory.
+    Returns None if the facts.db doesn't exist yet (i.e. no dual-write has
+    populated it), so callers fall back to SQLite.
+    """
+    if project_root is None:
+        try:
+            project_root = _find_project_root(".")
+        except Exception:
+            return None
+
+    key = str(Path(project_root).resolve())
+    cached = _facts_db_cache.get(key)
+    if cached is not None:
+        return cached
+
+    with _facts_db_lock:
+        # Double-check after acquiring lock
+        cached = _facts_db_cache.get(key)
+        if cached is not None:
+            return cached
+
+        try:
+            cache_dir = _cache_db_dir(project_root)
+            db_path = cache_dir / "facts.db"
+            if not db_path.exists():
+                logger.debug("facts db not found at %s", db_path)
+                return None
+            client = _open_facts_db(str(db_path))
+            _facts_db_cache[key] = client
+            logger.debug("facts db opened at %s", db_path)
+            return client
+        except Exception as exc:
+            logger.debug("facts db unavailable: %s", exc)
+            return None
+
+
+def _write_facts_batch(
+    facts_db_path: str,
+    file_paths_to_clear: list[str],
+    sym_rows: list[tuple],
+    import_rows: list[tuple],
+    ref_rows: list[tuple],
+) -> None:
+    """Write a batch of facts to the CozoDB facts database.
+
+    Called from ``_index_batch`` subprocesses.  Each subprocess opens its
+    own CozoDB connection (SQLite WAL handles concurrent writers).
+
+    Args:
+        facts_db_path: Path to the facts.db file.
+        file_paths_to_clear: File paths whose old facts should be removed.
+        sym_rows: Symbol tuples from _index_batch (17-element).
+        import_rows: Import tuples (content_hash, file_path, module).
+        ref_rows: Reference tuples (content_hash, qn, file_path, line, col, kind).
+    """
+    try:
+        fdb = _open_facts_db(facts_db_path)
+    except BaseException:
+        return
+
+    try:
+        # Delete old facts for changed files
+        if file_paths_to_clear:
+            for fp in file_paths_to_clear:
+                try:
+                    fdb.run(
+                        "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                        "fp == $fp  :rm fact_symbol {fp => }", {"fp": fp}
+                    )
+                except Exception:
+                    pass
+                try:
+                    fdb.run(
+                        "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _], "
+                        "fp == $fp  :rm fact_reference {tqn, fp, line, col => }", {"fp": fp}
+                    )
+                except Exception:
+                    pass
+                try:
+                    fdb.run(
+                        "?[fp, mod] := *fact_import[fp, mod], "
+                        "fp == $fp  :rm fact_import {fp, mod}", {"fp": fp}
+                    )
+                except Exception:
+                    pass
+
+        # Insert symbols
+        if sym_rows:
+            # sym_rows: (hash, file_path, name, qn, module_qn, kind, line, end_line,
+            #            depth, parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa)
+            cozo_sym = [
+                [r[1], r[4], r[2], r[3], r[5], r[6], r[7], r[8],
+                 r[9] or "", r[10] or "", r[11] or "", r[12] or "", r[13] or "",
+                 bool(r[14]), bool(r[15]), bool(r[16])]
+                for r in sym_rows
+            ]
+            fdb.run(
+                "?[fp, mqn, name, qn, kind, line, end_line, depth, "
+                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
+                ":put fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
+                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
+                {"rows": cozo_sym},
+            )
+
+        # Insert references
+        if ref_rows:
+            # ref_rows: (hash, target_qn, file_path, line, col, kind)
+            cozo_ref = [[r[1], r[2], r[3], r[4], r[5]] for r in ref_rows]
+            fdb.run(
+                "?[tqn, fp, line, col, kind] <- $rows "
+                ":put fact_reference {tqn, fp, line, col => kind}",
+                {"rows": cozo_ref},
+            )
+
+        # Insert imports
+        if import_rows:
+            # import_rows: (hash, file_path, module)
+            cozo_imp = [[r[1], r[2]] for r in import_rows]
+            fdb.run(
+                "?[fp, mod] <- $rows "
+                ":put fact_import {fp, mod}",
+                {"rows": cozo_imp},
+            )
+
+    except BaseException:
+        logger.debug("facts db write failed", exc_info=True)
+
+    try:
+        fdb.close()
+    except BaseException:
+        pass
+
+
+def _populate_facts_db(project_root: str) -> None:
+    """Populate CozoDB facts.db from SQLite parse.db.
+
+    Called once after indexing completes (from the main process) to avoid
+    SQLite lock panics from concurrent subprocess CozoDB writes.  Reads
+    all symbols, references, and imports from parse.db and bulk-inserts
+    them into facts.db.
+    """
+    import sqlite3 as _sql3
+
+    cache_dir = _cache_db_dir(project_root)
+    db_path = cache_dir / "parse.db"
+    if not db_path.exists():
+        return
+
+    facts_path = str(cache_dir / "facts.db")
+
+    try:
+        fdb = _open_facts_db(facts_path)
+    except BaseException:
+        return
+
+    try:
+        conn = _sql3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        worktree_id = _get_worktree_id(project_root)
+
+        # Symbols
+        sym_rows = conn.execute(
+            "SELECT si.file_path, si.module_qn, si.name, si.qualified_name, si.kind, "
+            "si.line, si.end_line, si.depth, si.parent, si.bases, si.signature, "
+            "si.returns, si.decorators, si.is_entry_point, si.is_exported, si.has_noqa "
+            "FROM symbol_index si "
+            "INNER JOIN file_manifest fm "
+            "  ON si.content_hash = fm.content_hash AND si.file_path = fm.path "
+            "  AND fm.worktree_id = ?",
+            (worktree_id,),
+        ).fetchall()
+
+        if sym_rows:
+            cozo_sym = [
+                [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                 r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
+                 bool(r[13]), bool(r[14]), bool(r[15])]
+                for r in sym_rows
+            ]
+            fdb.run(
+                "?[fp, mqn, name, qn, kind, line, end_line, depth, "
+                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
+                ":put fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
+                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
+                {"rows": cozo_sym},
+            )
+
+        # References
+        ref_rows = conn.execute(
+            "SELECT ri.target_qn, ri.file_path, ri.line, ri.col, ri.ref_kind "
+            "FROM reference_index ri "
+            "INNER JOIN file_manifest fm "
+            "  ON ri.content_hash = fm.content_hash AND ri.file_path = fm.path "
+            "  AND fm.worktree_id = ?",
+            (worktree_id,),
+        ).fetchall()
+
+        if ref_rows:
+            cozo_ref = [list(r) for r in ref_rows]
+            fdb.run(
+                "?[tqn, fp, line, col, kind] <- $rows "
+                ":put fact_reference {tqn, fp, line, col => kind}",
+                {"rows": cozo_ref},
+            )
+
+        # Imports
+        imp_rows = conn.execute(
+            "SELECT ig.file_path, ig.imported_module "
+            "FROM import_graph ig "
+            "INNER JOIN file_manifest fm "
+            "  ON ig.content_hash = fm.content_hash AND ig.file_path = fm.path "
+            "  AND fm.worktree_id = ?",
+            (worktree_id,),
+        ).fetchall()
+
+        if imp_rows:
+            cozo_imp = [list(r) for r in imp_rows]
+            fdb.run(
+                "?[fp, mod] <- $rows "
+                ":put fact_import {fp, mod}",
+                {"rows": cozo_imp},
+            )
+
+        conn.close()
+    except BaseException:
+        logger.debug("facts db population failed", exc_info=True)
+
+    try:
+        fdb.close()
+    except BaseException:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Qualified-name index cache: per-file set of QN strings for pre-filtering
 # ---------------------------------------------------------------------------
 # After the first cross-project operation populates this cache, subsequent
@@ -593,6 +899,10 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             pass
 
+    # NOTE: CozoDB dual-write is NOT done here — it's done by the caller
+    # (_populate_facts_db) after all workers complete, to avoid SQLite
+    # lock panics from concurrent subprocess writes.
+
     return (processed, len(qn_rows), skipped,
             len(sym_rows), len(import_rows), len(ref_rows))
 
@@ -842,6 +1152,11 @@ def _ensure_index_fresh(
         if files_to_index:
             _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
+            # Populate CozoDB facts.db from the freshly-written SQLite data.
+            try:
+                _populate_facts_db(project_root)
+            except BaseException:
+                pass
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
@@ -890,6 +1205,28 @@ def _ensure_index_fresh(
                 pass
         if scan.deleted:
             conn.commit()
+            # Also clean CozoDB facts db for deleted files
+            try:
+                fdb = _get_facts_db(project_root)
+                if fdb is not None:
+                    for dp in scan.deleted:
+                        try:
+                            fdb.run(
+                                "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                                "fp == $fp  :rm fact_symbol {fp => }", {"fp": dp}
+                            )
+                            fdb.run(
+                                "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _], "
+                                "fp == $fp  :rm fact_reference {tqn, fp, line, col => }", {"fp": dp}
+                            )
+                            fdb.run(
+                                "?[fp, mod] := *fact_import[fp, mod], "
+                                "fp == $fp  :rm fact_import {fp, mod}", {"fp": dp}
+                            )
+                        except BaseException:
+                            pass
+            except BaseException:
+                pass
 
         conn.close()
         return True
@@ -911,17 +1248,161 @@ def query_symbol_index(
     limit: int = 0,
     language: str = "python",
 ) -> list[dict] | None:
-    """Query the symbol_index table directly for fast symbol lookup.
+    """Query the fact_symbol relation for fast symbol lookup.
 
+    Uses CozoDB facts.db when available, with SQLite parse.db fallback.
     Returns a list of dicts with symbol info, or None if the index
     is not available or not fresh.
     """
-    import sqlite3 as _sql3
-
     if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
+
+    # Try CozoDB facts database first.
+    results = _query_symbol_index_cozo(
+        project_root,
+        name_pattern=name_pattern,
+        kind=kind,
+        file_path=file_path,
+        qualified_name=qualified_name,
+        limit=limit,
+    )
+    if results is None:
+        # Fallback to SQLite
+        results = _query_symbol_index_sqlite(
+            project_root,
+            name_pattern=name_pattern,
+            kind=kind,
+            file_path=file_path,
+            qualified_name=qualified_name,
+            limit=limit,
+        )
+    if results is None:
+        return None
+
+    # Fallback: if no results and not constrained to a specific file,
+    # try looking up the symbol in venv site-packages.
+    if not results and not file_path:
+        venv_results = lookup_venv_symbol(
+            project_path,
+            name_pattern=name_pattern,
+            qualified_name=qualified_name,
+            kind=kind,
+            limit=limit,
+        )
+        if venv_results:
+            return venv_results
+
+    # Fallback: if still no results and a qualified_name was given,
+    # try resolving through module mappings (modmap).
+    if not results and not file_path and qualified_name:
+        modmap_results = _lookup_via_modmap(
+            project_root, qualified_name,
+            name_pattern=name_pattern, kind=kind, limit=limit,
+        )
+        if modmap_results:
+            return modmap_results
+
+    return results
+
+
+def _query_symbol_index_cozo(
+    project_root: str,
+    *,
+    name_pattern: str | None = None,
+    kind: str | None = None,
+    file_path: str | None = None,
+    qualified_name: str | None = None,
+    limit: int = 0,
+) -> list[dict] | None:
+    """Query fact_symbol via CozoDB Datalog."""
+    fdb = _get_facts_db(project_root)
+    if fdb is None:
+        return None
+
+    try:
+        clauses = [
+            "*fact_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa]"
+        ]
+        params: dict = {}
+
+        if name_pattern:
+            if "*" in name_pattern or "?" in name_pattern:
+                # CozoDB doesn't have GLOB; use starts_with/ends_with/contains
+                # Convert simple patterns; for complex globs fall back to SQLite.
+                if name_pattern.endswith("*") and "*" not in name_pattern[:-1]:
+                    clauses.append("starts_with(name, $name_prefix)")
+                    params["name_prefix"] = name_pattern[:-1]
+                elif name_pattern.startswith("*") and "*" not in name_pattern[1:]:
+                    clauses.append("ends_with(name, $name_suffix)")
+                    params["name_suffix"] = name_pattern[1:]
+                else:
+                    return None  # Complex glob — fall back to SQLite
+            else:
+                clauses.append("name == $name")
+                params["name"] = name_pattern
+
+        if kind:
+            clauses.append("kind == $kind")
+            params["kind"] = kind
+
+        if file_path:
+            resolved = str(Path(file_path).resolve())
+            clauses.append("fp == $file_path")
+            params["file_path"] = resolved
+
+        if qualified_name:
+            # Match qn, mqn, or mqn prefix
+            clauses.append(
+                "(qn == $qname or mqn == $qname or starts_with(mqn, $qname_prefix))"
+            )
+            params["qname"] = qualified_name
+            params["qname_prefix"] = qualified_name + "."
+
+        query = (
+            "?[name, qn, kind, fp, line, end_line, depth, parent, sig, returns, decs] := "
+            + ", ".join(clauses)
+            + "\n:order name, fp, line"
+        )
+        if limit > 0:
+            query += f"\n:limit {limit}"
+
+        result = fdb.run(query, params)
+        return [
+            {
+                "name": r[0],
+                "qualified_name": r[1],
+                "kind": r[2],
+                "file_path": r[3],
+                "line": r[4],
+                "end_line": r[5],
+                "depth": r[6],
+                "parent": r[7],
+                "signature": r[8],
+                "returns": r[9],
+                "decorators": r[10].split(",") if r[10] else [],
+            }
+            for r in result["rows"]
+        ]
+    except Exception:
+        logger.debug("CozoDB query_symbol_index failed, falling back", exc_info=True)
+        return None
+
+
+def _query_symbol_index_sqlite(
+    project_root: str,
+    *,
+    name_pattern: str | None = None,
+    kind: str | None = None,
+    file_path: str | None = None,
+    qualified_name: str | None = None,
+    limit: int = 0,
+) -> list[dict] | None:
+    """Query symbol_index via SQLite (legacy fallback)."""
+    import sqlite3 as _sql3
+
     cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
 
@@ -937,7 +1418,6 @@ def query_symbol_index(
 
         if name_pattern:
             if "*" in name_pattern or "?" in name_pattern:
-                # Convert glob to SQL GLOB
                 conditions.append("name GLOB ?")
                 params.append(name_pattern)
             else:
@@ -954,11 +1434,6 @@ def query_symbol_index(
             params.append(resolved)
 
         if qualified_name:
-            # Match against both qualified_name and module_qn (the
-            # fully-qualified module path).  This mirrors the logic in
-            # lookup_venv_symbol and allows lookups like
-            # "common.db.models.Foo" to find a symbol whose module_qn
-            # is "common.db.models" and name is "Foo".
             conditions.append(
                 "(qualified_name = ? OR module_qn = ? OR module_qn LIKE ?)"
             )
@@ -990,30 +1465,6 @@ def query_symbol_index(
                 "decorators": row[10].split(",") if row[10] else [],
             })
         conn.close()
-
-        # Fallback: if no results and not constrained to a specific file,
-        # try looking up the symbol in venv site-packages.
-        if not results and not file_path:
-            venv_results = lookup_venv_symbol(
-                project_path,
-                name_pattern=name_pattern,
-                qualified_name=qualified_name,
-                kind=kind,
-                limit=limit,
-            )
-            if venv_results:
-                return venv_results
-
-        # Fallback: if still no results and a qualified_name was given,
-        # try resolving through module mappings (modmap).
-        if not results and not file_path and qualified_name:
-            modmap_results = _lookup_via_modmap(
-                project_root, qualified_name,
-                name_pattern=name_pattern, kind=kind, limit=limit,
-            )
-            if modmap_results:
-                return modmap_results
-
         return results
     except Exception:
         try:
@@ -1394,17 +1845,40 @@ def query_reference_index(
     ref_kind: str | None = None,
     language: str = "python",
 ) -> list[dict] | None:
-    """Query the reference_index table for fast find-references.
+    """Query references via CozoDB (with SQLite fallback).
 
     Returns a list of dicts with reference info, or None if the index
     is not available or not fresh.
     """
-    import sqlite3 as _sql3
-
     if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
+
+    # Try CozoDB first
+    fdb = _get_facts_db(project_root)
+    if fdb is not None:
+        try:
+            clauses = ["*fact_reference[tqn, fp, line, col, kind]", "tqn == $qn"]
+            params: dict = {"qn": target_qn}
+            if ref_kind:
+                clauses.append("kind == $ref_kind")
+                params["ref_kind"] = ref_kind
+            query = (
+                "?[fp, line, col, kind] := " + ", ".join(clauses)
+                + "\n:order fp, line"
+            )
+            result = fdb.run(query, params)
+            return [
+                {"file_path": r[0], "line": r[1], "col": r[2], "ref_kind": r[3]}
+                for r in result["rows"]
+            ]
+        except Exception:
+            logger.debug("CozoDB query_reference_index failed, falling back", exc_info=True)
+
+    # SQLite fallback
+    import sqlite3 as _sql3
+
     cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
 
@@ -1428,14 +1902,10 @@ def query_reference_index(
                 "WHERE target_qn = ? ORDER BY file_path, line",
                 (target_qn,),
             ).fetchall()
-        results = []
-        for row in rows:
-            results.append({
-                "file_path": row[0],
-                "line": row[1],
-                "col": row[2],
-                "ref_kind": row[3],
-            })
+        results = [
+            {"file_path": r[0], "line": r[1], "col": r[2], "ref_kind": r[3]}
+            for r in rows
+        ]
         conn.close()
         return results
     except Exception:
@@ -1450,13 +1920,27 @@ def query_import_graph(
     project_path: str,
     imported_module: str,
 ) -> list[str] | None:
-    """Query the import_graph for files importing a module.
+    """Query for files importing a module (CozoDB with SQLite fallback).
 
     Returns file paths, or None if index not available.
     """
+    project_root = _find_project_root(project_path)
+
+    # Try CozoDB first
+    fdb = _get_facts_db(project_root)
+    if fdb is not None:
+        try:
+            result = fdb.run(
+                "?[fp] := *fact_import[fp, mod], mod == $mod",
+                {"mod": imported_module},
+            )
+            return [r[0] for r in result["rows"]]
+        except Exception:
+            logger.debug("CozoDB query_import_graph failed, falling back", exc_info=True)
+
+    # SQLite fallback
     import sqlite3 as _sql3
 
-    project_root = _find_project_root(project_path)
     cache_dir = _cache_db_dir(project_root)
     db_path = cache_dir / "parse.db"
     if not db_path.exists():
@@ -1753,6 +2237,14 @@ def warm_caches(
     except Exception as exc:
         logger.debug("warm_caches: FTS rebuild skipped: %s", exc)
         stats["fts_indexed"] = 0
+
+    # Phase 5: populate CozoDB facts.db from SQLite.
+    # Done here (main process, single-threaded) to avoid SQLite lock
+    # panics from concurrent subprocess writes.
+    try:
+        _populate_facts_db(project_root)
+    except BaseException:
+        logger.debug("warm_caches: facts db population failed", exc_info=True)
 
     return stats
 
@@ -4247,6 +4739,259 @@ def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
     return None
 
 
+def _dead_code_postfilter(
+    rows: list[tuple],
+    scan_root: str,
+    all_files: bool,
+    strings_count_as_references: bool,
+    entry_point_decorators: list[str] | None,
+    exclude_references_from: list[str] | None,
+) -> list[DeadSymbol]:
+    """Shared post-filter for dead code candidates.
+
+    Applies entry-point decorator filtering and string-literal scanning
+    to the candidate rows returned by either CozoDB or SQLite.
+
+    Args:
+        rows: List of (name, qname, kind, file_path, line, decorators) tuples.
+    """
+    # Post-filter: custom entry point decorators.
+    if entry_point_decorators and rows:
+        ep_decs = set(entry_point_decorators)
+        ep_basenames = {d.rsplit(".", 1)[-1] for d in ep_decs}
+        filtered = []
+        for row in rows:
+            dec_str = row[5]  # decorators column
+            if dec_str:
+                skip = False
+                for dec in dec_str.split(","):
+                    dec_clean = dec.strip()
+                    if dec_clean.startswith("@"):
+                        dec_clean = dec_clean[1:]
+                    if "(" in dec_clean:
+                        dec_clean = dec_clean[:dec_clean.index("(")]
+                    if dec_clean in ep_decs:
+                        skip = True
+                        break
+                    basename = dec_clean.rsplit(".", 1)[-1] if "." in dec_clean else dec_clean
+                    if basename in ep_basenames:
+                        skip = True
+                        break
+                if skip:
+                    continue
+            filtered.append(row)
+        rows = filtered
+
+    if not rows:
+        return []
+
+    if not strings_count_as_references:
+        return [
+            DeadSymbol(
+                file_path=fp, name=name, kind=sym_kind,
+                line=line, selector=f"{fp}::{qname}",
+                reason="no references found",
+            )
+            for name, qname, sym_kind, fp, line, _decs in rows
+        ]
+
+    # String-literal post-filter
+    str_names = {name for name, _, _, _, _, _ in rows if len(name) > 3}
+
+    names_with_str_ref: set[tuple[str, str]] = set()
+    if str_names:
+        source_files = _collect_source_files(
+            scan_root, git_tracked_only=not all_files,
+        )
+
+        _exclude_prefixes: list[str] = []
+        _exclude_globs: list[str] = []
+        if exclude_references_from:
+            import fnmatch as _fnmatch
+            for pattern in exclude_references_from:
+                if "*" in pattern or "?" in pattern:
+                    if not pattern.startswith("*") and not Path(pattern).is_absolute():
+                        pattern = str(Path(scan_root) / pattern)
+                    if not pattern.endswith("*"):
+                        pattern = pattern.rstrip("/") + "/*"
+                    _exclude_globs.append(pattern)
+                else:
+                    _exclude_prefixes.append(str(Path(pattern).resolve()))
+
+        def _is_excluded_ref(path: str) -> bool:
+            if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
+                return True
+            if _exclude_globs:
+                return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
+            return False
+
+        file_cache: dict[str, str] = {}
+        try:
+            matched = _rust.read_and_filter_files(
+                source_files, list(str_names),
+            )
+            for fp, content in matched:
+                r = str(Path(fp).resolve())
+                if _is_excluded_ref(r):
+                    continue
+                file_cache[r] = content
+        except Exception:
+            pass
+
+        for _, _, _, fp, _, _ in rows:
+            r = str(Path(fp).resolve())
+            if r not in file_cache:
+                try:
+                    file_cache[r] = Path(fp).read_text()
+                except Exception:
+                    pass
+
+        _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
+        for name, qname, sym_kind, fp, line, _decs in rows:
+            if len(name) <= 3:
+                continue
+            r = str(Path(fp).resolve())
+
+            content = file_cache.get(r)
+            if content and name in content:
+                for i, lt in enumerate(content.splitlines(), 1):
+                    if i == line or name not in lt:
+                        continue
+                    cleaned = _strip_re.sub("", lt)
+                    if name not in cleaned:
+                        names_with_str_ref.add((fp, name))
+                        break
+
+            if (fp, name) in names_with_str_ref:
+                continue
+
+            for other_r, other_content in file_cache.items():
+                if other_r == r:
+                    continue
+                if name in other_content:
+                    names_with_str_ref.add((fp, name))
+                    break
+
+    dead_symbols = []
+    for name, qname, sym_kind, fp, line, _decs in rows:
+        if (fp, name) in names_with_str_ref:
+            continue
+        dead_symbols.append(
+            DeadSymbol(
+                file_path=fp, name=name, kind=sym_kind,
+                line=line, selector=f"{fp}::{qname}",
+                reason="no references found",
+            )
+        )
+    return dead_symbols
+
+
+def _find_dead_code_cozo(
+    scan_root: str,
+    kind: str | None,
+    include_private: bool,
+    exclude_references_from: list[str] | None,
+    entry_point_names: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> list[tuple] | None:
+    """CozoScript dead code candidate query.
+
+    Returns rows as (name, qualified_name, kind, file_path, line, decorators)
+    tuples, or None if CozoDB is unavailable.  Post-filtering for
+    entry_point_decorators and string literals is done by the caller.
+    """
+    fdb = _get_facts_db(_find_project_root(scan_root))
+    if fdb is None:
+        return None
+
+    try:
+        # Build the Datalog query piece by piece.
+        # has_ref: symbols that have at least one external reference
+        # (by qualified_name or module_qn, excluding self-references).
+        rules = [
+            "has_ref[mqn] := "
+            "*fact_reference[mqn, ref_fp, ref_line, _, _], "
+            "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
+            "not (ref_fp == sym_fp, ref_line == sym_line)",
+        ]
+
+        # Also check references via module_qn
+        rules.append(
+            "has_ref[mqn] := "
+            "*fact_symbol[_, mqn, _, qn, _, _, _, _, _, _, _, _, _, _, _, _], "
+            "qn != \"\", "
+            "*fact_reference[qn, ref_fp, ref_line, _, _], "
+            "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
+            "not (ref_fp == sym_fp, ref_line == sym_line)"
+        )
+
+        # If exclude_references_from, add a more selective has_ref
+        if exclude_references_from:
+            # For now, fall back to SQLite for this complex case
+            # (CozoDB lacks LIKE/GLOB for path matching)
+            return None
+
+        # Build candidate conditions
+        candidate_clauses = [
+            "*fact_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa]",
+            "depth == 1",
+            "is_entry == false",
+            "is_exported == false",
+            "has_noqa == false",
+            "not has_ref[mqn]",
+        ]
+
+        if kind == "function":
+            candidate_clauses.append('kind in ["function", "async_function"]')
+        elif kind == "class":
+            candidate_clauses.append('kind == "class"')
+        else:
+            candidate_clauses.append(
+                'kind in ["function", "async_function", "method", "async_method", "class"]'
+            )
+
+        if not include_private:
+            candidate_clauses.append(
+                '(not starts_with(name, "_") or starts_with(name, "__"))'
+            )
+
+        if exclude_paths:
+            for ep in exclude_paths:
+                resolved = str(Path(ep).resolve()) if not ep.startswith("*") else ep
+                if "*" not in resolved:
+                    candidate_clauses.append(f'not starts_with(fp, "{resolved}")')
+                else:
+                    # Complex glob — fall back to SQLite
+                    return None
+
+        if entry_point_names:
+            # CozoDB doesn't have NOT IN for inline lists easily;
+            # filter in Python post-processing instead
+            pass
+
+        rules.append(
+            "?[name, qn, kind, fp, line, decs] := "
+            + ", ".join(candidate_clauses)
+            + "\n:order fp, line"
+        )
+
+        query = "\n".join(rules)
+        result = fdb.run(query)
+
+        rows = [tuple(r) for r in result["rows"]]
+
+        # Post-filter entry_point_names in Python
+        if entry_point_names:
+            ep_set = set(entry_point_names)
+            rows = [r for r in rows if r[0] not in ep_set]
+
+        return rows
+    except Exception:
+        logger.debug("CozoDB dead code query failed, falling back to SQLite", exc_info=True)
+        return None
+
+
 def _find_dead_code_cached(
     project_path: str,
     kind: str | None,
@@ -4259,11 +5004,11 @@ def _find_dead_code_cached(
     exclude_paths: list[str] | None = None,
     language: str = "python",
 ) -> list[DeadSymbol]:
-    """Index-accelerated dead code detection — single SQL query.
+    """Index-accelerated dead code detection.
 
-    Uses ``symbol_index`` and ``reference_index`` from ``parse.db``.
+    Uses CozoDB Datalog when available, with SQLite ``parse.db`` fallback.
     The heavy lifting (candidate filtering + reference checking) is a
-    single ``NOT EXISTS`` query; only the lightweight string-literal
+    Datalog query (or SQL ``NOT EXISTS``); the lightweight string-literal
     post-filter runs in Python on the small result set.
     """
     import sqlite3 as _sql3
@@ -4297,6 +5042,23 @@ def _find_dead_code_cached(
     if not _ensure_index_fresh(scan_root, language=language):
         logger.info("dead_code: index stale/missing — warming caches")
         warm_caches(scan_root, type_engine="none", language=language)
+
+    # Try CozoDB Datalog path first (returns candidate rows or None).
+    cozo_rows = _find_dead_code_cozo(
+        scan_root, kind, include_private, exclude_references_from,
+        entry_point_names=entry_point_names,
+        exclude_paths=exclude_paths,
+    )
+    if cozo_rows is not None:
+        # cozo_rows: (name, qn, kind, file_path, line, decorators)
+        # Apply the same post-filtering as the SQLite path below.
+        rows = cozo_rows
+        # Jump past the SQL query section to the shared post-filter.
+        # (We reuse the exact same decorator and string-literal logic.)
+        return _dead_code_postfilter(
+            rows, scan_root, all_files, strings_count_as_references,
+            entry_point_decorators, exclude_references_from,
+        )
 
     project_root = _find_project_root(scan_root)
     worktree_id = _get_worktree_id(project_root)
@@ -4382,153 +5144,10 @@ def _find_dead_code_cached(
         rows = conn.execute(query, [worktree_id] + params).fetchall()
         conn.close()
 
-        # Post-filter: custom entry point decorators.
-        if entry_point_decorators and rows:
-            ep_decs = set(entry_point_decorators)
-            # Also build a basename set for flexible matching.
-            ep_basenames = {d.rsplit(".", 1)[-1] for d in ep_decs}
-            filtered = []
-            for row in rows:
-                dec_str = row[5]  # si.decorators column
-                if dec_str:
-                    skip = False
-                    for dec in dec_str.split(","):
-                        # Strip @ prefix and arguments:
-                        # @app.command("name") -> app.command
-                        dec_clean = dec.strip()
-                        if dec_clean.startswith("@"):
-                            dec_clean = dec_clean[1:]
-                        if "(" in dec_clean:
-                            dec_clean = dec_clean[:dec_clean.index("(")]
-                        if dec_clean in ep_decs:
-                            skip = True
-                            break
-                        basename = dec_clean.rsplit(".", 1)[-1] if "." in dec_clean else dec_clean
-                        if basename in ep_basenames:
-                            skip = True
-                            break
-                    if skip:
-                        continue
-                filtered.append(row)
-            rows = filtered
-
-        if not rows:
-            return []
-
-        # ---- String-literal post-filter (Python) ---------------------
-        # The reference_index only captures AST-level Name/Attribute
-        # references.  String literals need a quick text scan.  This
-        # runs on the small set of candidates returned by SQL (~tens).
-        if not strings_count_as_references:
-            return [
-                DeadSymbol(
-                    file_path=fp, name=name, kind=sym_kind,
-                    line=line, selector=f"{fp}::{qname}",
-                    reason="no references found",
-                )
-                for name, qname, sym_kind, fp, line, _decs in rows
-            ]
-
-        # Collect names that need string checking (length > 3).
-        str_names = {name for name, _, _, _, _, _ in rows if len(name) > 3}
-
-        if str_names:
-            # Use Rust batch-read with name hints for fast file scanning.
-            source_files = _collect_source_files(
-                scan_root, git_tracked_only=not all_files,
-            )
-
-            # Build exclude matchers for string scanning.
-            _exclude_prefixes: list[str] = []
-            _exclude_globs: list[str] = []
-            if exclude_references_from:
-                import fnmatch as _fnmatch
-                for pattern in exclude_references_from:
-                    if "*" in pattern or "?" in pattern:
-                        # Normalise relative globs to absolute for matching.
-                        if not pattern.startswith("*") and not Path(pattern).is_absolute():
-                            pattern = str(Path(scan_root) / pattern)
-                        # Ensure trailing * so fnmatch matches files inside dirs.
-                        if not pattern.endswith("*"):
-                            pattern = pattern.rstrip("/") + "/*"
-                        _exclude_globs.append(pattern)
-                    else:
-                        _exclude_prefixes.append(str(Path(pattern).resolve()))
-
-            def _is_excluded_ref(path: str) -> bool:
-                if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
-                    return True
-                if _exclude_globs:
-                    return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
-                return False
-
-            # file → content cache (only files containing a candidate name)
-            file_cache: dict[str, str] = {}
-            try:
-                matched = _rust.read_and_filter_files(
-                    source_files, list(str_names),
-                )
-                for fp, content in matched:
-                    r = str(Path(fp).resolve())
-                    if _is_excluded_ref(r):
-                        continue
-                    file_cache[r] = content
-            except Exception:
-                pass
-
-            # Also read definition files for same-file string checks.
-            for _, _, _, fp, _, _ in rows:
-                r = str(Path(fp).resolve())
-                if r not in file_cache:
-                    try:
-                        file_cache[r] = Path(fp).read_text()
-                    except Exception:
-                        pass
-
-            # Build name → set of files containing it (excluding def file).
-            _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
-            names_with_str_ref: set[tuple[str, str]] = set()  # (file_path, name)
-            for name, qname, sym_kind, fp, line, _decs in rows:
-                if len(name) <= 3:
-                    continue
-                r = str(Path(fp).resolve())
-
-                # Same-file: check for name in strings on non-def lines.
-                content = file_cache.get(r)
-                if content and name in content:
-                    for i, lt in enumerate(content.splitlines(), 1):
-                        if i == line or name not in lt:
-                            continue
-                        cleaned = _strip_re.sub("", lt)
-                        if name not in cleaned:
-                            names_with_str_ref.add((fp, name))
-                            break
-
-                if (fp, name) in names_with_str_ref:
-                    continue
-
-                # Cross-file: any other file containing the name.
-                for other_r, other_content in file_cache.items():
-                    if other_r == r:
-                        continue
-                    if name in other_content:
-                        names_with_str_ref.add((fp, name))
-                        break
-        else:
-            names_with_str_ref = set()
-
-        dead_symbols = []
-        for name, qname, sym_kind, fp, line, _decs in rows:
-            if (fp, name) in names_with_str_ref:
-                continue
-            dead_symbols.append(
-                DeadSymbol(
-                    file_path=fp, name=name, kind=sym_kind,
-                    line=line, selector=f"{fp}::{qname}",
-                    reason="no references found",
-                )
-            )
-        return dead_symbols
+        return _dead_code_postfilter(
+            rows, scan_root, all_files, strings_count_as_references,
+            entry_point_decorators, exclude_references_from,
+        )
 
     except Exception:
         try:
