@@ -68,14 +68,26 @@ grammar.  For example, `tree-sitter-python` can mark string literals as
 potential injection sites, and a `tree-sitter-sql` grammar can parse the
 contents.
 
-**Approach**: Add an injection layer between the existing file parser and the
-scope resolver:
+**Design choice**: We adopt a *virtual code* model inspired by Volar.js
+rather than relying solely on tree-sitter's built-in injection queries.
+Tree-sitter injections are syntax-only (no cross-boundary semantic info),
+and their `injections.scm` files don't encode the call-site heuristics we
+need (e.g., "first arg of `cursor.execute()` is SQL").  Instead, emend
+detects injection sites using its own configurable rules (below), extracts
+the string content, and parses it as a standalone DSL document — similar to
+Volar.js's `VirtualCode` objects but at the index/batch level rather than
+in an LSP hot path.
+
+This also follows the *Language Services* pattern recommended by VS Code:
+embed DSL parsers internally rather than forwarding requests to external
+language servers, keeping the tool self-contained and CLI-friendly.
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌───────────────────┐
 │ Host parse   │ ──▶ │ Injection detect │ ──▶ │ DSL sub-parse     │
-│ (Python CST) │     │ (heuristics +    │     │ (SQL/HTML/Jinja   │
-│              │     │  annotations)    │     │  CST per region)  │
+│ (Python CST) │     │ (rule-based:     │     │ (standalone SQL/  │
+│              │     │  call patterns,  │     │  HTML/Jinja CST   │
+│              │     │  tags, comments) │     │  per region)      │
 └─────────────┘     └──────────────────┘     └───────────────────┘
 ```
 
@@ -124,7 +136,26 @@ class LinkHint:
 ### 3. Cross-Language Link Resolution
 
 A new `DslLinkResolver` connects DSL symbols to host-language definitions
-by consuming `LinkHint`s and querying the existing symbol index:
+by consuming `LinkHint`s and querying the existing symbol index.
+
+**Relation to scope graphs**: The academic scope graph model (Visser et al.)
+provides a clean formal framework for cross-language name resolution —
+declarations and references in different languages become nodes in a shared
+graph, with resolution edges crossing language boundaries.  GitHub's Stack
+Graphs operationalize this for Python and TypeScript.  Our approach is more
+pragmatic: rather than building a unified scope graph across languages, we
+use strategy-based link hints that encode domain-specific conventions (ORM
+naming, component exports, CSS selectors).  This trades theoretical
+generality for practical accuracy — an ORM-aware strategy can resolve
+`users` → `class User` with high confidence, while a generic scope graph
+would need the same domain knowledge encoded as custom scope rules anyway.
+
+A future evolution could adopt scope graph edges for the cross-language
+links, enabling transitive resolution (e.g., SQL column → ORM attribute →
+API serializer field) and integration with GitHub's Stack Graphs or
+Sourcegraph SCIP indexers.
+
+Resolution architecture:
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌───────────────────┐
@@ -515,13 +546,191 @@ class UserResolver {
    during `emend index`? Proposal: DSL indexing should add no more than
    30% to total index time, gated behind `[dsl] enabled = true`.
 
-## Related Work
+8. **SCIP interoperability**: Should DSL symbols be exportable in
+   Sourcegraph's SCIP format?  This would enable cross-language navigation
+   on Sourcegraph instances and provide a standard interchange format.
+   SCIP's symbol scheme would need extending for DSL-qualified names.
 
-- **tree-sitter injection queries**: Standard mechanism for embedded
-  language parsing; used by Neovim, Helix, and Zed for syntax highlighting.
-- **IntelliJ language injection**: JetBrains IDEs support language injection
-  via annotations (`@Language("SQL")`) and heuristics — closest prior art.
-- **LSP embedded languages**: The LSP spec has limited support for embedded
-  languages; most implementations handle it ad-hoc.
-- **Semgrep**: Supports cross-file taint tracking but not cross-language DSL
-  navigation.
+9. **Scope graph integration**: Should we adopt stack graph edges for
+   cross-language links long-term?  This would enable transitive resolution
+   chains (SQL column → ORM attr → API field) and potential integration
+   with GitHub's precise code navigation, but adds complexity.
+
+10. **Concatenated/interpolated strings**: JetBrains IntelliLang handles
+    SQL queries built from concatenated string fragments as a single logical
+    document.  Should we support this?  Python f-strings and TS template
+    literals with interpolation are common for dynamic SQL.  Proposal:
+    phase 1 handles only complete string literals; phase 2 adds support for
+    concatenation with `$HOLE` placeholders in the DSL parse.
+
+11. **PolyglotPiranha-style rule graphs**: Uber's Piranha uses a graph of
+    match-replace rules with capture propagation between nodes.  Should
+    DSL-aware lint/replace rules support chaining (e.g., "match SQL
+    pattern, then check the enclosing Python call")?  This is more
+    expressive than flat rules but harder to configure.
+
+## Prior Art
+
+### Foundational Theory
+
+**Scope Graphs (TU Delft, Eelco Visser et al.)** — The most rigorous
+academic framework for language-independent name resolution.  Scope graphs
+separate name resolution into two stages: (1) construct a language-specific
+scope graph from an AST, and (2) resolve references using a
+language-independent resolution algorithm.  The resolution calculus is
+declarative and supports lexical scoping, modules, imports, and complex
+binding rules.  This work directly influenced GitHub's Stack Graphs.
+
+Key papers:
+- "A Theory of Name Resolution" (ESOP 2015) — Neron, Tolmach, Visser,
+  Wachsmuth
+- "Scopes as types" (OOPSLA 2018)
+- "Scope Graphs: The Story so Far" (EVCS 2023)
+
+**Cross-Language Support Mechanisms (Mayer et al.)** — A controlled
+experiment with 22 participants demonstrated that cross-language support
+mechanisms (visualization, static checking, navigation, refactoring)
+significantly aid software development.  Over 90% of surveyed professional
+developers reported problems related to cross-language linking.
+
+**Towards Analyzing N-language Polyglot Programs (2026)** — Recent research
+identifying key open problems: incremental dataflow updates at language
+boundaries, function summary exchange across languages, precise
+inter-procedural call graph construction in polyglot systems.
+
+### IDE and Editor Approaches
+
+**JetBrains IntelliLang** — The most mature embedded language injection
+system.  String literals are treated as fragments of another language with
+full syntax highlighting, completion, navigation, and validation.  Injection
+is driven by `@Language("SQL")` annotations (Java), `# language=SQL` magic
+comments (Python), or configurable place patterns (e.g., "first argument of
+`connection.prepareStatement()`").  The low-level `MultiHostInjector` API
+handles concatenated strings — multiple fragments treated as one logical
+document.  This is the closest prior art to what we are proposing, but it is
+proprietary and tightly coupled to the JetBrains PSI infrastructure.
+
+**Angular Language Service** — Deep cross-language navigation between
+TypeScript and HTML templates: go-to-definition from template expressions
+to TypeScript component properties/methods, rename-symbol that works across
+templates and TypeScript, hover on template bindings.  Requires
+`strictTemplates` in `tsconfig.json`.
+
+**VS Code extensions** for specific DSL pairs:
+- *React CSS modules* (`viijay-kr.react-ts-css`): Ctrl+Click on CSS class
+  names in JSX/TSX to navigate to `.module.css` definitions.
+- *vscode-styled-components*: Syntax highlighting and IntelliSense inside
+  tagged template literals for CSS-in-JS.
+- *vscode-graphql* (GraphQL Foundation): Go-to-definition, hover, and
+  outline for GraphQL across files.
+- *Relay GraphQL* (Meta/Coinbase): Go-to-definition for fragments, fields,
+  and types with Relay compiler integration.
+
+### Tree-sitter Injection Mechanism
+
+Tree-sitter supports language injections via `queries/injections.scm` files
+shipped with each grammar.  Two special captures drive the system:
+`@injection.content` marks the text region to reparse, and
+`@injection.language` captures a node whose text names the target language.
+The `#set! injection.language "sql"` directive hardcodes the language for
+known patterns.  Parsing produces a hierarchy of `LanguageLayer` objects;
+injected languages can themselves have injections (arbitrary nesting).
+
+Used by Neovim, Helix, Zed, and Pulsar for syntax highlighting.
+
+**Current limitations** (relevant to this proposal): injected regions are
+parsed as top-level nodes in the target grammar — there is no way to
+specify that an injection should be a specific AST node type.
+Cross-region semantic information (definitions visible across injection
+boundaries) is not shared.  See
+[tree-sitter/tree-sitter#3625](https://github.com/tree-sitter/tree-sitter/issues/3625)
+for the active proposal to improve this.
+
+### Embedded Language LSP Frameworks
+
+**Volar.js** — The dominant embedded-language LSP framework, used by Vue,
+Astro, and Svelte.  Core concept: a file is parsed into regions, each
+mapped to a `VirtualCode` object for its language.  Service plugins
+provide language features per embedded language.  This avoids duplicating
+expensive TypeScript Language Service instances.  ByteDance's Lynx team
+shipped a complete language toolset using Volar.js in two weeks with a
+single developer.
+
+**VS Code's two approaches** for embedded languages:
+1. *Language Services* (recommended): the language server embeds libraries
+   for each sub-language internally (e.g., the HTML LS uses CSS and JS
+   language services for `<style>` and `<script>`).
+2. *Request Forwarding*: the language server creates virtual text documents
+   for embedded regions and forwards LSP requests back to VS Code.
+
+**LSP Virtual Documents Proposal** — An emerging proposal to make embedded
+languages first-class in LSP: servers create virtual text documents, and
+clients delegate LSP requests to the appropriate language server.  Not yet
+part of the LSP specification.
+
+### Code Intelligence Platforms
+
+**GitHub Stack Graphs** — GitHub's precise code navigation, based on scope
+graphs research.  Properties: zero-configuration (no CI job needed),
+declarative DSL for name binding rules, incremental (processes most commits
+in seconds), built on tree-sitter.  Currently supports Python and TypeScript
+with precise navigation.
+
+**Sourcegraph SCIP** — The SCIP Code Intelligence Protocol (replacing LSIF)
+is a Protobuf-based format for language-agnostic code indexing.  Supports
+cross-repository navigation (following symbols across repos) and
+cross-language navigation (e.g., Protobuf definitions to generated Java/Go
+bindings).  10x CI speedup over LSIF for TypeScript indexing.
+
+### Polyglot Transformation Tools
+
+**PolyglotPiranha (Uber, PLDI 2024)** — A lightweight polyglot code
+transformation DSL built on tree-sitter, supporting 10 languages.  Uses a
+graph of match-replace rules where edges specify application order and
+captures propagate between nodes.  Deployed at Uber scale (7.5M LoC),
+deleting 210K LoC and migrating 20K LoC across 1,611 PRs.  Limitation:
+purely syntactic — cannot express transformations requiring type resolution
+or control-flow analysis.
+
+**Semgrep** — Cross-language pattern matching via `metavariable-pattern`
+for polyglot files (e.g., matching JavaScript `eval` inside HTML).
+Commercial tier adds cross-file and cross-function dataflow analysis.  Built
+on tree-sitter, supports 30+ languages.  Does not provide navigation or
+reference-finding.
+
+### DSL-Specific Tools
+
+**Jinja2/Django templates:**
+- *jinja-lsp* (uros-5): A dedicated LSP for Jinja templates supporting
+  go-to-definition for both template identifiers and Python backend
+  identifiers.  Works with Helix and Neovim.  Nascent but promising.
+- *live-jinja-renderer* (VS Code): Ctrl+Click navigation to macros,
+  variables, blocks, and template paths.
+
+**SQL:** No existing tool provides true go-to-definition from embedded SQL
+strings to table/column definitions in Python or Java.  The
+sql-language-server (joe-re), sqls, and Postgres Language Server all work on
+standalone `.sql` files.  JetBrains is the only environment that comes
+close, via IntelliLang + Database Tools.
+
+**Python-specific:** Jedi, Rope, and pylsp are purely Python-focused — none
+handle embedded SQL, templates, or cross-language analysis.
+
+### Gaps This Proposal Fills
+
+The biggest gaps in the current landscape:
+
+1. **Embedded SQL ↔ ORM navigation** — No tool connects SQLAlchemy/Django
+   model definitions to their usage in raw SQL queries or vice versa.
+2. **Template ↔ view navigation** — jinja-lsp is nascent; no tool provides
+   bidirectional navigation between Flask/Django views and Jinja2 templates
+   with full semantic understanding.
+3. **General embedded DSL framework for static analysis** — Tree-sitter
+   injections handle syntax only.  There is no general framework for
+   semantic-level cross-language analysis in static analysis tools (as
+   opposed to IDEs).
+4. **LSP-level standard** — The virtual documents proposal exists but is not
+   yet part of the LSP spec; each framework reinvents embedding.
+5. **CLI-accessible cross-language refs** — All existing cross-language
+   navigation is IDE-specific.  A CLI tool providing `emend refs
+   models.py::User --include-dsl` has no equivalent today.
