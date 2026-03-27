@@ -395,25 +395,8 @@ def _populate_facts_db(project_root: str) -> None:
 
         worktree_id = _get_worktree_id(project_root)
 
-        # Clear all facts tables before repopulating so deleted/renamed
-        # symbols don't linger as stale entries.
-        try:
-            fdb.run(
-                "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, "
-                "_, _, _, _, _, _, _, _] :rm fact_symbol {fp, mqn => }"
-            )
-            fdb.run(
-                "?[tqn, fp, line, col] := *fact_reference[tqn, fp, line, col, _] "
-                ":rm fact_reference {tqn, fp, line, col => }"
-            )
-            fdb.run(
-                "?[fp, mod] := *fact_import[fp, mod] "
-                ":rm fact_import {fp, mod}"
-            )
-        except Exception:
-            pass
-
-        # Symbols
+        # Symbols — use :replace so the entire relation is atomically
+        # swapped, which also removes any stale rows from deleted symbols.
         sym_rows = conn.execute(
             "SELECT si.file_path, si.module_qn, si.name, si.qualified_name, si.kind, "
             "si.line, si.end_line, si.depth, si.parent, si.bases, si.signature, "
@@ -425,20 +408,19 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if sym_rows:
-            cozo_sym = [
-                [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-                 r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
-                 bool(r[13]), bool(r[14]), bool(r[15])]
-                for r in sym_rows
-            ]
-            fdb.run(
-                "?[fp, mqn, name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
-                ":put fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
-                {"rows": cozo_sym},
-            )
+        cozo_sym = [
+            [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+             r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
+             bool(r[13]), bool(r[14]), bool(r[15])]
+            for r in sym_rows
+        ]
+        fdb.run(
+            "?[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
+            ":replace fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
+            {"rows": cozo_sym},
+        )
 
         # References
         ref_rows = conn.execute(
@@ -450,13 +432,12 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if ref_rows:
-            cozo_ref = [list(r) for r in ref_rows]
-            fdb.run(
-                "?[tqn, fp, line, col, kind] <- $rows "
-                ":put fact_reference {tqn, fp, line, col => kind}",
-                {"rows": cozo_ref},
-            )
+        cozo_ref = [list(r) for r in ref_rows]
+        fdb.run(
+            "?[tqn, fp, line, col, kind] <- $rows "
+            ":replace fact_reference {tqn, fp, line, col => kind}",
+            {"rows": cozo_ref},
+        )
 
         # Imports
         imp_rows = conn.execute(
@@ -468,13 +449,12 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if imp_rows:
-            cozo_imp = [list(r) for r in imp_rows]
-            fdb.run(
-                "?[fp, mod] <- $rows "
-                ":put fact_import {fp, mod}",
-                {"rows": cozo_imp},
-            )
+        cozo_imp = [list(r) for r in imp_rows]
+        fdb.run(
+            "?[fp, mod] <- $rows "
+            ":replace fact_import {fp, mod}",
+            {"rows": cozo_imp},
+        )
 
         conn.close()
     except BaseException:
