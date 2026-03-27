@@ -215,3 +215,272 @@ class TestTsconfigJsoncParsing:
         (tmp_path / "src").mkdir()
         result = _find_source_root(str(tmp_path), language="typescript")
         assert result == str(tmp_path / "src")
+
+
+# ============================================================================
+# Bug 7: parse_noqa_comments() hardcoded to Python
+# ============================================================================
+
+class TestLintNoqaLanguageThreading:
+    """parse_noqa_comments() always uses load_plugin('python') regardless
+    of the actual language being linted, so // noqa comments in TypeScript
+    and Rust files are silently ignored."""
+
+    def test_parse_noqa_typescript_line_comment(self):
+        """TypeScript // noqa comments should be recognized."""
+        from emend.lint import parse_noqa_comments
+        source = "let x = eval('code'); // noqa: emend:no-eval\n"
+        noqa = parse_noqa_comments(source, language="typescript")
+        assert 1 in noqa, "// noqa comment not recognized for TypeScript"
+
+    def test_parse_noqa_typescript_bare(self):
+        """Bare // noqa in TypeScript should suppress all rules."""
+        from emend.lint import parse_noqa_comments
+        source = "let x = eval('code'); // noqa\n"
+        noqa = parse_noqa_comments(source, language="typescript")
+        assert 1 in noqa, "bare // noqa not recognized for TypeScript"
+        assert noqa[1] is None
+
+    def test_parse_noqa_rust_line_comment(self):
+        """Rust // noqa comments should be recognized."""
+        from emend.lint import parse_noqa_comments
+        source = 'let x = unsafe { std::mem::zeroed() }; // noqa: emend:no-unsafe\n'
+        noqa = parse_noqa_comments(source, language="rust")
+        assert 1 in noqa, "// noqa comment not recognized for Rust"
+
+    def test_parse_noqa_python_default_unchanged(self):
+        """Python (default) should still work without explicit language."""
+        from emend.lint import parse_noqa_comments
+        source = "x = eval('code')  # noqa: emend:no-eval\n"
+        noqa = parse_noqa_comments(source)
+        assert 1 in noqa, "Python noqa should work with default language"
+
+    def test_run_lint_passes_language_to_noqa(self, tmp_path):
+        """run_lint() should pass its language parameter through to
+        parse_noqa_comments so that noqa comments are respected."""
+        from emend.lint import run_lint, LintRule
+        ts_file = tmp_path / "test.ts"
+        ts_file.write_text("let x = eval('code'); // noqa: emend:no-eval\n")
+        rule = LintRule(
+            name="no-eval",
+            find="eval($ARG)",
+            message="Do not use eval",
+        )
+        violations = run_lint(
+            rules=[rule],
+            paths=[str(ts_file)],
+            language="typescript",
+        )
+        # The noqa comment should suppress the violation
+        assert len(violations) == 0, (
+            f"Expected 0 violations (noqa should suppress), got {len(violations)}"
+        )
+
+
+# ============================================================================
+# Bug 8: _find_source_root() language not threaded through callers
+# ============================================================================
+
+class TestFindSourceRootLanguageThreading:
+    """_ensure_index_fresh() and warm_caches() call _find_source_root()
+    without passing the language parameter, so non-Python projects always
+    get Python-specific source root detection (which may return the wrong
+    directory)."""
+
+    def test_ensure_index_fresh_accepts_language_parameter(self):
+        """_ensure_index_fresh() should accept a language keyword argument
+        so that callers can thread the language through to _find_source_root()."""
+        import inspect
+        from emend.transform import _ensure_index_fresh
+        sig = inspect.signature(_ensure_index_fresh)
+        assert "language" in sig.parameters, (
+            "_ensure_index_fresh() is missing a 'language' keyword parameter"
+        )
+
+    def test_warm_caches_accepts_language_parameter(self):
+        """warm_caches() should accept a language keyword argument
+        so that callers can thread the language through to _find_source_root()."""
+        import inspect
+        from emend.transform import warm_caches
+        sig = inspect.signature(warm_caches)
+        assert "language" in sig.parameters, (
+            "warm_caches() is missing a 'language' keyword parameter"
+        )
+
+    def test_ensure_index_fresh_passes_language_to_find_source_root(self, tmp_path):
+        """When language='rust' is passed to _ensure_index_fresh(), it should
+        forward it to _find_source_root() so Rust source root detection is used."""
+        from unittest.mock import patch, MagicMock
+        from emend.transform import _ensure_index_fresh
+
+        # Patch _find_source_root to track what language arg it receives
+        with patch("emend.transform._find_source_root", return_value=str(tmp_path)) as mock_fsr:
+            # _ensure_index_fresh will fail early (no DB), but we can still
+            # check whether _find_source_root was called with the right language.
+            # We also need to patch enough to reach the _find_source_root call.
+            # The function calls _find_project_root first, then opens DB, etc.
+            # We'll patch to get past early checks.
+            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
+                with patch("emend.transform._cache_db_dir", return_value=tmp_path):
+                    with patch("emend.transform._get_worktree_id", return_value="test"):
+                        # Create a minimal DB so the function progresses
+                        import sqlite3
+                        db = tmp_path / "parse.db"
+                        conn = sqlite3.connect(str(db))
+                        conn.execute("CREATE TABLE IF NOT EXISTS file_manifest "
+                                     "(worktree_id TEXT, path TEXT, mtime_ns INTEGER, "
+                                     "size INTEGER, content_hash BLOB, indexed_at REAL, "
+                                     "PRIMARY KEY (worktree_id, path))")
+                        conn.commit()
+                        conn.close()
+
+                        try:
+                            _ensure_index_fresh(str(tmp_path), language="rust")
+                        except Exception:
+                            pass  # We don't care if it fails; we just need the call
+
+                        # If _find_source_root was called, check it got language="rust"
+                        if mock_fsr.called:
+                            call_args = mock_fsr.call_args
+                            # It should have been called with language="rust"
+                            lang_arg = call_args.kwargs.get("language") or (
+                                call_args.args[1] if len(call_args.args) > 1 else None
+                            )
+                            assert lang_arg == "rust", (
+                                f"_find_source_root() was called with language={lang_arg!r}, "
+                                f"expected 'rust'"
+                            )
+
+    def test_warm_caches_passes_language_to_find_source_root(self, tmp_path):
+        """When language='typescript' is passed to warm_caches(), it should
+        forward it to _find_source_root()."""
+        from unittest.mock import patch
+        from emend.transform import warm_caches
+
+        with patch("emend.transform._find_source_root", return_value=str(tmp_path)) as mock_fsr:
+            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
+                with patch("emend.transform._cache_db_dir", return_value=tmp_path):
+                    with patch("emend.transform._ensure_cache_ignore_files"):
+                        with patch("emend.transform.visit_project_ts", return_value=[]):
+                            try:
+                                warm_caches(str(tmp_path), language="typescript")
+                            except Exception:
+                                pass
+
+                            if mock_fsr.called:
+                                call_args = mock_fsr.call_args
+                                lang_arg = call_args.kwargs.get("language") or (
+                                    call_args.args[1] if len(call_args.args) > 1 else None
+                                )
+                                assert lang_arg == "typescript", (
+                                    f"_find_source_root() was called with language={lang_arg!r}, "
+                                    f"expected 'typescript'"
+                                )
+
+    def test_query_symbol_index_accepts_language(self):
+        """query_symbol_index() should accept a language parameter so it can
+        forward it to _ensure_index_fresh()."""
+        import inspect
+        from emend.transform import query_symbol_index
+        sig = inspect.signature(query_symbol_index)
+        assert "language" in sig.parameters, (
+            "query_symbol_index() is missing a 'language' keyword parameter"
+        )
+
+    def test_query_reference_index_accepts_language(self):
+        """query_reference_index() should accept a language parameter so it can
+        forward it to _ensure_index_fresh()."""
+        import inspect
+        from emend.transform import query_reference_index
+        sig = inspect.signature(query_reference_index)
+        assert "language" in sig.parameters, (
+            "query_reference_index() is missing a 'language' keyword parameter"
+        )
+
+    def test_find_dead_code_cached_accepts_language(self):
+        """_find_dead_code_cached() should accept a language parameter so it can
+        forward it to _ensure_index_fresh() and warm_caches()."""
+        import inspect
+        from emend.transform import _find_dead_code_cached
+        sig = inspect.signature(_find_dead_code_cached)
+        assert "language" in sig.parameters, (
+            "_find_dead_code_cached() is missing a 'language' keyword parameter"
+        )
+
+    def test_query_symbol_index_passes_language_to_ensure_index_fresh(self, tmp_path):
+        """query_symbol_index() should forward its language parameter to
+        _ensure_index_fresh()."""
+        from unittest.mock import patch
+        from emend.transform import query_symbol_index
+
+        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
+            query_symbol_index(str(tmp_path), language="rust")
+            assert mock_eif.called
+            call_kwargs = mock_eif.call_args.kwargs
+            assert call_kwargs.get("language") == "rust", (
+                f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
+                f"expected 'rust'"
+            )
+
+    def test_query_reference_index_passes_language_to_ensure_index_fresh(self, tmp_path):
+        """query_reference_index() should forward its language parameter to
+        _ensure_index_fresh()."""
+        from unittest.mock import patch
+        from emend.transform import query_reference_index
+
+        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
+            query_reference_index(str(tmp_path), "some.symbol", language="typescript")
+            assert mock_eif.called
+            call_kwargs = mock_eif.call_args.kwargs
+            assert call_kwargs.get("language") == "typescript", (
+                f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
+                f"expected 'typescript'"
+            )
+
+    def test_find_dead_code_cached_passes_language_to_ensure_index_fresh(self, tmp_path):
+        """_find_dead_code_cached() should forward its language parameter to
+        _ensure_index_fresh() and warm_caches()."""
+        from unittest.mock import patch
+        from emend.transform import _find_dead_code_cached
+
+        # _ensure_index_fresh returns True so _find_dead_code_cached skips
+        # the warm_caches() fallback and proceeds to open the DB.
+        # We also need to mock DB-related helpers so it doesn't fail.
+        import sqlite3
+        db = tmp_path / "parse.db"
+        conn = sqlite3.connect(str(db))
+        # Create minimal tables that _find_dead_code_cached expects
+        conn.execute("CREATE TABLE IF NOT EXISTS symbol_index "
+                     "(worktree_id TEXT, file TEXT, name TEXT, kind TEXT, "
+                     "line INTEGER, col INTEGER, end_line INTEGER, end_col INTEGER, "
+                     "qualified_name TEXT, decorators TEXT, is_exported INTEGER, "
+                     "content_hash BLOB)")
+        conn.execute("CREATE TABLE IF NOT EXISTS reference_index "
+                     "(worktree_id TEXT, file TEXT, name TEXT, line INTEGER, "
+                     "col INTEGER, kind TEXT, target_qn TEXT, content_hash BLOB)")
+        conn.commit()
+        conn.close()
+
+        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
+            with patch("emend.transform.warm_caches") as mock_wc:
+                with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
+                    with patch("emend.transform._get_worktree_id", return_value="test"):
+                        with patch("emend.transform._cache_db_dir", return_value=tmp_path):
+                            try:
+                                _find_dead_code_cached(str(tmp_path), None, False, None, True, False, language="rust")
+                            except Exception:
+                                pass  # We only care about the mock calls
+
+                assert mock_eif.called
+                call_kwargs = mock_eif.call_args.kwargs
+                assert call_kwargs.get("language") == "rust", (
+                    f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
+                    f"expected 'rust'"
+                )
+                # warm_caches should also get the language
+                assert mock_wc.called, "warm_caches() should be called when index is not fresh"
+                wc_kwargs = mock_wc.call_args.kwargs
+                assert wc_kwargs.get("language") == "rust", (
+                    f"warm_caches() was called with language={wc_kwargs.get('language')!r}, "
+                    f"expected 'rust'"
+                )

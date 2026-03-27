@@ -755,6 +755,7 @@ def _ensure_index_fresh(
     project_path: str,
     *,
     max_inline_reindex: int = 50,
+    language: str = "python",
 ) -> bool:
     """Lightweight freshness check for the index.
 
@@ -839,7 +840,7 @@ def _ensure_index_fresh(
             conn.commit()
 
         if files_to_index:
-            _src_root = _find_source_root(project_root)
+            _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
             # Update manifest for re-indexed files
             import os as _os
@@ -908,6 +909,7 @@ def query_symbol_index(
     file_path: str | None = None,
     qualified_name: str | None = None,
     limit: int = 0,
+    language: str = "python",
 ) -> list[dict] | None:
     """Query the symbol_index table directly for fast symbol lookup.
 
@@ -916,7 +918,7 @@ def query_symbol_index(
     """
     import sqlite3 as _sql3
 
-    if not _ensure_index_fresh(project_path):
+    if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
@@ -1390,6 +1392,7 @@ def query_reference_index(
     target_qn: str,
     *,
     ref_kind: str | None = None,
+    language: str = "python",
 ) -> list[dict] | None:
     """Query the reference_index table for fast find-references.
 
@@ -1398,7 +1401,7 @@ def query_reference_index(
     """
     import sqlite3 as _sql3
 
-    if not _ensure_index_fresh(project_path):
+    if not _ensure_index_fresh(project_path, language=language):
         return None
 
     project_root = _find_project_root(project_path)
@@ -1529,6 +1532,7 @@ def warm_caches(
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
+    language: str = "python",
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
@@ -1596,7 +1600,7 @@ def warm_caches(
         pass
 
     # Resolve source root once so _index_batch workers can compute module_qn.
-    source_root = _find_source_root(project_root)
+    source_root = _find_source_root(project_root, language=language)
 
     # Split files into batches — one batch per worker.
     batch_size = max(1, len(file_contents) // max_workers)
@@ -4253,6 +4257,7 @@ def _find_dead_code_cached(
     entry_point_decorators: list[str] | None = None,
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    language: str = "python",
 ) -> list[DeadSymbol]:
     """Index-accelerated dead code detection — single SQL query.
 
@@ -4289,9 +4294,9 @@ def _find_dead_code_cached(
         return pattern
 
     # Ensure the index is fresh; build it if necessary.
-    if not _ensure_index_fresh(scan_root):
+    if not _ensure_index_fresh(scan_root, language=language):
         logger.info("dead_code: index stale/missing — warming caches")
-        warm_caches(scan_root, type_engine="none")
+        warm_caches(scan_root, type_engine="none", language=language)
 
     project_root = _find_project_root(scan_root)
     worktree_id = _get_worktree_id(project_root)
