@@ -14,7 +14,9 @@
 | `ast_utils.py` | AST traversal utilities (uses Rust `emend_core.collect_symbols_from_str()`) |
 | `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
-| `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink`, `TaintSanitizer`, `TaintViolation`, intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_taint_analysis()` with fixed-point iteration |
+| `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink`, `TaintSanitizer`, `TaintViolation`, intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_taint_analysis()` with fixed-point iteration; field-sensitive tracking (`_extract_qualified_identifiers`), container-aware propagation (`_find_container_mutations`, `_find_for_loops`), YAML `presets:` key for auto-loading framework rules |
+| `taint_presets.py` | Framework-specific taint rule presets: `get_preset()` for Flask, Django, SQLAlchemy, FastAPI; `merge_configs()` to compose multiple configs; loaded via `emend taint --preset` or YAML `presets:` key |
+| `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `emend dsl` CLI command |
 | `cfg.py` | Per-function CFG module: `build_cfgs_for_source()`, `build_cfgs_for_file()`, `find_unreachable_blocks()`, text/JSON/DOT formatters; wraps Rust `emend_core.PyCfg` and `build_cfgs()` |
 | `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TaintFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()`, JSON serialization |
 | `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `CustomCheck`; `load_policies()`, `run_policy_checks()`, `validate_policies()`; loads from `.emend/policies.yaml` |
@@ -91,6 +93,8 @@
 | `test_policy.py` | Policy engine: YAML loading, validation, structural checks, flow checks, formatting |
 | `test_rewrite_engine.py` | Rewrite engine: union-find, e-graph, expression parsing, rule loading, saturation |
 | `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
+| `test_taint_presets.py` | Framework-specific taint presets: preset loading, merge, Flask/Django/SQLAlchemy integration |
+| `test_dsl.py` | DSL support: SQL detection, symbol extraction, ORM link resolution, formatting |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 | `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
 | `test_cfg_typescript.py` | TypeScript/JS CFG construction (alternative-style if, c-style for, switch/case fallthrough, try/catch fields-style, arrow functions, methods) |
@@ -114,7 +118,8 @@
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section and flow rules with `flows-from`/`flows-to`/`not-through`) |
 | `delete` | Safe delete a symbol with optional cascading removal of newly-dead dependents (`--cascade`, `--apply`, `--json`, `--project`). Without `--cascade`, acts like `rm`. With it, transitively identifies and removes symbols whose only callers are in the delete set. |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
-| `taint` | Taint analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`) |
+| `taint` | Taint analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`, `--preset` for framework-specific rules) |
+| `dsl` | Detect and analyze embedded DSL regions (`--type sql`, `--orm sqlalchemy\|django`, `--resolve` for cross-language links, `--json`, `--project`) |
 | `impact` | Compute transitive set of impacted symbols from a change via reverse-caller closure (`--diff`, `--output symbols\|tests\|graph`, `--json`, `--max-depth`) |
 | `facts` | Query the relational fact graph for code invariants (`--type symbols\|calls\|references\|taint_flows\|types\|imports`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`, `--json`) |
 | `policy` | Run declarative policy checks from `.emend/policies.yaml` (`--config`, `--policy`, `--json`; supports flow, structural, type, deadcode, and custom checks) |

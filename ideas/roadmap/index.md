@@ -21,10 +21,10 @@
 
 Spec: [taint-analysis.md](taint-analysis.md)
 
-- [ ] Field sensitivity — treat `obj.field` as distinct from `obj`
+- [x] Field sensitivity — treat `obj.field` as distinct from `obj` — `taint.py` (`_extract_qualified_identifiers`, dotted assignment detection)
 - [ ] Object-sensitive dispatch — resolve `obj.method()` by receiver type, not just name
-- [ ] High-precision container modeling — track taint through list/dict elements
-- [ ] Framework-specific source/sink/sanitizer rules — Django, Flask, SQLAlchemy
+- [x] High-precision container modeling — track taint through list/dict elements — `taint.py` (`_find_container_mutations`, `_find_for_loops`, subscript-read propagation)
+- [x] Framework-specific source/sink/sanitizer rules — Django, Flask, SQLAlchemy, FastAPI — `taint_presets.py`, `emend taint --preset`, YAML `presets:` key
 
 ---
 
@@ -35,13 +35,13 @@ Spec: [dsl-support.md](dsl-support.md)
 ### Phase 1: Infrastructure
 
 - [ ] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core`
-- [ ] Implement injection detection in `emend_core` (call-based, tag-based, magic-comment, file-extension)
-- [ ] Implement `DslSymbolExtractor` for SQL (tables, columns), CSS (selectors), JSX (component tags)
+- [x] Implement injection detection (call-based, magic-comment, SQL keyword heuristics) — `dsl.py` (`detect_dsl_regions`, regex-based; tree-sitter grammars deferred)
+- [x] Implement `DslSymbolExtractor` for SQL (tables, columns) — `dsl.py` (`extract_sql_symbols`; CSS/JSX deferred)
 - [ ] Add `dsl_symbols` table to `parse.db`; wire into `emend index`
 
 ### Phase 2: Link resolution + navigation
 
-- [ ] Implement `DslLinkResolver` with strategies: `orm_model`, `orm_column`, `component_export`, `css_class_usage`
+- [x] Implement `DslLinkResolver` with strategies: `orm_model`, `orm_column` — `dsl.py` (`resolve_orm_links`; `component_export`, `css_class_usage` deferred)
 - [ ] Add `dsl_links` table and populate during indexing
 - [ ] Wire `--include-dsl` into `search` and `refs`
 - [ ] Add `dsl_goto_definition` to `editor-server`
