@@ -810,12 +810,14 @@ class TestMCPTools:
 
         result = map_write(
             kind="mapping", op="add",
-            source_project="user-svc",
-            source_identifier="UserService.create_user",
-            target_project="gateway",
-            target_identifier="POST /users",
-            relationship="implements",
-            evidence="The create_user method handles POST /users requests.",
+            entry={
+                "source_project": "user-svc",
+                "source_identifier": "UserService.create_user",
+                "target_project": "gateway",
+                "target_identifier": "POST /users",
+                "relationship": "implements",
+                "evidence": "The create_user method handles POST /users requests.",
+            },
         )
         data = json.loads(result)
         assert data["source_identifier"] == "UserService.create_user"
@@ -824,7 +826,8 @@ class TestMCPTools:
         results = json.loads(search_result)
         assert len(results) >= 1
 
-        lookup_result = map_read(kind="mapping", identifier="UserService.create_user")
+        # Exact identifier lookup via query (no spaces → exact lookup)
+        lookup_result = map_read(kind="mapping", query="UserService.create_user")
         results = json.loads(lookup_result)
         assert len(results) >= 1
 
@@ -836,13 +839,18 @@ class TestMCPTools:
 
         map_write(
             kind="mapping", op="add",
-            source_project="svc",
-            source_identifier="Foo.bar",
-            target_project="gw",
-            target_identifier="POST /foo",
+            entry={
+                "source_project": "svc",
+                "source_identifier": "Foo.bar",
+                "target_project": "gw",
+                "target_identifier": "POST /foo",
+            },
         )
 
-        result = map_write(kind="mapping", op="delete", source_identifier="Foo.bar")
+        result = map_write(
+            kind="mapping", op="delete",
+            entry={"source_identifier": "Foo.bar"},
+        )
         data = json.loads(result)
         assert data["deleted"] is True
 

@@ -39,7 +39,7 @@ def test_all_tools_registered():
         "search", "replace", "modify", "refs", "rename",
         "move", "graph", "deadcode", "lint",
         "impact", "semantic_context", "taint",
-        "query_facts", "datalog_query", "check_policies",
+        "datalog_query", "check_policies",
         "map_read", "map_write",
         "grammar_and_cookbook",
     }
@@ -56,7 +56,7 @@ def test_dump_schema():
         "search", "replace", "modify", "refs", "rename",
         "move", "graph", "deadcode", "lint",
         "impact", "semantic_context", "taint",
-        "query_facts", "datalog_query", "check_policies",
+        "datalog_query", "check_policies",
         "map_read", "map_write",
         "grammar_and_cookbook",
     }
@@ -64,6 +64,40 @@ def test_dump_schema():
         assert "description" in tool
         assert "inputSchema" in tool
         assert tool["inputSchema"]["type"] == "object"
+
+
+def test_dump_schema_no_anyof_null():
+    """Schema compression should collapse anyOf-with-null into plain type."""
+    result = dump_schema()
+    data = json.loads(result)
+    for tool in data["tools"]:
+        props = tool["inputSchema"].get("properties", {})
+        for param_name, param_schema in props.items():
+            if "anyOf" in param_schema:
+                # anyOf should NOT have a {type: null} branch — those should be collapsed
+                entries = param_schema["anyOf"]
+                null_entries = [e for e in entries if isinstance(e, dict) and e.get("type") == "null"]
+                assert not null_entries, (
+                    f"Tool {tool['name']}, param {param_name}: anyOf still has null branch"
+                )
+
+
+def test_dump_schema_no_title_keys():
+    """Schema compression should strip all title keys."""
+    result = dump_schema()
+    # Quick check: no "title" key anywhere in the JSON
+    data = json.loads(result)
+
+    def _check_no_title(obj, path=""):
+        if isinstance(obj, dict):
+            assert "title" not in obj, f"Found 'title' key at {path}"
+            for k, v in obj.items():
+                _check_no_title(v, f"{path}.{k}")
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                _check_no_title(item, f"{path}[{i}]")
+
+    _check_no_title(data)
 
 
 # ---------------------------------------------------------------------------
@@ -425,14 +459,42 @@ def test_move_copy_only_dry_run(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_grammar_and_cookbook():
-    """The grammar_and_cookbook tool returns the RST reference document."""
+def test_grammar_and_cookbook_default_returns_toc():
+    """The default call returns a table of contents, not the full document."""
     result = grammar_and_cookbook()
+    assert 'section="<name>"' in result
+    assert "selectors" in result
+    assert "patterns" in result
+    assert "commands" in result
+    assert "recipes" in result
+    # Should NOT contain the full RST body
+    assert "emend search" not in result
+
+
+def test_grammar_and_cookbook_all_returns_full_document():
+    """section='all' returns the complete RST reference document."""
+    result = grammar_and_cookbook(section="all")
     assert "Selector syntax" in result
     assert "Pattern syntax" in result
     assert "Cookbook recipes" in result
     assert "emend search" in result
     assert "emend replace" in result
+
+
+def test_grammar_and_cookbook_selectors_section():
+    """section='selectors' returns only the Selector syntax section."""
+    result = grammar_and_cookbook(section="selectors")
+    assert "Selector syntax" in result
+    # Should not contain content from other sections
+    assert "Cookbook recipes" not in result
+
+
+def test_grammar_and_cookbook_recipes_section():
+    """section='recipes' returns only the Cookbook recipes section."""
+    result = grammar_and_cookbook(section="recipes")
+    assert "Cookbook recipes" in result or "recipes" in result.lower()
+    # Should not contain selector grammar content
+    assert "Selector syntax" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +556,59 @@ def test_datalog_query_limit(tmp_path):
 def test_datalog_query_error(tmp_path):
     result = datalog_query(
         query="this is not valid cozoscript !!!",
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_datalog_query_raw_no_query(tmp_path):
+    """Raw mode without a query returns an error."""
+    result = datalog_query(project=str(tmp_path))
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_datalog_query_guided_mode(tmp_path):
+    """Guided mode with fact_type='symbols' returns symbol list without CozoScript."""
+    p = tmp_path / "example.py"
+    p.write_text("def foo():\n    pass\n\ndef bar():\n    foo()\n")
+
+    result = datalog_query(
+        mode="guided",
+        fact_type="symbols",
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert isinstance(data, list)
+    names = [item["name"] for item in data]
+    assert "foo" in names
+    assert "bar" in names
+
+
+def test_datalog_query_guided_mode_calls(tmp_path):
+    """Guided mode with fact_type='calls' returns caller/callee info."""
+    p = tmp_path / "example.py"
+    p.write_text("def foo():\n    bar()\n\ndef bar():\n    pass\n")
+
+    result = datalog_query(
+        mode="guided",
+        fact_type="calls",
+        symbol="example.foo",
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert "calls_from" in data or "calls_to" in data
+
+
+def test_datalog_query_guided_mode_missing_symbol(tmp_path):
+    """Guided calls mode without symbol returns an error."""
+    p = tmp_path / "example.py"
+    p.write_text("def foo():\n    pass\n")
+
+    result = datalog_query(
+        mode="guided",
+        fact_type="calls",
         project=str(tmp_path),
     )
     data = json.loads(result)

@@ -3363,6 +3363,14 @@ def mcp_cmd(
         bool,
         typer.Option("--schema", help="Print the MCP tool schema as JSON and exit")
     ] = False,
+    profile: Annotated[
+        Optional[str],
+        typer.Option("--profile", help="Tool profile: core, refactor, or full (default)")
+    ] = None,
+    tools: Annotated[
+        Optional[str],
+        typer.Option("--tools", help="Comma-separated list of tool names to expose")
+    ] = None,
 ):
     """Start an MCP (Model Context Protocol) server.
 
@@ -3371,14 +3379,23 @@ def mcp_cmd(
     Requires the 'mcp' optional dependency:
         pip install emend[mcp]
 
+    Profiles control which tools are exposed:
+        core: search, replace, modify, refs, rename, move, semantic_context, impact, grammar_and_cookbook
+        refactor: core + graph, lint, deadcode
+        full (default): all tools
+
     Examples:
         emend mcp
         emend mcp --transport sse --port 8080
         emend mcp --schema
+        emend mcp --profile core
+        emend mcp --tools search,replace,modify
     """
+    tools_list = [t.strip() for t in tools.split(",")] if tools else None
     try:
         if schema:
-            from emend.mcp_server import dump_schema
+            from emend.mcp_server import dump_schema, configure_profile
+            configure_profile(profile=profile, tools=tools_list)
             print(dump_schema())
             return
         from emend.mcp_server import run_server
@@ -3390,7 +3407,7 @@ def mcp_cmd(
         )
         raise typer.Exit(2)
 
-    run_server(transport=transport, port=port)
+    run_server(transport=transport, port=port, profile=profile, tools=tools_list)
 
 
 @app.command("cfg")

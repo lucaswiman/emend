@@ -406,6 +406,43 @@ Example YAML::
       - add: {selector: "api.py::fetch_user[params]:KEYWORD_ONLY", value: "timeout: float = 30.0"}
 
 
+Fact graph relations
+--------------------
+
+The ``datalog_query`` tool exposes CozoDB stored relations.  Prefix a relation
+name with ``*`` to query it.
+
+Available stored relations::
+
+  symbol       {qualified_name => file_path, name, kind, line, end_line, parent}
+  call         {caller_qn, callee_qn, file_path, line, col}
+  reference    {symbol_qn, file_path, line, col => ref_kind}
+  taint_flow   {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
+  type_binding {symbol_qn, file_path, line, binding_kind => type_str}
+  import       {importing_file, imported_module, imported_name, line => alias}
+  cfg_edge     {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}
+  def_use      {file_path, func_qn, var_name, def_line, def_col, use_line, use_col}
+
+Example queries
+~~~~~~~~~~~~~~~
+
+All function symbols::
+
+  ?[name, file] := *symbol[qn, file, name, "function", l, e, p]
+
+Dead code (symbols with no references)::
+
+  has_ref[qn] := *reference[qn, _, _, _, _]
+  dead[name, file, line] := *symbol[qn, file, name, kind, line, _, _], not has_ref[qn]
+  ?[name, file, line] := dead[name, file, line]
+
+Transitive callers of a function::
+
+  reaches[a] := *call[a, "mymod.func", _, _, _]
+  reaches[a] := *call[a, mid, _, _, _], reaches[mid]
+  ?[a] := reaches[a]
+
+
 Cookbook recipes
 ---------------
 
