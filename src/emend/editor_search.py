@@ -1043,6 +1043,38 @@ class EditorSearchEngine:
             query=qualified_name,
         )
 
+    # -- DSL goto-definition ------------------------------------------------
+
+    def _goto_dsl_fallback(self, file: str, line: int) -> SearchResult:
+        """Fallback for goto_definition: resolve DSL symbols at the cursor line."""
+        from emend.dsl import (
+            detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
+            DslKind,
+        )
+
+        items: list[dict] = []
+        try:
+            regions = detect_dsl_regions(file)
+            for region in regions:
+                if region.host_start_line <= line <= region.host_end_line and region.dsl == DslKind.SQL:
+                    symbols = extract_sql_symbols(region)
+                    if symbols:
+                        links = resolve_orm_links(symbols, self.project_root)
+                        for lnk in links:
+                            items.append({
+                                "name": lnk.target_qualified_name.split(".")[-1],
+                                "kind": "class",
+                                "file_path": lnk.target_file,
+                                "line": lnk.target_line,
+                                "col": 0,
+                                "qualified_name": lnk.target_qualified_name,
+                            })
+                    break
+        except Exception as e:
+            logger.warning("_goto_dsl_fallback error: %s", e)
+
+        return SearchResult(items=items, elapsed_ms=0, mode="symbol")
+
     # -- file symbols (outline) ---------------------------------------------
 
     def file_symbols(
@@ -1116,7 +1148,7 @@ class EditorSearchEngine:
             query="status",
         )
 
-    def goto_local(self, file: str, line: int, col: int) -> SearchResult:
+    def goto_definition(self, file: str, line: int, col: int) -> SearchResult:
         """Find the definition of the symbol at the given position.
 
         Uses the scope resolver to trace the reference back to its binding site.
@@ -1126,11 +1158,11 @@ class EditorSearchEngine:
         import time as _time
         t0 = _time.monotonic()
 
-        logger.debug(f"goto_local: file={file}, line={line}, col={col}")
+        logger.debug(f"goto_definition: file={file}, line={line}, col={col}")
 
         file_path = Path(file).resolve()
         if not file_path.exists():
-            logger.debug(f"goto_local: file not found: {file_path}")
+            logger.debug(f"goto_definition: file not found: {file_path}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # Parse with scope resolver
@@ -1141,7 +1173,7 @@ class EditorSearchEngine:
                 content = f.read()
             resolver.index_file(str(file_path), content)
             refs = resolver.references_in_file(str(file_path))
-            logger.debug(f"goto_local: found {len(refs)} references in file")
+            logger.debug(f"goto_definition: found {len(refs)} references in file")
 
             # Also get bindings (for parameters and other definitions)
             bindings = []
@@ -1152,9 +1184,9 @@ class EditorSearchEngine:
                         # scopes_in_file returns 0-based line numbers, convert to 1-based
                         binding_line_1based = b_line + 1
                         bindings.append((f"{b_name}", binding_line_1based, b_col, b_kind))
-                logger.debug(f"goto_local: found {len(bindings)} bindings in scopes")
+                logger.debug(f"goto_definition: found {len(bindings)} bindings in scopes")
             except Exception as e:
-                logger.debug(f"goto_local: error getting bindings: {e}")
+                logger.debug(f"goto_definition: error getting bindings: {e}")
         except Exception as exc:
             logger.debug("Scope resolver failed: %s", exc)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
@@ -1177,7 +1209,7 @@ class EditorSearchEngine:
                 identifier = ""
                 # If cursor is at/past end and line is empty, skip
                 if cursor_idx < 0:
-                    logger.debug(f"goto_local: empty line or cursor at start, skipping identifier extraction")
+                    logger.debug(f"goto_definition: empty line or cursor at start, skipping identifier extraction")
                 else:
                     # Find start of identifier (move left while alphanumeric/underscore)
                     start = cursor_idx
@@ -1208,7 +1240,7 @@ class EditorSearchEngine:
                         elif found_left:
                             cursor_idx = left
                         else:
-                            logger.debug(f"goto_local: cursor not on identifier, skipping reference search")
+                            logger.debug(f"goto_definition: cursor not on identifier, skipping reference search")
 
                         # Recompute start from the chosen cursor position
                         start = cursor_idx
@@ -1221,7 +1253,7 @@ class EditorSearchEngine:
                         while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
                             end += 1
                         identifier = line_text[start:end]
-                        logger.debug(f"goto_local: extracted identifier='{identifier}' from cursor at col={col}")
+                        logger.debug(f"goto_definition: extracted identifier='{identifier}' from cursor at col={col}")
 
                         # Find the reference with matching identifier (last component of QN)
                         for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
@@ -1230,7 +1262,7 @@ class EditorSearchEngine:
                                 qn_last = qn_parts[-1]
 
                                 if qn_last == identifier:
-                                    logger.debug(f"goto_local: MATCH found target_qn={qn}")
+                                    logger.debug(f"goto_definition: MATCH found target_qn={qn}")
                                     target_qn = qn
                                     break
 
@@ -1239,7 +1271,7 @@ class EditorSearchEngine:
                             # First try exact line match
                             for b_name, b_line, b_col, b_kind in bindings:
                                 if b_line == line and b_name == identifier:
-                                    logger.debug(f"goto_local: MATCH found binding {b_name} at line {b_line}")
+                                    logger.debug(f"goto_definition: MATCH found binding {b_name} at line {b_line}")
                                     target_qn = b_name
                                     break
 
@@ -1251,11 +1283,17 @@ class EditorSearchEngine:
                                     # Use the most recent one (highest line number)
                                     matching_bindings.sort(key=lambda x: -x[1])
                                     b_name, b_line, b_col, b_kind = matching_bindings[0]
-                                    logger.debug(f"goto_local: MATCH found binding {b_name} in parent scope at line {b_line}")
+                                    logger.debug(f"goto_definition: MATCH found binding {b_name} in parent scope at line {b_line}")
                                     target_qn = b_name
 
         if not target_qn:
-            logger.debug(f"goto_local: no target_qn found at line={line}, col={col}")
+            logger.debug(f"goto_definition: no target_qn found at line={line}, col={col}, trying DSL fallback")
+            # DSL fallback: if cursor is inside an embedded DSL region (e.g. SQL
+            # string), resolve table/column names to host-language definitions.
+            dsl_result = self._goto_dsl_fallback(str(file_path), line)
+            if dsl_result.items:
+                dsl_result.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
+                return dsl_result
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # 1. Local definition in the same file
@@ -1788,11 +1826,11 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.status().to_dict()
     elif method == "reindex":
         return engine.reindex().to_dict()
-    elif method == "goto_local":
+    elif method in ("goto_definition", "goto_local"):
         file = params.pop("file", "")
         line = int(params.pop("line", 1))
         col = int(params.pop("col", 0))
-        return engine.goto_local(file, line, col).to_dict()
+        return engine.goto_definition(file, line, col).to_dict()
     elif method == "rename_preview":
         qn = params.get("qualified_name", "")
         new_name = params.get("new_name", "")
@@ -1814,14 +1852,14 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     elif method == "mapping_lookup":
         return _mapping_lookup(engine, params)
     elif method == "mapping_goto":
-        # First try goto_local if file/line/col are provided
+        # First try goto_definition if file/line/col are provided
         if "file" in params and "line" in params:
             file = params.get("file", "")
             line = int(params.get("line", 1))
             col = int(params.get("col", 0))
-            logger.debug(f"mapping_goto: trying goto_local(file={file!r}, line={line}, col={col})")
-            res = engine.goto_local(file, line, col)
-            logger.debug(f"mapping_goto: goto_local returned {len(res.items)} items")
+            logger.debug(f"mapping_goto: trying goto_definition(file={file!r}, line={line}, col={col})")
+            res = engine.goto_definition(file, line, col)
+            logger.debug(f"mapping_goto: goto_definition returned {len(res.items)} items")
             if res.items:
                 return res.to_dict()
         logger.debug(f"mapping_goto: falling back to _mapping_goto")

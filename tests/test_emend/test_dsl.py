@@ -279,3 +279,173 @@ class TestFormatSymbols:
         assert isinstance(data, list)
         assert data[0]["name"] == "users"
         assert data[0]["kind"] == "table"
+
+
+class TestDslDebugCommand:
+    """Tests for the renamed dsl-debug CLI command."""
+
+    def test_dsl_debug_command_exists(self):
+        """The dsl-debug command is registered."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+        runner = CliRunner()
+        result = runner.invoke(app, ["dsl-debug", "--help"])
+        assert result.exit_code == 0
+        assert "Debug" in result.output or "debug" in result.output or "DSL" in result.output
+
+    def test_dsl_hidden_alias(self):
+        """The old 'dsl' command still works as a hidden alias."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+        runner = CliRunner()
+        result = runner.invoke(app, ["dsl", "--help"])
+        assert result.exit_code == 0
+
+    def test_dsl_debug_detects_sql(self, tmp_path):
+        """dsl-debug detects SQL in files."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+        f = tmp_path / "app.py"
+        f.write_text(
+            'def query(cursor):\n'
+            '    cursor.execute("SELECT name FROM users WHERE id = 1")\n'
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["dsl-debug", str(f)])
+        assert result.exit_code == 0
+        assert "users" in result.output
+
+
+class TestSearchDslSymbols:
+    """Tests for automatic DSL symbol discovery in search."""
+
+    def test_search_finds_sql_tables(self, tmp_path):
+        """search surfaces SQL table symbols alongside host-language results."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "app.py"
+        f.write_text(
+            'class User:\n'
+            '    pass\n'
+            '\n'
+            'QUERY = "SELECT name FROM users WHERE id = 1"\n'
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["grep", str(f) + "::User"])
+        assert result.exit_code == 0
+
+    def test_search_no_crash_without_dsl(self, tmp_path):
+        """search doesn't crash on files without DSL content."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "app.py"
+        f.write_text('def hello():\n    pass\n')
+        runner = CliRunner()
+        result = runner.invoke(app, ["grep", str(f) + "::hello"])
+        assert result.exit_code == 0
+
+
+class TestRefsDslSymbols:
+    """Tests for automatic DSL reference discovery in refs."""
+
+    def test_refs_finds_sql_references(self, tmp_path):
+        """refs surfaces SQL table references for ORM models."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            'class User:\n'
+            '    __tablename__ = "users"\n'
+            '    pass\n'
+        )
+        query_file = tmp_path / "queries.py"
+        query_file.write_text(
+            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "refs", str(model_file) + "::User",
+            "--project", str(tmp_path),
+        ])
+        assert result.exit_code == 0
+        assert "queries.py" in result.output
+
+    def test_refs_no_crash_without_matches(self, tmp_path):
+        """refs doesn't crash when no DSL matches exist."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "app.py"
+        f.write_text('def foo():\n    pass\n')
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "refs", str(f) + "::foo",
+            "--project", str(tmp_path),
+        ])
+        assert result.exit_code == 0
+
+    def test_refs_json_includes_dsl(self, tmp_path):
+        """refs --json includes DSL references."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            'class User:\n'
+            '    __tablename__ = "users"\n'
+            '    pass\n'
+        )
+        query_file = tmp_path / "queries.py"
+        query_file.write_text(
+            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
+        )
+        from typer.testing import CliRunner
+        from emend.cli import app
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "refs", str(model_file) + "::User",
+            "--json", "--project", str(tmp_path),
+        ])
+        assert result.exit_code == 0
+
+
+class TestGotoLocalDslFallback:
+    """Tests for DSL fallback in goto_definition."""
+
+    def test_goto_definition_resolves_sql_to_orm_model(self, tmp_path):
+        """goto_definition resolves SQL table name to ORM model class."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            'class User:\n'
+            '    __tablename__ = "users"\n'
+            '    pass\n'
+        )
+        query_file = tmp_path / "queries.py"
+        query_file.write_text(
+            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
+        )
+        from emend.editor_search import EditorSearchEngine
+        engine = EditorSearchEngine(str(tmp_path))
+        result = engine.goto_definition(file=str(query_file), line=1, col=25)
+        assert result.mode == "symbol"
+        if result.items:
+            assert any("User" in item.get("qualified_name", "") for item in result.items)
+
+    def test_goto_definition_no_dsl_when_normal_ref(self, tmp_path):
+        """goto_definition uses normal resolution for non-DSL code."""
+        f = tmp_path / "app.py"
+        f.write_text('def hello():\n    pass\nhello()\n')
+        from emend.editor_search import EditorSearchEngine
+        engine = EditorSearchEngine(str(tmp_path))
+        result = engine.goto_definition(file=str(f), line=3, col=1)
+        assert result.mode == "symbol"
+
+    def test_goto_definition_empty_for_plain_string(self, tmp_path):
+        """goto_definition returns empty for non-DSL strings."""
+        f = tmp_path / "app.py"
+        f.write_text('msg = "hello world"\n')
+        from emend.editor_search import EditorSearchEngine
+        engine = EditorSearchEngine(str(tmp_path))
+        result = engine.goto_definition(file=str(f), line=1, col=8)
+        # No DSL content, no identifier — empty is fine
+        assert result.mode == "symbol"

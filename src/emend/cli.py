@@ -776,6 +776,19 @@ def search(
                             is_tty=is_tty,
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
+
+            # ---- DSL symbols in scanned files ----
+            from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+            _lang = _state["language"]
+            target_path_dsl = path or "."
+            _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
+            for _dsl_f in _dsl_files:
+                regions = detect_dsl_regions(str(_dsl_f))
+                for region in regions:
+                    if region.dsl == DslKind.SQL:
+                        for sym in extract_sql_symbols(region):
+                            print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
+
             return
 
         # ---- LOOKUP MODE ----
@@ -818,6 +831,22 @@ def search(
         )
         if result:
             print(result, end='')
+
+        # ---- DSL SYMBOL OVERLAY ----
+        # ---- DSL symbol overlay ----
+        from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+        _lang = _state["language"]
+        _dsl_path = path or file_or_pattern or "."
+        _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
+        _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
+        if _search_term:
+            for _dsl_f in _dsl_files:
+                regions = detect_dsl_regions(str(_dsl_f))
+                for region in regions:
+                    if region.dsl == DslKind.SQL:
+                        for sym in extract_sql_symbols(region):
+                            if _search_term in sym.name or sym.name in _search_term:
+                                print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1433,8 +1462,8 @@ def taint_cmd(
         raise typer.Exit(1)
 
 
-@app.command("dsl")
-def dsl_cmd(
+@app.command("dsl-debug", hidden=True)
+def dsl_debug_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     dsl_type: Annotated[Optional[str], typer.Option("--type", help="DSL type to detect (sql, css, html)")] = None,
     orm: Annotated[str, typer.Option("--orm", help="ORM framework (sqlalchemy, django)")] = "sqlalchemy",
@@ -1442,16 +1471,16 @@ def dsl_cmd(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
 ):
-    """Detect and analyze embedded DSL regions (SQL, CSS, HTML).
+    """[Debug] Detect and analyze embedded DSL regions (SQL, CSS, HTML).
 
-    Scans source files for embedded DSL content, extracts symbols
-    (table names, column names, CSS classes), and optionally resolves
-    cross-language links to host-language definitions.
+    Diagnostic command for inspecting DSL detection and symbol extraction.
+    For production use, prefer `emend search --include-dsl` and
+    `emend refs --include-dsl`.
 
     Examples:
-        emend dsl src/
-        emend dsl app.py --type sql --resolve
-        emend dsl src/ --type sql --orm django --json
+        emend dsl-debug src/
+        emend dsl-debug app.py --type sql --resolve
+        emend dsl-debug src/ --type sql --orm django --json
     """
     try:
         from emend.dsl import DslKind, detect_dsl_regions, extract_sql_symbols, resolve_orm_links, format_symbols, DslSymbol, DslLink
@@ -1491,6 +1520,9 @@ def dsl_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+app.command("dsl", hidden=True)(dsl_debug_cmd)
 
 
 @app.command("cp")
@@ -1599,6 +1631,48 @@ def refs_cmd(
                 elif ref.is_import:
                     marker = " (import)"
                 print(f"{ref.file_path}:{ref.line}{marker}", flush=True)
+
+        # ---- DSL cross-language references ----
+        from emend.dsl import (
+            detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
+            DslKind,
+        )
+        _sel_name = parsed_selector.symbol_path[-1] if parsed_selector.symbol_path else ""
+        if _sel_name:
+            _proj = project or (str(Path(parsed_selector.file_path).parent) if parsed_selector.file_path else ".")
+            _lang = _state["language"]
+            _dsl_files, _ = resolve_files(_proj, language=_lang)
+            _dsl_all_symbols = []
+            for _dsl_f in _dsl_files:
+                regions = detect_dsl_regions(str(_dsl_f))
+                for region in regions:
+                    if region.dsl == DslKind.SQL:
+                        _dsl_all_symbols.extend(extract_sql_symbols(region))
+            if _dsl_all_symbols:
+                _dsl_links = resolve_orm_links(_dsl_all_symbols, _proj)
+                _matched = [
+                    lnk for lnk in _dsl_links
+                    if _sel_name.lower() in lnk.target_qualified_name.lower()
+                ]
+                if _matched:
+                    if json_output:
+                        import json
+                        dsl_refs = [
+                            {
+                                "file_path": lnk.dsl_symbol.host_file,
+                                "line": lnk.dsl_symbol.host_line,
+                                "column": lnk.dsl_symbol.host_col,
+                                "is_definition": False,
+                                "is_import": False,
+                                "is_write": False,
+                            }
+                            for lnk in _matched
+                        ]
+                        print(json.dumps(dsl_refs, indent=2))
+                    else:
+                        for lnk in _matched:
+                            print(f"{lnk.dsl_symbol.host_file}:{lnk.dsl_symbol.host_line}", flush=True)
+
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)
