@@ -136,6 +136,7 @@ def load_taint_config(config_path: str) -> TaintConfig:
 # ---------------------------------------------------------------------------
 
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
+_QUALIFIED_IDENT_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b")
 
 
 def _extract_identifiers(expr: str) -> set[str]:
@@ -150,11 +151,26 @@ def _extract_identifiers(expr: str) -> set[str]:
     return {m for m in _IDENT_RE.findall(expr) if m not in _KEYWORDS}
 
 
+def _extract_qualified_identifiers(expr: str) -> set[str]:
+    """Return both simple identifiers and dotted attribute access patterns in *expr*.
+
+    For example, ``obj.field`` and ``obj.field.subfield`` are returned as-is,
+    in addition to all simple identifiers found by ``_extract_identifiers``.
+    This enables field-sensitive taint tracking where ``obj.dirty`` is distinct
+    from ``obj.clean``.
+    """
+    simple = _extract_identifiers(expr)
+    qualified = set(_QUALIFIED_IDENT_RE.findall(expr))
+    return simple | qualified
+
+
 def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int, str, str]]:
     """Find assignments in source using tree-sitter statement ranges.
 
     Returns a list of (line, target_name, rhs_text) tuples for simple
-    assignments like ``x = expr`` or ``x = func(expr)``.
+    assignments like ``x = expr`` or ``x = func(expr)``, as well as dotted
+    attribute assignments like ``obj.field = expr`` (returned as
+    ``"obj.field"`` in the target position for field-sensitive tracking).
     """
     from emend import emend_core
 
@@ -178,8 +194,71 @@ def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int,
             target = m.group(1)
             rhs = m.group(2).strip()
             assignments.append((start, target, rhs))
+            continue
+
+        # Dotted attribute assignment: obj.field = value (field-sensitive)
+        # Matches ``obj.field = ...`` or ``obj.field.sub = ...``
+        m_dotted = re.match(
+            r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*=\s*(?!=)(.+)",
+            stmt_text,
+            re.DOTALL,
+        )
+        if m_dotted:
+            target = m_dotted.group(1)
+            rhs = m_dotted.group(2).strip()
+            assignments.append((start, target, rhs))
 
     return assignments
+
+
+# Regex for list/dict container mutations
+_CONTAINER_APPEND_RE = re.compile(
+    r"^\s*([A-Za-z_]\w*)\.(?:append|extend|update)\s*\((.+)\)\s*$"
+)
+_CONTAINER_SUBSCRIPT_ASSIGN_RE = re.compile(
+    r"^\s*([A-Za-z_]\w*)\s*\[.*?\]\s*=\s*(.+)$"
+)
+# Regex for subscript read on RHS: items[...] or d[...]
+_SUBSCRIPT_READ_RE = re.compile(r"^([A-Za-z_]\w*)\s*\[")
+# Regex for for-loop iteration
+_FOR_LOOP_RE = re.compile(r"^\s*for\s+([A-Za-z_]\w*)\s+in\s+(.+?)\s*:")
+
+
+def _find_container_mutations(source: str) -> list[tuple[int, str, str]]:
+    """Find container mutation statements in source.
+
+    Returns a list of (line, container_name, rhs_text) for:
+    - ``items.append(expr)``  -> container=items, rhs=expr
+    - ``items.extend(other)`` -> container=items, rhs=other
+    - ``d.update(other)``     -> container=d, rhs=other
+    - ``d[key] = expr``       -> container=d, rhs=expr
+
+    Line numbers are 1-based.
+    """
+    mutations: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(source.split("\n"), start=1):
+        m = _CONTAINER_APPEND_RE.match(line)
+        if m:
+            mutations.append((lineno, m.group(1), m.group(2).strip()))
+            continue
+        m = _CONTAINER_SUBSCRIPT_ASSIGN_RE.match(line)
+        if m:
+            mutations.append((lineno, m.group(1), m.group(2).strip()))
+    return mutations
+
+
+def _find_for_loops(source: str) -> list[tuple[int, str, str]]:
+    """Find for-loop iteration statements in source.
+
+    Returns a list of (line, loop_var, iterable_expr) for ``for VAR in EXPR:``.
+    Line numbers are 1-based.
+    """
+    loops: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(source.split("\n"), start=1):
+        m = _FOR_LOOP_RE.match(line)
+        if m:
+            loops.append((lineno, m.group(1), m.group(2).strip()))
+    return loops
 
 
 # ---------------------------------------------------------------------------
@@ -291,37 +370,121 @@ def _analyze_function(
                     taint_state[var] = {}
                 taint_state[var][src_def.label] = step
 
-    # Step 2: Propagate taint through assignments in order
-    # We walk the dedented body looking for assignments and propagate taint labels
+    # Step 2: Propagate taint through assignments, container mutations, and
+    # for-loops in line order.  Merging all three into a single sorted pass
+    # ensures that a container mutated on line N is seen as tainted when a
+    # subscript read occurs on line N+1.
+
     body_assignments = _find_assignments_in_source(body_dedented)
-    for stmt_line_rel, target, rhs in body_assignments:
-        # Map relative line back to absolute file line
-        stmt_line_abs = stmt_line_rel + body_start - 1
-        rhs_idents = _extract_identifiers(rhs)
+    container_mutations = _find_container_mutations(body_dedented)
+    for_loops = _find_for_loops(body_dedented)
 
-        # Collect labels from RHS identifiers
-        propagated_labels: dict[str, TaintTraceStep] = {}
-        for ident in rhs_idents:
-            if ident in taint_state:
-                for label, origin_step in taint_state[ident].items():
-                    if label_filter and label != label_filter:
-                        continue
-                    propagated_labels[label] = TaintTraceStep(
-                        file_path=file_path,
-                        line=stmt_line_abs,
-                        col=0,
-                        description=f"propagation: {target} = ... {ident} ...",
-                        variable=target,
-                    )
+    # Build unified (line, kind, payload) list sorted by line.
+    _ops: list[tuple[int, str, tuple]] = []
+    for line_rel, target, rhs in body_assignments:
+        _ops.append((line_rel, "assign", (target, rhs)))
+    for line_rel, container, rhs in container_mutations:
+        _ops.append((line_rel, "container", (container, rhs)))
+    for line_rel, loop_var, iterable_expr in for_loops:
+        _ops.append((line_rel, "for", (loop_var, iterable_expr)))
+    _ops.sort(key=lambda t: t[0])
 
-        if propagated_labels:
-            if target not in taint_state:
-                taint_state[target] = {}
-            # Only add labels that are not already present (don't overwrite
-            # a source trace with a propagation trace for the same variable)
-            for lbl, step in propagated_labels.items():
-                if lbl not in taint_state[target]:
-                    taint_state[target][lbl] = step
+    for op_line_rel, op_kind, op_payload in _ops:
+        op_line_abs = op_line_rel + body_start - 1
+
+        if op_kind == "assign":
+            target, rhs = op_payload
+            rhs_idents = _extract_qualified_identifiers(rhs)
+
+            propagated_labels: dict[str, TaintTraceStep] = {}
+            for ident in rhs_idents:
+                if ident in taint_state:
+                    for label, origin_step in taint_state[ident].items():
+                        if label_filter and label != label_filter:
+                            continue
+                        propagated_labels[label] = TaintTraceStep(
+                            file_path=file_path,
+                            line=op_line_abs,
+                            col=0,
+                            description=f"propagation: {target} = ... {ident} ...",
+                            variable=target,
+                        )
+                elif "." in ident:
+                    base = ident.split(".")[0]
+                    if base in taint_state:
+                        for label, origin_step in taint_state[base].items():
+                            if label_filter and label != label_filter:
+                                continue
+                            propagated_labels[label] = TaintTraceStep(
+                                file_path=file_path,
+                                line=op_line_abs,
+                                col=0,
+                                description=f"propagation: {target} = ... {ident} ...",
+                                variable=target,
+                            )
+
+            # Subscript reads: target = container[key]
+            rhs_stripped = rhs.strip()
+            subscript_m = _SUBSCRIPT_READ_RE.match(rhs_stripped)
+            if subscript_m:
+                container_name = subscript_m.group(1)
+                if container_name in taint_state:
+                    for label, origin_step in taint_state[container_name].items():
+                        if label_filter and label != label_filter:
+                            continue
+                        if label not in propagated_labels:
+                            propagated_labels[label] = TaintTraceStep(
+                                file_path=file_path,
+                                line=op_line_abs,
+                                col=0,
+                                description=f"propagation: {target} = {container_name}[...]",
+                                variable=target,
+                            )
+
+            if propagated_labels:
+                if target not in taint_state:
+                    taint_state[target] = {}
+                for lbl, step in propagated_labels.items():
+                    if lbl not in taint_state[target]:
+                        taint_state[target][lbl] = step
+
+        elif op_kind == "container":
+            container, rhs = op_payload
+            rhs_idents = _extract_identifiers(rhs)
+            for ident in rhs_idents:
+                if ident in taint_state:
+                    for label, origin_step in taint_state[ident].items():
+                        if label_filter and label != label_filter:
+                            continue
+                        if container not in taint_state:
+                            taint_state[container] = {}
+                        if label not in taint_state[container]:
+                            taint_state[container][label] = TaintTraceStep(
+                                file_path=file_path,
+                                line=op_line_abs,
+                                col=0,
+                                description=f"propagation: {container} mutated with tainted {ident}",
+                                variable=container,
+                            )
+
+        elif op_kind == "for":
+            loop_var, iterable_expr = op_payload
+            iterable_idents = _extract_identifiers(iterable_expr)
+            for ident in iterable_idents:
+                if ident in taint_state:
+                    for label, origin_step in taint_state[ident].items():
+                        if label_filter and label != label_filter:
+                            continue
+                        if loop_var not in taint_state:
+                            taint_state[loop_var] = {}
+                        if label not in taint_state[loop_var]:
+                            taint_state[loop_var][label] = TaintTraceStep(
+                                file_path=file_path,
+                                line=op_line_abs,
+                                col=0,
+                                description=f"propagation: for {loop_var} in {ident}",
+                                variable=loop_var,
+                            )
 
     # Step 3: Apply sanitizers to remove taint
     for san_def in config.sanitizers:
@@ -384,13 +547,14 @@ def _analyze_function(
             if not _in_range(match_line):
                 continue
 
-            # Check if any variable in the sink match is tainted with the forbidden label
+            # Check if any variable in the sink match is tainted with the forbidden label.
+            # Use qualified identifiers so that obj.dirty in a sink is detected too.
             sink_idents: set[str] = set()
             for cap_name, cap_val in (match.captures or {}).items():
                 if cap_val:
-                    sink_idents |= _extract_identifiers(cap_val)
+                    sink_idents |= _extract_qualified_identifiers(cap_val)
             if match.matched_text:
-                sink_idents |= _extract_identifiers(match.matched_text)
+                sink_idents |= _extract_qualified_identifiers(match.matched_text)
 
             for ident in sink_idents:
                 if ident in taint_state and sink_def.label in taint_state[ident]:

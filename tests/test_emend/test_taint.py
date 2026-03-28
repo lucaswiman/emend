@@ -373,3 +373,152 @@ def test_taint_sanitize_then_use(tmp_path):
     violations = run_taint_analysis([str(test_file)], config)
 
     assert len(violations) == 0
+
+
+def test_taint_field_sensitivity_distinct_fields(tmp_path):
+    """Different fields on the same object are tracked independently."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    user_input = request.args.get('name')\n"
+        "    obj = type('O', (), {})()\n"
+        "    obj.dirty = user_input\n"
+        "    obj.clean = 'safe'\n"
+        "    cursor.execute(obj.dirty)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    # obj.dirty should trigger a violation
+    assert len(violations) >= 1
+
+
+def test_taint_field_sensitivity_clean_field_no_violation(tmp_path):
+    """A clean field on a partially-tainted object does not trigger."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    user_input = request.args.get('name')\n"
+        "    obj = type('O', (), {})()\n"
+        "    obj.dirty = user_input\n"
+        "    obj.clean = 'safe'\n"
+        "    cursor.execute(obj.clean)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    # obj.clean should NOT trigger a violation
+    assert len(violations) == 0
+
+
+def test_taint_field_sensitivity_propagation(tmp_path):
+    """Taint propagates through dotted attribute assignments."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    data = name\n"
+        "    cursor.execute(data)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) >= 1
+
+
+def test_taint_field_sanitizer_only_cleans_field(tmp_path):
+    """Sanitizing obj.field does not clean obj.other_field."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    a = request.args.get('a')\n"
+        "    b = request.args.get('b')\n"
+        "    a = escape(a)\n"
+        "    cursor.execute(b)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    # b is still tainted (escape only cleaned a)
+    assert len(violations) >= 1
+
+
+def test_taint_container_append(tmp_path):
+    """Taint propagates through list.append()."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    queries = []\n"
+        "    queries.append(name)\n"
+        "    cursor.execute(queries[0])\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) >= 1
+
+
+def test_taint_container_dict_subscript(tmp_path):
+    """Taint propagates through dict subscript assignment."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    data = {}\n"
+        "    data['query'] = name\n"
+        "    q = data['query']\n"
+        "    cursor.execute(q)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) >= 1
+
+
+def test_taint_container_iteration(tmp_path):
+    """Taint propagates through for-loop iteration."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    items = [name]\n"
+        "    for item in items:\n"
+        "        cursor.execute(item)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) >= 1
+
+
+def test_taint_container_clean_list_no_violation(tmp_path):
+    """Clean list elements do not produce false positives."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(cursor):\n"
+        "    queries = ['SELECT 1', 'SELECT 2']\n"
+        "    for q in queries:\n"
+        "        cursor.execute(q)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) == 0
+
+
+def test_taint_container_extend(tmp_path):
+    """Taint propagates through list.extend()."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    tainted = [name]\n"
+        "    queries = []\n"
+        "    queries.extend(tainted)\n"
+        "    cursor.execute(queries[0])\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_taint_analysis([str(test_file)], config)
+    assert len(violations) >= 1
