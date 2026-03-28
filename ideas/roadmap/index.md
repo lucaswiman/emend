@@ -32,6 +32,29 @@ Spec: [taint-analysis.md](taint-analysis.md)
 
 Spec: [dsl-support.md](dsl-support.md)
 
+### Current state
+
+The core infrastructure exists in `dsl.py`: SQL region detection (keyword
+heuristics, magic comments), table/column extraction via regex, and ORM link
+resolution (singularize+PascalCase, `__tablename__` matching).  There is a
+standalone `emend dsl` command wired in `cli.py`, but this is **wrong** — DSL
+support should be transparent infrastructure integrated into existing commands,
+not a separate user-facing command.
+
+### Next steps (design fix)
+
+- [ ] **Remove the standalone `emend dsl` command** — the current command is a
+  diagnostic tool at best.  Rename to `emend dsl-debug` or fold into
+  `emend index --dsl` if diagnostic output is still wanted.
+- [ ] **Wire DSL symbols into `search`** — `emend search User --include-dsl`
+  should find both `class User` and SQL `FROM users`.  DSL symbols should
+  appear in search results alongside host-language symbols.
+- [ ] **Wire DSL symbols into `refs`** — `emend refs models.py::User --include-dsl`
+  should surface SQL table references.  This is the highest-value integration.
+- [ ] **Wire into editor-server** — `dsl_goto_definition` from cursor inside a
+  SQL string should jump to the ORM model class.  Editor go-to-definition and
+  find-references should work transparently across the host/DSL boundary.
+
 ### Phase 1: Infrastructure
 
 - [ ] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core`
