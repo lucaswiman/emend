@@ -1,0 +1,224 @@
+# SQL language configuration for emend scope resolver.
+#
+# SQL is a declarative query language. This config provides tree-sitter
+# parsing, symbol extraction (tables, columns, functions), and pattern
+# matching support for SQL files. Uses the tree-sitter-sequel grammar.
+
+[language]
+name = "sql"
+tree_sitter_grammar = "tree-sitter-sequel"
+file_extensions = ["sql"]
+comment_prefix = "--"
+keywords = [
+    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE",
+    "DROP", "ALTER", "TABLE", "INDEX", "VIEW", "JOIN", "ON", "AND", "OR",
+    "NOT", "IN", "EXISTS", "BETWEEN", "LIKE", "ORDER", "BY", "GROUP",
+    "HAVING", "LIMIT", "OFFSET", "UNION", "EXCEPT", "INTERSECT", "AS",
+    "INTO", "VALUES", "SET", "NULL", "IS", "DISTINCT", "ALL", "ANY",
+    "CASE", "WHEN", "THEN", "ELSE", "END", "BEGIN", "COMMIT", "ROLLBACK",
+    "GRANT", "REVOKE", "WITH", "RECURSIVE", "RETURNING",
+]
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+[[scoping.scope_creators]]
+node = "program"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "create_function"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "create_table"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "create_view"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "cte"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "subquery"
+kind = "function"
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.function]
+is_closure_boundary = true
+names_visible_to_inner = true
+
+[scoping.rules.class]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+# ---------------------------------------------------------------------------
+# Binding rules
+# ---------------------------------------------------------------------------
+[bindings]
+
+[[bindings.assignment]]
+node = "column_definition"
+target = "name"
+
+[[bindings.assignment]]
+node = "assignment"
+target = "left"
+
+[bindings.parameters]
+param_nodes = ["function_argument"]
+name_field = "name"
+
+[bindings.definitions]
+function_def = "create_function"
+class_def = "create_table"
+name_field = "name"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = ""
+module_field = ""
+name_field = ""
+resolution = "none"
+dotted_name = ""
+identifier = "identifier"
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+module_separator = "."
+class_member_prefix = true
+nested_function_prefix = false
+locals_marker = ""
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+public_by_default = true
+private_prefix = ""
+
+# ---------------------------------------------------------------------------
+# Symbols
+# ---------------------------------------------------------------------------
+[symbols]
+function_node = "create_function"
+class_node = "create_table"
+decorated_node = ""
+definition_field = ""
+async_keyword = ""
+name_field = "name"
+parameters_field = "function_arguments"
+return_type_field = ""
+body_field = "function_body"
+superclasses_field = ""
+decorator_node = ""
+expression_statement_node = "statement"
+
+[symbols.statements]
+simple = [
+    "select", "insert", "update", "delete",
+    "drop_table", "drop_view", "drop_index", "drop_function",
+    "grant", "revoke", "comment_statement",
+    "alter_table", "alter_view", "alter_column",
+    "transaction",
+]
+compound = [
+    "create_table", "create_view", "create_materialized_view",
+    "create_function", "create_index", "create_schema",
+    "create_trigger", "create_type", "create_sequence",
+]
+recurse_into = ["program", "block"]
+
+[builtins]
+names = [
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF",
+    "CAST", "TRIM", "UPPER", "LOWER", "LENGTH", "SUBSTRING",
+    "REPLACE", "CONCAT", "NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE",
+    "CURRENT_TIME", "EXTRACT", "DATE_TRUNC", "ROW_NUMBER",
+    "RANK", "DENSE_RANK", "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE",
+    "ARRAY_AGG", "STRING_AGG", "JSON_AGG", "JSONB_AGG",
+]
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+[pattern_matching]
+function_def = "create_function"
+class_def = "create_table"
+decorated_def = ""
+call = "invocation"
+attribute = "field"
+identifier = "identifier"
+assignment = "assignment"
+augmented_assignment = ""
+annotated_assignment = "column_definition"
+return_stmt = "returning"
+if_stmt = "case"
+while_stmt = ""
+for_stmt = ""
+with_stmt = "cte"
+try_stmt = ""
+except_handler = ""
+for_in_clause = ""
+if_clause = "when_clause"
+pair = ""
+import_stmt = ""
+import_from_stmt = ""
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = "delete"
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = ""
+yield_expr = ""
+lambda = ""
+named_expr = ""
+integer = "literal"
+float = "literal"
+string = "literal"
+list = "list"
+tuple = ""
+set = ""
+dict = ""
+binary_operator = "binary_expression"
+boolean_operator = "binary_expression"
+unary_operator = "unary_expression"
+comparison_operator = "binary_expression"
+subscript = "subscript"
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = [
+    "select", "insert", "update", "delete",
+    "create_table", "create_view", "create_function", "create_index",
+    "drop_table", "drop_view", "drop_function", "drop_index",
+    "alter_table", "alter_view", "alter_column",
+    "transaction", "grant", "revoke", "statement",
+]
+func_field = "function"
+args_field = "arguments"
+object_field = ""
+attr_field = "field"
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = ""
+value_field = "value"
+condition_field = "condition"
+target_field = "left"
+iter_field = ""
+elt_field = ""

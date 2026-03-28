@@ -99,6 +99,7 @@
 | `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
 | `test_cfg_typescript.py` | TypeScript/JS CFG construction (alternative-style if, c-style for, switch/case fallthrough, try/catch fields-style, arrow functions, methods) |
 | `test_cfg_rust.py` | Rust CFG construction (alternative-style if, for/while/loop expressions, match arms, impl/trait methods, let bindings, break/continue) |
+| `test_dsl_treesitter.py` | Tree-sitter grammar integration for HTML, CSS, SQL, Jinja2 (parsing, scope resolution, language registry) |
 
 ## Commands
 
@@ -138,6 +139,8 @@ All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on
 - `ast_utils.py` — uses `emend_core.collect_symbols_from_str()`
 - `query.py` — uses `PyScopeResolver` for symbol collection and filtering
 - `ast_commands.py` — uses `emend_core` for symbol collection with rich metadata
+- Supported languages: Python, TypeScript/TSX/JS/JSX, Rust, HTML, CSS, SQL, Jinja2
+- Language configs in `languages/{python,typescript,rust,html,css,sql,jinja2}/config.toml`
 
 ### Cross-Project Operations
 

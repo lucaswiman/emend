@@ -33,6 +33,10 @@ _BUILTIN: dict[str, list[str]] = {
     "python": ["py", "pyi"],
     "typescript": ["ts", "tsx", "js", "jsx"],
     "rust": ["rs"],
+    "html": ["html", "htm"],
+    "css": ["css"],
+    "sql": ["sql"],
+    "jinja2": ["jinja", "jinja2", "j2"],
 }
 
 
