@@ -268,3 +268,235 @@ would reach for over raw file editing.  The remaining tools are individually
 fine but collectively expensive in context budget.  A `--profile` flag (e.g.
 `emend mcp --profile=core` vs `--profile=full`) could let users opt into the
 lighter set.
+
+---
+
+## Refactoring plan
+
+### Phase 1: Schema compression (no behavioral changes)
+
+These changes reduce token cost without altering any tool's behavior or
+parameters.  They can ship as a single PR and require only `test_mcp_server.py`
+updates (schema shape assertions).
+
+**Estimated savings: ~7,400 chars (~2,100 tokens)**
+
+- [ ] **1a. Post-process `dump_schema()` to simplify nullable types.**
+  There are exactly 60 `Optional[X]` params across all tools.  Pydantic
+  serializes each as `{"anyOf": [{"type": "X"}, {"type": "null"}], "default":
+  null}` (~140 chars).  Post-process the schema dict before JSON serialization:
+  walk every property, and when the value has an `anyOf` list with exactly two
+  entries where one is `{"type": "null"}`, collapse it to the non-null type and
+  keep the `default: null`.  Strip the `title` keys too — they're just
+  PascalCase-ified param names and carry zero information for an LLM.  This is
+  purely a `dump_schema` / wire-format change; the Pydantic models and runtime
+  validation stay the same.
+  - File: `mcp_server.py` — `dump_schema()`
+  - Test: assert no tool schema contains `"anyOf"` with a null branch; assert
+    every previously-nullable param still has `"default": null`
+  - Verify: `emend mcp --schema | python -c "import sys,json; ..."`; compare
+    char count before/after
+
+- [ ] **1b. Strip `title` keys from schema output.**
+  Every property and every tool's `inputSchema` has a `title` field
+  (`"title": "Source Project"`, `"title": "replaceArguments"`).  These are
+  Pydantic boilerplate — the property name and tool name already convey the
+  same information.  Strip them in the same post-processing pass.
+  - File: `mcp_server.py` — same function as 1a
+  - Estimated additional savings: ~1,500 chars
+
+- [ ] **1c. Trim `datalog_query` description.**
+  The current description is 1,375 chars — the longest of any tool — mostly
+  example CozoScript queries.  Move the relation schema and examples into
+  `grammar_and_cookbook.rst` (where they belong as reference material) and keep
+  only a 2-sentence description + a one-liner example in the tool docstring.
+  - File: `mcp_server.py` — `datalog_query` docstring
+  - File: `src/emend/grammar_and_cookbook.rst` — add a "Fact graph relations"
+    section
+  - Estimated savings: ~900 chars
+
+- [ ] **1d. Regenerate `docs/_static/mcp_schema.json` and update token counts
+  in this document.**
+
+### Phase 2: Merge `query_facts` into `datalog_query`
+
+`query_facts` (10 params, 2,544 chars) is a guided wrapper around
+`datalog_query`.  Every `query_facts` call can be expressed as a CozoScript
+query.  Merging them removes a tool and its 10-param schema.
+
+**Estimated savings: ~2,500 chars (~700 tokens)**
+
+- [ ] **2a. Add a `mode` param to `datalog_query`.**
+  `mode="raw"` (default) is the current CozoScript passthrough.
+  `mode="guided"` accepts the current `query_facts` params (`fact_type`, `name`,
+  `kind`, `file_path`, `symbol`, `label`, `transitive`, `max_depth`, `limit`)
+  and internally constructs the CozoScript query.  Use Pydantic's `Field`
+  discriminator or just a string enum.
+  - File: `mcp_server.py` — merge guided logic into `datalog_query`, rename to
+    `query` or keep `datalog_query`
+  - Consideration: the guided params only apply in guided mode; in raw mode
+    they're ignored.  Document this clearly in the description.
+
+- [ ] **2b. Deprecate and remove `query_facts`.**
+  Remove the `@mcp_app.tool()` registration.  Update
+  `test_all_tools_registered` expected set.  Port any `query_facts`-specific
+  tests to use the merged tool.
+  - File: `mcp_server.py`, `test_mcp_server.py`
+
+- [ ] **2c. Update `docs/commands.rst` MCP tool table.**
+
+### Phase 3: Restructure `map_write`
+
+`map_write` has 18 params (5,312 chars) encoding four operations via
+combinatorial `kind` x `op` dispatch.  Replace with a single `entry` JSON
+param.
+
+**Estimated savings: ~3,000 chars (~850 tokens)**
+
+- [ ] **3a. Define `MappingEntry` and `ModuleEntry` typed dicts (or just
+  document the JSON shapes in the description).**
+  The tool accepts `kind`, `op`, and `entry: dict` instead of 16 flat fields.
+  Example:
+  ```python
+  def map_write(
+      kind: Annotated[str, Field(description="Entry type: 'mapping' or 'module'.")],
+      op: Annotated[str, Field(description="Operation: 'add' or 'delete'.")],
+      entry: Annotated[dict, Field(description=(
+          "Entry data. For mapping+add: {source_project, source_identifier, "
+          "target_project, target_identifier, ...}. For module+add: "
+          "{module_prefix, repo|local_path, ...}. For delete: just the key "
+          "fields (source_identifier or module_prefix)."
+      ))],
+  ) -> str:
+  ```
+  - File: `mcp_server.py` — rewrite `map_write`
+  - The tool body unpacks `entry` and delegates to the same `MappingStore`
+    methods as today
+
+- [ ] **3b. Slim `map_read` similarly.**
+  Reduce to `kind`, `query` (free text or identifier), and `options: dict` for
+  the rare filter params (`source_project`, `target_project`, `relationship`,
+  `direction`, `limit`).  Or just keep it as-is if the savings aren't worth the
+  churn — `map_read` at 2,707 chars is heavy but tolerable.
+  - Decision: revisit after 3a lands and re-measure
+
+- [ ] **3c. Update `test_mcp_server.py`** — update or add tests for the new
+  `entry` dict interface.
+
+- [ ] **3d. Update `docs/commands.rst`** and `knowledge.rst` MCP sections.
+
+### Phase 4: Trim config-heavy tool params
+
+Move per-call override params on `deadcode`, `taint`, and `check_policies` into
+config-file-only settings, keeping only `path` and `config` as MCP params.
+
+**Estimated savings: ~3,500 chars (~1,000 tokens)**
+
+- [ ] **4a. `deadcode` — drop MCP-only override params.**
+  Keep: `path`, `kind`, `include_private`, `no_last_reference`.
+  Drop from MCP surface (still available on CLI): `exclude_references_from`,
+  `no_strings`, `all_files`, `entry_point_decorators`, `entry_point_names`,
+  `exclude_paths`.  These are all configurable via `.emend/patterns.yaml`'s
+  `deadcode` section already.
+  - File: `mcp_server.py` — `deadcode` tool function
+  - Keep the underlying `find_dead_code()` signature unchanged; the MCP tool
+    just stops exposing the overrides and reads them from config instead
+  - Add a `config` param (path to patterns.yaml) so the agent can point at a
+    non-default config if needed
+
+- [ ] **4b. `taint` — already lean (5 params), leave as-is.**
+  The only candidate for removal is `interprocedural` (a mode switch), but it's
+  genuinely useful.  No change needed.
+
+- [ ] **4c. `check_policies` — already lean (3 params), leave as-is.**
+
+- [ ] **4d. Update tests and docs.**
+
+### Phase 5: `grammar_and_cookbook` sectioning
+
+The current tool dumps 15,479 chars (~5,160 tokens) in a single response.
+Split into sections the agent can request individually.
+
+**Estimated savings: context per-call, not schema size**
+
+- [ ] **5a. Add a `section` param.**
+  `section=None` (default) returns a compact table of contents with section
+  names and one-line summaries.  `section="selectors"`, `section="patterns"`,
+  `section="recipes"`, etc. return just that section.
+  - File: `mcp_server.py` — `grammar_and_cookbook`
+  - File: `src/emend/grammar_and_cookbook.rst` — add `.. _section-selectors:`
+    labels (or use heading text as keys)
+  - Parse the RST into sections by heading level; return the requested slice
+
+- [ ] **5b. Update tests.**
+  - `test_grammar_and_cookbook` — test default returns TOC, test each section
+    returns content
+
+- [ ] **5c. Fix the existing `literalinclude` regex bug.**
+  The `_inline` function uses `m.group(1)` but the regex has no capture group.
+  This is already causing a test failure on Python 3.13.  Change
+  `r"\.\. literalinclude:: [^\n]+\n..."` to
+  `r"\.\. literalinclude:: ([^\n]+)\n..."` (add parens).
+  - File: `mcp_server.py` line ~1193
+
+### Phase 6: `--profile` flag for tool subsets
+
+Let users choose a lighter tool surface when they don't need the full suite.
+
+- [ ] **6a. Add `--profile` option to `emend mcp`.**
+  Profiles:
+  - `full` (default): all tools, current behavior
+  - `core`: search, replace, modify, refs, rename, move, semantic_context,
+    impact, grammar_and_cookbook (9 tools)
+  - `refactor`: core + graph, lint, deadcode (12 tools)
+  - Custom: `--tools search,replace,modify` for explicit selection
+
+  Implementation: after `mcp_app` is constructed with all tools, remove
+  tools not in the selected profile before starting the server.  FastMCP's
+  `_tool_manager` likely supports removal, or we conditionally register.
+  - File: `cli.py` — `mcp_cmd()` adds `--profile` / `--tools` params
+  - File: `mcp_server.py` — add `configure_profile(profile, tools)` that
+    prunes the tool registry
+
+- [ ] **6b. Wire `--profile` into `--schema`** so `emend mcp --schema
+  --profile core` shows only the core tools.
+
+- [ ] **6c. Update `docs/commands.rst`** and `docs/installation.rst` with
+  profile documentation and recommendations.
+
+- [ ] **6d. Update instructions block per profile.**
+  The `core` profile doesn't need the "Mappings" section in the instructions.
+  Conditionally trim the instructions string based on which tools are active.
+
+### Phase 7: Measure and validate
+
+- [ ] **7a. Regenerate schema for each profile and record token counts.**
+  Target:
+  - `full`: ~8,000 tokens (down from 12,000)
+  - `core`: ~5,000 tokens
+  - `refactor`: ~6,500 tokens
+
+- [ ] **7b. Run `test-mcp` for all profiles.**
+
+- [ ] **7c. Manual smoke test with Claude Code.**
+  Configure `emend mcp --profile core` as an MCP server in Claude Code,
+  run through a real refactoring session, and confirm the tools work as
+  expected without the dropped params causing friction.
+
+- [ ] **7d. Update this document with final numbers.**
+
+### Ordering and dependencies
+
+```
+Phase 1 (compression) ─── no deps, ship first
+Phase 2 (merge facts) ─── no deps, can parallel with 1
+Phase 3 (map_write)   ─── no deps, can parallel with 1-2
+Phase 4 (trim params) ─── no deps, can parallel with 1-3
+Phase 5 (grammar)     ─── no deps, can parallel with 1-4
+Phase 6 (profiles)    ─── depends on 1-5 (needs final tool list)
+Phase 7 (validate)    ─── depends on all above
+```
+
+Phases 1-5 are independent and can be done in any order or in parallel as
+separate PRs.  Phase 6 should come after the tool set stabilizes.  Phase 7 is
+the final validation pass.
