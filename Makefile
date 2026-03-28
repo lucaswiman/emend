@@ -53,7 +53,11 @@ deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
 
 docs: docs-html
 
-docs-html: $(VENV)/bin/activate
+docs/_static/mcp_schema.json: src/emend/mcp_server.py | $(MCP_VENV)/lib/emend_core
+	@mkdir -p docs/_static
+	$(MCP_VENV)/bin/emend mcp --schema > $@
+
+docs-html: $(VENV)/bin/activate docs/_static/mcp_schema.json
 	$(VENV)/bin/sphinx-build -b html docs docs/_build/html
 
 BENCH_LABEL ?=

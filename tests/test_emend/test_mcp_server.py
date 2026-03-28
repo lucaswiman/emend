@@ -12,6 +12,7 @@ import pytest
 try:
     from emend.mcp_server import (
         mcp_app,
+        dump_schema,
         search,
         replace,
         modify,
@@ -43,6 +44,26 @@ def test_all_tools_registered():
         "grammar_and_cookbook",
     }
     assert expected == tool_names
+
+
+def test_dump_schema():
+    """dump_schema() returns valid JSON with all tools and their inputSchema."""
+    result = dump_schema()
+    data = json.loads(result)
+    assert "tools" in data
+    tool_names = {t["name"] for t in data["tools"]}
+    assert tool_names == {
+        "search", "replace", "modify", "refs", "rename",
+        "move", "graph", "deadcode", "lint",
+        "impact", "semantic_context", "taint",
+        "query_facts", "datalog_query", "check_policies",
+        "map_read", "map_write",
+        "grammar_and_cookbook",
+    }
+    for tool in data["tools"]:
+        assert "description" in tool
+        assert "inputSchema" in tool
+        assert tool["inputSchema"]["type"] == "object"
 
 
 # ---------------------------------------------------------------------------

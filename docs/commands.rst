@@ -861,6 +861,10 @@ Requires the ``mcp`` optional dependency: ``pip install emend[mcp]``.
 +---------------------------+-----------------------------------------------+
 | ``--port``, ``-p``        | Port for SSE transport (default: 8000)        |
 +---------------------------+-----------------------------------------------+
+| ``--schema``              | Print the MCP tool schema as JSON and exit    |
++---------------------------+-----------------------------------------------+
+
+See also: `raw MCP schema JSON <_static/mcp_schema.json>`_.
 
 **Exposed tools:**
 
