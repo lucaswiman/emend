@@ -123,12 +123,21 @@ def load_taint_config(config_path: str) -> TaintConfig:
     for s in raw.get("sanitizers", []) or []:
         sanitizers.append(TaintSanitizer(pattern=s["pattern"], label=s["label"]))
 
-    return TaintConfig(
+    explicit_config = TaintConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
     )
+
+    # Support a ``presets`` key that merges named framework presets
+    preset_names = raw.get("presets", []) or []
+    if preset_names:
+        from emend.taint_presets import get_preset, merge_configs
+        preset_configs = [get_preset(name) for name in preset_names]
+        return merge_configs(*preset_configs, explicit_config)
+
+    return explicit_config
 
 
 # ---------------------------------------------------------------------------
