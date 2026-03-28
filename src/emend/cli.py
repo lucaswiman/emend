@@ -847,16 +847,22 @@ def search(
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
 
             # ---- DSL symbols in scanned files ----
-            from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+            from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
             _lang = _state["language"]
             target_path_dsl = path or "."
             _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
+                    _dsl_syms = []
                     if region.dsl == DslKind.SQL:
-                        for sym in extract_sql_symbols(region):
-                            print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
+                        _dsl_syms = extract_sql_symbols(region)
+                    elif region.dsl == DslKind.JINJA:
+                        _dsl_syms = extract_jinja_symbols(region)
+                    elif region.dsl == DslKind.GRAPHQL:
+                        _dsl_syms = extract_graphql_symbols(region)
+                    for sym in _dsl_syms:
+                        print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
 
             return
 
@@ -903,7 +909,7 @@ def search(
 
         # ---- DSL SYMBOL OVERLAY ----
         # ---- DSL symbol overlay ----
-        from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+        from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
         _lang = _state["language"]
         _dsl_path = path or file_or_pattern or "."
         _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
@@ -912,10 +918,16 @@ def search(
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
+                    _dsl_syms = []
                     if region.dsl == DslKind.SQL:
-                        for sym in extract_sql_symbols(region):
-                            if _search_term in sym.name or sym.name in _search_term:
-                                print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
+                        _dsl_syms = extract_sql_symbols(region)
+                    elif region.dsl == DslKind.JINJA:
+                        _dsl_syms = extract_jinja_symbols(region)
+                    elif region.dsl == DslKind.GRAPHQL:
+                        _dsl_syms = extract_graphql_symbols(region)
+                    for sym in _dsl_syms:
+                        if _search_term in sym.name or sym.name in _search_term:
+                            print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1552,7 +1564,12 @@ def dsl_debug_cmd(
         emend dsl-debug src/ --type sql --orm django --json
     """
     try:
-        from emend.dsl import DslKind, detect_dsl_regions, extract_sql_symbols, resolve_orm_links, format_symbols, DslSymbol, DslLink
+        from emend.dsl import (
+            DslKind, detect_dsl_regions, extract_sql_symbols,
+            extract_jinja_symbols, extract_graphql_symbols,
+            resolve_orm_links, resolve_jinja_links, resolve_graphql_links,
+            format_symbols, DslSymbol, DslLink,
+        )
 
         # Parse DSL type filter
         dsl_filter: list[DslKind] | None = None
@@ -1573,12 +1590,24 @@ def dsl_debug_cmd(
             for region in regions:
                 if region.dsl == DslKind.SQL:
                     all_symbols.extend(extract_sql_symbols(region))
+                elif region.dsl == DslKind.JINJA:
+                    all_symbols.extend(extract_jinja_symbols(region))
+                elif region.dsl == DslKind.GRAPHQL:
+                    all_symbols.extend(extract_graphql_symbols(region))
 
         # Resolve links if requested
         links: list[DslLink] = []
         if resolve and all_symbols:
             project_root = project or str(Path(path).resolve() if Path(path).is_dir() else Path(path).parent.resolve())
-            links = resolve_orm_links(all_symbols, project_root, orm=orm)
+            sql_syms = [s for s in all_symbols if s.dsl == DslKind.SQL]
+            jinja_syms = [s for s in all_symbols if s.dsl == DslKind.JINJA]
+            gql_syms = [s for s in all_symbols if s.dsl == DslKind.GRAPHQL]
+            if sql_syms:
+                links.extend(resolve_orm_links(sql_syms, project_root, orm=orm))
+            if jinja_syms:
+                links.extend(resolve_jinja_links(jinja_syms, project_root))
+            if gql_syms:
+                links.extend(resolve_graphql_links(gql_syms, project_root))
 
         output = format_symbols(all_symbols, links=links if resolve else None, json_output=json_output)
         if output:
@@ -1703,7 +1732,9 @@ def refs_cmd(
 
         # ---- DSL cross-language references ----
         from emend.dsl import (
-            detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
+            detect_dsl_regions, extract_sql_symbols,
+            extract_jinja_symbols, extract_graphql_symbols,
+            resolve_orm_links, resolve_jinja_links, resolve_graphql_links,
             DslKind,
         )
         _sel_name = parsed_selector.symbol_path[-1] if parsed_selector.symbol_path else ""
@@ -1711,14 +1742,27 @@ def refs_cmd(
             _proj = project or (str(Path(parsed_selector.file_path).parent) if parsed_selector.file_path else ".")
             _lang = _state["language"]
             _dsl_files, _ = resolve_files(_proj, language=_lang)
-            _dsl_all_symbols = []
+            _dsl_all_symbols: list = []
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
                     if region.dsl == DslKind.SQL:
                         _dsl_all_symbols.extend(extract_sql_symbols(region))
+                    elif region.dsl == DslKind.JINJA:
+                        _dsl_all_symbols.extend(extract_jinja_symbols(region))
+                    elif region.dsl == DslKind.GRAPHQL:
+                        _dsl_all_symbols.extend(extract_graphql_symbols(region))
             if _dsl_all_symbols:
-                _dsl_links = resolve_orm_links(_dsl_all_symbols, _proj)
+                _dsl_links: list = []
+                _sql_syms = [s for s in _dsl_all_symbols if s.dsl == DslKind.SQL]
+                _jinja_syms = [s for s in _dsl_all_symbols if s.dsl == DslKind.JINJA]
+                _gql_syms = [s for s in _dsl_all_symbols if s.dsl == DslKind.GRAPHQL]
+                if _sql_syms:
+                    _dsl_links.extend(resolve_orm_links(_sql_syms, _proj))
+                if _jinja_syms:
+                    _dsl_links.extend(resolve_jinja_links(_jinja_syms, _proj))
+                if _gql_syms:
+                    _dsl_links.extend(resolve_graphql_links(_gql_syms, _proj))
                 _matched = [
                     lnk for lnk in _dsl_links
                     if _sel_name.lower() in lnk.target_qualified_name.lower()
