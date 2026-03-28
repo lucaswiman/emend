@@ -216,6 +216,7 @@ impl FunctionCfg {
 
 struct CfgBuilder<'a> {
     source: &'a [u8],
+    cfg_sec: &'a CfgSection,
     blocks: Vec<BasicBlock>,
     edges: Vec<CfgEdge>,
     next_id: u32,
@@ -225,9 +226,10 @@ struct CfgBuilder<'a> {
 }
 
 impl<'a> CfgBuilder<'a> {
-    fn new(source: &'a [u8]) -> Self {
+    fn new(source: &'a [u8], cfg_sec: &'a CfgSection) -> Self {
         let mut builder = CfgBuilder {
             source,
+            cfg_sec,
             blocks: Vec::new(),
             edges: Vec::new(),
             next_id: 0,
@@ -313,70 +315,97 @@ impl<'a> CfgBuilder<'a> {
 
     fn collect_defs_uses(&mut self, block_id: BlockId, node: tree_sitter::Node) {
         let kind = node.kind();
-        match kind {
-            "assignment" | "augmented_assignment" => {
-                // LHS = defs, RHS = uses
-                if let Some(left) = node.child_by_field_name("left") {
-                    self.collect_defs_from_target(block_id, left);
+
+        // Check def_use_rules from config
+        for rule in &self.cfg_sec.def_use_rules {
+            if kind == rule.node {
+                if let Some(target) = node.child_by_field_name(&rule.target) {
+                    self.collect_defs_from_target(block_id, target);
                 }
-                if let Some(right) = node.child_by_field_name("right") {
-                    self.collect_uses_from_expr(block_id, right);
+                if let Some(value) = node.child_by_field_name(&rule.value) {
+                    self.collect_uses_from_expr(block_id, value);
+                }
+                return;
+            }
+        }
+
+        // Return/throw: uses from the value expression
+        if self.cfg_sec.return_nodes.iter().any(|n| n == kind)
+            || self.cfg_sec.throw_nodes.iter().any(|n| n == kind)
+        {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    self.collect_uses_from_expr(block_id, child);
                 }
             }
-            "return_statement" => {
-                // uses from the return value
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() != "return" {
-                        self.collect_uses_from_expr(block_id, child);
-                    }
-                }
+            return;
+        }
+
+        // Expression statement: unwrap and recurse
+        if !self.cfg_sec.expression_statement_node.is_empty()
+            && kind == self.cfg_sec.expression_statement_node
+        {
+            if let Some(child) = node.child(0) {
+                self.collect_defs_uses(block_id, child);
             }
-            "expression_statement" => {
-                // expression_statement wraps the real node (assignment, call, etc.)
-                if let Some(child) = node.child(0) {
-                    self.collect_defs_uses(block_id, child);
-                }
+            return;
+        }
+
+        // Fallback: recurse into named children looking for def_use_rule matches
+        // (e.g., lexical_declaration > variable_declarator in TS)
+        let mut found_rule = false;
+        let rule_nodes: Vec<String> = self.cfg_sec.def_use_rules.iter().map(|r| r.node.clone()).collect();
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.children(&mut cursor).filter(|c| c.is_named()).collect();
+        for child in children {
+            if rule_nodes.iter().any(|r| r == child.kind()) {
+                self.collect_defs_uses(block_id, child);
+                found_rule = true;
             }
-            _ => {
-                // For other statements, do a generic walk for identifiers
-                self.collect_uses_from_expr(block_id, node);
-            }
+        }
+        if !found_rule {
+            self.collect_uses_from_expr(block_id, node);
         }
     }
 
     fn collect_defs_from_target(&mut self, block_id: BlockId, node: tree_sitter::Node) {
-        match node.kind() {
-            "identifier" => {
-                let name = self.node_text(node).to_string();
-                let line = node.start_position().row as u32;
-                let col = node.start_position().column as u32;
-                self.block_mut(block_id).defs.push((name, line, col));
-            }
-            "tuple" | "list" | "pattern_list" | "tuple_pattern" => {
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.is_named() {
-                        self.collect_defs_from_target(block_id, child);
-                    }
+        let kind = node.kind();
+        let id_node = &self.cfg_sec.identifier_node;
+
+        if !id_node.is_empty() && kind == id_node {
+            let name = self.node_text(node).to_string();
+            let line = node.start_position().row as u32;
+            let col = node.start_position().column as u32;
+            self.block_mut(block_id).defs.push((name, line, col));
+            return;
+        }
+
+        // Destructuring targets
+        if self.cfg_sec.destructure_nodes.iter().any(|n| n == kind) {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    self.collect_defs_from_target(block_id, child);
                 }
             }
-            "subscript" | "attribute" => {
-                // x[i] = ... or x.attr = ... — x is a use, not a def
-                self.collect_uses_from_expr(block_id, node);
-            }
-            _ => {}
+            return;
+        }
+
+        // Attribute/subscript access on LHS → use, not def
+        if self.cfg_sec.attribute_access_nodes.iter().any(|n| n == kind) {
+            self.collect_uses_from_expr(block_id, node);
+            return;
         }
     }
 
     fn collect_uses_from_expr(&mut self, block_id: BlockId, node: tree_sitter::Node) {
-        if node.kind() == "identifier" {
+        let kind = node.kind();
+        let id_node = &self.cfg_sec.identifier_node;
+
+        if !id_node.is_empty() && kind == id_node {
             let name = self.node_text(node).to_string();
-            // Skip keywords that tree-sitter might parse as identifiers
-            if matches!(
-                name.as_str(),
-                "True" | "False" | "None" | "self" | "cls"
-            ) {
+            if self.cfg_sec.skip_identifiers.iter().any(|s| s == &name) {
                 return;
             }
             let line = node.start_position().row as u32;
@@ -435,170 +464,338 @@ impl<'a> CfgBuilder<'a> {
         current: BlockId,
     ) -> Option<BlockId> {
         let kind = node.kind();
-        match kind {
-            "if_statement" => self.walk_if(node, current),
-            "for_statement" => self.walk_for(node, current),
-            "while_statement" => self.walk_while(node, current),
-            "try_statement" => self.walk_try(node, current),
-            "with_statement" => self.walk_with(node, current),
-            "match_statement" => self.walk_match(node, current),
-            "return_statement" | "raise_statement" => {
-                self.add_statement(current, node);
-                self.collect_defs_uses(current, node);
-                self.add_edge(current, self.exit_block, EdgeKind::Jump);
-                None
-            }
-            "break_statement" => {
-                self.add_statement(current, node);
-                if let Some(&(_, loop_exit)) = self.loop_stack.last() {
-                    self.add_edge(current, loop_exit, EdgeKind::Jump);
+
+        // Unwrap expression_statement to check if inner is a control flow node.
+        // Languages like Rust wrap if/match/loop expressions in expression_statement.
+        if !self.cfg_sec.expression_statement_node.is_empty()
+            && kind == self.cfg_sec.expression_statement_node
+        {
+            if let Some(inner) = node.named_child(0) {
+                let ik = inner.kind();
+                let is_cf = self.cfg_sec.if_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.for_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.c_style_for_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.while_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.loop_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.try_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.match_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.return_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.throw_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.break_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.continue_nodes.iter().any(|n| n == ik);
+                if is_cf {
+                    return self.walk_statement(inner, current);
                 }
-                None
-            }
-            "continue_statement" => {
-                self.add_statement(current, node);
-                if let Some(&(loop_header, _)) = self.loop_stack.last() {
-                    self.add_edge(current, loop_header, EdgeKind::BackEdge);
-                }
-                None
-            }
-            "assert_statement" => {
-                self.add_statement(current, node);
-                self.collect_defs_uses(current, node);
-                // Assert can raise AssertionError
-                // We model it as: continue on success, exit on failure
-                Some(current)
-            }
-            // Compound statements that don't affect control flow but contain
-            // nested definitions (classes, functions) — skip their bodies
-            "function_definition" | "async_function_definition" | "class_definition"
-            | "decorated_definition" => {
-                self.add_statement(current, node);
-                Some(current)
-            }
-            _ => {
-                // Simple statement: assignment, expression, import, etc.
-                self.add_statement(current, node);
-                self.collect_defs_uses(current, node);
-                Some(current)
             }
         }
+
+        if self.cfg_sec.if_nodes.iter().any(|n| n == kind) {
+            return self.walk_if(node, current);
+        }
+        if self.cfg_sec.for_nodes.iter().any(|n| n == kind) {
+            return self.walk_for(node, current);
+        }
+        if self.cfg_sec.c_style_for_nodes.iter().any(|n| n == kind) {
+            return self.walk_c_style_for(node, current);
+        }
+        if self.cfg_sec.while_nodes.iter().any(|n| n == kind) {
+            return self.walk_while(node, current);
+        }
+        if self.cfg_sec.loop_nodes.iter().any(|n| n == kind) {
+            return self.walk_infinite_loop(node, current);
+        }
+        if self.cfg_sec.try_nodes.iter().any(|n| n == kind) {
+            return self.walk_try(node, current);
+        }
+        if self.cfg_sec.with_nodes.iter().any(|n| n == kind) {
+            return self.walk_with(node, current);
+        }
+        if self.cfg_sec.match_nodes.iter().any(|n| n == kind) {
+            return self.walk_match(node, current);
+        }
+        if self.cfg_sec.return_nodes.iter().any(|n| n == kind)
+            || self.cfg_sec.throw_nodes.iter().any(|n| n == kind)
+        {
+            self.add_statement(current, node);
+            self.collect_defs_uses(current, node);
+            self.add_edge(current, self.exit_block, EdgeKind::Jump);
+            return None;
+        }
+        if self.cfg_sec.break_nodes.iter().any(|n| n == kind) {
+            self.add_statement(current, node);
+            if let Some(&(_, loop_exit)) = self.loop_stack.last() {
+                self.add_edge(current, loop_exit, EdgeKind::Jump);
+            }
+            return None;
+        }
+        if self.cfg_sec.continue_nodes.iter().any(|n| n == kind) {
+            self.add_statement(current, node);
+            if let Some(&(loop_header, _)) = self.loop_stack.last() {
+                self.add_edge(current, loop_header, EdgeKind::BackEdge);
+            }
+            return None;
+        }
+        if self.cfg_sec.assert_nodes.iter().any(|n| n == kind) {
+            self.add_statement(current, node);
+            self.collect_defs_uses(current, node);
+            return Some(current);
+        }
+        // Compound definitions (functions, classes) — skip their bodies
+        if self.cfg_sec.definition_nodes.iter().any(|n| n == kind) {
+            self.add_statement(current, node);
+            return Some(current);
+        }
+        // Decorated definitions
+        if !self.cfg_sec.decorated_node.is_empty() && kind == self.cfg_sec.decorated_node {
+            self.add_statement(current, node);
+            return Some(current);
+        }
+
+        // Simple statement: assignment, expression, import, etc.
+        self.add_statement(current, node);
+        self.collect_defs_uses(current, node);
+        Some(current)
     }
 
     // ---- Compound statement handlers --------------------------------------
 
     fn walk_if(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        if self.cfg_sec.if_style == "alternative" {
+            self.walk_if_alternative(node, current)
+        } else {
+            self.walk_if_children(node, current)
+        }
+    }
+
+    /// Python-style if: elif_clause / else_clause as direct children.
+    fn walk_if_children(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
         let join = self.new_block_from_node(node);
         let mut all_terminated = true;
 
-        // Get the condition
-        let condition = node.child_by_field_name("condition");
+        let cond_field = &self.cfg_sec.condition_field;
+        let cons_field = &self.cfg_sec.consequence_field;
+        let elif_kind = &self.cfg_sec.elif_clause;
+        let else_kind = &self.cfg_sec.else_clause;
+        let body_field = &self.cfg_sec.body_field;
+
+        let condition = node.child_by_field_name(cond_field);
         let cond_range = condition.map(|c| (c.start_byte(), c.end_byte()));
 
         if let Some(cond) = condition {
             self.collect_uses_from_expr(current, cond);
         }
 
-        // True branch (the "consequence" field)
-        if let Some(body) = node.child_by_field_name("consequence") {
+        // True branch (consequence)
+        if let Some(body) = node.child_by_field_name(cons_field) {
             let true_block = self.new_block_from_node(body);
             self.add_edge_cond(current, true_block, EdgeKind::TrueBranch, cond_range);
-            match self.walk_body(body, true_block) {
-                Some(end) => {
-                    self.add_edge(end, join, EdgeKind::Fallthrough);
-                    all_terminated = false;
-                }
-                None => {} // terminated
+            if let Some(end) = self.walk_body(body, true_block) {
+                self.add_edge(end, join, EdgeKind::Fallthrough);
+                all_terminated = false;
             }
         }
 
-        // Walk elif/else alternatives
+        // elif/else children
         let mut cursor = node.walk();
         let mut has_else = false;
         let alternatives: Vec<_> = node.children(&mut cursor)
-            .filter(|c| c.kind() == "elif_clause" || c.kind() == "else_clause")
+            .filter(|c| {
+                (!elif_kind.is_empty() && c.kind() == elif_kind.as_str())
+                    || (!else_kind.is_empty() && c.kind() == else_kind.as_str())
+            })
             .collect();
 
         let mut prev_false_from = current;
         let mut prev_cond_range = cond_range;
 
         for alt in &alternatives {
-            match alt.kind() {
-                "elif_clause" => {
-                    let elif_cond = alt.child_by_field_name("condition");
-                    let elif_cond_range = elif_cond.map(|c| (c.start_byte(), c.end_byte()));
+            if !elif_kind.is_empty() && alt.kind() == elif_kind.as_str() {
+                let elif_cond = alt.child_by_field_name(cond_field);
+                let elif_cond_range = elif_cond.map(|c| (c.start_byte(), c.end_byte()));
 
-                    let elif_test_block = self.new_block_from_node(*alt);
-                    self.add_edge_cond(prev_false_from, elif_test_block, EdgeKind::FalseBranch, prev_cond_range);
+                let elif_test_block = self.new_block_from_node(*alt);
+                self.add_edge_cond(prev_false_from, elif_test_block, EdgeKind::FalseBranch, prev_cond_range);
 
-                    if let Some(cond) = elif_cond {
-                        self.collect_uses_from_expr(elif_test_block, cond);
-                    }
-
-                    if let Some(body) = alt.child_by_field_name("consequence") {
-                        let body_block = self.new_block_from_node(body);
-                        self.add_edge_cond(elif_test_block, body_block, EdgeKind::TrueBranch, elif_cond_range);
-                        match self.walk_body(body, body_block) {
-                            Some(end) => {
-                                self.add_edge(end, join, EdgeKind::Fallthrough);
-                                all_terminated = false;
-                            }
-                            None => {}
-                        }
-                    }
-
-                    prev_false_from = elif_test_block;
-                    prev_cond_range = elif_cond_range;
+                if let Some(cond) = elif_cond {
+                    self.collect_uses_from_expr(elif_test_block, cond);
                 }
-                "else_clause" => {
-                    has_else = true;
-                    if let Some(body) = alt.child_by_field_name("body") {
-                        let else_block = self.new_block_from_node(body);
-                        self.add_edge_cond(prev_false_from, else_block, EdgeKind::FalseBranch, prev_cond_range);
-                        match self.walk_body(body, else_block) {
-                            Some(end) => {
-                                self.add_edge(end, join, EdgeKind::Fallthrough);
-                                all_terminated = false;
-                            }
-                            None => {}
-                        }
+
+                if let Some(body) = alt.child_by_field_name(cons_field) {
+                    let body_block = self.new_block_from_node(body);
+                    self.add_edge_cond(elif_test_block, body_block, EdgeKind::TrueBranch, elif_cond_range);
+                    if let Some(end) = self.walk_body(body, body_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
                     }
                 }
-                _ => {}
+
+                prev_false_from = elif_test_block;
+                prev_cond_range = elif_cond_range;
+            } else if !else_kind.is_empty() && alt.kind() == else_kind.as_str() {
+                has_else = true;
+                if let Some(body) = alt.child_by_field_name(body_field) {
+                    let else_block = self.new_block_from_node(body);
+                    self.add_edge_cond(prev_false_from, else_block, EdgeKind::FalseBranch, prev_cond_range);
+                    if let Some(end) = self.walk_body(body, else_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
+                    }
+                }
             }
         }
 
-        // If no else clause, the false branch goes directly to join
         if !has_else {
             self.add_edge_cond(prev_false_from, join, EdgeKind::FalseBranch, prev_cond_range);
             all_terminated = false;
         }
 
-        if all_terminated {
-            None
-        } else {
-            Some(join)
+        if all_terminated { None } else { Some(join) }
+    }
+
+    /// TS/Rust-style if: else is a nested if in the "alternative" field.
+    fn walk_if_alternative(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let join = self.new_block_from_node(node);
+        let mut all_terminated = true;
+
+        let cond_field = &self.cfg_sec.condition_field;
+        let cons_field = &self.cfg_sec.consequence_field;
+        let alt_field = &self.cfg_sec.alternative_field;
+        let else_wrapper = &self.cfg_sec.else_wrapper;
+
+        let condition = node.child_by_field_name(cond_field);
+        let cond_range = condition.map(|c| (c.start_byte(), c.end_byte()));
+
+        if let Some(cond) = condition {
+            self.collect_uses_from_expr(current, cond);
         }
+
+        // True branch (consequence)
+        if let Some(body) = node.child_by_field_name(cons_field) {
+            let true_block = self.new_block_from_node(body);
+            self.add_edge_cond(current, true_block, EdgeKind::TrueBranch, cond_range);
+            if let Some(end) = self.walk_body(body, true_block) {
+                self.add_edge(end, join, EdgeKind::Fallthrough);
+                all_terminated = false;
+            }
+        }
+
+        // Alternative branch
+        if let Some(alt) = node.child_by_field_name(alt_field) {
+            // Unwrap else_wrapper if configured (Rust: else_clause wraps the body)
+            let inner = if !else_wrapper.is_empty() && alt.kind() == else_wrapper.as_str() {
+                unwrap_first_named_child(alt)
+            } else {
+                Some(alt)
+            };
+
+            if let Some(inner_node) = inner {
+                if self.cfg_sec.if_nodes.iter().any(|n| n == inner_node.kind()) {
+                    // else-if chain: recurse
+                    let elif_block = self.new_block_from_node(inner_node);
+                    self.add_edge_cond(current, elif_block, EdgeKind::FalseBranch, cond_range);
+                    if self.walk_if_alternative_chain(inner_node, elif_block, join) {
+                        all_terminated = false;
+                    }
+                } else {
+                    // else block
+                    let else_block = self.new_block_from_node(inner_node);
+                    self.add_edge_cond(current, else_block, EdgeKind::FalseBranch, cond_range);
+                    if let Some(end) = self.walk_body(inner_node, else_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
+                    }
+                }
+            }
+        } else {
+            // No alternative — false branch goes to join
+            self.add_edge_cond(current, join, EdgeKind::FalseBranch, cond_range);
+            all_terminated = false;
+        }
+
+        if all_terminated { None } else { Some(join) }
+    }
+
+    /// Helper for alternative-style else-if chains. Returns true if any branch is non-terminating.
+    fn walk_if_alternative_chain(
+        &mut self,
+        node: tree_sitter::Node,
+        current: BlockId,
+        join: BlockId,
+    ) -> bool {
+        let cond_field = &self.cfg_sec.condition_field;
+        let cons_field = &self.cfg_sec.consequence_field;
+        let alt_field = &self.cfg_sec.alternative_field;
+        let else_wrapper = &self.cfg_sec.else_wrapper;
+
+        let mut any_non_term = false;
+
+        let condition = node.child_by_field_name(cond_field);
+        let cond_range = condition.map(|c| (c.start_byte(), c.end_byte()));
+
+        if let Some(cond) = condition {
+            self.collect_uses_from_expr(current, cond);
+        }
+
+        if let Some(body) = node.child_by_field_name(cons_field) {
+            let true_block = self.new_block_from_node(body);
+            self.add_edge_cond(current, true_block, EdgeKind::TrueBranch, cond_range);
+            if let Some(end) = self.walk_body(body, true_block) {
+                self.add_edge(end, join, EdgeKind::Fallthrough);
+                any_non_term = true;
+            }
+        }
+
+        if let Some(alt) = node.child_by_field_name(alt_field) {
+            let inner = if !else_wrapper.is_empty() && alt.kind() == else_wrapper.as_str() {
+                unwrap_first_named_child(alt)
+            } else {
+                Some(alt)
+            };
+
+            if let Some(inner_node) = inner {
+                if self.cfg_sec.if_nodes.iter().any(|n| n == inner_node.kind()) {
+                    let elif_block = self.new_block_from_node(inner_node);
+                    self.add_edge_cond(current, elif_block, EdgeKind::FalseBranch, cond_range);
+                    if self.walk_if_alternative_chain(inner_node, elif_block, join) {
+                        any_non_term = true;
+                    }
+                } else {
+                    let else_block = self.new_block_from_node(inner_node);
+                    self.add_edge_cond(current, else_block, EdgeKind::FalseBranch, cond_range);
+                    if let Some(end) = self.walk_body(inner_node, else_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        any_non_term = true;
+                    }
+                }
+            }
+        } else {
+            self.add_edge_cond(current, join, EdgeKind::FalseBranch, cond_range);
+            any_non_term = true;
+        }
+
+        any_non_term
     }
 
     fn walk_for(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
-        // Header: evaluate iterable
+        let var_field = &self.cfg_sec.for_variable_field;
+        let iter_field = &self.cfg_sec.for_iterable_field;
+        let body_field = &self.cfg_sec.body_field;
+        let else_kind = &self.cfg_sec.else_clause;
+        let has_else = self.cfg_sec.for_has_else;
+
         let header = self.new_block_from_node(node);
         self.add_edge(current, header, EdgeKind::Fallthrough);
 
-        // Collect the loop variable as a def in the header
-        if let Some(left) = node.child_by_field_name("left") {
+        if let Some(left) = node.child_by_field_name(var_field) {
             self.collect_defs_from_target(header, left);
         }
-        // Collect the iterable as a use in the header
-        if let Some(right) = node.child_by_field_name("right") {
+        if let Some(right) = node.child_by_field_name(iter_field) {
             self.collect_uses_from_expr(header, right);
         }
 
         let exit = self.new_block_from_node(node);
 
-        // Body
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = node.child_by_field_name(body_field) {
             let body_block = self.new_block_from_node(body);
             self.add_edge(header, body_block, EdgeKind::TrueBranch);
 
@@ -611,18 +808,22 @@ impl<'a> CfgBuilder<'a> {
             }
         }
 
-        // Else clause (executes when loop completes without break)
-        let mut cursor = node.walk();
-        let else_clause = node.children(&mut cursor)
-            .find(|c| c.kind() == "else_clause");
+        // Else clause (Python only: executes when loop completes without break)
+        if has_else && !else_kind.is_empty() {
+            let mut cursor = node.walk();
+            let else_clause = node.children(&mut cursor)
+                .find(|c| c.kind() == else_kind.as_str());
 
-        if let Some(else_node) = else_clause {
-            if let Some(body) = else_node.child_by_field_name("body") {
-                let else_block = self.new_block_from_node(body);
-                self.add_edge(header, else_block, EdgeKind::FalseBranch);
-                if let Some(end) = self.walk_body(body, else_block) {
-                    self.add_edge(end, exit, EdgeKind::Fallthrough);
+            if let Some(else_node) = else_clause {
+                if let Some(body) = else_node.child_by_field_name(body_field) {
+                    let else_block = self.new_block_from_node(body);
+                    self.add_edge(header, else_block, EdgeKind::FalseBranch);
+                    if let Some(end) = self.walk_body(body, else_block) {
+                        self.add_edge(end, exit, EdgeKind::Fallthrough);
+                    }
                 }
+            } else {
+                self.add_edge(header, exit, EdgeKind::FalseBranch);
             }
         } else {
             self.add_edge(header, exit, EdgeKind::FalseBranch);
@@ -631,11 +832,58 @@ impl<'a> CfgBuilder<'a> {
         Some(exit)
     }
 
-    fn walk_while(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+    /// C-style for (TS `for (init; cond; update) { body }`).
+    fn walk_c_style_for(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let body_field = &self.cfg_sec.body_field;
+        let cond_field = &self.cfg_sec.condition_field;
+
+        // Initializer: collect defs/uses
+        if let Some(init) = node.child_by_field_name("initializer") {
+            self.collect_defs_uses(current, init);
+        }
+
         let header = self.new_block_from_node(node);
         self.add_edge(current, header, EdgeKind::Fallthrough);
 
-        let condition = node.child_by_field_name("condition");
+        let condition = node.child_by_field_name(cond_field);
+        let cond_range = condition.map(|c| (c.start_byte(), c.end_byte()));
+        if let Some(cond) = condition {
+            self.collect_uses_from_expr(header, cond);
+        }
+
+        let exit = self.new_block_from_node(node);
+
+        if let Some(body) = node.child_by_field_name(body_field) {
+            let body_block = self.new_block_from_node(body);
+            self.add_edge_cond(header, body_block, EdgeKind::TrueBranch, cond_range);
+
+            self.loop_stack.push((header, exit));
+            let body_end = self.walk_body(body, body_block);
+            self.loop_stack.pop();
+
+            if let Some(end) = body_end {
+                // Update expression
+                if let Some(update) = node.child_by_field_name("increment") {
+                    self.collect_defs_uses(end, update);
+                }
+                self.add_edge(end, header, EdgeKind::BackEdge);
+            }
+        }
+
+        self.add_edge_cond(header, exit, EdgeKind::FalseBranch, cond_range);
+        Some(exit)
+    }
+
+    fn walk_while(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let cond_field = &self.cfg_sec.condition_field;
+        let body_field = &self.cfg_sec.body_field;
+        let else_kind = &self.cfg_sec.else_clause;
+        let has_else = self.cfg_sec.while_has_else;
+
+        let header = self.new_block_from_node(node);
+        self.add_edge(current, header, EdgeKind::Fallthrough);
+
+        let condition = node.child_by_field_name(cond_field);
         let cond_range = condition.map(|c| (c.start_byte(), c.end_byte()));
 
         if let Some(cond) = condition {
@@ -644,7 +892,7 @@ impl<'a> CfgBuilder<'a> {
 
         let exit = self.new_block_from_node(node);
 
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = node.child_by_field_name(body_field) {
             let body_block = self.new_block_from_node(body);
             self.add_edge_cond(header, body_block, EdgeKind::TrueBranch, cond_range);
 
@@ -657,18 +905,21 @@ impl<'a> CfgBuilder<'a> {
             }
         }
 
-        // Else clause
-        let mut cursor = node.walk();
-        let else_clause = node.children(&mut cursor)
-            .find(|c| c.kind() == "else_clause");
+        if has_else && !else_kind.is_empty() {
+            let mut cursor = node.walk();
+            let else_clause = node.children(&mut cursor)
+                .find(|c| c.kind() == else_kind.as_str());
 
-        if let Some(else_node) = else_clause {
-            if let Some(body) = else_node.child_by_field_name("body") {
-                let else_block = self.new_block_from_node(body);
-                self.add_edge_cond(header, else_block, EdgeKind::FalseBranch, cond_range);
-                if let Some(end) = self.walk_body(body, else_block) {
-                    self.add_edge(end, exit, EdgeKind::Fallthrough);
+            if let Some(else_node) = else_clause {
+                if let Some(body) = else_node.child_by_field_name(body_field) {
+                    let else_block = self.new_block_from_node(body);
+                    self.add_edge_cond(header, else_block, EdgeKind::FalseBranch, cond_range);
+                    if let Some(end) = self.walk_body(body, else_block) {
+                        self.add_edge(end, exit, EdgeKind::Fallthrough);
+                    }
                 }
+            } else {
+                self.add_edge_cond(header, exit, EdgeKind::FalseBranch, cond_range);
             }
         } else {
             self.add_edge_cond(header, exit, EdgeKind::FalseBranch, cond_range);
@@ -677,11 +928,52 @@ impl<'a> CfgBuilder<'a> {
         Some(exit)
     }
 
+    /// Rust `loop { ... }` — infinite loop, only exits via break.
+    fn walk_infinite_loop(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let body_field = &self.cfg_sec.body_field;
+
+        let header = self.new_block_from_node(node);
+        self.add_edge(current, header, EdgeKind::Fallthrough);
+
+        let exit = self.new_block_from_node(node);
+
+        if let Some(body) = node.child_by_field_name(body_field) {
+            let body_block = self.new_block_from_node(body);
+            self.add_edge(header, body_block, EdgeKind::Fallthrough);
+
+            self.loop_stack.push((header, exit));
+            let body_end = self.walk_body(body, body_block);
+            self.loop_stack.pop();
+
+            if let Some(end) = body_end {
+                self.add_edge(end, header, EdgeKind::BackEdge);
+            }
+        }
+
+        // No false branch — loop only exits via break (which jumps to exit)
+        Some(exit)
+    }
+
     fn walk_try(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        if self.cfg_sec.try_style == "fields" {
+            self.walk_try_fields(node, current)
+        } else {
+            self.walk_try_children(node, current)
+        }
+    }
+
+    /// Python-style try: except_clause / else_clause / finally_clause as children.
+    fn walk_try_children(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
         let join = self.new_block_from_node(node);
         let mut all_terminated = true;
 
-        // Find children by kind
+        let try_body_kind = &self.cfg_sec.try_body_node;
+        let except_kinds = &self.cfg_sec.except_clauses;
+        let else_kind = &self.cfg_sec.try_else_clause;
+        let finally_kind = &self.cfg_sec.try_finally_clause;
+        let id_node = &self.cfg_sec.identifier_node;
+        let body_field = &self.cfg_sec.body_field;
+
         let mut cursor = node.walk();
         let children: Vec<_> = node.children(&mut cursor).collect();
 
@@ -691,16 +983,18 @@ impl<'a> CfgBuilder<'a> {
         let mut finally_clause = None;
 
         for child in &children {
-            match child.kind() {
-                "block" if try_body.is_none() => try_body = Some(*child),
-                "except_clause" | "except_group_clause" => except_clauses.push(*child),
-                "else_clause" => else_clause = Some(*child),
-                "finally_clause" => finally_clause = Some(*child),
-                _ => {}
+            let ck = child.kind();
+            if !try_body_kind.is_empty() && ck == try_body_kind.as_str() && try_body.is_none() {
+                try_body = Some(*child);
+            } else if except_kinds.iter().any(|k| k == ck) {
+                except_clauses.push(*child);
+            } else if !else_kind.is_empty() && ck == else_kind.as_str() {
+                else_clause = Some(*child);
+            } else if !finally_kind.is_empty() && ck == finally_kind.as_str() {
+                finally_clause = Some(*child);
             }
         }
 
-        // Try body
         let mut try_end = None;
         if let Some(body) = try_body {
             let try_block = self.new_block_from_node(body);
@@ -708,11 +1002,9 @@ impl<'a> CfgBuilder<'a> {
             try_end = self.walk_body(body, try_block);
         }
 
-        // Except handlers — each gets an exception edge from the try entry
         let except_target = if !except_clauses.is_empty() {
             let first_except = self.new_block_from_node(except_clauses[0]);
 
-            // Exception edge from try start to first except
             if let Some(body) = try_body {
                 let try_entry = self.blocks.iter()
                     .find(|b| b.start_byte == body.start_byte())
@@ -722,14 +1014,11 @@ impl<'a> CfgBuilder<'a> {
                 }
             }
 
-            // Walk each except handler
             for except in &except_clauses {
                 let handler_block = self.new_block_from_node(*except);
-
-                // Collect exception variable if present (as x)
                 let mut ec = except.walk();
                 for c in except.children(&mut ec) {
-                    if c.kind() == "identifier" {
+                    if !id_node.is_empty() && c.kind() == id_node.as_str() {
                         let name = self.node_text(c).to_string();
                         self.block_mut(handler_block).defs.push((
                             name,
@@ -737,17 +1026,12 @@ impl<'a> CfgBuilder<'a> {
                             c.start_position().column as u32,
                         ));
                     }
-                    if c.kind() == "block" {
-                        match self.walk_body(c, handler_block) {
-                            Some(end) => {
-                                if finally_clause.is_some() {
-                                    // Will be connected to finally
-                                } else {
-                                    self.add_edge(end, join, EdgeKind::Fallthrough);
-                                }
-                                all_terminated = false;
+                    if !try_body_kind.is_empty() && c.kind() == try_body_kind.as_str() {
+                        if let Some(end) = self.walk_body(c, handler_block) {
+                            if finally_clause.is_none() {
+                                self.add_edge(end, join, EdgeKind::Fallthrough);
                             }
-                            None => {}
+                            all_terminated = false;
                         }
                     }
                 }
@@ -758,9 +1042,8 @@ impl<'a> CfgBuilder<'a> {
             None
         };
 
-        // Else clause (runs if try completed without exception)
         if let Some(else_node) = else_clause {
-            if let Some(body) = else_node.child_by_field_name("body") {
+            if let Some(body) = else_node.child_by_field_name(body_field) {
                 let else_block = self.new_block_from_node(body);
                 if let Some(te) = try_end {
                     self.add_edge(te, else_block, EdgeKind::Fallthrough);
@@ -771,7 +1054,7 @@ impl<'a> CfgBuilder<'a> {
                             self.add_edge(end, join, EdgeKind::Fallthrough);
                         }
                         all_terminated = false;
-                        try_end = Some(end); // For finally chaining
+                        try_end = Some(end);
                     }
                     None => { try_end = None; }
                 }
@@ -783,43 +1066,105 @@ impl<'a> CfgBuilder<'a> {
             all_terminated = false;
         }
 
-        // Finally clause
         if let Some(fin_node) = finally_clause {
             let mut fc = fin_node.walk();
             for c in fin_node.children(&mut fc) {
-                if c.kind() == "block" {
+                if !try_body_kind.is_empty() && c.kind() == try_body_kind.as_str() {
                     let fin_block = self.new_block_from_node(c);
-
-                    // Connect try end (or else end) to finally
                     if let Some(te) = try_end {
                         self.add_edge(te, fin_block, EdgeKind::Finally);
                     }
-
-                    // Connect except handler ends to finally
-                    // (simplified: connect the except entry to finally)
                     if let Some(et) = except_target {
                         self.add_edge(et, fin_block, EdgeKind::Finally);
                     }
-
-                    match self.walk_body(c, fin_block) {
-                        Some(end) => {
-                            self.add_edge(end, join, EdgeKind::Fallthrough);
-                            all_terminated = false;
-                        }
-                        None => {}
+                    if let Some(end) = self.walk_body(c, fin_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
                     }
                 }
             }
         }
 
-        if all_terminated {
-            None
-        } else {
-            Some(join)
+        if all_terminated { None } else { Some(join) }
+    }
+
+    /// TS-style try: handler/finalizer as named fields.
+    fn walk_try_fields(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let join = self.new_block_from_node(node);
+        let mut all_terminated = true;
+
+        let catch_field = &self.cfg_sec.catch_field;
+        let finalizer_field = &self.cfg_sec.finalizer_field;
+        let body_field = &self.cfg_sec.body_field;
+
+        // Try body
+        let mut try_end = None;
+        if let Some(body) = node.child_by_field_name(body_field) {
+            let try_block = self.new_block_from_node(body);
+            self.add_edge(current, try_block, EdgeKind::Fallthrough);
+            try_end = self.walk_body(body, try_block);
+
+            // Exception edge from try entry
+            if !catch_field.is_empty() {
+                if let Some(handler) = node.child_by_field_name(catch_field) {
+                    let handler_block = self.new_block_from_node(handler);
+                    self.add_edge(try_block, handler_block, EdgeKind::Exception);
+
+                    // Walk handler body
+                    if let Some(hbody) = handler.child_by_field_name(body_field) {
+                        if let Some(end) = self.walk_body(hbody, handler_block) {
+                            if finalizer_field.is_empty()
+                                || node.child_by_field_name(finalizer_field).is_none()
+                            {
+                                self.add_edge(end, join, EdgeKind::Fallthrough);
+                            }
+                            all_terminated = false;
+                        }
+                    }
+                }
+            }
         }
+
+        // Connect try end
+        let has_finalizer = !finalizer_field.is_empty()
+            && node.child_by_field_name(finalizer_field).is_some();
+
+        if let Some(te) = try_end {
+            if !has_finalizer {
+                self.add_edge(te, join, EdgeKind::Fallthrough);
+            }
+            all_terminated = false;
+        }
+
+        // Finalizer
+        if !finalizer_field.is_empty() {
+            if let Some(fin) = node.child_by_field_name(finalizer_field) {
+                let fin_block = self.new_block_from_node(fin);
+                if let Some(te) = try_end {
+                    self.add_edge(te, fin_block, EdgeKind::Finally);
+                }
+                // Walk finalizer body
+                if let Some(fbody) = fin.child_by_field_name(body_field) {
+                    if let Some(end) = self.walk_body(fbody, fin_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
+                    }
+                } else {
+                    // Finalizer may have its body as direct children
+                    if let Some(end) = self.walk_body(fin, fin_block) {
+                        self.add_edge(end, join, EdgeKind::Fallthrough);
+                        all_terminated = false;
+                    }
+                }
+            }
+        }
+
+        if all_terminated { None } else { Some(join) }
     }
 
     fn walk_with(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let body_field = &self.cfg_sec.body_field;
+
         // Collect context manager uses and "as" defs
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -827,7 +1172,6 @@ impl<'a> CfgBuilder<'a> {
                 let mut ic = child.walk();
                 for item in child.children(&mut ic) {
                     if item.kind() == "with_item" {
-                        // Value is a use, alias is a def
                         if let Some(val) = item.child_by_field_name("value") {
                             self.collect_uses_from_expr(current, val);
                         }
@@ -846,8 +1190,7 @@ impl<'a> CfgBuilder<'a> {
             }
         }
 
-        // Walk the body
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = node.child_by_field_name(body_field) {
             self.walk_body(body, current)
         } else {
             Some(current)
@@ -855,42 +1198,146 @@ impl<'a> CfgBuilder<'a> {
     }
 
     fn walk_match(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let subject_field = &self.cfg_sec.match_subject_field;
+        let body_field_name = &self.cfg_sec.match_body_field;
+        let case_kind = &self.cfg_sec.case_clause;
+        let default_kind = &self.cfg_sec.case_default;
+        let case_body_node = &self.cfg_sec.case_body_node;
+        let case_body_field = &self.cfg_sec.case_body_field;
+        let fallthrough = self.cfg_sec.switch_fallthrough;
+
         let join = self.new_block_from_node(node);
         let mut all_terminated = true;
 
         // Subject expression
-        if let Some(subject) = node.child_by_field_name("subject") {
+        if let Some(subject) = node.child_by_field_name(subject_field) {
             self.collect_uses_from_expr(current, subject);
         }
 
-        // Case clauses
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "case_clause" {
-                let case_block = self.new_block_from_node(child);
-                self.add_edge(current, case_block, EdgeKind::Fallthrough);
+        // Collect case clauses from the match body (or direct children)
+        let case_parent = if !body_field_name.is_empty() {
+            node.child_by_field_name(body_field_name)
+        } else {
+            None
+        };
+        let parent = case_parent.unwrap_or(node);
 
-                // Find the block body inside the case clause
-                let mut cc = child.walk();
-                for case_child in child.children(&mut cc) {
-                    if case_child.kind() == "block" {
-                        match self.walk_body(case_child, case_block) {
-                            Some(end) => {
-                                self.add_edge(end, join, EdgeKind::Fallthrough);
-                                all_terminated = false;
-                            }
-                            None => {}
+        let mut cursor = parent.walk();
+        let cases: Vec<_> = parent.children(&mut cursor)
+            .filter(|c| {
+                (!case_kind.is_empty() && c.kind() == case_kind.as_str())
+                    || (!default_kind.is_empty() && c.kind() == default_kind.as_str())
+            })
+            .collect();
+
+        let mut prev_case_end: Option<BlockId> = None;
+
+        for case in &cases {
+            let case_block = self.new_block_from_node(*case);
+            self.add_edge(current, case_block, EdgeKind::Fallthrough);
+
+            // Switch fallthrough: previous case falls into this one
+            if fallthrough {
+                if let Some(prev_end) = prev_case_end {
+                    self.add_edge(prev_end, case_block, EdgeKind::Fallthrough);
+                }
+            }
+
+            // Find the case body via field or by scanning children
+            let body_node = if !case_body_field.is_empty() {
+                case.child_by_field_name(case_body_field)
+            } else {
+                None
+            };
+
+            if let Some(bn) = body_node {
+                // Rust match arms: body is a single expression via field
+                match self.walk_body(bn, case_block) {
+                    Some(end) => {
+                        if !fallthrough {
+                            self.add_edge(end, join, EdgeKind::Fallthrough);
                         }
+                        all_terminated = false;
+                        prev_case_end = Some(end);
+                    }
+                    None => { prev_case_end = None; }
+                }
+            } else {
+                // Scan children for body block (Python case_clause) or
+                // walk all statement children (TS switch_case)
+                let mut found_body = false;
+                let mut cc = case.walk();
+                let case_children: Vec<_> = case.children(&mut cc)
+                    .filter(|c| c.is_named())
+                    .collect();
+
+                if !case_body_node.is_empty() {
+                    // Python: find child of type case_body_node
+                    for case_child in &case_children {
+                        if case_child.kind() == case_body_node.as_str() {
+                            found_body = true;
+                            match self.walk_body(*case_child, case_block) {
+                                Some(end) => {
+                                    self.add_edge(end, join, EdgeKind::Fallthrough);
+                                    all_terminated = false;
+                                    prev_case_end = Some(end);
+                                }
+                                None => { prev_case_end = None; }
+                            }
+                        }
+                    }
+                }
+
+                if !found_body {
+                    // TS switch_case: statements are direct children (skip the
+                    // case value which is typically the first child)
+                    let stmts: Vec<_> = case_children.iter()
+                        .filter(|c| {
+                            // Skip the case value/pattern nodes
+                            let k = c.kind();
+                            k != "string" && k != "number" && k != "identifier"
+                                && k != "case_pattern" && k != "match_pattern"
+                                && k != ":" && k != "case"
+                        })
+                        .copied()
+                        .collect();
+
+                    let mut case_current = case_block;
+                    let mut terminated = false;
+                    for stmt in stmts {
+                        if terminated {
+                            let unreachable = self.new_block_from_node(stmt);
+                            case_current = unreachable;
+                            terminated = false;
+                        }
+                        match self.walk_statement(stmt, case_current) {
+                            Some(next) => case_current = next,
+                            None => { terminated = true; }
+                        }
+                    }
+
+                    if terminated {
+                        prev_case_end = None;
+                    } else {
+                        if !fallthrough {
+                            self.add_edge(case_current, join, EdgeKind::Fallthrough);
+                        }
+                        all_terminated = false;
+                        prev_case_end = Some(case_current);
                     }
                 }
             }
         }
 
-        // If no cases matched (shouldn't happen with well-formed match),
-        // fall through to join
+        // Connect last case to join in fallthrough mode
+        if fallthrough {
+            if let Some(prev_end) = prev_case_end {
+                self.add_edge(prev_end, join, EdgeKind::Fallthrough);
+                all_terminated = false;
+            }
+        }
+
         if all_terminated {
-            // All cases terminated — join block is unreachable
-            // But we still return it for structural consistency
             self.add_edge(current, join, EdgeKind::Fallthrough);
         }
 
@@ -898,12 +1345,21 @@ impl<'a> CfgBuilder<'a> {
     }
 }
 
+/// Get the first named child of a node without borrowing issues.
+/// Tree-sitter's `children()` requires a mutable cursor borrow that conflicts
+/// with the returned `Node` lifetime; `named_child(0)` avoids this.
+fn unwrap_first_named_child(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    node.named_child(0)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Build a CFG for a single function definition node.
-pub fn build_cfg(node: tree_sitter::Node, source: &[u8]) -> FunctionCfg {
+pub fn build_cfg(node: tree_sitter::Node, source: &[u8], cfg_sec: &CfgSection) -> FunctionCfg {
+    let body_field = &cfg_sec.body_field;
+
     let func_name = node
         .child_by_field_name("name")
         .map(|n| n.utf8_text(source).unwrap_or("").to_string())
@@ -912,11 +1368,11 @@ pub fn build_cfg(node: tree_sitter::Node, source: &[u8]) -> FunctionCfg {
     let func_start_line = node.start_position().row as u32;
     let func_end_line = node.end_position().row as u32;
 
-    let mut builder = CfgBuilder::new(source);
+    let mut builder = CfgBuilder::new(source, cfg_sec);
     let entry = BlockId(0);
 
     // Find the function body
-    if let Some(body) = node.child_by_field_name("body") {
+    if let Some(body) = node.child_by_field_name(body_field) {
         builder.update_block_range(entry, body);
         let body_end = builder.walk_body(body, entry);
         if let Some(end) = body_end {
@@ -944,30 +1400,44 @@ pub fn build_cfgs_for_source(source: &str, ext: &str) -> Vec<FunctionCfg> {
         None => return Vec::new(),
     };
 
+    let cfg_sec = &config_for_ext(ext).cfg;
+
+    // If cfg section has no function_nodes configured, CFG is not supported
+    if cfg_sec.function_nodes.is_empty() {
+        return Vec::new();
+    }
+
     let source_bytes = source.as_bytes();
     let mut cfgs = Vec::new();
-    collect_functions(tree.root_node(), source_bytes, &mut cfgs);
+    collect_functions(tree.root_node(), source_bytes, cfg_sec, &mut cfgs);
     cfgs
 }
 
-fn collect_functions(node: tree_sitter::Node, source: &[u8], cfgs: &mut Vec<FunctionCfg>) {
+fn collect_functions(
+    node: tree_sitter::Node,
+    source: &[u8],
+    cfg_sec: &CfgSection,
+    cfgs: &mut Vec<FunctionCfg>,
+) {
     let kind = node.kind();
-    if kind == "function_definition" || kind == "async_function_definition" {
-        cfgs.push(build_cfg(node, source));
-        // Don't recurse into nested functions — they get their own CFG
+
+    // Is this a function node?
+    if cfg_sec.function_nodes.iter().any(|n| n == kind) {
+        cfgs.push(build_cfg(node, source, cfg_sec));
         return;
     }
 
-    // For decorated_definition, check if it wraps a function
-    if kind == "decorated_definition" {
+    // Decorated definition wrapping a function or container
+    if !cfg_sec.decorated_node.is_empty() && kind == cfg_sec.decorated_node {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "function_definition" || child.kind() == "async_function_definition" {
-                cfgs.push(build_cfg(child, source));
+            let ck = child.kind();
+            if cfg_sec.function_nodes.iter().any(|n| n == ck) {
+                cfgs.push(build_cfg(child, source, cfg_sec));
                 return;
             }
-            if child.kind() == "class_definition" {
-                collect_functions(child, source, cfgs);
+            if cfg_sec.container_nodes.iter().any(|n| n == ck) {
+                collect_functions(child, source, cfg_sec, cfgs);
                 return;
             }
         }
@@ -977,6 +1447,6 @@ fn collect_functions(node: tree_sitter::Node, source: &[u8], cfgs: &mut Vec<Func
     // Recurse into all children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_functions(child, source, cfgs);
+        collect_functions(child, source, cfg_sec, cfgs);
     }
 }

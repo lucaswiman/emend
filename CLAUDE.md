@@ -93,6 +93,8 @@
 | `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 | `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
+| `test_cfg_typescript.py` | TypeScript/JS CFG construction (alternative-style if, c-style for, switch/case fallthrough, try/catch fields-style, arrow functions, methods) |
+| `test_cfg_rust.py` | Rust CFG construction (alternative-style if, for/while/loop expressions, match arms, impl/trait methods, let bindings, break/continue) |
 
 ## Commands
 
