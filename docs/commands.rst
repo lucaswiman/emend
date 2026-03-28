@@ -864,31 +864,45 @@ Requires the ``mcp`` optional dependency: ``pip install emend[mcp]``.
 
 **Exposed tools:**
 
-+-----------+-------------------------------------------------------------------+
-| Tool      | Description                                                       |
-+===========+===================================================================+
-| search    | Unified search: pattern matching, symbol lookup, summary          |
-+-----------+-------------------------------------------------------------------+
-| replace   | Pattern replacement (dry-run by default)                          |
-+-----------+-------------------------------------------------------------------+
-| edit      | Modify or remove symbol components                                |
-+-----------+-------------------------------------------------------------------+
-| add       | Add items to symbol components                                    |
-+-----------+-------------------------------------------------------------------+
-| refs      | Find references to a symbol (returns JSON)                        |
-+-----------+-------------------------------------------------------------------+
-| rename    | Rename symbols or modules across the project                      |
-+-----------+-------------------------------------------------------------------+
-| move      | Move symbols or modules with import updates                       |
-+-----------+-------------------------------------------------------------------+
-| graph     | Generate call graphs                                              |
-+-----------+-------------------------------------------------------------------+
-| deadcode  | Find unreferenced code                                            |
-+-----------+-------------------------------------------------------------------+
-| lint      | Pattern-based linting                                             |
-+-----------+-------------------------------------------------------------------+
-| copy_to   | Copy a symbol to another file                                     |
-+-----------+-------------------------------------------------------------------+
++---------------+-------------------------------------------------------------------+
+| Tool          | Description                                                       |
++===============+===================================================================+
+| search        | Unified search: pattern matching, symbol lookup, summary          |
++---------------+-------------------------------------------------------------------+
+| replace       | Pattern replacement (dry-run by default)                          |
++---------------+-------------------------------------------------------------------+
+| edit          | Modify or remove symbol components                                |
++---------------+-------------------------------------------------------------------+
+| add           | Add items to symbol components                                    |
++---------------+-------------------------------------------------------------------+
+| refs          | Find references to a symbol (returns JSON)                        |
++---------------+-------------------------------------------------------------------+
+| rename        | Rename symbols or modules across the project                      |
++---------------+-------------------------------------------------------------------+
+| move          | Move symbols or modules with import updates                       |
++---------------+-------------------------------------------------------------------+
+| graph         | Generate call graphs                                              |
++---------------+-------------------------------------------------------------------+
+| deadcode      | Find unreferenced code                                            |
++---------------+-------------------------------------------------------------------+
+| lint          | Pattern-based linting                                             |
++---------------+-------------------------------------------------------------------+
+| copy_to       | Copy a symbol to another file                                     |
++---------------+-------------------------------------------------------------------+
+| impact        | Compute transitively impacted symbols from a change               |
++---------------+-------------------------------------------------------------------+
+| taint         | Taint analysis: detect unsafe source-to-sink flows                |
++---------------+-------------------------------------------------------------------+
+| query_facts   | Query the fact graph (symbols, calls, references, taint flows)    |
++---------------+-------------------------------------------------------------------+
+| datalog_query | Execute a CozoScript query against the fact graph                 |
++---------------+-------------------------------------------------------------------+
+| check_policies| Run declarative policy checks                                     |
++---------------+-------------------------------------------------------------------+
+| map_read      | Look up identifier/module mappings                                |
++---------------+-------------------------------------------------------------------+
+| map_write     | Add or update identifier/module mappings                          |
++---------------+-------------------------------------------------------------------+
 
 All write tools (edit, add, replace, rename, move) default to dry-run mode and
 return a unified diff. Set ``apply=True`` to write changes to disk.
@@ -1032,20 +1046,25 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
 
 **Options:**
 
-+---------------------+-----------------------------------------------+
-| Option              | Description                                   |
-+=====================+===============================================+
-| ``--config FILE``   | Path to config file                           |
-|                     | (default: ``.emend/patterns.yaml``)           |
-+---------------------+-----------------------------------------------+
-| ``--label TEXT``    | Only check a specific taint label             |
-+---------------------+-----------------------------------------------+
-| ``--trace``         | Show full propagation traces                  |
-+---------------------+-----------------------------------------------+
-| ``--json``          | Output as JSON                                |
-+---------------------+-----------------------------------------------+
-| ``--project``, ``-p`` | Project root directory                      |
-+---------------------+-----------------------------------------------+
++------------------------------+-----------------------------------------------+
+| Option                       | Description                                   |
++==============================+===============================================+
+| ``--config FILE``            | Path to config file                           |
+|                              | (default: ``.emend/patterns.yaml``)           |
++------------------------------+-----------------------------------------------+
+| ``--label TEXT``             | Only check a specific taint label             |
++------------------------------+-----------------------------------------------+
+| ``--trace``                  | Show full propagation traces                  |
++------------------------------+-----------------------------------------------+
+| ``--json``                   | Output as JSON                                |
++------------------------------+-----------------------------------------------+
+| ``--project``, ``-p``        | Project root directory                        |
++------------------------------+-----------------------------------------------+
+| ``--interprocedural``        | Track taint across function boundaries using  |
+|                              | function summaries and fixed-point iteration  |
++------------------------------+-----------------------------------------------+
+| ``--max-iterations INT``     | Max fixed-point iterations (default: 10)      |
++------------------------------+-----------------------------------------------+
 
 **Config file format:**
 
@@ -1092,4 +1111,389 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
    # JSON output
    emend taint src/ --json
 
+   # Cross-function taint tracking
+   emend taint src/ --interprocedural
+   emend taint src/ --interprocedural --max-iterations 20
+
 ---
+
+delete
+------
+
+Delete a symbol, with optional cascading removal of code that becomes dead
+after the deletion.  Dry-run by default; use ``--apply`` to write.
+
+Without ``--cascade``, removes only the target symbol (like ``rm``).
+With ``--cascade``, emend finds every symbol whose only callers were in the
+deleted set, removes those too, and repeats until stable.
+
+.. code-block:: text
+
+   emend delete SELECTOR [OPTIONS]
+
+**Arguments:**
+
+- ``SELECTOR`` -- Symbol selector (e.g. ``models.py::LegacyUser``)
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--cascade``       | Transitively delete symbols that become       |
+|                     | unreferenced after removal                    |
++---------------------+-----------------------------------------------+
+| ``--apply``         | Write changes to disk (default: dry-run)      |
++---------------------+-----------------------------------------------+
+| ``--json``          | Output the deletion plan as JSON              |
++---------------------+-----------------------------------------------+
+| ``--project``, ``-p`` | Project root directory                      |
++---------------------+-----------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Preview cascade deletion (dry-run)
+   emend delete models.py::LegacyUser --cascade
+
+   # Apply the deletion
+   emend delete models.py::LegacyUser --cascade --apply
+
+   # Simple single-symbol delete
+   emend delete api.py::deprecated_function --apply
+
+   # JSON output for tooling
+   emend delete models.py::LegacyUser --cascade --json
+
+---
+
+cfg
+---
+
+Build and display per-function control flow graphs.  Constructs basic-block
+CFGs for every function in the target file(s), with text, JSON, and Graphviz
+DOT output.
+
+.. code-block:: text
+
+   emend cfg PATH [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- File or directory to analyze
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--function``, ``-f`` | Restrict to a specific function name       |
++---------------------+-----------------------------------------------+
+| ``--format TEXT``   | Output format: ``text`` (default), ``json``,  |
+|                     | ``dot``                                       |
++---------------------+-----------------------------------------------+
+| ``--unreachable``   | Only show unreachable blocks                  |
++---------------------+-----------------------------------------------+
+
+**Output formats:**
+
++--------+------------------------------------------------------------------+
+| Format | Description                                                      |
++========+==================================================================+
+| text   | Human-readable block/edge summary                                |
++--------+------------------------------------------------------------------+
+| json   | Structured JSON with blocks, edges, dominators                   |
++--------+------------------------------------------------------------------+
+| dot    | Graphviz DOT (pipe to ``dot -Tsvg`` for visualization)           |
++--------+------------------------------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # All functions in a file
+   emend cfg src/app.py
+
+   # A specific function
+   emend cfg src/app.py --function process
+
+   # Graphviz DOT (render as SVG)
+   emend cfg src/app.py --function process --format dot | dot -Tsvg > cfg.svg
+
+   # Detect unreachable code
+   emend cfg src/ --unreachable
+
+   # JSON for programmatic use
+   emend cfg src/ --format json
+
+---
+
+facts
+-----
+
+Query the relational fact graph for code invariants.  Builds a unified graph
+from project source and supports structured queries over symbols, calls,
+references, taint flows, type information, and imports.
+
+.. code-block:: text
+
+   emend facts [PROJECT] [OPTIONS]
+
+**Arguments:**
+
+- ``PROJECT`` -- Project root directory (default: ``.``)
+
+**Options:**
+
++-------------------------------+-----------------------------------------------+
+| Option                        | Description                                   |
++===============================+===============================================+
+| ``--type``, ``-t``            | Fact type: ``symbols`` (default), ``calls``,  |
+|                               | ``references``, ``taint_flows``, ``types``,   |
+|                               | ``imports``                                   |
++-------------------------------+-----------------------------------------------+
+| ``--name``, ``-n``            | Filter by name (symbols)                      |
++-------------------------------+-----------------------------------------------+
+| ``--kind``, ``-k``            | Filter by kind (symbols)                      |
++-------------------------------+-----------------------------------------------+
+| ``--file``, ``-f``            | Filter by file path                           |
++-------------------------------+-----------------------------------------------+
+| ``--symbol``, ``-s``          | Qualified symbol name (calls/refs/types)      |
++-------------------------------+-----------------------------------------------+
+| ``--label``                   | Taint label filter (taint_flows)              |
++-------------------------------+-----------------------------------------------+
+| ``--transitive``              | Compute transitive closure (calls)            |
++-------------------------------+-----------------------------------------------+
+| ``--max-depth INT``           | Max depth for transitive queries (default: 10)|
++-------------------------------+-----------------------------------------------+
+| ``--json``                    | Output as JSON                                |
++-------------------------------+-----------------------------------------------+
+| ``--limit INT``               | Max results (default: 100)                    |
++-------------------------------+-----------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # List all symbols
+   emend facts .
+
+   # Direct calls to a function
+   emend facts . --type calls --symbol mymod.process
+
+   # Transitive callers
+   emend facts . --type calls --symbol mymod.process --transitive
+
+   # All references to a class
+   emend facts . --type references --symbol mymod.MyClass
+
+   # Taint flows for a specific label
+   emend facts . --type taint_flows --label user_input
+
+   # Imports in a file
+   emend facts . --type imports --file src/app.py
+
+---
+
+query
+-----
+
+Execute a CozoScript (Datalog) query directly against the project's fact
+graph.  For structured queries over known fact types, prefer ``emend facts``.
+Use ``emend query`` for ad-hoc or compositional analyses.
+
+The fact graph is stored in CozoDB with the following relations:
+
+.. code-block:: text
+
+   symbol      {qn, file_path, name, kind, line, end_line, parent}
+   call        {caller_qn, callee_qn, file_path, line, col}
+   reference   {symbol_qn, file_path, line, col, ref_kind}
+   taint_flow  {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
+   type_binding {symbol_qn, file_path, line, binding_kind, type_str}
+   import      {importing_file, imported_module, imported_name, line, alias}
+
+.. code-block:: text
+
+   emend query COZOSCRIPT [OPTIONS]
+
+**Arguments:**
+
+- ``COZOSCRIPT`` -- CozoScript query string
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--project``, ``-p`` | Project root directory (default: ``.``)     |
++---------------------+-----------------------------------------------+
+| ``--json``          | Output as JSON                                |
++---------------------+-----------------------------------------------+
+| ``--db``            | Path to persistent CozoDB database            |
++---------------------+-----------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # All function symbols
+   emend query '?[name, file] := *symbol[qn, file, name, "function", l, e, p]'
+
+   # Dead code (symbols with no references)
+   emend query 'has_ref[qn] := *reference[qn, _, _, _, _]
+     dead[name, file, line] := *symbol[qn, file, name, kind, line, _, _], not has_ref[qn]
+     ?[name, file, line] := dead[name, file, line]'
+
+   # Transitive callers of a function
+   emend query 'reaches[a] := *call[a, "mymod.func", _, _, _]
+     reaches[a] := *call[a, mid, _, _, _], reaches[mid]
+     ?[a] := reaches[a]'
+
+---
+
+policy
+------
+
+Run declarative policy checks against source code.  Policies are named,
+reusable compliance rules loaded from ``.emend/policies.yaml`` that combine
+flow analysis, structural checks, type constraints, and dead code detection.
+
+.. code-block:: text
+
+   emend policy PATH [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- File or directory to check
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--config FILE``   | Path to policies.yaml                         |
+|                     | (default: ``.emend/policies.yaml``)           |
++---------------------+-----------------------------------------------+
+| ``--policy``, ``-p`` | Run only a specific policy by name           |
++---------------------+-----------------------------------------------+
+| ``--json``          | Output as JSON                                |
++---------------------+-----------------------------------------------+
+
+**Config file format (**.emend/policies.yaml**):**
+
+.. code-block:: yaml
+
+   policies:
+     no-sql-injection:
+       description: "Prevent SQL injection via user input"
+       checks:
+         - type: flow
+           flows-from: "request.args.get($X)"
+           flows-to: "cursor.execute($Q)"
+           message: "User input reaches SQL cursor.execute()"
+
+     no-dead-exports:
+       description: "All public API symbols must be referenced"
+       checks:
+         - type: deadcode
+           kind: function
+           message: "Public function appears to be unreferenced"
+
+**Policy check types:**
+
++-------------+------------------------------------------------------------+
+| Type        | Description                                                |
++=============+============================================================+
+| flow        | Source-to-sink taint flow check                            |
++-------------+------------------------------------------------------------+
+| structural  | Pattern-based structural constraint                        |
++-------------+------------------------------------------------------------+
+| type        | Type annotation constraint                                 |
++-------------+------------------------------------------------------------+
+| deadcode    | Unreferenced symbol detection                              |
++-------------+------------------------------------------------------------+
+| custom      | Custom check via callable                                  |
++-------------+------------------------------------------------------------+
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Run all policies
+   emend policy src/
+
+   # Custom config
+   emend policy src/ --config .emend/policies.yaml
+
+   # Run a specific policy
+   emend policy src/ --policy no-sql-injection
+
+   # JSON output
+   emend policy src/ --json
+
+---
+
+saturate
+--------
+
+.. warning::
+
+   This command is **experimental**. The rule format and output may change
+   between versions.
+
+Apply equality saturation rewrites to expressions in source files.  Uses an
+e-graph representation to find optimal rewrites for expressions that match
+rules defined in ``.emend/rewrites.yaml``.
+
+.. code-block:: text
+
+   emend saturate PATH [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- File or directory to rewrite
+
+**Options:**
+
++---------------------+-----------------------------------------------+
+| Option              | Description                                   |
++=====================+===============================================+
+| ``--config FILE``   | Path to rewrites.yaml                         |
+|                     | (default: ``.emend/rewrites.yaml``)           |
++---------------------+-----------------------------------------------+
+| ``--apply``, ``-a`` | Apply rewrites (default: dry-run)             |
++---------------------+-----------------------------------------------+
+| ``--max-iterations INT`` | Max saturation iterations (default: 30) |
++---------------------+-----------------------------------------------+
+| ``--json``          | Output as JSON                                |
++---------------------+-----------------------------------------------+
+
+**Config file format (**.emend/rewrites.yaml**):**
+
+.. code-block:: yaml
+
+   rules:
+     - name: "double-negation"
+       lhs: "not (not $X)"
+       rhs: "$X"
+     - name: "bool-simplify"
+       lhs: "$X and True"
+       rhs: "$X"
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Dry-run with default config
+   emend saturate src/
+
+   # Custom rules file
+   emend saturate src/ --config .emend/rewrites.yaml
+
+   # Apply rewrites
+   emend saturate file.py --apply
+
+   # JSON output
+   emend saturate src/ --json

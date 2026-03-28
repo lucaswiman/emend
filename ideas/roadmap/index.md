@@ -1,50 +1,72 @@
 # Roadmap
 
-This directory replaces `ideas/egglog-analysis-and-transformation.md` with
-smaller spec documents and a staged implementation order.
+**When you complete a task, check off its checkbox.**
 
-## Ordered TODOs
+---
 
-- [x] Phase 1: Ship impact analysis.
-  Spec: [impact-analysis.md](impact-analysis.md)
-- [x] Phase 2: Ship intraprocedural taint analysis with path traces.
-  Spec: [taint-analysis.md](taint-analysis.md)
-- [x] ~Phase 3: Add compliance-sensitive value tracking as a layer on top of taint.~ **Won't do** — this is a labeled special case of taint analysis (Phase 2).
-  Spec: [compliance-sensitive-value-tracking.md](compliance-sensitive-value-tracking.md)
-- [x] Phase 4: Stabilize a relational/query model for code invariants.
-  Spec: [query-language-for-code-invariants.md](query-language-for-code-invariants.md)
-  Impl: `fact_graph.py` — typed fact model (symbols, calls, references, taint flows, types, imports) with indexed queries, transitive closures, and JSON serialization. CLI: `emend facts`.
-- [x] Phase 5: Add interprocedural summaries and recursive fixed-point analysis.
-  Specs: [taint-analysis.md](taint-analysis.md), [implementation-roadmap.md](implementation-roadmap.md)
-  Impl: `taint.py` — `FunctionSummary` dataclass, `_compute_function_summary()`, `run_interprocedural_taint_analysis()` with fixed-point iteration. CLI: `emend taint --interprocedural`.
-- [x] Phase 6: Expose an MCP query interface after the relation schema is stable.
-  Spec: [mcp-design.md](mcp-design.md)
-  Impl: `mcp_server.py` — added `impact`, `taint`, `query_facts`, and `check_policies` MCP tools.
-- [x] Phase 7: Experiment with rewrite backends, including egglog equality saturation.
-  Specs: [backend-options.md](backend-options.md), [rewrite-and-saturation.md](rewrite-and-saturation.md)
-  Impl: `rewrite_engine.py` — e-graph with union-find, expression parsing, pattern matching, YAML rule loading. CLI: `emend saturate` (experimental).
-- [x] Phase 8: Add expert-mode policy/query surfaces and power-user configuration.
-  Specs: [query-language-for-code-invariants.md](query-language-for-code-invariants.md), [open-questions.md](open-questions.md)
-  Impl: `policy.py` — declarative policies (flow, structural, type, deadcode, custom checks) loaded from `.emend/policies.yaml`. CLI: `emend policy`.
+## Completed
 
-## Design Notes
+- [x] Phase 1: Impact analysis — `transform.py`, `emend impact`
+- [x] Phase 2: Intraprocedural taint — `taint.py`, `emend taint`
+- [x] Phase 3: Compliance layer — **Won't do separately**; taint labels cover this
+- [x] Phase 4: Stable fact schema — `fact_graph.py`, `emend facts`
+- [x] Phase 5: Interprocedural taint — `taint.py`, `emend taint --interprocedural`
+- [x] Phase 6: MCP query interface — `mcp_server.py`, `emend mcp`
+- [x] Phase 7: Rewrite/equality-saturation experiment — `rewrite_engine.py`, `emend saturate`
+- [x] Phase 8: Expert-mode policy/query surfaces — `policy.py`, `emend policy`, `emend query`
 
-- The recommended order is intentionally front-loaded toward immediately useful
-  analysis features: impact first, then taint, then policy and query work.
-- The rewrite/equality-saturation work is kept explicitly experimental until the
-  analysis-side facts, provenance, and extraction semantics are well understood.
-- The long-term architecture should be driven by a stable internal fact model,
-  not by prematurely committing the whole product surface to one backend.
+---
 
-## Documents
+## Taint Precision Improvements
 
-- [impact-analysis.md](impact-analysis.md)
-- [taint-analysis.md](taint-analysis.md)
-- [compliance-sensitive-value-tracking.md](compliance-sensitive-value-tracking.md)
-- [query-language-for-code-invariants.md](query-language-for-code-invariants.md)
-- [backend-options.md](backend-options.md)
-- [rewrite-and-saturation.md](rewrite-and-saturation.md)
-- [mcp-design.md](mcp-design.md)
-- [implementation-roadmap.md](implementation-roadmap.md)
-- [relation-to-existing-tools.md](relation-to-existing-tools.md)
-- [open-questions.md](open-questions.md)
+Spec: [taint-analysis.md](taint-analysis.md)
+
+- [ ] Field sensitivity — treat `obj.field` as distinct from `obj`
+- [ ] Object-sensitive dispatch — resolve `obj.method()` by receiver type, not just name
+- [ ] High-precision container modeling — track taint through list/dict elements
+- [ ] Framework-specific source/sink/sanitizer rules — Django, Flask, SQLAlchemy
+
+---
+
+## DSL Support for Embedded Languages
+
+Spec: [dsl-support.md](dsl-support.md)
+
+### Phase 1: Infrastructure
+
+- [ ] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core`
+- [ ] Implement injection detection in `emend_core` (call-based, tag-based, magic-comment, file-extension)
+- [ ] Implement `DslSymbolExtractor` for SQL (tables, columns), CSS (selectors), JSX (component tags)
+- [ ] Add `dsl_symbols` table to `parse.db`; wire into `emend index`
+
+### Phase 2: Link resolution + navigation
+
+- [ ] Implement `DslLinkResolver` with strategies: `orm_model`, `orm_column`, `component_export`, `css_class_usage`
+- [ ] Add `dsl_links` table and populate during indexing
+- [ ] Wire `--include-dsl` into `search` and `refs`
+- [ ] Add `dsl_goto_definition` to `editor-server`
+
+### Phase 3: Pattern matching in DSL regions
+
+- [ ] Extend pattern grammar with `--dsl` mode for DSL-specific node types
+- [ ] Add DSL-aware lint rules to lint engine
+- [ ] Implement `find`/`replace` inside DSL regions
+
+### Phase 4: Tier 2 DSLs + deeper integration
+
+- [ ] Jinja2/Django template support: variable resolution, block inheritance
+- [ ] GraphQL support: schema-to-resolver linking, query-to-type navigation
+- [ ] Regex named group navigation: `(?P<name>...)` → `.group("name")` call sites
+- [ ] `impact` command integration: ORM model changes surface affected SQL queries and JSX call sites
+
+---
+
+## Reference Documents
+
+- [taint-analysis.md](taint-analysis.md) — deferred taint precision work
+- [dsl-support.md](dsl-support.md) — DSL support full spec
+- [query-language-for-code-invariants.md](query-language-for-code-invariants.md) — ongoing witness-quality requirement
+- [rewrite-and-saturation.md](rewrite-and-saturation.md) — open design questions for the experimental rewrite engine
+- [backend-options.md](backend-options.md) — architecture rationale (CozoDB vs egglog)
+- [relation-to-existing-tools.md](relation-to-existing-tools.md) — positioning vs Semgrep, CodeQL, Pysa
+- [open-questions.md](open-questions.md) — ongoing design trade-offs
