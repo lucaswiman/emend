@@ -571,30 +571,46 @@ def deadcode(
     path: Annotated[str, Field(description="Project directory to scan.")] = ".",
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, class.")] = None,
     include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
-    exclude_references_from: Annotated[list[str] | None, Field(description="Directories to ignore when scanning for references.")] = None,
-    no_strings: Annotated[bool, Field(description="Don't count string literals as references.")] = False,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
-    all_files: Annotated[bool, Field(description="Scan all Python files, not just git-tracked ones.")] = False,
-    entry_point_decorators: Annotated[list[str] | None, Field(description="Additional decorator names to treat as entry points.")] = None,
-    entry_point_names: Annotated[list[str] | None, Field(description="Additional function/class names to treat as entry points.")] = None,
-    exclude_paths: Annotated[list[str] | None, Field(description="Directories to exclude entirely from dead code analysis.")] = None,
+    config: Annotated[str | None, Field(description="Path to patterns.yaml config (default: .emend/patterns.yaml). Configure entry points, exclusions, and other settings there.")] = None,
 ) -> str:
     """Find potentially dead (unreferenced) code. Returns JSON.
 
     Skips dunder methods, test functions, decorated entry points,
     __all__ members, and conventional entry points.
 
-    Use entry_point_decorators and entry_point_names to add custom
-    exclusions beyond the built-in heuristics.
+    Use a .emend/patterns.yaml config file (or --config) to set
+    entry_point_decorators, entry_point_names, exclude_paths,
+    exclude_references_from, and other advanced options.
     """
+    from pathlib import Path as _Path
+    from emend.lint import load_rules
+
+    # Load deadcode settings from config file if present
+    exclude_references_from = None
+    strings_count_as_references = True
+    entry_point_decorators = None
+    entry_point_names = None
+    exclude_paths = None
+
+    config_path = _Path(config or ".emend/patterns.yaml")
+    if config_path.exists():
+        _, _, deadcode_config = load_rules(str(config_path))
+        if deadcode_config is not None:
+            exclude_references_from = deadcode_config.exclude_references_from
+            strings_count_as_references = deadcode_config.strings_count_as_references
+            entry_point_decorators = deadcode_config.entry_point_decorators
+            entry_point_names = deadcode_config.entry_point_names
+            exclude_paths = deadcode_config.exclude_paths
+
     results = find_dead_code(
         project_path=path,
         kind=kind,
         include_private=include_private,
         exclude_references_from=exclude_references_from,
-        strings_count_as_references=not no_strings,
+        strings_count_as_references=strings_count_as_references,
         show_last_reference=not no_last_reference,
-        all_files=all_files,
+        all_files=False,
         entry_point_decorators=entry_point_decorators,
         entry_point_names=entry_point_names,
         exclude_paths=exclude_paths,
@@ -840,118 +856,78 @@ def taint(
 
 
 # ---------------------------------------------------------------------------
-# fact_graph (query interface)
-# ---------------------------------------------------------------------------
-
-
-@mcp_app.tool()
-def query_facts(
-    project: Annotated[str, Field(description="Project root directory.")] = ".",
-    fact_type: Annotated[str, Field(description="Fact type to query: symbols, calls, references, taint_flows, types, imports.")] = "symbols",
-    name: Annotated[str | None, Field(description="Filter by name (symbols).")] = None,
-    kind: Annotated[str | None, Field(description="Filter by kind (symbols).")] = None,
-    file_path: Annotated[str | None, Field(description="Filter by file path.")] = None,
-    symbol: Annotated[str | None, Field(description="Symbol qualified name (calls/references/types).")] = None,
-    label: Annotated[str | None, Field(description="Taint label filter (taint_flows).")] = None,
-    transitive: Annotated[bool, Field(description="Compute transitive closure (calls).")] = False,
-    max_depth: Annotated[int, Field(description="Max depth for transitive queries.")] = 10,
-    limit: Annotated[int, Field(description="Max results to return.")] = 100,
-) -> str:
-    """Query the relational fact graph for code invariants.
-
-    Provides structured access to symbols, call relationships,
-    references, taint flows, type information, and imports.
-    """
-    from emend.fact_graph import FactGraph
-    import dataclasses
-
-    graph = FactGraph.build_from_project(project)
-
-    if fact_type == "symbols":
-        results = graph.symbols(name=name, kind=kind, file_path=file_path)
-        return json.dumps([dataclasses.asdict(f) for f in results[:limit]], indent=2)
-
-    elif fact_type == "calls":
-        if not symbol:
-            return json.dumps({"error": "Provide 'symbol' parameter for call queries."})
-        if transitive:
-            callers = graph.transitive_callers(symbol, max_depth=max_depth)
-            return json.dumps({"symbol": symbol, "transitive_callers": sorted(callers)}, indent=2)
-        from_calls = graph.calls_from(symbol)
-        to_calls = graph.calls_to(symbol)
-        return json.dumps({
-            "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
-            "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
-        }, indent=2)
-
-    elif fact_type == "references":
-        if not symbol:
-            return json.dumps({"error": "Provide 'symbol' parameter for reference queries."})
-        refs = graph.references_to(symbol)
-        return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
-
-    elif fact_type == "taint_flows":
-        flows = graph.taint_flows(label=label, file_path=file_path)
-        return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
-
-    elif fact_type == "types":
-        if not symbol:
-            return json.dumps({"error": "Provide 'symbol' parameter for type queries."})
-        types = graph.types_for(symbol)
-        return json.dumps([dataclasses.asdict(t) for t in types[:limit]], indent=2)
-
-    elif fact_type == "imports":
-        if not file_path:
-            return json.dumps({"error": "Provide 'file_path' parameter for import queries."})
-        imports = graph.imports_in(file_path)
-        return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
-
-    return json.dumps({"error": f"Unknown fact_type: {fact_type}"})
-
-
-# ---------------------------------------------------------------------------
-# datalog_query (raw CozoScript expert mode)
+# datalog_query (raw CozoScript + guided structured mode)
 # ---------------------------------------------------------------------------
 
 
 @mcp_app.tool()
 def datalog_query(
-    query: Annotated[str, Field(description="CozoScript (Datalog) query to execute against the project fact graph.")],
+    query: Annotated[str | None, Field(description="CozoScript query (required for raw mode, ignored in guided mode).")] = None,
     project: Annotated[str, Field(description="Project root directory.")] = ".",
-    limit: Annotated[int, Field(description="Maximum number of result rows to return. 0 means unlimited.")] = 200,
+    limit: Annotated[int, Field(description="Maximum number of result rows to return.")] = 200,
+    mode: Annotated[str, Field(description="Query mode: 'raw' for CozoScript, 'guided' for structured queries.")] = "raw",
+    fact_type: Annotated[str | None, Field(description="Guided mode: fact type (symbols, calls, references, taint_flows, types, imports).")] = None,
+    name: Annotated[str | None, Field(description="Guided mode: filter by name.")] = None,
+    kind: Annotated[str | None, Field(description="Guided mode: filter by kind.")] = None,
+    file_path: Annotated[str | None, Field(description="Guided mode: filter by file path.")] = None,
+    symbol: Annotated[str | None, Field(description="Guided mode: symbol qualified name.")] = None,
+    label: Annotated[str | None, Field(description="Guided mode: taint label filter.")] = None,
+    transitive: Annotated[bool, Field(description="Guided mode: compute transitive closure.")] = False,
+    max_depth: Annotated[int, Field(description="Guided mode: max depth for transitive queries.")] = 10,
 ) -> str:
-    """Execute a raw CozoScript (Datalog) query against the project fact graph.
-
-    Provides expert-level access to the underlying CozoDB relations for
-    composable, recursive, and cross-relation queries beyond what
-    query_facts supports.
-
-    Available stored relations (prefix with * to query):
-      symbol       {qualified_name => file_path, name, kind, line, end_line, parent}
-      call         {caller_qn, callee_qn, file_path, line, col}
-      reference    {symbol_qn, file_path, line, col => ref_kind}
-      taint_flow   {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
-      type_binding {symbol_qn, file_path, line, binding_kind => type_str}
-      import       {importing_file, imported_module, imported_name, line => alias}
-      cfg_edge     {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}
-      def_use      {file_path, func_qn, var_name, def_line, def_col, use_line, use_col}
-
-    Example queries:
-
-    All function symbols:
-      ?[name, file] := *symbol[qn, file, name, "function", l, e, p]
-
-    Dead code (symbols with no references):
-      has_ref[qn] := *reference[qn, _, _, _, _]
-      dead[name, file, line] := *symbol[qn, file, name, kind, line, _, _], not has_ref[qn]
-      ?[name, file, line] := dead[name, file, line]
-
-    Transitive callers of a function:
-      reaches[a] := *call[a, "mymod.func", _, _, _]
-      reaches[a] := *call[a, mid, _, _, _], reaches[mid]
-      ?[a] := reaches[a]
-    """
+    """Query the project fact graph via CozoScript (raw) or structured params (guided)."""
     from emend.fact_graph import FactGraph
+
+    if mode == "guided":
+        import dataclasses
+
+        _fact_type = fact_type or "symbols"
+        graph = FactGraph.build_from_project(project)
+
+        if _fact_type == "symbols":
+            results = graph.symbols(name=name, kind=kind, file_path=file_path)
+            return json.dumps([dataclasses.asdict(f) for f in results[:limit]], indent=2)
+
+        elif _fact_type == "calls":
+            if not symbol:
+                return json.dumps({"error": "Provide 'symbol' parameter for call queries."})
+            if transitive:
+                callers = graph.transitive_callers(symbol, max_depth=max_depth)
+                return json.dumps({"symbol": symbol, "transitive_callers": sorted(callers)}, indent=2)
+            from_calls = graph.calls_from(symbol)
+            to_calls = graph.calls_to(symbol)
+            return json.dumps({
+                "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
+                "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
+            }, indent=2)
+
+        elif _fact_type == "references":
+            if not symbol:
+                return json.dumps({"error": "Provide 'symbol' parameter for reference queries."})
+            refs = graph.references_to(symbol)
+            return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
+
+        elif _fact_type == "taint_flows":
+            flows = graph.taint_flows(label=label, file_path=file_path)
+            return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
+
+        elif _fact_type == "types":
+            if not symbol:
+                return json.dumps({"error": "Provide 'symbol' parameter for type queries."})
+            types = graph.types_for(symbol)
+            return json.dumps([dataclasses.asdict(t) for t in types[:limit]], indent=2)
+
+        elif _fact_type == "imports":
+            if not file_path:
+                return json.dumps({"error": "Provide 'file_path' parameter for import queries."})
+            imports = graph.imports_in(file_path)
+            return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
+
+        return json.dumps({"error": f"Unknown fact_type: {_fact_type}"})
+
+    # raw mode
+    if query is None:
+        return json.dumps({"error": "Provide 'query' parameter for raw mode."})
 
     try:
         graph = FactGraph.build_from_project(project)
@@ -1011,30 +987,41 @@ def check_policies(
 @mcp_app.tool()
 def map_read(
     kind: Annotated[str, Field(description="What to read: 'mapping' or 'module'.")] = "mapping",
-    query: Annotated[str, Field(description="Search query (substring match). Omit to list.")] = "",
-    identifier: Annotated[str | None, Field(description="Exact identifier lookup (mapping kind only).")] = None,
-    module: Annotated[str | None, Field(description="Module name to resolve (module kind only).")] = None,
-    project: Annotated[str | None, Field(description="Filter by project.")] = None,
-    source_project: Annotated[str | None, Field(description="Filter mappings by source project.")] = None,
-    target_project: Annotated[str | None, Field(description="Filter mappings by target project.")] = None,
-    relationship: Annotated[str | None, Field(description="Filter mappings by relationship.")] = None,
-    direction: Annotated[str, Field(description="Identifier lookup direction: source, target, both.")] = "both",
-    limit: Annotated[int, Field(description="Max results.")] = 50,
+    query: Annotated[str, Field(description="Search query (substring match) or exact identifier/module name. Omit to list all.")] = "",
+    options: Annotated[dict | None, Field(description=(
+        "Optional filters. "
+        "For mappings: {source_project?, target_project?, relationship?, direction?, limit?}. "
+        "For modules: no options needed."
+    ))] = None,
 ) -> str:
     """Read from the mapping store.
 
     kind controls what is returned:
-    - mapping: search/list/lookup identifier mappings
-    - module: list module mappings, or resolve a module name to a local path
+    - mapping: search/list/lookup identifier mappings. If query looks like an
+      identifier (no spaces, non-empty), exact lookup is tried first; falls
+      back to substring search. Use options.direction ('source'/'target'/'both')
+      to control lookup direction.
+    - module: list module mappings, or resolve a module name to a local path.
+      If query is set, module resolution is attempted first; falls back to listing.
     """
     from emend.knowledge import MappingStore, mapping_to_dict, module_mapping_to_dict
 
     store = MappingStore(".")
+    opts = options or {}
 
     if kind == "mapping":
-        if identifier is not None:
-            results = store.find_mappings_for(identifier, project=project, direction=direction)
-            return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+        # Exact identifier lookup when query has no spaces (looks like an identifier)
+        if query and " " not in query:
+            project = opts.get("project")
+            direction = opts.get("direction", "both")
+            results = store.find_mappings_for(query, project=project, direction=direction)
+            if results:
+                return json.dumps([mapping_to_dict(m) for m in results], indent=2)
+        # Substring search or list-all
+        source_project = opts.get("source_project")
+        target_project = opts.get("target_project")
+        relationship = opts.get("relationship")
+        limit = opts.get("limit", 50)
         if query:
             results = store.search_mappings(
                 query, source_project=source_project,
@@ -1048,15 +1035,15 @@ def map_read(
         return json.dumps([mapping_to_dict(m) for m in results], indent=2)
 
     if kind == "module":
-        if module is not None:
-            mm = store.resolve_module(module)
-            if mm is None:
-                return json.dumps({"error": f"No module mapping found for '{module}'."})
-            result = module_mapping_to_dict(mm)
-            resolved = store.resolve_module_to_path(module)
-            if resolved:
-                result["resolved_path"] = resolved
-            return json.dumps(result, indent=2)
+        if query:
+            mm = store.resolve_module(query)
+            if mm is not None:
+                result = module_mapping_to_dict(mm)
+                resolved = store.resolve_module_to_path(query)
+                if resolved:
+                    result["resolved_path"] = resolved
+                return json.dumps(result, indent=2)
+            return json.dumps({"error": f"No module mapping found for '{query}'."})
         results = store.list_module_mappings()
         return json.dumps([module_mapping_to_dict(m) for m in results], indent=2)
 
@@ -1067,30 +1054,26 @@ def map_read(
 def map_write(
     kind: Annotated[str, Field(description="Entry type: 'mapping' or 'module'.")],
     op: Annotated[str, Field(description="Operation: 'add' or 'delete'.")],
-    source_project: Annotated[str | None, Field(description="Mapping source project.")] = None,
-    source_identifier: Annotated[str | None, Field(description="Mapping source identifier.")] = None,
-    source_kind: Annotated[str | None, Field(description="Mapping source kind.")] = None,
-    target_project: Annotated[str | None, Field(description="Mapping target project.")] = None,
-    target_identifier: Annotated[str | None, Field(description="Mapping target identifier.")] = None,
-    target_kind: Annotated[str | None, Field(description="Mapping target kind.")] = None,
-    relationship: Annotated[str | None, Field(description="Mapping relationship: equivalent, calls, implements, produces, consumes.")] = None,
-    confidence: Annotated[float | None, Field(description="Mapping confidence 0–1.")] = None,
-    provenance: Annotated[str | None, Field(description="Provenance: manual, llm, heuristic.")] = None,
-    evidence: Annotated[str | None, Field(description="Mapping evidence text.")] = None,
-    module_prefix: Annotated[str | None, Field(description="Module prefix (module kind).")] = None,
-    repo: Annotated[str | None, Field(description="GitHub repo org/name (module kind).")] = None,
-    local_path: Annotated[str | None, Field(description="Local path (module kind).")] = None,
-    branch: Annotated[str | None, Field(description="Branch/tag (module kind).")] = None,
-    subpath: Annotated[str | None, Field(description="Subpath within repo (module kind).")] = None,
-    metadata: Annotated[dict | None, Field(description="Additional metadata dict.")] = None,
+    entry: Annotated[dict, Field(description=(
+        "Entry data. "
+        "For mapping+add: {source_project, source_identifier, target_project, target_identifier, "
+        "source_kind?, target_kind?, relationship?, confidence?, provenance?, evidence?, metadata?}. "
+        "For mapping+delete: {source_identifier, source_project?, target_identifier?}. "
+        "For module+add: {module_prefix, repo?, local_path?, branch?, subpath?, provenance?, metadata?}. "
+        "For module+delete: {module_prefix}."
+    ))],
 ) -> str:
     """Write to the mapping store: add or delete entries.
 
     kind + op selects the operation:
-    - mapping + add: requires source_project, source_identifier, target_project, target_identifier
-    - mapping + delete: requires source_identifier
-    - module + add: requires module_prefix, and one of repo or local_path
-    - module + delete: requires module_prefix
+    - mapping + add: entry must contain source_project, source_identifier, target_project,
+      target_identifier. Optional: source_kind, target_kind, relationship, confidence,
+      provenance, evidence, metadata.
+    - mapping + delete: entry must contain source_identifier. Optional: source_project,
+      target_identifier to narrow the deletion.
+    - module + add: entry must contain module_prefix and at least one of repo or local_path.
+      Optional: branch, subpath, provenance, metadata.
+    - module + delete: entry must contain module_prefix.
     """
     from emend.knowledge import (
         MappingStore, IdentifierMapping, ModuleMapping,
@@ -1101,49 +1084,58 @@ def map_write(
 
     if kind == "mapping":
         if op == "add":
+            source_project = entry.get("source_project")
+            source_identifier = entry.get("source_identifier")
+            target_project = entry.get("target_project")
+            target_identifier = entry.get("target_identifier")
             if not source_project or not source_identifier or not target_project or not target_identifier:
                 return json.dumps({"error": "source_project, source_identifier, target_project, target_identifier required."})
             m = IdentifierMapping(
                 source_project=source_project,
                 source_identifier=source_identifier,
-                source_kind=source_kind or "",
+                source_kind=entry.get("source_kind") or "",
                 target_project=target_project,
                 target_identifier=target_identifier,
-                target_kind=target_kind or "",
-                relationship=relationship or "equivalent",
-                confidence=confidence if confidence is not None else 1.0,
-                provenance=provenance or "llm",
-                evidence=evidence or "",
-                metadata=metadata or {},
+                target_kind=entry.get("target_kind") or "",
+                relationship=entry.get("relationship") or "equivalent",
+                confidence=entry.get("confidence") if entry.get("confidence") is not None else 1.0,
+                provenance=entry.get("provenance") or "llm",
+                evidence=entry.get("evidence") or "",
+                metadata=entry.get("metadata") or {},
             )
             store.add_mapping(m)
             return json.dumps(mapping_to_dict(m), indent=2)
         if op == "delete":
+            source_identifier = entry.get("source_identifier")
             if not source_identifier:
                 return json.dumps({"error": "source_identifier is required for delete."})
             ok = store.delete_mapping(
                 source_identifier,
-                source_project=source_project,
-                target_identifier=target_identifier,
+                source_project=entry.get("source_project"),
+                target_identifier=entry.get("target_identifier"),
             )
             return json.dumps({"deleted": ok, "source_identifier": source_identifier})
 
     elif kind == "module":
         if op == "add":
+            module_prefix = entry.get("module_prefix")
             if not module_prefix:
                 return json.dumps({"error": "module_prefix is required."})
+            repo = entry.get("repo")
+            local_path = entry.get("local_path")
             if not repo and not local_path:
                 return json.dumps({"error": "Either repo or local_path is required."})
             m = ModuleMapping(
                 module_prefix=module_prefix,
                 repo=repo or "", local_path=local_path or "",
-                branch=branch or "", subpath=subpath or "",
-                provenance=provenance or "llm",
-                metadata=metadata or {},
+                branch=entry.get("branch") or "", subpath=entry.get("subpath") or "",
+                provenance=entry.get("provenance") or "llm",
+                metadata=entry.get("metadata") or {},
             )
             store.add_module_mapping(m)
             return json.dumps(module_mapping_to_dict(m), indent=2)
         if op == "delete":
+            module_prefix = entry.get("module_prefix")
             if not module_prefix:
                 return json.dumps({"error": "module_prefix is required for delete."})
             ok = store.delete_module_mapping_by_prefix(module_prefix)
@@ -1160,14 +1152,82 @@ def map_write(
 # ---------------------------------------------------------------------------
 
 
+def _parse_rst_sections(text: str) -> dict[str, str]:
+    """Parse RST text into a dict mapping section keys to their content.
+
+    Top-level sections are identified by headings underlined with ``---``.
+    The document title (underlined with ``===``) is excluded.
+    """
+    import re as _re
+
+    key_map = {
+        "selector_syntax": "selectors",
+        "pattern_syntax": "patterns",
+        "commands": "commands",
+        "cookbook_recipes": "recipes",
+        "fact_graph_relations": "facts",
+    }
+
+    lines = text.split("\n")
+    section_starts: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if (
+            i > 0
+            and stripped
+            and all(c == "-" for c in stripped)
+            and len(stripped) >= 3
+        ):
+            heading = lines[i - 1].strip()
+            if heading:
+                section_starts.append((i - 1, heading))
+
+    sections: dict[str, str] = {}
+    for idx, (start, heading) in enumerate(section_starts):
+        end = section_starts[idx + 1][0] if idx + 1 < len(section_starts) else len(lines)
+        content = "\n".join(lines[start:end]).strip()
+        raw_key = _re.sub(r"\s+", "_", heading.lower())
+        key = key_map.get(raw_key, raw_key)
+        sections[key] = content
+
+    return sections
+
+
+_SECTION_SUMMARIES: dict[str, str] = {
+    "selectors": "addressing symbols, components, wildcards, file globs",
+    "patterns": "metavariables, expressions, statements, replacements",
+    "commands": "grep, replace, edit, add, rm, refs, rename, mv, cp, graph, deadcode, lint, batch",
+    "recipes": "common refactoring patterns and examples",
+    "facts": "CozoDB stored relations and example Datalog queries",
+}
+
+
 @mcp_app.tool()
-def grammar_and_cookbook() -> str:
-    """Return the full emend grammar reference and cookbook.
+def grammar_and_cookbook(
+    section: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Section to retrieve. Pass None (default) to get a table of contents. '
+                'Pass "all" for the full document. '
+                'Other values: selectors, patterns, commands, recipes, facts.'
+            ),
+            default=None,
+        ),
+    ] = None,
+) -> str:
+    """Return the emend grammar reference and cookbook, or a specific section of it.
 
     Call this tool when you need detailed syntax help for constructing
     selectors, patterns, or command invocations.  The response covers
     selector syntax, pattern metavariables, every command with examples,
     and common refactoring recipes.
+
+    When called without arguments, returns a table of contents listing the
+    available sections.  Pass ``section="<name>"`` to retrieve a specific
+    section, or ``section="all"`` for the complete document.
+
+    Available section names: selectors, patterns, commands, recipes, facts, all.
     """
     import importlib.resources
     import re as _re
@@ -1191,11 +1251,46 @@ def grammar_and_cookbook() -> str:
         return m.group(0)  # leave unknown directives as-is
 
     text = _re.sub(
-        r"\.\. literalinclude:: [^\n]+\n(?:   :[^\n]+\n)*",
+        r"\.\. literalinclude:: ([^\n]+)\n(?:   :[^\n]+\n)*",
         _inline,
         text,
     )
-    return text
+
+    # Return the full document when section="all".
+    if section == "all":
+        return text
+
+    sections = _parse_rst_sections(text)
+
+    # Return a specific named section.
+    if section is not None:
+        if section in sections:
+            return sections[section]
+        available = ", ".join(sorted(sections.keys()))
+        return f"Unknown section {section!r}. Available sections: {available}, all"
+
+    # Default: return a compact table of contents.
+    toc_lines = [
+        'Available sections (pass section="<name>" to retrieve):\n',
+    ]
+    # List known sections in a stable order, then any extras.
+    ordered_keys = ["selectors", "patterns", "commands", "recipes", "facts"]
+    seen: set[str] = set()
+    for key in ordered_keys:
+        if key in sections:
+            summary = _SECTION_SUMMARIES.get(key, "")
+            heading_line = sections[key].split("\n")[0]
+            entry = f"- {key}: {heading_line} — {summary}" if summary else f"- {key}: {heading_line}"
+            toc_lines.append(entry)
+            seen.add(key)
+    for key, content in sections.items():
+        if key not in seen:
+            heading_line = content.split("\n")[0]
+            summary = _SECTION_SUMMARIES.get(key, "")
+            entry = f"- {key}: {heading_line} — {summary}" if summary else f"- {key}: {heading_line}"
+            toc_lines.append(entry)
+    toc_lines.append("- all: Return the complete reference document")
+    return "\n".join(toc_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1225,29 +1320,121 @@ def _warm_caches_background() -> None:
     proc.start()
 
 
+def _compress_schema(obj: object) -> object:
+    """Recursively compress a JSON-Schema dict.
+
+    Transformations applied:
+    - Remove all ``title`` keys (Pydantic boilerplate).
+    - Collapse ``anyOf: [{type: X}, {type: null}]`` (and the reversed order)
+      into ``type: X``, retaining any existing ``default`` value.  Also
+      handles the case where the non-null entry carries ``items`` (arrays).
+    """
+    if isinstance(obj, list):
+        return [_compress_schema(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+
+    # Recurse first so inner nodes are already compressed.
+    compressed: dict = {k: _compress_schema(v) for k, v in obj.items() if k != "title"}
+
+    # Collapse anyOf with a null alternative into a plain type.
+    if "anyOf" in compressed:
+        entries = compressed["anyOf"]
+        if isinstance(entries, list) and len(entries) == 2:
+            null_entries = [e for e in entries if isinstance(e, dict) and e.get("type") == "null"]
+            real_entries = [e for e in entries if isinstance(e, dict) and e.get("type") != "null"]
+            if len(null_entries) == 1 and len(real_entries) == 1:
+                real = real_entries[0]
+                # Only collapse simple types and typed arrays to keep schema valid.
+                real_type = real.get("type")
+                if real_type in ("string", "integer", "boolean", "number", "array"):
+                    del compressed["anyOf"]
+                    compressed["type"] = real_type
+                    if real_type == "array" and "items" in real:
+                        compressed["items"] = real["items"]
+                    # Preserve default: null if present, otherwise set it.
+                    compressed.setdefault("default", None)
+
+    return compressed
+
+
 def dump_schema() -> str:
     """Return the MCP tool schema as a JSON string.
 
     Each tool is serialised with its name, description, and full
     JSON-Schema ``inputSchema`` derived from the Pydantic/Field
-    annotations on the tool functions.
+    annotations on the tool functions.  The schema is post-processed to
+    remove Pydantic boilerplate (``title`` keys) and collapse nullable
+    ``anyOf`` unions into plain ``type`` entries.
     """
     tools = mcp_app._tool_manager.list_tools()
     result = [
         {
             "name": t.name,
             "description": t.description or "",
-            "inputSchema": t.parameters,
+            "inputSchema": _compress_schema(t.parameters),
         }
         for t in tools
     ]
     return json.dumps({"tools": result}, indent=2)
 
 
-def run_server(transport: str = "stdio", port: int = 8000) -> None:
+PROFILES: dict[str, set[str]] = {
+    "core": {
+        "search", "replace", "modify", "refs", "rename", "move",
+        "semantic_context", "impact", "grammar_and_cookbook",
+    },
+    "refactor": {
+        "search", "replace", "modify", "refs", "rename", "move",
+        "semantic_context", "impact", "grammar_and_cookbook",
+        "graph", "lint", "deadcode",
+    },
+    # "full" keeps all tools — no filtering needed.
+}
+
+
+def configure_profile(
+    profile: str | None = None,
+    tools: list[str] | None = None,
+) -> None:
+    """Prune the tool registry to match *profile* or an explicit *tools* list.
+
+    Must be called **before** ``run_server()`` or ``dump_schema()``.
+    """
+    if profile == "full" or (profile is None and tools is None):
+        return
+
+    if tools is not None:
+        keep = set(tools)
+    elif profile is not None:
+        keep = PROFILES.get(profile)
+        if keep is None:
+            valid = ", ".join(sorted(PROFILES.keys()) + ["full"])
+            raise ValueError(f"Unknown profile {profile!r}. Available: {valid}")
+    else:
+        return
+
+    all_tools = mcp_app._tool_manager.list_tools()
+    for t in all_tools:
+        if t.name not in keep:
+            mcp_app._tool_manager._tools.pop(t.name, None)
+
+    # Trim the instructions block when mapping tools are absent.
+    if "map_read" not in keep and "map_write" not in keep:
+        mcp_app.instructions = (mcp_app.instructions or "").split("## Mappings")[0].rstrip()
+
+
+def run_server(
+    transport: str = "stdio",
+    port: int = 8000,
+    profile: str | None = None,
+    tools: list[str] | None = None,
+) -> None:
     """Start the MCP server."""
     if transport not in ("stdio", "sse"):
         raise ValueError(f"Unknown transport: {transport!r}. Use 'stdio' or 'sse'.")
+
+    configure_profile(profile=profile, tools=tools)
 
     # Kick off cache warming in a background process so the first tool
     # call doesn't pay the full indexing cost.
