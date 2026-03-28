@@ -1,0 +1,181 @@
+# CSS language configuration for emend scope resolver.
+#
+# CSS is a stylesheet language with selectors and declarations. This config
+# provides tree-sitter parsing, symbol extraction (selectors, properties),
+# and pattern matching support for CSS files.
+
+[language]
+name = "css"
+tree_sitter_grammar = "tree-sitter-css"
+file_extensions = ["css"]
+comment_prefix = "/*"
+keywords = ["important"]
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+[[scoping.scope_creators]]
+node = "stylesheet"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "rule_set"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "media_statement"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "keyframes_statement"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "supports_statement"
+kind = "class"
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.class]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+# ---------------------------------------------------------------------------
+# Binding rules
+# ---------------------------------------------------------------------------
+[bindings]
+
+[[bindings.assignment]]
+node = "declaration"
+target = "property_name"
+
+[bindings.parameters]
+param_nodes = []
+name_field = ""
+
+[bindings.definitions]
+function_def = "rule_set"
+class_def = "rule_set"
+name_field = "selectors"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = "import_statement"
+module_field = "url"
+name_field = ""
+resolution = "none"
+dotted_name = ""
+identifier = "identifier"
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+module_separator = " "
+class_member_prefix = true
+nested_function_prefix = false
+locals_marker = ""
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+public_by_default = true
+private_prefix = ""
+
+# ---------------------------------------------------------------------------
+# Symbols
+# ---------------------------------------------------------------------------
+[symbols]
+function_node = "rule_set"
+class_node = "rule_set"
+decorated_node = ""
+definition_field = ""
+async_keyword = ""
+name_field = "selectors"
+parameters_field = ""
+return_type_field = ""
+body_field = "block"
+superclasses_field = ""
+decorator_node = ""
+expression_statement_node = "declaration"
+
+[symbols.statements]
+simple = ["declaration", "comment", "import_statement", "charset_statement", "namespace_statement"]
+compound = ["rule_set", "media_statement", "keyframes_statement", "supports_statement", "at_rule"]
+recurse_into = ["stylesheet", "block", "keyframe_block_list"]
+
+[builtins]
+names = []
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+[pattern_matching]
+function_def = "rule_set"
+class_def = "rule_set"
+decorated_def = ""
+call = "call_expression"
+attribute = ""
+identifier = "identifier"
+assignment = "declaration"
+augmented_assignment = ""
+annotated_assignment = ""
+return_stmt = ""
+if_stmt = ""
+while_stmt = ""
+for_stmt = ""
+with_stmt = ""
+try_stmt = ""
+except_handler = ""
+for_in_clause = ""
+if_clause = ""
+pair = "declaration"
+import_stmt = "import_statement"
+import_from_stmt = ""
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = ""
+yield_expr = ""
+lambda = ""
+named_expr = ""
+integer = "integer_value"
+float = "float_value"
+string = "string_value"
+list = ""
+tuple = ""
+set = ""
+dict = ""
+binary_operator = "binary_expression"
+boolean_operator = ""
+unary_operator = ""
+comparison_operator = ""
+subscript = ""
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = ["rule_set", "declaration", "media_statement", "keyframes_statement", "supports_statement", "import_statement", "charset_statement", "namespace_statement", "at_rule", "comment"]
+func_field = "function_name"
+args_field = "arguments"
+object_field = ""
+attr_field = ""
+left_field = "property_name"
+right_field = "value"
+operator_field = ""
+annotation_field = ""
+value_field = "value"
+condition_field = ""
+target_field = "property_name"
+iter_field = ""
+elt_field = ""

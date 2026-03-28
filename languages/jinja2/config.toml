@@ -1,0 +1,180 @@
+# Jinja2 template language configuration for emend scope resolver.
+#
+# Jinja2 is a template language with expression blocks ({{ }}), statement
+# blocks ({% %}), and comments ({# #}). This config provides tree-sitter
+# parsing, symbol extraction (variables, blocks, macros), and pattern
+# matching support for Jinja2 template files.
+
+[language]
+name = "jinja2"
+tree_sitter_grammar = "tree-sitter-jinja2"
+file_extensions = ["jinja", "jinja2", "j2"]
+comment_prefix = "{#"
+keywords = [
+    "if", "elif", "else", "endif", "for", "endfor", "block", "endblock",
+    "extends", "include", "import", "from", "macro", "endmacro",
+    "call", "endcall", "filter", "endfilter", "set", "endset",
+    "do", "with", "endwith", "autoescape", "endautoescape",
+    "raw", "endraw", "trans", "endtrans", "pluralize", "debug",
+    "and", "or", "not", "is", "in",
+]
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+[[scoping.scope_creators]]
+node = "source_file"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "statement"
+kind = "function"
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.function]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+# ---------------------------------------------------------------------------
+# Binding rules
+# ---------------------------------------------------------------------------
+[bindings]
+
+[[bindings.assignment]]
+node = "statement"
+target = "identifier"
+
+[bindings.parameters]
+param_nodes = []
+name_field = ""
+
+[bindings.definitions]
+function_def = "statement"
+class_def = "statement"
+name_field = "identifier"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = ""
+module_field = ""
+name_field = ""
+resolution = "none"
+dotted_name = ""
+identifier = "identifier"
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+module_separator = "."
+class_member_prefix = false
+nested_function_prefix = false
+locals_marker = ""
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+public_by_default = true
+private_prefix = ""
+
+# ---------------------------------------------------------------------------
+# Symbols
+# ---------------------------------------------------------------------------
+[symbols]
+function_node = "statement"
+class_node = "statement"
+decorated_node = ""
+definition_field = ""
+async_keyword = ""
+name_field = "identifier"
+parameters_field = ""
+return_type_field = ""
+body_field = ""
+superclasses_field = ""
+decorator_node = ""
+expression_statement_node = "expression"
+
+[symbols.statements]
+simple = ["expression", "comment"]
+compound = ["statement"]
+recurse_into = ["source_file"]
+
+[builtins]
+names = [
+    "range", "lipsum", "dict", "cycler", "joiner", "namespace",
+    "loop", "true", "false", "none",
+]
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+[pattern_matching]
+function_def = "statement"
+class_def = ""
+decorated_def = ""
+call = ""
+attribute = "object"
+identifier = "identifier"
+assignment = ""
+augmented_assignment = ""
+annotated_assignment = ""
+return_stmt = ""
+if_stmt = ""
+while_stmt = ""
+for_stmt = ""
+with_stmt = ""
+try_stmt = ""
+except_handler = ""
+for_in_clause = ""
+if_clause = ""
+pair = ""
+import_stmt = ""
+import_from_stmt = ""
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = ""
+yield_expr = ""
+lambda = ""
+named_expr = ""
+integer = ""
+float = ""
+string = "string"
+list = ""
+tuple = ""
+set = ""
+dict = ""
+binary_operator = ""
+boolean_operator = ""
+unary_operator = ""
+comparison_operator = ""
+subscript = ""
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = ["statement", "expression", "comment"]
+func_field = ""
+args_field = ""
+object_field = ""
+attr_field = ""
+left_field = ""
+right_field = ""
+operator_field = "operator"
+annotation_field = ""
+value_field = ""
+condition_field = ""
+target_field = ""
+iter_field = ""
+elt_field = ""

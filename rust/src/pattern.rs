@@ -11,6 +11,10 @@ fn get_parser(lang_name: &str) -> Parser {
         "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX,
         "rust" => tree_sitter_rust::LANGUAGE,
+        "html" => tree_sitter_html::LANGUAGE,
+        "css" => tree_sitter_css::LANGUAGE,
+        "sql" => tree_sitter_sequel::LANGUAGE,
+        "jinja2" => tree_sitter_jinja2::LANGUAGE,
         _ => tree_sitter_python::LANGUAGE,
     };
     parser
@@ -37,6 +41,30 @@ pub(crate) fn parse_rust(source: &str) -> Option<Tree> {
     parser.parse(source.as_bytes(), None)
 }
 
+/// Parse HTML source into a tree-sitter Tree.
+pub(crate) fn parse_html(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("html");
+    parser.parse(source.as_bytes(), None)
+}
+
+/// Parse CSS source into a tree-sitter Tree.
+pub(crate) fn parse_css(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("css");
+    parser.parse(source.as_bytes(), None)
+}
+
+/// Parse SQL source into a tree-sitter Tree.
+pub(crate) fn parse_sql(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("sql");
+    parser.parse(source.as_bytes(), None)
+}
+
+/// Parse Jinja2 source into a tree-sitter Tree.
+pub(crate) fn parse_jinja2(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("jinja2");
+    parser.parse(source.as_bytes(), None)
+}
+
 /// Parse source based on file extension.
 pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
     match ext {
@@ -45,6 +73,10 @@ pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
         "tsx" => parse_typescript(source, true),
         "js" | "jsx" => parse_typescript(source, false), // JS uses TS grammar
         "rs" => parse_rust(source),
+        "html" | "htm" => parse_html(source),
+        "css" => parse_css(source),
+        "sql" => parse_sql(source),
+        "jinja" | "jinja2" | "j2" => parse_jinja2(source),
         _ => parse_python(source),
     }
 }

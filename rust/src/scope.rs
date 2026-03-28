@@ -24,6 +24,10 @@ use std::sync::OnceLock;
 const PYTHON_CONFIG_TOML: &str = include_str!("../../languages/python/config.toml");
 const TS_CONFIG_TOML: &str = include_str!("../../languages/typescript/config.toml");
 const RUST_CONFIG_TOML: &str = include_str!("../../languages/rust/config.toml");
+const HTML_CONFIG_TOML: &str = include_str!("../../languages/html/config.toml");
+const CSS_CONFIG_TOML: &str = include_str!("../../languages/css/config.toml");
+const SQL_CONFIG_TOML: &str = include_str!("../../languages/sql/config.toml");
+const JINJA2_CONFIG_TOML: &str = include_str!("../../languages/jinja2/config.toml");
 
 /// Return a cached `&'static LanguageConfig` for the given file extension.
 /// Defaults to Python config for unknown extensions.
@@ -31,6 +35,10 @@ pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
     static PY_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     static TS_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     static RUST_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static HTML_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static CSS_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static SQL_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static JINJA2_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     match ext {
         "py" | "pyi" => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -43,6 +51,22 @@ pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
         "rs" => RUST_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(RUST_CONFIG_TOML)
                 .expect("Failed to parse Rust config")
+        }),
+        "html" | "htm" => HTML_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(HTML_CONFIG_TOML)
+                .expect("Failed to parse HTML config")
+        }),
+        "css" => CSS_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(CSS_CONFIG_TOML)
+                .expect("Failed to parse CSS config")
+        }),
+        "sql" => SQL_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(SQL_CONFIG_TOML)
+                .expect("Failed to parse SQL config")
+        }),
+        "jinja" | "jinja2" | "j2" => JINJA2_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(JINJA2_CONFIG_TOML)
+                .expect("Failed to parse Jinja2 config")
         }),
         _ => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -643,7 +667,7 @@ pub struct DeclarationsSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BindingsSection {
     pub assignment: Vec<AssignmentRule>,
-    #[serde(rename = "loop")]
+    #[serde(rename = "loop", default)]
     pub loop_rules: Vec<AssignmentRule>,
     #[serde(default)]
     pub context_manager: Vec<AssignmentRule>,
@@ -2604,6 +2628,10 @@ impl LanguageConfig {
             "py" | "pyi" => "python",
             "ts" | "tsx" | "js" | "jsx" => "typescript",
             "rs" => "rust",
+            "html" | "htm" => "html",
+            "css" => "css",
+            "sql" => "sql",
+            "jinja" | "jinja2" | "j2" => "jinja2",
             _ => return Err(format!("Unsupported extension: {}", ext)),
         };
         let config_path = lang_dir.join(lang_name).join("config.toml");
@@ -2617,6 +2645,10 @@ impl LanguageConfig {
             "python" => Ok(Self::from_toml(PYTHON_CONFIG_TOML).unwrap_or_else(|_| Self::python_default())),
             "typescript" => Ok(Self::from_toml(TS_CONFIG_TOML).expect("Failed to parse embedded TypeScript config")),
             "rust" => Ok(Self::from_toml(RUST_CONFIG_TOML).expect("Failed to parse embedded Rust config")),
+            "html" => Ok(Self::from_toml(HTML_CONFIG_TOML).expect("Failed to parse embedded HTML config")),
+            "css" => Ok(Self::from_toml(CSS_CONFIG_TOML).expect("Failed to parse embedded CSS config")),
+            "sql" => Ok(Self::from_toml(SQL_CONFIG_TOML).expect("Failed to parse embedded SQL config")),
+            "jinja2" => Ok(Self::from_toml(JINJA2_CONFIG_TOML).expect("Failed to parse embedded Jinja2 config")),
             _ => Err(format!("No config found for {}", lang_name)),
         }
     }

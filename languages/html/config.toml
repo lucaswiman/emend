@@ -1,0 +1,177 @@
+# HTML language configuration for emend scope resolver.
+#
+# HTML is a markup language without traditional scoping, bindings, or imports.
+# This config provides enough structure for tree-sitter parsing, symbol
+# extraction (tags, attributes), and pattern matching in HTML files.
+
+[language]
+name = "html"
+tree_sitter_grammar = "tree-sitter-html"
+file_extensions = ["html", "htm"]
+comment_prefix = "<!--"
+keywords = []
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+[[scoping.scope_creators]]
+node = "document"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "element"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "script_element"
+kind = "class"
+
+[[scoping.scope_creators]]
+node = "style_element"
+kind = "class"
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.class]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+# ---------------------------------------------------------------------------
+# Binding rules
+# ---------------------------------------------------------------------------
+[bindings]
+
+[[bindings.assignment]]
+node = "attribute"
+target = "attribute_name"
+
+[bindings.parameters]
+param_nodes = []
+name_field = ""
+
+[bindings.definitions]
+function_def = "element"
+class_def = "element"
+name_field = "tag_name"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = ""
+module_field = ""
+name_field = ""
+resolution = "none"
+dotted_name = ""
+identifier = "tag_name"
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+module_separator = "/"
+class_member_prefix = true
+nested_function_prefix = false
+locals_marker = ""
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+public_by_default = true
+private_prefix = ""
+
+# ---------------------------------------------------------------------------
+# Symbols
+# ---------------------------------------------------------------------------
+[symbols]
+function_node = "element"
+class_node = "element"
+decorated_node = ""
+definition_field = ""
+async_keyword = ""
+name_field = "tag_name"
+parameters_field = ""
+return_type_field = ""
+body_field = ""
+superclasses_field = ""
+decorator_node = ""
+expression_statement_node = ""
+
+[symbols.statements]
+simple = ["doctype", "comment", "text", "entity"]
+compound = ["element", "script_element", "style_element"]
+recurse_into = ["document"]
+
+[builtins]
+names = []
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+[pattern_matching]
+function_def = "element"
+class_def = "element"
+decorated_def = ""
+call = ""
+attribute = "attribute"
+identifier = "tag_name"
+assignment = "attribute"
+augmented_assignment = ""
+annotated_assignment = ""
+return_stmt = ""
+if_stmt = ""
+while_stmt = ""
+for_stmt = ""
+with_stmt = ""
+try_stmt = ""
+except_handler = ""
+for_in_clause = ""
+if_clause = ""
+pair = "attribute"
+import_stmt = ""
+import_from_stmt = ""
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = ""
+yield_expr = ""
+lambda = ""
+named_expr = ""
+integer = ""
+float = ""
+string = "quoted_attribute_value"
+list = ""
+tuple = ""
+set = ""
+dict = ""
+binary_operator = ""
+boolean_operator = ""
+unary_operator = ""
+comparison_operator = ""
+subscript = ""
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = ["element", "script_element", "style_element", "doctype", "comment", "text"]
+func_field = ""
+args_field = ""
+object_field = ""
+attr_field = "attribute_name"
+left_field = ""
+right_field = ""
+operator_field = ""
+annotation_field = ""
+value_field = "attribute_value"
+condition_field = ""
+target_field = ""
+iter_field = ""
+elt_field = ""

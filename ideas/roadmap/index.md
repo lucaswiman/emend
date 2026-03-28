@@ -53,7 +53,7 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 
 ### Phase 1: Infrastructure
 
-- [ ] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core`
+- [x] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core` — `tree-sitter-html`, `tree-sitter-css`, `tree-sitter-sequel` (SQL), `tree-sitter-jinja2`; language configs in `languages/{html,css,sql,jinja2}/config.toml`; parser dispatch in `pattern.rs`; scope resolver support in `scope.rs`; language registry in `language_registry.py`
 - [x] Implement injection detection (call-based, magic-comment, SQL keyword heuristics) — `dsl.py` (`detect_dsl_regions`, regex-based; tree-sitter grammars deferred)
 - [x] Implement `DslSymbolExtractor` for SQL (tables, columns) — `dsl.py` (`extract_sql_symbols`; CSS/JSX deferred)
 - [x] Add `dsl_symbols` table to `parse.db`; wire into `emend index` — `_init_cache_schema()` creates `dsl_symbols` table; `_index_batch()` extracts and stores DSL symbols during indexing
