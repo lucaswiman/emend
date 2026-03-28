@@ -1,10 +1,11 @@
 //! Per-function control flow graph construction from tree-sitter ASTs.
 //!
-//! Builds basic-block CFGs for Python functions, supporting if/elif/else,
-//! for/while loops (with break/continue), try/except/finally, with statements,
-//! match/case, return, raise, and assert.
+//! Builds basic-block CFGs for functions in any supported language.
+//! Language-specific tree-sitter node types and field names are driven by
+//! the `[cfg]` section of the language config TOML (see [`CfgSection`]).
 
 use std::collections::{HashMap, HashSet};
+use crate::scope::{config_for_ext, CfgSection};
 
 // ---------------------------------------------------------------------------
 // Data model

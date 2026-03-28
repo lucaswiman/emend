@@ -230,3 +230,66 @@ condition_field = "condition"
 target_field = "left"
 iter_field = "right"
 elt_field = "body"
+
+# ---------------------------------------------------------------------------
+# Control flow graph (CFG) construction
+# ---------------------------------------------------------------------------
+[cfg]
+function_nodes = ["function_declaration", "method_definition", "arrow_function", "function_expression"]
+container_nodes = ["class_declaration", "class_body"]
+definition_nodes = ["function_declaration", "class_declaration", "method_definition"]
+block_nodes = ["statement_block", "program", "switch_body"]
+
+if_nodes = ["if_statement"]
+if_style = "alternative"
+alternative_field = "alternative"
+else_clause = "else_clause"
+
+for_nodes = ["for_in_statement"]
+for_variable_field = "left"
+for_iterable_field = "right"
+c_style_for_nodes = ["for_statement"]
+
+while_nodes = ["while_statement"]
+
+try_nodes = ["try_statement"]
+try_style = "fields"
+catch_field = "handler"
+finalizer_field = "finalizer"
+
+match_nodes = ["switch_statement"]
+match_subject_field = "value"
+match_body_field = "body"
+case_clause = "switch_case"
+case_default = "switch_default"
+switch_fallthrough = true
+
+return_nodes = ["return_statement"]
+throw_nodes = ["throw_statement"]
+break_nodes = ["break_statement"]
+continue_nodes = ["continue_statement"]
+
+condition_field = "condition"
+consequence_field = "consequence"
+body_field = "body"
+
+expression_statement_node = "expression_statement"
+identifier_node = "identifier"
+skip_identifiers = ["undefined", "null", "true", "false"]
+destructure_nodes = ["array_pattern", "object_pattern"]
+attribute_access_nodes = ["subscript_expression", "member_expression"]
+
+[[cfg.def_use_rules]]
+node = "assignment_expression"
+target = "left"
+value = "right"
+
+[[cfg.def_use_rules]]
+node = "augmented_assignment_expression"
+target = "left"
+value = "right"
+
+[[cfg.def_use_rules]]
+node = "variable_declarator"
+target = "name"
+value = "value"
