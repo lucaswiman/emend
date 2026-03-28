@@ -3238,6 +3238,118 @@ def mcp_cmd(
     run_server(transport=transport, port=port)
 
 
+@app.command("cfg")
+def cfg_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    function: Annotated[
+        Optional[str],
+        typer.Option("--function", "-f", help="Restrict to a specific function name"),
+    ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text, json, or dot"),
+    ] = "text",
+    unreachable: Annotated[
+        bool,
+        typer.Option("--unreachable", help="Only show unreachable blocks"),
+    ] = False,
+):
+    """Build and display per-function control flow graphs.
+
+    Constructs basic-block CFGs for every function in the target file(s).
+    Supports text, JSON, and Graphviz DOT output.
+
+    Examples:
+        emend cfg src/app.py
+        emend cfg src/app.py --function process --format dot
+        emend cfg src/ --unreachable --format json
+    """
+    try:
+        from emend.cfg import (
+            build_cfgs_for_file,
+            find_unreachable_blocks,
+            format_cfg_text,
+            format_cfgs_dot,
+            format_cfgs_json,
+        )
+
+        _lang = _state["language"]
+        resolved, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved]
+
+        all_cfgs: list = []
+        cfg_files: list[str] = []
+
+        for fpath in files:
+            try:
+                cfgs = build_cfgs_for_file(fpath)
+            except Exception as exc:
+                logger.debug("CFG build failed for %s: %s", fpath, exc)
+                continue
+
+            for cfg in cfgs:
+                if function and cfg.func_name != function:
+                    continue
+                all_cfgs.append(cfg)
+                cfg_files.append(fpath)
+
+        if not all_cfgs:
+            if function:
+                print(f"No function named '{function}' found.", file=sys.stderr)
+            else:
+                print("No functions found.", file=sys.stderr)
+            raise typer.Exit(2)
+
+        if unreachable:
+            results = []
+            for i, cfg in enumerate(all_cfgs):
+                blocks = find_unreachable_blocks(cfg)
+                if blocks:
+                    results.append({
+                        "file": cfg_files[i],
+                        "function": cfg.func_name,
+                        "unreachable_blocks": blocks,
+                    })
+            if output_format == "json":
+                import json
+                print(json.dumps(results, indent=2))
+            else:
+                if not results:
+                    print("No unreachable blocks found.")
+                for r in results:
+                    for blk in r["unreachable_blocks"]:
+                        print(
+                            f"{r['file']}:{blk['start_line']+1}: "
+                            f"unreachable code in {r['function']} "
+                            f"(block B{blk['id']}, "
+                            f"lines {blk['start_line']}-{blk['end_line']})"
+                        )
+            raise typer.Exit(0)
+
+        if output_format == "json":
+            print(format_cfgs_json(all_cfgs, file_path=files[0] if len(files) == 1 else None))
+        elif output_format == "dot":
+            print(format_cfgs_dot(all_cfgs))
+        else:
+            parts = []
+            for i, cfg in enumerate(all_cfgs):
+                parts.append(f"# {cfg_files[i]}")
+                parts.append(format_cfg_text(cfg))
+            print("\n\n".join(parts))
+
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
 def main():
     try:
         app()

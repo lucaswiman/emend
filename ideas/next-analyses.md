@@ -42,7 +42,7 @@ program slicing, CFL-reachability, IFDS/IDE, points-to, and effect inference
 as rule sets rather than separate implementations.
 **Effort:** Medium.
 
-### 2. Per-Function Control Flow Graphs
+### 2. Per-Function Control Flow Graphs ✅
 
 Build CFGs in Rust as part of the existing tree-sitter parse pass, expose
 via PyO3.  This is the intraprocedural counterpart of the Datalog engine:
@@ -50,6 +50,16 @@ the Datalog engine unlocks interprocedural query-side analyses, while CFGs
 unlock intraprocedural path-sensitive analyses.
 
 **Design:** See [control-flow-graphs.md](control-flow-graphs.md).
+
+**Impl:** `cfg.rs` — tree-sitter AST to basic blocks + edges (if/elif/else,
+for/while with break/continue, try/except/finally, with, match/case,
+return, raise, assert).  Iterative dominator and post-dominator computation.
+`cfg_py.rs` — PyO3 `PyCfg` wrapper with `get_blocks()`, `get_edges()`,
+`predecessors()`, `successors()`, `dominators()`, `post_dominators()`,
+`to_dot()`, `to_json()`.  Python: `cfg.py` with `build_cfgs_for_file()`,
+`find_unreachable_blocks()`, text/JSON/DOT formatters.  CLI: `emend cfg`.
+Fact graph: `CfgEdgeFact`, `DefUseFact` with CozoDB schema, batch insert,
+and query methods.
 
 **Reuses:** emend_core tree-sitter infrastructure, scope resolver's AST walk.
 **Enables:** Path-sensitive taint, must-close-on-all-paths typestate,
@@ -169,7 +179,7 @@ when writing the rule sets.
 | # | Technique | Status | Key Reuse | Effort |
 |---|-----------|--------|-----------|--------|
 | 1 | Datalog engine | **✅ Complete** | fact_graph | Medium |
-| 2 | Per-function CFGs | **TODO** | emend_core, scope resolver | Medium |
+| 2 | Per-function CFGs | **✅ Complete** | emend_core, scope resolver | Medium |
 | 3 | Typestate analysis | **TODO** | taint engine, CFGs | Medium |
 | 4 | API migration | **TODO** | mapping store, batch | Medium |
 | 5 | Spec mining | **TODO** | pattern matching | Low-medium |
