@@ -1,6 +1,11 @@
 # DSL Support for Embedded Languages
 
-**Status: Provisional**
+**Status: Phase 1 partial, Phase 2 partial — regex-based SQL infrastructure implemented**
+
+Initial implementation in `dsl.py`: SQL region detection (keyword heuristics,
+magic comments), table/column extraction, ORM link resolution
+(`__tablename__` + singularize/PascalCase), `emend dsl` CLI command.
+Tree-sitter DSL grammars and CSS/JSX/Jinja extractors are deferred.
 
 ## Motivation
 

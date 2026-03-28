@@ -1340,6 +1340,7 @@ def taint_cmd(
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function taint tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
+    preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific rules (django, flask, sqlalchemy, fastapi, all)")] = None,
 ):
     """Run taint analysis to detect unsafe data flows.
 
@@ -1351,7 +1352,8 @@ def taint_cmd(
     function summaries and fixed-point iteration.
 
     Configuration is read from the ``taint`` section of .emend/patterns.yaml
-    (or the file specified by --config).
+    (or the file specified by --config).  Use --preset to load built-in rules
+    for a specific framework (django, flask, sqlalchemy, fastapi, all).
 
     Examples:
         emend taint src/
@@ -1359,6 +1361,7 @@ def taint_cmd(
         emend taint src/ --trace
         emend taint src/ --json
         emend taint src/ --interprocedural
+        emend taint app.py --preset flask
     """
     try:
         from emend.taint import load_taint_config, run_taint_analysis, format_violations
@@ -1367,11 +1370,20 @@ def taint_cmd(
         if config is None:
             config = ".emend/patterns.yaml"
         config_path = Path(config)
-        if not config_path.exists():
+        if not config_path.exists() and preset is None:
             print(f"Error: Config file not found: {config}", file=sys.stderr)
             raise typer.Exit(2)
 
-        taint_config = load_taint_config(str(config_path))
+        if config_path.exists():
+            taint_config = load_taint_config(str(config_path))
+        else:
+            from emend.taint import TaintConfig as _TaintConfig
+            taint_config = _TaintConfig()
+
+        if preset:
+            from emend.taint_presets import get_preset, merge_configs
+            preset_config = get_preset(preset)
+            taint_config = merge_configs(taint_config, preset_config)
         if not taint_config.sources:
             print("No taint sources configured.", file=sys.stderr)
             raise typer.Exit(0)
@@ -1416,6 +1428,66 @@ def taint_cmd(
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command("dsl")
+def dsl_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    dsl_type: Annotated[Optional[str], typer.Option("--type", help="DSL type to detect (sql, css, html)")] = None,
+    orm: Annotated[str, typer.Option("--orm", help="ORM framework (sqlalchemy, django)")] = "sqlalchemy",
+    resolve: Annotated[bool, typer.Option("--resolve", help="Resolve cross-language links")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+):
+    """Detect and analyze embedded DSL regions (SQL, CSS, HTML).
+
+    Scans source files for embedded DSL content, extracts symbols
+    (table names, column names, CSS classes), and optionally resolves
+    cross-language links to host-language definitions.
+
+    Examples:
+        emend dsl src/
+        emend dsl app.py --type sql --resolve
+        emend dsl src/ --type sql --orm django --json
+    """
+    try:
+        from emend.dsl import DslKind, detect_dsl_regions, extract_sql_symbols, resolve_orm_links, format_symbols, DslSymbol, DslLink
+
+        # Parse DSL type filter
+        dsl_filter: list[DslKind] | None = None
+        if dsl_type:
+            try:
+                dsl_filter = [DslKind(dsl_type.lower())]
+            except ValueError:
+                print(f"Error: Unknown DSL type '{dsl_type}'. Valid types: sql, css, html, graphql, jinja", file=sys.stderr)
+                raise typer.Exit(2)
+
+        _lang = _state["language"]
+        resolved_files, _ = resolve_files(path, language=_lang)
+        files = [str(f) for f in resolved_files]
+
+        all_symbols: list[DslSymbol] = []
+        for file_path in files:
+            regions = detect_dsl_regions(file_path, dsls=dsl_filter)
+            for region in regions:
+                if region.dsl == DslKind.SQL:
+                    all_symbols.extend(extract_sql_symbols(region))
+
+        # Resolve links if requested
+        links: list[DslLink] = []
+        if resolve and all_symbols:
+            project_root = project or str(Path(path).resolve() if Path(path).is_dir() else Path(path).parent.resolve())
+            links = resolve_orm_links(all_symbols, project_root, orm=orm)
+
+        output = format_symbols(all_symbols, links=links if resolve else None, json_output=json_output)
+        if output:
+            print(output, end='')
+
+    except typer.Exit:
+        raise
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
