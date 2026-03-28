@@ -910,14 +910,6 @@ def flows_to(sink_pattern: str) -> Callable[[Fact], bool]:
     return _predicate
 
 
-def reachable_from(symbol_qn: str) -> Callable[[FactGraph], set[str]]:
-    """Return a callable that computes the transitive call closure from *symbol_qn*."""
-    def _compute(graph: FactGraph) -> set[str]:
-        return graph.transitive_callees(symbol_qn)
-
-    return _compute
-
-
 def symbol_has_type(type_pattern: str) -> Callable[[Fact], bool]:
     """Return a predicate matching TypeFacts whose type_str matches *type_pattern*."""
     compiled = re.compile(type_pattern)

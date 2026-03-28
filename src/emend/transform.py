@@ -395,7 +395,8 @@ def _populate_facts_db(project_root: str) -> None:
 
         worktree_id = _get_worktree_id(project_root)
 
-        # Symbols
+        # Symbols — use :replace so the entire relation is atomically
+        # swapped, which also removes any stale rows from deleted symbols.
         sym_rows = conn.execute(
             "SELECT si.file_path, si.module_qn, si.name, si.qualified_name, si.kind, "
             "si.line, si.end_line, si.depth, si.parent, si.bases, si.signature, "
@@ -407,20 +408,19 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if sym_rows:
-            cozo_sym = [
-                [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-                 r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
-                 bool(r[13]), bool(r[14]), bool(r[15])]
-                for r in sym_rows
-            ]
-            fdb.run(
-                "?[fp, mqn, name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
-                ":put fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
-                "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
-                {"rows": cozo_sym},
-            )
+        cozo_sym = [
+            [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+             r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
+             bool(r[13]), bool(r[14]), bool(r[15])]
+            for r in sym_rows
+        ]
+        fdb.run(
+            "?[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
+            ":replace fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
+            {"rows": cozo_sym},
+        )
 
         # References
         ref_rows = conn.execute(
@@ -432,13 +432,12 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if ref_rows:
-            cozo_ref = [list(r) for r in ref_rows]
-            fdb.run(
-                "?[tqn, fp, line, col, kind] <- $rows "
-                ":put fact_reference {tqn, fp, line, col => kind}",
-                {"rows": cozo_ref},
-            )
+        cozo_ref = [list(r) for r in ref_rows]
+        fdb.run(
+            "?[tqn, fp, line, col, kind] <- $rows "
+            ":replace fact_reference {tqn, fp, line, col => kind}",
+            {"rows": cozo_ref},
+        )
 
         # Imports
         imp_rows = conn.execute(
@@ -450,13 +449,12 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        if imp_rows:
-            cozo_imp = [list(r) for r in imp_rows]
-            fdb.run(
-                "?[fp, mod] <- $rows "
-                ":put fact_import {fp, mod}",
-                {"rows": cozo_imp},
-            )
+        cozo_imp = [list(r) for r in imp_rows]
+        fdb.run(
+            "?[fp, mod] <- $rows "
+            ":replace fact_import {fp, mod}",
+            {"rows": cozo_imp},
+        )
 
         conn.close()
     except BaseException:
@@ -4535,6 +4533,7 @@ _ENTRY_POINT_DECORATOR_BASENAMES = frozenset({
     'command', 'task', 'hook', 'listener',
     'receiver', 'signal', 'handler', 'middleware',
     'register', 'export',
+    'tool',  # MCP tool registration (@mcp_app.tool(), @server.tool(), etc.)
 })
 
 # Names that are conventional entry points and should never be flagged
@@ -4651,10 +4650,17 @@ def _dead_code_postfilter(
     Args:
         rows: List of (name, qname, kind, file_path, line, decorators) tuples.
     """
-    # Post-filter: custom entry point decorators.
-    if entry_point_decorators and rows:
-        ep_decs = set(entry_point_decorators)
-        ep_basenames = {d.rsplit(".", 1)[-1] for d in ep_decs}
+    # Post-filter: built-in entry point decorators (applied at query time so
+    # changes to _ENTRY_POINT_DECORATOR_BASENAMES take effect without a full
+    # cache rebuild) plus any user-supplied entry_point_decorators.
+    combined_decs = set(_ENTRY_POINT_DECORATORS)
+    combined_basenames = set(_ENTRY_POINT_DECORATOR_BASENAMES)
+    if entry_point_decorators:
+        for d in entry_point_decorators:
+            combined_decs.add(d)
+            combined_basenames.add(d.rsplit(".", 1)[-1])
+
+    if rows:
         filtered = []
         for row in rows:
             dec_str = row[5]  # decorators column
@@ -4666,11 +4672,11 @@ def _dead_code_postfilter(
                         dec_clean = dec_clean[1:]
                     if "(" in dec_clean:
                         dec_clean = dec_clean[:dec_clean.index("(")]
-                    if dec_clean in ep_decs:
+                    if dec_clean in combined_decs:
                         skip = True
                         break
                     basename = dec_clean.rsplit(".", 1)[-1] if "." in dec_clean else dec_clean
-                    if basename in ep_basenames:
+                    if basename in combined_basenames:
                         skip = True
                         break
                 if skip:
@@ -4722,41 +4728,36 @@ def _dead_code_postfilter(
             return False
 
         file_cache: dict[str, str] = {}
-        try:
-            matched = _rust.read_and_filter_files(
-                source_files, list(str_names),
-            )
-            for fp, content in matched:
-                r = str(Path(fp).resolve())
-                if _is_excluded_ref(r):
-                    continue
-                file_cache[r] = content
-        except Exception:
-            pass
+        # Build file cache: scan all source files for any candidate name.
+        # Note: _rust.read_and_filter_files uses AND semantics (all names must
+        # be present), so we use a Python-level OR scan here instead.
+        for _fp in source_files:
+            _r = str(Path(_fp).resolve())
+            if _is_excluded_ref(_r):
+                continue
+            try:
+                _content = Path(_fp).read_text(errors="replace")
+            except Exception:
+                continue
+            if any(n in _content for n in str_names):
+                file_cache[_r] = _content
 
-        for _, _, _, fp, _, _ in rows:
-            r = str(Path(fp).resolve())
-            if r not in file_cache:
-                try:
-                    file_cache[r] = Path(fp).read_text()
-                except Exception:
-                    pass
-
-        _strip_re = re.compile(r"'[^']*'|\"[^\"]*\"")
         for name, qname, sym_kind, fp, line, _decs in rows:
             if len(name) <= 3:
                 continue
             r = str(Path(fp).resolve())
 
+            # Same-file scan: any occurrence on a different line counts as a
+            # reference.  The SQL/CozoDB index only captures module-level
+            # references; method-body references are missed by the scope
+            # resolver, so we fall back to a text scan here.
             content = file_cache.get(r)
             if content and name in content:
                 for i, lt in enumerate(content.splitlines(), 1):
                     if i == line or name not in lt:
                         continue
-                    cleaned = _strip_re.sub("", lt)
-                    if name not in cleaned:
-                        names_with_str_ref.add((fp, name))
-                        break
+                    names_with_str_ref.add((fp, name))
+                    break
 
             if (fp, name) in names_with_str_ref:
                 continue

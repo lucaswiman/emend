@@ -140,12 +140,3 @@ def resolve_environment_path(project_root: str, language: str = "python") -> Pat
     return None
 
 
-# Backward compatibility aliases
-def get_venv_lookup_config(project_root: str, language: str = "python") -> EnvironmentLookupConfig:
-    """Deprecated: use get_environment_lookup_config instead."""
-    return get_environment_lookup_config(project_root, language)
-
-
-def resolve_venv_site_packages(project_root: str, language: str = "python") -> Path | None:
-    """Deprecated: use resolve_environment_path instead."""
-    return resolve_environment_path(project_root, language)

@@ -95,6 +95,64 @@ class TestDeadCodeWarmPath:
         assert "helper" not in dead_names
         assert "orphan" in dead_names
 
+    def test_warm_path_intra_file_class_instantiation(self, tmp_path):
+        """Warm path: class instantiated within the same file should not be dead."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            "class Inner:\n"
+            "    def run(self): return 1\n\n"
+            "class Outer:\n"
+            "    def __init__(self):\n"
+            "        self._inner = Inner()\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "Inner" not in dead_names, "Inner is instantiated by Outer.__init__"
+
+    def test_warm_path_intra_file_type_annotation(self, tmp_path):
+        """Warm path: class used only in a type annotation in the same file is not dead."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            "from __future__ import annotations\n\n"
+            "class Client:\n"
+            "    def connect(self): pass\n\n"
+            "class Service:\n"
+            "    def __init__(self):\n"
+            "        self._client: Client | None = None\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "Client" not in dead_names, "Client is referenced in Service type annotation"
+
+    def test_warm_path_intra_file_function_call(self, tmp_path):
+        """Warm path: helper function called only within the same file is not dead."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            "def normalize(s: str) -> str:\n"
+            "    return s.strip().lower()\n\n"
+            "class Processor:\n"
+            "    def process(self, val: str) -> str:\n"
+            "        return normalize(val)\n"
+        )
+
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "normalize" not in dead_names, "normalize is called by Processor.process"
+
 
 class TestFindDeadCode:
     """Tests for find_dead_code() in transform.py."""

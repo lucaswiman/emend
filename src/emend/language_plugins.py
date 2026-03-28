@@ -6,9 +6,8 @@ Each language plugin composes three handlers:
 - ``PatternCompiler``: compile pattern strings to the Rust IR
 
 Phase 2a defines the ABCs and the ``LanguagePlugin`` dataclass.
-Phase 2b provides ``NoOpImportHandler``, ``RegexCommentHandler``, and
-``NoOpPatternCompiler`` as generic stubs used for languages that do not yet
-have a dedicated plugin.
+Phase 2b provides ``NoOpImportHandler`` and ``RegexCommentHandler`` as generic
+stubs used for languages that do not yet have a dedicated plugin.
 
 Phase 2c extracts Python-specific code into ``PythonImportHandler``,
 ``PythonCommentHandler``, and ``PythonPatternCompiler`` in ``python_plugin.py``.
@@ -452,14 +451,6 @@ class DocCommentHandler(RegexCommentHandler):
 
         if changed:
             return "".join(lines)
-        return None
-
-
-class NoOpPatternCompiler(PatternCompiler):
-    """Pattern compiler that defers to the default Rust IR path (returns None)."""
-
-    def compile(self, pattern_str: str) -> dict | None:
-        # Returning None signals callers to use the default compilation path.
         return None
 
 
