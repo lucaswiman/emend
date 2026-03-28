@@ -3359,6 +3359,10 @@ def mcp_cmd(
         int,
         typer.Option("--port", "-p", help="Port for SSE transport")
     ] = 8000,
+    schema: Annotated[
+        bool,
+        typer.Option("--schema", help="Print the MCP tool schema as JSON and exit")
+    ] = False,
 ):
     """Start an MCP (Model Context Protocol) server.
 
@@ -3370,8 +3374,13 @@ def mcp_cmd(
     Examples:
         emend mcp
         emend mcp --transport sse --port 8080
+        emend mcp --schema
     """
     try:
+        if schema:
+            from emend.mcp_server import dump_schema
+            print(dump_schema())
+            return
         from emend.mcp_server import run_server
     except ImportError:
         print(

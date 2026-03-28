@@ -1225,6 +1225,25 @@ def _warm_caches_background() -> None:
     proc.start()
 
 
+def dump_schema() -> str:
+    """Return the MCP tool schema as a JSON string.
+
+    Each tool is serialised with its name, description, and full
+    JSON-Schema ``inputSchema`` derived from the Pydantic/Field
+    annotations on the tool functions.
+    """
+    tools = mcp_app._tool_manager.list_tools()
+    result = [
+        {
+            "name": t.name,
+            "description": t.description or "",
+            "inputSchema": t.parameters,
+        }
+        for t in tools
+    ]
+    return json.dumps({"tools": result}, indent=2)
+
+
 def run_server(transport: str = "stdio", port: int = 8000) -> None:
     """Start the MCP server."""
     if transport not in ("stdio", "sse"):
