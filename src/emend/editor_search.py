@@ -1043,6 +1043,64 @@ class EditorSearchEngine:
             query=qualified_name,
         )
 
+    # -- DSL goto-definition ------------------------------------------------
+
+    def dsl_goto_definition(
+        self, file: str, line: int, col: int
+    ) -> SearchResult:
+        """Jump from a cursor inside a DSL region to the host-language definition.
+
+        Args:
+            file: Host file path.
+            line: 1-based line number of cursor.
+            col: 0-based column of cursor.
+
+        Returns:
+            SearchResult with resolved definition locations.
+        """
+        import time as _time
+        t0 = _time.monotonic()
+
+        from emend.dsl import (
+            detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
+            DslKind,
+        )
+
+        items: list[dict] = []
+        try:
+            regions = detect_dsl_regions(file)
+            # Find the region containing the cursor
+            target_region = None
+            for region in regions:
+                if (region.host_start_line <= line <= region.host_end_line):
+                    target_region = region
+                    break
+
+            if target_region and target_region.dsl == DslKind.SQL:
+                symbols = extract_sql_symbols(target_region)
+                if symbols:
+                    links = resolve_orm_links(symbols, self.project_root)
+                    for lnk in links:
+                        items.append({
+                            "dsl_symbol": lnk.dsl_symbol.name,
+                            "dsl_kind": lnk.dsl_symbol.kind.value,
+                            "target_qn": lnk.target_qualified_name,
+                            "target_file": lnk.target_file,
+                            "target_line": lnk.target_line,
+                            "strategy": lnk.strategy,
+                            "confidence": lnk.confidence,
+                        })
+        except Exception as e:
+            logger.warning("dsl_goto_definition error: %s", e)
+
+        elapsed = (_time.monotonic() - t0) * 1000
+        return SearchResult(
+            items=items,
+            elapsed_ms=round(elapsed, 2),
+            mode="dsl_goto_definition",
+            query=f"{file}:{line}:{col}",
+        )
+
     # -- file symbols (outline) ---------------------------------------------
 
     def file_symbols(
@@ -1870,6 +1928,12 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         ).to_dict()
     elif method == "types_at_cursor":
         return engine.types_at_cursor(
+            file=params.get("file", ""),
+            line=int(params.get("line", 0)),
+            col=int(params.get("col", 0)),
+        ).to_dict()
+    elif method == "dsl_goto_definition":
+        return engine.dsl_goto_definition(
             file=params.get("file", ""),
             line=int(params.get("line", 0)),
             col=int(params.get("col", 0)),

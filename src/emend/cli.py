@@ -388,6 +388,10 @@ def search(
         bool,
         typer.Option("--include-map", help="Take symbol / module mappings into account for resolution")
     ] = False,
+    include_dsl: Annotated[
+        bool,
+        typer.Option("--include-dsl", help="Include embedded DSL symbols (SQL tables, columns) in results")
+    ] = False,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -776,6 +780,25 @@ def search(
                             is_tty=is_tty,
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
+
+            # ---- DSL overlay for pattern mode ----
+            if include_dsl:
+                from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+                _lang = _state["language"]
+                target_path_dsl = path or "."
+                _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
+                dsl_symbols = []
+                for _dsl_f in _dsl_files:
+                    regions = detect_dsl_regions(str(_dsl_f))
+                    for region in regions:
+                        if region.dsl == DslKind.SQL:
+                            dsl_symbols.extend(extract_sql_symbols(region))
+                if dsl_symbols:
+                    from emend.dsl import format_symbols as _fmt_dsl
+                    _dsl_out = _fmt_dsl(dsl_symbols, json_output=json_output)
+                    if _dsl_out:
+                        print(f"\n-- DSL symbols --\n{_dsl_out}", end='')
+
             return
 
         # ---- LOOKUP MODE ----
@@ -818,6 +841,33 @@ def search(
         )
         if result:
             print(result, end='')
+
+        # ---- DSL SYMBOL OVERLAY ----
+        if include_dsl:
+            from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+            _lang = _state["language"]
+            # Determine which files to scan for DSL regions
+            _dsl_path = path or file_or_pattern or "."
+            _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
+            dsl_symbols = []
+            for _dsl_f in _dsl_files:
+                regions = detect_dsl_regions(str(_dsl_f))
+                for region in regions:
+                    if region.dsl == DslKind.SQL:
+                        dsl_symbols.extend(extract_sql_symbols(region))
+            # Filter DSL symbols by the query (bare name match)
+            _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
+            if _search_term and dsl_symbols:
+                matched_dsl = [s for s in dsl_symbols if _search_term in s.name or s.name in _search_term]
+                if matched_dsl:
+                    from emend.dsl import format_symbols
+                    if json_output:
+                        dsl_out = format_symbols(matched_dsl, json_output=True)
+                        print(f"\n-- DSL symbols --\n{dsl_out}")
+                    else:
+                        dsl_out = format_symbols(matched_dsl)
+                        if dsl_out:
+                            print(f"\n-- DSL symbols --\n{dsl_out}", end='')
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1433,8 +1483,8 @@ def taint_cmd(
         raise typer.Exit(1)
 
 
-@app.command("dsl")
-def dsl_cmd(
+@app.command("dsl-debug", hidden=True)
+def dsl_debug_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     dsl_type: Annotated[Optional[str], typer.Option("--type", help="DSL type to detect (sql, css, html)")] = None,
     orm: Annotated[str, typer.Option("--orm", help="ORM framework (sqlalchemy, django)")] = "sqlalchemy",
@@ -1442,16 +1492,16 @@ def dsl_cmd(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
 ):
-    """Detect and analyze embedded DSL regions (SQL, CSS, HTML).
+    """[Debug] Detect and analyze embedded DSL regions (SQL, CSS, HTML).
 
-    Scans source files for embedded DSL content, extracts symbols
-    (table names, column names, CSS classes), and optionally resolves
-    cross-language links to host-language definitions.
+    Diagnostic command for inspecting DSL detection and symbol extraction.
+    For production use, prefer `emend search --include-dsl` and
+    `emend refs --include-dsl`.
 
     Examples:
-        emend dsl src/
-        emend dsl app.py --type sql --resolve
-        emend dsl src/ --type sql --orm django --json
+        emend dsl-debug src/
+        emend dsl-debug app.py --type sql --resolve
+        emend dsl-debug src/ --type sql --orm django --json
     """
     try:
         from emend.dsl import DslKind, detect_dsl_regions, extract_sql_symbols, resolve_orm_links, format_symbols, DslSymbol, DslLink
@@ -1493,6 +1543,9 @@ def dsl_cmd(
         raise typer.Exit(1)
 
 
+app.command("dsl", hidden=True)(dsl_debug_cmd)
+
+
 @app.command("cp")
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
@@ -1525,6 +1578,7 @@ def refs_cmd(
     reads_only: Annotated[bool, typer.Option("--reads-only", help="Only show read (load) references")] = False,
     calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (not mere references)")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory (used with --calls-only)")] = None,
+    include_dsl: Annotated[bool, typer.Option("--include-dsl", help="Include references from embedded DSL regions (e.g. SQL table references)")] = False,
 ):
     """Find all references to a symbol across the project.
 
@@ -1599,6 +1653,55 @@ def refs_cmd(
                 elif ref.is_import:
                     marker = " (import)"
                 print(f"{ref.file_path}:{ref.line}{marker}", flush=True)
+
+        # ---- DSL cross-language references ----
+        if include_dsl:
+            from emend.dsl import (
+                detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
+                DslKind, DslSymbolKind,
+            )
+            # Extract the symbol name from the selector
+            _sel_name = parsed_selector.symbol_path[-1] if parsed_selector.symbol_path else ""
+            if _sel_name:
+                _proj = project or str(Path(parsed_selector.file_path).parent) if parsed_selector.file_path else "."
+                _lang = _state["language"]
+                _dsl_files, _ = resolve_files(_proj, language=_lang)
+                _dsl_all_symbols = []
+                for _dsl_f in _dsl_files:
+                    regions = detect_dsl_regions(str(_dsl_f))
+                    for region in regions:
+                        if region.dsl == DslKind.SQL:
+                            _dsl_all_symbols.extend(extract_sql_symbols(region))
+                if _dsl_all_symbols:
+                    # Resolve links to find which DSL symbols point to our target
+                    _dsl_links = resolve_orm_links(_dsl_all_symbols, _proj)
+                    _matched = [
+                        lnk for lnk in _dsl_links
+                        if _sel_name.lower() in lnk.target_qualified_name.lower()
+                    ]
+                    if _matched:
+                        if json_output:
+                            import json
+                            dsl_refs = [
+                                {
+                                    "file_path": lnk.dsl_symbol.host_file,
+                                    "line": lnk.dsl_symbol.host_line,
+                                    "column": lnk.dsl_symbol.host_col,
+                                    "dsl": lnk.dsl_symbol.dsl.value,
+                                    "dsl_symbol": lnk.dsl_symbol.name,
+                                    "confidence": lnk.confidence,
+                                }
+                                for lnk in _matched
+                            ]
+                            print(json.dumps(dsl_refs, indent=2))
+                        else:
+                            for lnk in _matched:
+                                print(
+                                    f"{lnk.dsl_symbol.host_file}:{lnk.dsl_symbol.host_line} "
+                                    f"(dsl:{lnk.dsl_symbol.dsl.value} {lnk.dsl_symbol.name})",
+                                    flush=True,
+                                )
+
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)
