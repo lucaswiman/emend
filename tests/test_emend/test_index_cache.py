@@ -35,7 +35,7 @@ class TestIndexBatchCacheHit:
 
         db_path = tmp_path / "parse.db"
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 
@@ -56,7 +56,7 @@ class TestIndexBatchCacheHit:
         _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
 
         # Warm run — must skip
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
         assert processed_n == 0
@@ -92,7 +92,7 @@ class TestIndexBatchCacheHit:
         conn.close()
 
         batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n = _index_batch(
+        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
             (str(db_path), str(tmp_path), str(tmp_path), batch)
         )
 

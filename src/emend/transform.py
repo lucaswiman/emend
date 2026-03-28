@@ -213,6 +213,54 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_ref_hash "
         "ON reference_index(content_hash)"
     )
+    # DSL tables for embedded language symbols and cross-language links
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS dsl_symbols ("
+        "  id INTEGER PRIMARY KEY,"
+        "  name TEXT NOT NULL,"
+        "  kind TEXT NOT NULL,"
+        "  dsl TEXT NOT NULL,"
+        "  host_file TEXT NOT NULL,"
+        "  host_start_line INTEGER NOT NULL,"
+        "  host_start_col INTEGER NOT NULL,"
+        "  host_end_line INTEGER NOT NULL,"
+        "  host_end_col INTEGER NOT NULL,"
+        "  content_hash BLOB NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dsl_name "
+        "ON dsl_symbols(name)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dsl_host "
+        "ON dsl_symbols(host_file)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dsl_hash "
+        "ON dsl_symbols(content_hash)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS dsl_links ("
+        "  id INTEGER PRIMARY KEY,"
+        "  dsl_symbol_name TEXT NOT NULL,"
+        "  dsl_symbol_file TEXT NOT NULL,"
+        "  target_qn TEXT NOT NULL,"
+        "  target_file TEXT,"
+        "  target_line INTEGER,"
+        "  strategy TEXT NOT NULL,"
+        "  confidence REAL NOT NULL,"
+        "  content_hash BLOB NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dsl_link_target "
+        "ON dsl_links(target_qn)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dsl_link_hash "
+        "ON dsl_links(content_hash)"
+    )
     conn.commit()
 
 
@@ -546,12 +594,12 @@ def _extract_noqa_lines(source: str) -> set[int]:
     return result
 
 
-def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int]:
+def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
     Runs in a subprocess.  Parses a batch of files, resolves qualified names,
-    collects symbol definitions, import relationships, and reference entries,
-    then writes directly to the SQLite disk cache.
+    collects symbol definitions, import relationships, reference entries,
+    and DSL symbols, then writes directly to the SQLite disk cache.
 
     Files whose content hash is already present in all cache tables are
     skipped (cache-hit fast path).
@@ -560,7 +608,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         args: (db_path, source_root, project_root, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count).
+        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count, dsl_count).
     """
     import pickle
     import sqlite3
@@ -573,9 +621,10 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     sym_rows: list[tuple] = []
     import_rows: list[tuple[bytes, str, str]] = []
     ref_rows: list[tuple] = []
+    dsl_rows: list[tuple] = []
 
     if not file_batch:
-        return (0, 0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0, 0, 0)
 
     # Scope resolver for QN and reference collection (replaces MetadataWrapper).
     scope_resolver = _rust.PyScopeResolver(project_root)
@@ -747,9 +796,30 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
+        # DSL symbol extraction (SQL, etc.)
+        try:
+            from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+            regions = detect_dsl_regions(py_file, source=content)
+            for region in regions:
+                if region.dsl == DslKind.SQL:
+                    for sym in extract_sql_symbols(region):
+                        dsl_rows.append((
+                            sym.name,
+                            sym.kind.value,
+                            sym.dsl.value,
+                            py_file,
+                            region.host_start_line,
+                            region.host_start_col,
+                            region.host_end_line,
+                            region.host_end_col,
+                            content_hash,
+                        ))
+        except Exception:
+            pass
+
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
-    has_data = qn_rows or sym_rows or import_rows or ref_rows
+    has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
     if has_data:
         try:
             conn = sqlite3.connect(db_path, timeout=30)
@@ -802,6 +872,20 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     ref_rows,
                 )
+            if dsl_rows:
+                hashes_with_dsl = list({r[-1] for r in dsl_rows})
+                placeholders = ",".join("?" * len(hashes_with_dsl))
+                conn.execute(
+                    f"DELETE FROM dsl_symbols WHERE content_hash IN ({placeholders})",
+                    hashes_with_dsl,
+                )
+                conn.executemany(
+                    "INSERT INTO dsl_symbols "
+                    "(name, kind, dsl, host_file, host_start_line, host_start_col, "
+                    "host_end_line, host_end_col, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    dsl_rows,
+                )
             conn.commit()
             conn.close()
         except Exception:
@@ -812,7 +896,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     # lock panics from concurrent subprocess writes.
 
     return (processed, len(qn_rows), skipped,
-            len(sym_rows), len(import_rows), len(ref_rows))
+            len(sym_rows), len(import_rows), len(ref_rows), len(dsl_rows))
 
 
 # ---------------------------------------------------------------------------
@@ -1959,7 +2043,7 @@ def warm_caches(
     stats: dict[str, int | str] = {
         "files": len(file_contents), "indexed": 0, "qn_cached": 0,
         "skipped": 0, "sym_cached": 0, "import_cached": 0, "ref_cached": 0,
-        "type_cached": 0, "type_engine": "",
+        "dsl_cached": 0, "type_cached": 0, "type_engine": "",
     }
 
     # Phase 2: parse + QN index in subprocesses.
@@ -1990,7 +2074,7 @@ def warm_caches(
     t0 = time.monotonic()
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
-        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n) in enumerate(
+        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n, dsl_n) in enumerate(
             executor.map(_index_batch, batches)
         ):
             stats["indexed"] += parse_n
@@ -1999,6 +2083,7 @@ def warm_caches(
             stats["sym_cached"] += sym_n
             stats["import_cached"] += import_n
             stats["ref_cached"] += ref_n
+            stats["dsl_cached"] += dsl_n
             # Report progress for all files in this batch
             if callback:
                 _db_path, _src, _proj, chunk = batches[batch_idx]
@@ -2006,10 +2091,11 @@ def warm_caches(
                     callback("index", py_file)
 
     logger.info(
-        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d)",
+        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d, dsl=%d)",
         stats["files"], time.monotonic() - t0,
         stats["indexed"], stats["qn_cached"],
         stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
+        stats["dsl_cached"],
     )
 
     # Phase 2.5: Update file_manifest and index_meta with freshness data.

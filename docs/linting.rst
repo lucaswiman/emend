@@ -95,6 +95,9 @@ Each rule is a mapping with a unique key (the rule name) and the following field
 +-----------------+----------+-----------------------------------------------+
 | ``not-through`` | No       | Sanitizer pattern for flow rules (see below)   |
 +-----------------+----------+-----------------------------------------------+
+| ``dsl``         | No       | DSL type for embedded-language rules (see      |
+|                 |          | below): ``sql``, ``css``, ``html``            |
++-----------------+----------+-----------------------------------------------+
 
 Patterns support the full emend pattern syntax including metavariables (``$X``, ``$...ARGS``), type constraints (``$X:str``), and all expression/statement forms. See :doc:`patterns` for the complete reference.
 
@@ -393,6 +396,55 @@ like regular pattern rules.
 For standalone taint analysis with more configuration options (labels, multiple
 source/sink/sanitizer groups, full traces), see the ``taint`` command in
 :doc:`commands`.
+
+
+DSL-aware lint rules
+--------------------
+
+Rules can target embedded DSL regions (SQL, CSS, HTML) instead of host-language
+code by setting the ``dsl`` field. The ``find`` pattern is matched against the
+content of detected DSL regions using case-insensitive regex with ``$METAVAR``
+support.
+
+Configuration
+~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   rules:
+     no-select-star:
+       dsl: sql
+       find: "SELECT * FROM $TABLE"
+       message: "Avoid SELECT *; enumerate columns explicitly"
+
+     no-delete-without-where:
+       dsl: sql
+       find: "DELETE FROM $TABLE"
+       message: "DELETE without WHERE clause is dangerous"
+
+How it works
+~~~~~~~~~~~~
+
+For each file, emend:
+
+1. Detects embedded DSL regions (SQL keyword heuristics, magic comments)
+2. Filters regions by the rule's ``dsl`` type
+3. Matches the ``find`` pattern against each region's content
+4. Reports violations with the host file location
+
+``$METAVAR`` placeholders match identifiers (e.g., table/column names).
+Whitespace in patterns matches any whitespace including newlines, so patterns
+work across multi-line SQL strings.
+
+DSL lint rules support ``# noqa`` suppression on the host-language line
+containing the match, just like regular rules.
+
+Example output
+~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   src/queries.py:42:0: [no-select-star] Avoid SELECT *; enumerate columns explicitly
 
 
 Dead code detection
