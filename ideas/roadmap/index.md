@@ -1,9 +1,10 @@
 # Roadmap
 
-All 8 phases of the original roadmap are complete.  This directory now holds
-design notes and deferred work only.
+**When you complete a task, check off its checkbox.**
 
-## Completed Phases
+---
+
+## Completed
 
 - [x] Phase 1: Impact analysis — `transform.py`, `emend impact`
 - [x] Phase 2: Intraprocedural taint — `taint.py`, `emend taint`
@@ -14,18 +15,56 @@ design notes and deferred work only.
 - [x] Phase 7: Rewrite/equality-saturation experiment — `rewrite_engine.py`, `emend saturate`
 - [x] Phase 8: Expert-mode policy/query surfaces — `policy.py`, `emend policy`, `emend query`
 
-## Design Notes
+---
 
-- The recommended order was intentionally front-loaded toward immediately useful
-  analysis features: impact first, then taint, then policy and query work.
-- The rewrite/equality-saturation work is kept explicitly experimental until the
-  analysis-side facts, provenance, and extraction semantics are well understood.
-- The long-term architecture is driven by a stable internal fact model rather
-  than premature commitment to one backend.
+## Taint Precision Improvements
 
-## Remaining Documents
+Spec: [taint-analysis.md](taint-analysis.md)
 
-- [taint-analysis.md](taint-analysis.md) — deferred precision improvements (field sensitivity, object dispatch)
+- [ ] Field sensitivity — treat `obj.field` as distinct from `obj`
+- [ ] Object-sensitive dispatch — resolve `obj.method()` by receiver type, not just name
+- [ ] High-precision container modeling — track taint through list/dict elements
+- [ ] Framework-specific source/sink/sanitizer rules — Django, Flask, SQLAlchemy
+
+---
+
+## DSL Support for Embedded Languages
+
+Spec: [dsl-support.md](dsl-support.md)
+
+### Phase 1: Infrastructure
+
+- [ ] Add tree-sitter grammars for SQL, HTML, CSS, Jinja to `emend_core`
+- [ ] Implement injection detection in `emend_core` (call-based, tag-based, magic-comment, file-extension)
+- [ ] Implement `DslSymbolExtractor` for SQL (tables, columns), CSS (selectors), JSX (component tags)
+- [ ] Add `dsl_symbols` table to `parse.db`; wire into `emend index`
+
+### Phase 2: Link resolution + navigation
+
+- [ ] Implement `DslLinkResolver` with strategies: `orm_model`, `orm_column`, `component_export`, `css_class_usage`
+- [ ] Add `dsl_links` table and populate during indexing
+- [ ] Wire `--include-dsl` into `search` and `refs`
+- [ ] Add `dsl_goto_definition` to `editor-server`
+
+### Phase 3: Pattern matching in DSL regions
+
+- [ ] Extend pattern grammar with `--dsl` mode for DSL-specific node types
+- [ ] Add DSL-aware lint rules to lint engine
+- [ ] Implement `find`/`replace` inside DSL regions
+
+### Phase 4: Tier 2 DSLs + deeper integration
+
+- [ ] Jinja2/Django template support: variable resolution, block inheritance
+- [ ] GraphQL support: schema-to-resolver linking, query-to-type navigation
+- [ ] Regex named group navigation: `(?P<name>...)` → `.group("name")` call sites
+- [ ] `impact` command integration: ORM model changes surface affected SQL queries and JSX call sites
+
+---
+
+## Reference Documents
+
+- [taint-analysis.md](taint-analysis.md) — deferred taint precision work
+- [dsl-support.md](dsl-support.md) — DSL support full spec
 - [query-language-for-code-invariants.md](query-language-for-code-invariants.md) — ongoing witness-quality requirement
 - [rewrite-and-saturation.md](rewrite-and-saturation.md) — open design questions for the experimental rewrite engine
 - [backend-options.md](backend-options.md) — architecture rationale (CozoDB vs egglog)
