@@ -938,17 +938,7 @@ pub fn build_cfg(node: tree_sitter::Node, source: &[u8]) -> FunctionCfg {
 
 /// Build CFGs for all top-level and nested functions in a source file.
 pub fn build_cfgs_for_source(source: &str, ext: &str) -> Vec<FunctionCfg> {
-    let language = match ext {
-        "py" | "pyi" => tree_sitter_python::LANGUAGE,
-        _ => tree_sitter_python::LANGUAGE, // default to Python for now
-    };
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language.into())
-        .expect("Failed to set tree-sitter language");
-
-    let tree = match parser.parse(source, None) {
+    let tree = match crate::pattern::parse_by_extension(source, ext) {
         Some(t) => t,
         None => return Vec::new(),
     };

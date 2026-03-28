@@ -3278,7 +3278,7 @@ def cfg_cmd(
         files = [str(f) for f in resolved]
 
         all_cfgs: list = []
-        file_map: dict = {}  # cfg -> file_path
+        cfg_files: list[str] = []
 
         for fpath in files:
             try:
@@ -3291,7 +3291,7 @@ def cfg_cmd(
                 if function and cfg.func_name != function:
                     continue
                 all_cfgs.append(cfg)
-                file_map[id(cfg)] = fpath
+                cfg_files.append(fpath)
 
         if not all_cfgs:
             if function:
@@ -3301,19 +3301,18 @@ def cfg_cmd(
             raise typer.Exit(2)
 
         if unreachable:
-            # Only report unreachable blocks
             results = []
-            for cfg in all_cfgs:
+            for i, cfg in enumerate(all_cfgs):
                 blocks = find_unreachable_blocks(cfg)
                 if blocks:
                     results.append({
-                        "file": file_map[id(cfg)],
+                        "file": cfg_files[i],
                         "function": cfg.func_name,
                         "unreachable_blocks": blocks,
                     })
             if output_format == "json":
-                import json as json_mod
-                print(json_mod.dumps(results, indent=2))
+                import json
+                print(json.dumps(results, indent=2))
             else:
                 if not results:
                     print("No unreachable blocks found.")
@@ -3328,20 +3327,24 @@ def cfg_cmd(
             raise typer.Exit(0)
 
         if output_format == "json":
-            # Collect all CFGs with file info
             print(format_cfgs_json(all_cfgs, file_path=files[0] if len(files) == 1 else None))
         elif output_format == "dot":
             print(format_cfgs_dot(all_cfgs))
         else:
             parts = []
-            for cfg in all_cfgs:
-                fpath = file_map[id(cfg)]
-                parts.append(f"# {fpath}")
+            for i, cfg in enumerate(all_cfgs):
+                parts.append(f"# {cfg_files[i]}")
                 parts.append(format_cfg_text(cfg))
             print("\n\n".join(parts))
 
     except typer.Exit:
         raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
