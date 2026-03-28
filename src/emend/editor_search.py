@@ -1045,22 +1045,8 @@ class EditorSearchEngine:
 
     # -- DSL goto-definition ------------------------------------------------
 
-    def dsl_goto_definition(
-        self, file: str, line: int, col: int
-    ) -> SearchResult:
-        """Jump from a cursor inside a DSL region to the host-language definition.
-
-        Args:
-            file: Host file path.
-            line: 1-based line number of cursor.
-            col: 0-based column of cursor.
-
-        Returns:
-            SearchResult with resolved definition locations.
-        """
-        import time as _time
-        t0 = _time.monotonic()
-
+    def _goto_dsl_fallback(self, file: str, line: int) -> SearchResult:
+        """Fallback for goto_local: resolve DSL symbols at the cursor line."""
         from emend.dsl import (
             detect_dsl_regions, extract_sql_symbols, resolve_orm_links,
             DslKind,
@@ -1069,37 +1055,25 @@ class EditorSearchEngine:
         items: list[dict] = []
         try:
             regions = detect_dsl_regions(file)
-            # Find the region containing the cursor
-            target_region = None
             for region in regions:
-                if (region.host_start_line <= line <= region.host_end_line):
-                    target_region = region
+                if region.host_start_line <= line <= region.host_end_line and region.dsl == DslKind.SQL:
+                    symbols = extract_sql_symbols(region)
+                    if symbols:
+                        links = resolve_orm_links(symbols, self.project_root)
+                        for lnk in links:
+                            items.append({
+                                "name": lnk.target_qualified_name.split(".")[-1],
+                                "kind": "class",
+                                "file_path": lnk.target_file,
+                                "line": lnk.target_line,
+                                "col": 0,
+                                "qualified_name": lnk.target_qualified_name,
+                            })
                     break
-
-            if target_region and target_region.dsl == DslKind.SQL:
-                symbols = extract_sql_symbols(target_region)
-                if symbols:
-                    links = resolve_orm_links(symbols, self.project_root)
-                    for lnk in links:
-                        items.append({
-                            "dsl_symbol": lnk.dsl_symbol.name,
-                            "dsl_kind": lnk.dsl_symbol.kind.value,
-                            "target_qn": lnk.target_qualified_name,
-                            "target_file": lnk.target_file,
-                            "target_line": lnk.target_line,
-                            "strategy": lnk.strategy,
-                            "confidence": lnk.confidence,
-                        })
         except Exception as e:
-            logger.warning("dsl_goto_definition error: %s", e)
+            logger.warning("_goto_dsl_fallback error: %s", e)
 
-        elapsed = (_time.monotonic() - t0) * 1000
-        return SearchResult(
-            items=items,
-            elapsed_ms=round(elapsed, 2),
-            mode="dsl_goto_definition",
-            query=f"{file}:{line}:{col}",
-        )
+        return SearchResult(items=items, elapsed_ms=0, mode="symbol")
 
     # -- file symbols (outline) ---------------------------------------------
 
@@ -1313,7 +1287,13 @@ class EditorSearchEngine:
                                     target_qn = b_name
 
         if not target_qn:
-            logger.debug(f"goto_local: no target_qn found at line={line}, col={col}")
+            logger.debug(f"goto_local: no target_qn found at line={line}, col={col}, trying DSL fallback")
+            # DSL fallback: if cursor is inside an embedded DSL region (e.g. SQL
+            # string), resolve table/column names to host-language definitions.
+            dsl_result = self._goto_dsl_fallback(str(file_path), line)
+            if dsl_result.items:
+                dsl_result.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
+                return dsl_result
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # 1. Local definition in the same file
@@ -1928,12 +1908,6 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         ).to_dict()
     elif method == "types_at_cursor":
         return engine.types_at_cursor(
-            file=params.get("file", ""),
-            line=int(params.get("line", 0)),
-            col=int(params.get("col", 0)),
-        ).to_dict()
-    elif method == "dsl_goto_definition":
-        return engine.dsl_goto_definition(
             file=params.get("file", ""),
             line=int(params.get("line", 0)),
             col=int(params.get("col", 0)),
