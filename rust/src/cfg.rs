@@ -352,8 +352,21 @@ impl<'a> CfgBuilder<'a> {
             return;
         }
 
-        // Fallback: generic walk for identifiers
-        self.collect_uses_from_expr(block_id, node);
+        // Fallback: recurse into named children looking for def_use_rule matches
+        // (e.g., lexical_declaration > variable_declarator in TS)
+        let mut found_rule = false;
+        let rule_nodes: Vec<String> = self.cfg_sec.def_use_rules.iter().map(|r| r.node.clone()).collect();
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.children(&mut cursor).filter(|c| c.is_named()).collect();
+        for child in children {
+            if rule_nodes.iter().any(|r| r == child.kind()) {
+                self.collect_defs_uses(block_id, child);
+                found_rule = true;
+            }
+        }
+        if !found_rule {
+            self.collect_uses_from_expr(block_id, node);
+        }
     }
 
     fn collect_defs_from_target(&mut self, block_id: BlockId, node: tree_sitter::Node) {
@@ -451,6 +464,30 @@ impl<'a> CfgBuilder<'a> {
         current: BlockId,
     ) -> Option<BlockId> {
         let kind = node.kind();
+
+        // Unwrap expression_statement to check if inner is a control flow node.
+        // Languages like Rust wrap if/match/loop expressions in expression_statement.
+        if !self.cfg_sec.expression_statement_node.is_empty()
+            && kind == self.cfg_sec.expression_statement_node
+        {
+            if let Some(inner) = node.named_child(0) {
+                let ik = inner.kind();
+                let is_cf = self.cfg_sec.if_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.for_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.c_style_for_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.while_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.loop_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.try_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.match_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.return_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.throw_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.break_nodes.iter().any(|n| n == ik)
+                    || self.cfg_sec.continue_nodes.iter().any(|n| n == ik);
+                if is_cf {
+                    return self.walk_statement(inner, current);
+                }
+            }
+        }
 
         if self.cfg_sec.if_nodes.iter().any(|n| n == kind) {
             return self.walk_if(node, current);
