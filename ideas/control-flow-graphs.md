@@ -1,5 +1,18 @@
 # Per-Function Control Flow Graphs
 
+**Status: IMPLEMENTED** — `cfg.py` (Python), `cfg.rs` / `cfg_py.rs` (Rust/PyO3 in
+`emend_core`).  CLI: `emend cfg --function --format text|json|dot --unreachable`.
+Fact graph integration: `CfgEdgeFact`, `DefUseFact` with CozoDB schema.
+Multi-language: Python, TypeScript/JS, Rust.  Dominators and post-dominators
+computed iteratively.  See `tests/test_emend/test_cfg.py`,
+`test_cfg_typescript.py`, `test_cfg_rust.py`.
+
+The sections below are the original design document, preserved as historical
+context.  The "What Exists Today" section describes the pre-implementation
+state.
+
+---
+
 ## Motivation
 
 Today every intraprocedural analysis in emend (taint, flow-rule lint, typestate

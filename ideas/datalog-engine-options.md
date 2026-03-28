@@ -1,5 +1,13 @@
 # Datalog Engine Options
 
+**Status: IMPLEMENTED** — CozoDB v0.7.6 selected and integrated as a Rust
+dependency in `emend_core`.  `FactGraph` is CozoDB-backed with Datalog
+recursive rules for transitive closures and dead code.  `emend facts` CLI,
+`DatalogCheck` policy type, and `emend query` are live.  See
+`next-analyses.md` §1 for the implementation summary.
+
+---
+
 ## Requirements
 
 The fact graph (symbols, calls, references, taint flows, types, imports) is
