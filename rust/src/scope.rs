@@ -243,6 +243,8 @@ pub struct LanguageConfig {
     pub symbols: SymbolsSection,
     #[serde(default)]
     pub pattern_matching: PatternMatchingSection,
+    #[serde(default)]
+    pub cfg: CfgSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -710,6 +712,184 @@ pub struct ExportsSection {
     pub private_prefix: String,
     #[serde(default)]
     pub dunder_is_public: bool,
+}
+
+// ---------------------------------------------------------------------------
+// CFG config section
+// ---------------------------------------------------------------------------
+
+/// A def/use extraction rule: for a given tree-sitter node type,
+/// specifies which field holds the assignment target and which holds the value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefUseRule {
+    pub node: String,
+    pub target: String,
+    pub value: String,
+}
+
+/// Language-specific configuration for the CFG builder.
+///
+/// All fields are optional with serde defaults so that configs without a
+/// `[cfg]` section still parse (the builder falls back to empty sets which
+/// effectively disables CFG construction for that language unless explicitly
+/// configured).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CfgSection {
+    // -- Function collection --------------------------------------------------
+    /// Tree-sitter node types that represent function definitions.
+    #[serde(default)]
+    pub function_nodes: Vec<String>,
+    /// Wrapper node for decorated definitions (e.g. Python's "decorated_definition").
+    #[serde(default)]
+    pub decorated_node: String,
+    /// Container nodes to recurse into when collecting functions (e.g. class bodies).
+    #[serde(default)]
+    pub container_nodes: Vec<String>,
+    /// Compound definition nodes whose bodies are skipped in CFG (don't affect flow).
+    #[serde(default)]
+    pub definition_nodes: Vec<String>,
+    /// Block-like nodes that contain statement children (e.g. "block", "statement_block").
+    #[serde(default)]
+    pub block_nodes: Vec<String>,
+
+    // -- Control flow node types ----------------------------------------------
+    #[serde(default)]
+    pub if_nodes: Vec<String>,
+    #[serde(default)]
+    pub for_nodes: Vec<String>,
+    /// C-style for loops (TS "for_statement") — separate from for-each.
+    #[serde(default)]
+    pub c_style_for_nodes: Vec<String>,
+    #[serde(default)]
+    pub while_nodes: Vec<String>,
+    /// Infinite loop nodes (Rust "loop_expression").
+    #[serde(default)]
+    pub loop_nodes: Vec<String>,
+    #[serde(default)]
+    pub try_nodes: Vec<String>,
+    #[serde(default)]
+    pub with_nodes: Vec<String>,
+    #[serde(default)]
+    pub match_nodes: Vec<String>,
+    #[serde(default)]
+    pub return_nodes: Vec<String>,
+    #[serde(default)]
+    pub throw_nodes: Vec<String>,
+    #[serde(default)]
+    pub break_nodes: Vec<String>,
+    #[serde(default)]
+    pub continue_nodes: Vec<String>,
+    #[serde(default)]
+    pub assert_nodes: Vec<String>,
+
+    // -- If handling ----------------------------------------------------------
+    /// "children" (Python: elif_clause/else_clause children) or
+    /// "alternative" (TS/Rust: nested if in alternative field).
+    #[serde(default)]
+    pub if_style: String,
+    /// Node type for elif clauses (Python only: "elif_clause").
+    #[serde(default)]
+    pub elif_clause: String,
+    /// Node type for else clauses.
+    #[serde(default)]
+    pub else_clause: String,
+    /// Field name for the alternative branch (TS/Rust: "alternative").
+    #[serde(default)]
+    pub alternative_field: String,
+    /// Wrapper node around else body (Rust: "else_clause"; empty = direct).
+    #[serde(default)]
+    pub else_wrapper: String,
+
+    // -- For handling ---------------------------------------------------------
+    /// Field name for the loop variable.
+    #[serde(default)]
+    pub for_variable_field: String,
+    /// Field name for the iterable.
+    #[serde(default)]
+    pub for_iterable_field: String,
+    /// Whether for loops can have else clauses (Python only).
+    #[serde(default)]
+    pub for_has_else: bool,
+
+    // -- While handling -------------------------------------------------------
+    /// Whether while loops can have else clauses (Python only).
+    #[serde(default)]
+    pub while_has_else: bool,
+
+    // -- Try handling ---------------------------------------------------------
+    /// "children" (Python: except_clause children) or
+    /// "fields" (TS: handler/finalizer fields).
+    #[serde(default)]
+    pub try_style: String,
+    /// Node type for the try body (Python: "block").
+    #[serde(default)]
+    pub try_body_node: String,
+    /// Node types for except/catch clauses (Python: ["except_clause", ...]).
+    #[serde(default)]
+    pub except_clauses: Vec<String>,
+    /// Node type for the else clause in try (Python: "else_clause").
+    #[serde(default)]
+    pub try_else_clause: String,
+    /// Node type for the finally clause (Python: "finally_clause").
+    #[serde(default)]
+    pub try_finally_clause: String,
+    /// Field name for the catch handler (TS: "handler").
+    #[serde(default)]
+    pub catch_field: String,
+    /// Field name for the finalizer (TS: "finalizer").
+    #[serde(default)]
+    pub finalizer_field: String,
+
+    // -- Match/Switch handling ------------------------------------------------
+    /// Field name for the match subject expression.
+    #[serde(default)]
+    pub match_subject_field: String,
+    /// Field name for the match body containing arms/cases (empty = direct children).
+    #[serde(default)]
+    pub match_body_field: String,
+    /// Node type for case/arm clauses.
+    #[serde(default)]
+    pub case_clause: String,
+    /// Node type for default case (TS: "switch_default").
+    #[serde(default)]
+    pub case_default: String,
+    /// Node type for case body (Python: "block").
+    #[serde(default)]
+    pub case_body_node: String,
+    /// Field name for case body (Rust: "value").
+    #[serde(default)]
+    pub case_body_field: String,
+    /// Whether cases fall through to the next (true for switch, false for match).
+    #[serde(default)]
+    pub switch_fallthrough: bool,
+
+    // -- Common field names ---------------------------------------------------
+    #[serde(default)]
+    pub condition_field: String,
+    #[serde(default)]
+    pub consequence_field: String,
+    #[serde(default)]
+    pub body_field: String,
+
+    // -- Def/use extraction ---------------------------------------------------
+    /// Rules mapping node types to their target (def) and value (use) fields.
+    #[serde(default)]
+    pub def_use_rules: Vec<DefUseRule>,
+    /// Node type for expression statements.
+    #[serde(default)]
+    pub expression_statement_node: String,
+    /// Node type for identifiers.
+    #[serde(default)]
+    pub identifier_node: String,
+    /// Identifier names to skip (keywords parsed as identifiers).
+    #[serde(default)]
+    pub skip_identifiers: Vec<String>,
+    /// Node types for destructuring targets (tuple/list unpacking).
+    #[serde(default)]
+    pub destructure_nodes: Vec<String>,
+    /// Node types for attribute/subscript access (use, not def, on LHS).
+    #[serde(default)]
+    pub attribute_access_nodes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

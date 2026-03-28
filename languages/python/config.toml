@@ -358,3 +358,65 @@ target_field = "left"
 iter_field = "right"
 elt_field = "body"
 
+# ---------------------------------------------------------------------------
+# Control flow graph (CFG) construction
+# ---------------------------------------------------------------------------
+[cfg]
+function_nodes = ["function_definition", "async_function_definition"]
+decorated_node = "decorated_definition"
+container_nodes = ["class_definition"]
+definition_nodes = ["function_definition", "async_function_definition", "class_definition", "decorated_definition"]
+block_nodes = ["block", "module"]
+
+if_nodes = ["if_statement"]
+if_style = "children"
+elif_clause = "elif_clause"
+else_clause = "else_clause"
+
+for_nodes = ["for_statement"]
+for_variable_field = "left"
+for_iterable_field = "right"
+for_has_else = true
+
+while_nodes = ["while_statement"]
+while_has_else = true
+
+try_nodes = ["try_statement"]
+try_style = "children"
+try_body_node = "block"
+except_clauses = ["except_clause", "except_group_clause"]
+try_else_clause = "else_clause"
+try_finally_clause = "finally_clause"
+
+with_nodes = ["with_statement"]
+
+match_nodes = ["match_statement"]
+match_subject_field = "subject"
+case_clause = "case_clause"
+case_body_node = "block"
+
+return_nodes = ["return_statement"]
+throw_nodes = ["raise_statement"]
+break_nodes = ["break_statement"]
+continue_nodes = ["continue_statement"]
+assert_nodes = ["assert_statement"]
+
+condition_field = "condition"
+consequence_field = "consequence"
+body_field = "body"
+
+expression_statement_node = "expression_statement"
+identifier_node = "identifier"
+skip_identifiers = ["True", "False", "None", "self", "cls"]
+destructure_nodes = ["tuple", "list", "pattern_list", "tuple_pattern"]
+attribute_access_nodes = ["subscript", "attribute"]
+
+[[cfg.def_use_rules]]
+node = "assignment"
+target = "left"
+value = "right"
+
+[[cfg.def_use_rules]]
+node = "augmented_assignment"
+target = "left"
+value = "right"

@@ -215,3 +215,60 @@ condition_field = "condition"
 target_field = "left"
 iter_field = "right"
 elt_field = "body"
+
+# ---------------------------------------------------------------------------
+# Control flow graph (CFG) construction
+# ---------------------------------------------------------------------------
+[cfg]
+function_nodes = ["function_item"]
+container_nodes = ["impl_item", "trait_item", "mod_item"]
+definition_nodes = ["function_item", "struct_item", "enum_item", "trait_item", "impl_item", "mod_item", "closure_expression"]
+block_nodes = ["block", "source_file"]
+
+if_nodes = ["if_expression"]
+if_style = "alternative"
+alternative_field = "alternative"
+else_wrapper = "else_clause"
+
+for_nodes = ["for_expression"]
+for_variable_field = "pattern"
+for_iterable_field = "value"
+
+while_nodes = ["while_expression"]
+
+loop_nodes = ["loop_expression"]
+
+match_nodes = ["match_expression"]
+match_subject_field = "value"
+match_body_field = "body"
+case_clause = "match_arm"
+case_body_field = "value"
+
+return_nodes = ["return_expression"]
+break_nodes = ["break_expression"]
+continue_nodes = ["continue_expression"]
+
+condition_field = "condition"
+consequence_field = "consequence"
+body_field = "body"
+
+expression_statement_node = "expression_statement"
+identifier_node = "identifier"
+skip_identifiers = ["self", "Self", "true", "false"]
+destructure_nodes = ["tuple_pattern", "struct_pattern", "slice_pattern"]
+attribute_access_nodes = ["field_expression", "index_expression"]
+
+[[cfg.def_use_rules]]
+node = "assignment_expression"
+target = "left"
+value = "right"
+
+[[cfg.def_use_rules]]
+node = "compound_assignment_expr"
+target = "left"
+value = "right"
+
+[[cfg.def_use_rules]]
+node = "let_declaration"
+target = "pattern"
+value = "value"
