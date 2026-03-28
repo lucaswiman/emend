@@ -3,10 +3,12 @@
 //! Wraps `crate::cfg::FunctionCfg` as `PyCfg` and exposes `build_cfgs`
 //! as a Python-callable function.
 
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::cfg::{build_cfgs_for_source, BlockId, EdgeKind, FunctionCfg};
+use crate::cfg::{build_cfgs_for_source, BlockId, FunctionCfg};
 
 // ─── PyCfg ──────────────────────────────────────────────────────────────────
 
@@ -114,7 +116,7 @@ impl PyCfg {
             let d = PyDict::new(py);
             d.set_item("from", edge.from.0)?;
             d.set_item("to", edge.to.0)?;
-            d.set_item("kind", edge_kind_str(&edge.kind))?;
+            d.set_item("kind", edge.kind.as_str())?;
             match edge.condition {
                 Some((sb, eb)) => {
                     d.set_item("condition_bytes", PyTuple::new(py, [sb, eb])?)?;
@@ -172,6 +174,36 @@ impl PyCfg {
         v
     }
 
+    /// Compute the full dominator map for all blocks at once.
+    ///
+    /// Returns a dict mapping block_id → sorted list of dominator block_ids.
+    fn all_dominators(&self) -> HashMap<u32, Vec<u32>> {
+        self.inner
+            .all_dominators()
+            .into_iter()
+            .map(|(k, v)| {
+                let mut ids: Vec<u32> = v.into_iter().map(|b| b.0).collect();
+                ids.sort();
+                (k.0, ids)
+            })
+            .collect()
+    }
+
+    /// Compute the full post-dominator map for all blocks at once.
+    ///
+    /// Returns a dict mapping block_id → sorted list of post-dominator block_ids.
+    fn all_post_dominators(&self) -> HashMap<u32, Vec<u32>> {
+        self.inner
+            .all_post_dominators()
+            .into_iter()
+            .map(|(k, v)| {
+                let mut ids: Vec<u32> = v.into_iter().map(|b| b.0).collect();
+                ids.sort();
+                (k.0, ids)
+            })
+            .collect()
+    }
+
     // ── Counts ──────────────────────────────────────────────────────────────
 
     /// Number of basic blocks in this CFG.
@@ -215,7 +247,7 @@ impl PyCfg {
         }
 
         for edge in &self.inner.edges {
-            let kind = edge_kind_str(&edge.kind);
+            let kind = edge.kind.as_str();
             out.push_str(&format!(
                 "  {} -> {} [label=\"{}\"];\n",
                 edge.from.0, edge.to.0, kind
@@ -260,7 +292,7 @@ impl PyCfg {
                 serde_json::json!({
                     "from": e.from.0,
                     "to": e.to.0,
-                    "kind": edge_kind_str(&e.kind),
+                    "kind": e.kind.as_str(),
                     "condition_bytes": cond,
                 })
             })
@@ -305,11 +337,6 @@ pub fn build_cfgs(source: &str, ext: Option<&str>) -> PyResult<Vec<PyCfg>> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Map an `EdgeKind` to its lowercase string representation.
-fn edge_kind_str(kind: &EdgeKind) -> &'static str {
-    kind.as_str()
-}
 
 /// Escape a string for use inside a DOT label or graph name (double-quoted).
 /// Backslash-escapes `"` and `\`; literal `\n` sequences are left intact so

@@ -3282,7 +3282,7 @@ def cfg_cmd(
 
         for fpath in files:
             try:
-                source, cfgs = build_cfgs_for_file(fpath)
+                cfgs = build_cfgs_for_file(fpath)
             except Exception as exc:
                 logger.debug("CFG build failed for %s: %s", fpath, exc)
                 continue
@@ -3339,8 +3339,6 @@ def cfg_cmd(
                 parts.append(f"# {fpath}")
                 parts.append(format_cfg_text(cfg))
             print("\n\n".join(parts))
-
-        raise typer.Exit(0)
 
     except typer.Exit:
         raise

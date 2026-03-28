@@ -30,13 +30,12 @@ def build_cfgs_for_source(source: str, ext: str = "py"):
 def build_cfgs_for_file(file_path: str, *, ext: str | None = None):
     """Build CFGs for all functions in the file at *file_path*.
 
-    Returns ``(source, cfgs)`` where *cfgs* is a list of ``PyCfg``.
+    Returns a list of ``PyCfg`` objects.
     """
     path = Path(file_path)
     source = path.read_text()
     extension = ext or path.suffix.lstrip(".") or "py"
-    cfgs = build_cfgs_for_source(source, ext=extension)
-    return source, cfgs
+    return build_cfgs_for_source(source, ext=extension)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ def build_cfgs_for_file(file_path: str, *, ext: str | None = None):
 # ---------------------------------------------------------------------------
 
 
-def format_cfg_text(cfg, source: str | None = None) -> str:
+def format_cfg_text(cfg) -> str:
     """Human-readable text representation of a single CFG."""
     lines: list[str] = []
     lines.append(
@@ -88,15 +87,8 @@ def format_cfgs_json(cfgs, file_path: str | None = None) -> str:
 
     data = []
     for cfg in cfgs:
-        entry = {
-            "func_name": cfg.func_name,
-            "func_start_line": cfg.func_start_line,
-            "func_end_line": cfg.func_end_line,
-            "entry": cfg.entry,
-            "exit": cfg.exit,
-            "blocks": cfg.get_blocks(),
-            "edges": cfg.get_edges(),
-        }
+        # Use Rust-side to_json() to avoid PyO3 round-trip for blocks/edges
+        entry = json.loads(cfg.to_json())
         if file_path:
             entry["file"] = file_path
         data.append(entry)
@@ -122,6 +114,12 @@ def find_unreachable_blocks(cfg) -> list[dict]:
     Each result is a dict from ``get_blocks()`` for the unreachable block.
     The synthetic exit block is excluded.
     """
+    # Build adjacency from edges once to avoid per-block PyO3 round-trips
+    edges = cfg.get_edges()
+    succ: dict[int, list[int]] = {}
+    for e in edges:
+        succ.setdefault(e["from"], []).append(e["to"])
+
     # BFS from entry
     reachable: set[int] = set()
     queue = [cfg.entry]
@@ -130,7 +128,7 @@ def find_unreachable_blocks(cfg) -> list[dict]:
         if bid in reachable:
             continue
         reachable.add(bid)
-        queue.extend(cfg.successors(bid))
+        queue.extend(succ.get(bid, []))
 
     unreachable = []
     for block in cfg.get_blocks():

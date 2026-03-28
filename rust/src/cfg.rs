@@ -106,34 +106,58 @@ impl FunctionCfg {
             .collect()
     }
 
-    /// Compute the set of dominators for a given block using the iterative
-    /// algorithm.  dom[n] = {n} ∪ ⋂{dom[p] | p ∈ preds(n)}.
-    pub fn dominators(&self, block_id: BlockId) -> HashSet<BlockId> {
-        let all_ids: HashSet<BlockId> = self.blocks.iter().map(|b| b.id).collect();
+    /// Build predecessor adjacency list (block_id → list of predecessors).
+    fn pred_adj(&self) -> HashMap<BlockId, Vec<BlockId>> {
+        let mut adj: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for b in &self.blocks {
+            adj.insert(b.id, Vec::new());
+        }
+        for e in &self.edges {
+            adj.entry(e.to).or_default().push(e.from);
+        }
+        adj
+    }
+
+    /// Build successor adjacency list (block_id → list of successors).
+    fn succ_adj(&self) -> HashMap<BlockId, Vec<BlockId>> {
+        let mut adj: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for b in &self.blocks {
+            adj.insert(b.id, Vec::new());
+        }
+        for e in &self.edges {
+            adj.entry(e.from).or_default().push(e.to);
+        }
+        adj
+    }
+
+    /// Iterative dominator fixpoint using pre-built adjacency lists.
+    fn compute_dominator_map(
+        blocks: &[BasicBlock],
+        adj: &HashMap<BlockId, Vec<BlockId>>,
+        root: BlockId,
+    ) -> HashMap<BlockId, HashSet<BlockId>> {
+        let all_ids: HashSet<BlockId> = blocks.iter().map(|b| b.id).collect();
         let mut dom: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
-        // Initialise: dom[entry] = {entry}, dom[n] = all for others
-        for b in &self.blocks {
-            if b.id == self.entry {
+        for b in blocks {
+            if b.id == root {
                 let mut s = HashSet::new();
-                s.insert(self.entry);
+                s.insert(root);
                 dom.insert(b.id, s);
             } else {
                 dom.insert(b.id, all_ids.clone());
             }
         }
 
-        // Iterate until stable
         let mut changed = true;
         while changed {
             changed = false;
-            for b in &self.blocks {
-                if b.id == self.entry {
+            for b in blocks {
+                if b.id == root {
                     continue;
                 }
-                let preds = self.predecessors(b.id);
-                if preds.is_empty() {
-                    // Unreachable block — dom is just itself
+                let neighbors = adj.get(&b.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                if neighbors.is_empty() {
                     let mut s = HashSet::new();
                     s.insert(b.id);
                     if dom[&b.id] != s {
@@ -142,8 +166,8 @@ impl FunctionCfg {
                     }
                     continue;
                 }
-                let mut new_dom = dom[&preds[0]].clone();
-                for p in &preds[1..] {
+                let mut new_dom = dom[&neighbors[0]].clone();
+                for p in &neighbors[1..] {
                     let pd = &dom[p];
                     new_dom.retain(|x| pd.contains(x));
                 }
@@ -155,56 +179,33 @@ impl FunctionCfg {
             }
         }
 
+        dom
+    }
+
+    /// Compute the set of dominators for a given block.
+    pub fn dominators(&self, block_id: BlockId) -> HashSet<BlockId> {
+        let adj = self.pred_adj();
+        let dom = Self::compute_dominator_map(&self.blocks, &adj, self.entry);
         dom.get(&block_id).cloned().unwrap_or_default()
     }
 
     /// Compute post-dominators: dominators on the reverse CFG from exit.
     pub fn post_dominators(&self, block_id: BlockId) -> HashSet<BlockId> {
-        let all_ids: HashSet<BlockId> = self.blocks.iter().map(|b| b.id).collect();
-        let mut dom: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-
-        for b in &self.blocks {
-            if b.id == self.exit {
-                let mut s = HashSet::new();
-                s.insert(self.exit);
-                dom.insert(b.id, s);
-            } else {
-                dom.insert(b.id, all_ids.clone());
-            }
-        }
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for b in &self.blocks {
-                if b.id == self.exit {
-                    continue;
-                }
-                // Successors in the forward graph = predecessors in the reverse graph
-                let succs = self.successors(b.id);
-                if succs.is_empty() {
-                    let mut s = HashSet::new();
-                    s.insert(b.id);
-                    if dom[&b.id] != s {
-                        dom.insert(b.id, s);
-                        changed = true;
-                    }
-                    continue;
-                }
-                let mut new_dom = dom[&succs[0]].clone();
-                for s in &succs[1..] {
-                    let sd = &dom[s];
-                    new_dom.retain(|x| sd.contains(x));
-                }
-                new_dom.insert(b.id);
-                if dom[&b.id] != new_dom {
-                    dom.insert(b.id, new_dom);
-                    changed = true;
-                }
-            }
-        }
-
+        let adj = self.succ_adj();
+        let dom = Self::compute_dominator_map(&self.blocks, &adj, self.exit);
         dom.get(&block_id).cloned().unwrap_or_default()
+    }
+
+    /// Compute the full dominator map for all blocks at once.
+    pub fn all_dominators(&self) -> HashMap<BlockId, HashSet<BlockId>> {
+        let adj = self.pred_adj();
+        Self::compute_dominator_map(&self.blocks, &adj, self.entry)
+    }
+
+    /// Compute the full post-dominator map for all blocks at once.
+    pub fn all_post_dominators(&self) -> HashMap<BlockId, HashSet<BlockId>> {
+        let adj = self.succ_adj();
+        Self::compute_dominator_map(&self.blocks, &adj, self.exit)
     }
 }
 
@@ -265,12 +266,7 @@ impl<'a> CfgBuilder<'a> {
     }
 
     fn add_edge(&mut self, from: BlockId, to: BlockId, kind: EdgeKind) {
-        self.edges.push(CfgEdge {
-            from,
-            to,
-            kind,
-            condition: None,
-        });
+        self.add_edge_cond(from, to, kind, None);
     }
 
     fn add_edge_cond(
@@ -288,22 +284,24 @@ impl<'a> CfgBuilder<'a> {
         });
     }
 
+    fn block_mut(&mut self, block_id: BlockId) -> &mut BasicBlock {
+        &mut self.blocks[block_id.0 as usize]
+    }
+
     fn update_block_range(&mut self, block_id: BlockId, node: tree_sitter::Node) {
-        if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
-            if b.start_byte == 0 && b.start_line == 0 && b.statements.is_empty() {
-                b.start_byte = node.start_byte();
-                b.start_line = node.start_position().row as u32;
-            }
-            b.end_byte = node.end_byte();
-            b.end_line = node.end_position().row as u32;
+        let b = self.block_mut(block_id);
+        if b.start_byte == 0 && b.start_line == 0 && b.statements.is_empty() {
+            b.start_byte = node.start_byte();
+            b.start_line = node.start_position().row as u32;
         }
+        b.end_byte = node.end_byte();
+        b.end_line = node.end_position().row as u32;
     }
 
     fn add_statement(&mut self, block_id: BlockId, node: tree_sitter::Node) {
         self.update_block_range(block_id, node);
-        if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
-            b.statements.push((node.start_byte(), node.end_byte()));
-        }
+        let b = self.block_mut(block_id);
+        b.statements.push((node.start_byte(), node.end_byte()));
     }
 
     fn node_text(&self, node: tree_sitter::Node) -> &str {
@@ -352,9 +350,7 @@ impl<'a> CfgBuilder<'a> {
                 let name = self.node_text(node).to_string();
                 let line = node.start_position().row as u32;
                 let col = node.start_position().column as u32;
-                if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
-                    b.defs.push((name, line, col));
-                }
+                self.block_mut(block_id).defs.push((name, line, col));
             }
             "tuple" | "list" | "pattern_list" | "tuple_pattern" => {
                 let mut cursor = node.walk();
@@ -384,9 +380,7 @@ impl<'a> CfgBuilder<'a> {
             }
             let line = node.start_position().row as u32;
             let col = node.start_position().column as u32;
-            if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
-                b.uses.push((name, line, col));
-            }
+            self.block_mut(block_id).uses.push((name, line, col));
             return;
         }
         // Recurse into children
@@ -403,6 +397,8 @@ impl<'a> CfgBuilder<'a> {
     /// Walk statements in a body node. Returns the current block after
     /// processing (may differ from `current` if a terminator was hit).
     fn walk_body(&mut self, body: tree_sitter::Node, mut current: BlockId) -> Option<BlockId> {
+        // Collect children upfront: tree-sitter cursors can't be shared with
+        // recursive walks, and the builder mutates self during iteration.
         let mut cursor = body.walk();
         let children: Vec<_> = body.children(&mut cursor).filter(|c| c.is_named()).collect();
         let mut terminated = false;
@@ -445,13 +441,7 @@ impl<'a> CfgBuilder<'a> {
             "try_statement" => self.walk_try(node, current),
             "with_statement" => self.walk_with(node, current),
             "match_statement" => self.walk_match(node, current),
-            "return_statement" => {
-                self.add_statement(current, node);
-                self.collect_defs_uses(current, node);
-                self.add_edge(current, self.exit_block, EdgeKind::Jump);
-                None
-            }
-            "raise_statement" => {
+            "return_statement" | "raise_statement" => {
                 self.add_statement(current, node);
                 self.collect_defs_uses(current, node);
                 self.add_edge(current, self.exit_block, EdgeKind::Jump);
@@ -738,13 +728,13 @@ impl<'a> CfgBuilder<'a> {
                 // Collect exception variable if present (as x)
                 let mut ec = except.walk();
                 for c in except.children(&mut ec) {
-                    if c.kind() == "as_pattern" || c.kind() == "identifier" {
-                        if c.kind() == "identifier" {
-                            let name = self.node_text(c).to_string();
-                            if let Some(b) = self.blocks.iter_mut().find(|b| b.id == handler_block) {
-                                b.defs.push((name, c.start_position().row as u32, c.start_position().column as u32));
-                            }
-                        }
+                    if c.kind() == "identifier" {
+                        let name = self.node_text(c).to_string();
+                        self.block_mut(handler_block).defs.push((
+                            name,
+                            c.start_position().row as u32,
+                            c.start_position().column as u32,
+                        ));
                     }
                     if c.kind() == "block" {
                         match self.walk_body(c, handler_block) {
