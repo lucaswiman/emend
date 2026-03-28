@@ -910,6 +910,63 @@ def query_facts(
 
 
 # ---------------------------------------------------------------------------
+# datalog_query (raw CozoScript expert mode)
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def datalog_query(
+    query: Annotated[str, Field(description="CozoScript (Datalog) query to execute against the project fact graph.")],
+    project: Annotated[str, Field(description="Project root directory.")] = ".",
+    limit: Annotated[int, Field(description="Maximum number of result rows to return. 0 means unlimited.")] = 200,
+) -> str:
+    """Execute a raw CozoScript (Datalog) query against the project fact graph.
+
+    Provides expert-level access to the underlying CozoDB relations for
+    composable, recursive, and cross-relation queries beyond what
+    query_facts supports.
+
+    Available stored relations (prefix with * to query):
+      symbol       {qualified_name => file_path, name, kind, line, end_line, parent}
+      call         {caller_qn, callee_qn, file_path, line, col}
+      reference    {symbol_qn, file_path, line, col => ref_kind}
+      taint_flow   {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
+      type_binding {symbol_qn, file_path, line, binding_kind => type_str}
+      import       {importing_file, imported_module, imported_name, line => alias}
+      cfg_edge     {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}
+      def_use      {file_path, func_qn, var_name, def_line, def_col, use_line, use_col}
+
+    Example queries:
+
+    All function symbols:
+      ?[name, file] := *symbol[qn, file, name, "function", l, e, p]
+
+    Dead code (symbols with no references):
+      has_ref[qn] := *reference[qn, _, _, _, _]
+      dead[name, file, line] := *symbol[qn, file, name, kind, line, _, _], not has_ref[qn]
+      ?[name, file, line] := dead[name, file, line]
+
+    Transitive callers of a function:
+      reaches[a] := *call[a, "mymod.func", _, _, _]
+      reaches[a] := *call[a, mid, _, _, _], reaches[mid]
+      ?[a] := reaches[a]
+    """
+    from emend.fact_graph import FactGraph
+
+    try:
+        graph = FactGraph.build_from_project(project)
+        result = graph.run_query(query)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+    headers = result.get("headers", [])
+    rows = result.get("rows", [])
+    if limit > 0:
+        rows = rows[:limit]
+    return json.dumps({"headers": headers, "rows": rows, "count": len(rows)}, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # policy
 # ---------------------------------------------------------------------------
 

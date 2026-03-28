@@ -21,6 +21,7 @@ try:
         graph,
         deadcode,
         grammar_and_cookbook,
+        datalog_query,
     )
 except Exception:
     pytest.skip("mcp SDK not usable in this environment", allow_module_level=True)
@@ -36,6 +37,9 @@ def test_all_tools_registered():
     expected = {
         "search", "replace", "modify", "refs", "rename",
         "move", "graph", "deadcode", "lint",
+        "impact", "semantic_context", "taint",
+        "query_facts", "datalog_query", "check_policies",
+        "map_read", "map_write",
         "grammar_and_cookbook",
     }
     assert expected == tool_names
@@ -408,6 +412,71 @@ def test_grammar_and_cookbook():
     assert "Cookbook recipes" in result
     assert "emend search" in result
     assert "emend replace" in result
+
+
+# ---------------------------------------------------------------------------
+# datalog_query tool
+# ---------------------------------------------------------------------------
+
+
+def test_datalog_query_basic(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text("def foo():\n    pass\n\ndef bar():\n    foo()\n")
+
+    result = datalog_query(
+        query='?[name, kind] := *symbol[_, _, name, kind, _, _, _]',
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert "headers" in data
+    assert "rows" in data
+    assert "count" in data
+    names = [row[0] for row in data["rows"]]
+    assert "foo" in names
+    assert "bar" in names
+
+
+def test_datalog_query_transitive_callers(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text(
+        "def a():\n    b()\n\ndef b():\n    c()\n\ndef c():\n    pass\n"
+    )
+
+    # Find all callers of c (directly or transitively)
+    result = datalog_query(
+        query=(
+            'reaches[caller] := *call[caller, callee, _, _, _], callee == "example.c"\n'
+            'reaches[caller] := *call[caller, mid, _, _, _], reaches[mid]\n'
+            '?[caller] := reaches[caller]'
+        ),
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert "rows" in data
+
+
+def test_datalog_query_limit(tmp_path):
+    p = tmp_path / "example.py"
+    # Create many symbols
+    lines = [f"def func_{i}():\n    pass\n" for i in range(20)]
+    p.write_text("\n".join(lines))
+
+    result = datalog_query(
+        query='?[name] := *symbol[_, _, name, "function", _, _, _]',
+        project=str(tmp_path),
+        limit=5,
+    )
+    data = json.loads(result)
+    assert data["count"] <= 5
+
+
+def test_datalog_query_error(tmp_path):
+    result = datalog_query(
+        query="this is not valid cozoscript !!!",
+        project=str(tmp_path),
+    )
+    data = json.loads(result)
+    assert "error" in data
 
 
 # ---------------------------------------------------------------------------
