@@ -301,3 +301,47 @@ Find chained comparisons
 
    # Find range checks
    emend search '$A < $B < $C' src/
+
+
+Embedded SQL analysis
+---------------------
+
+Search inside SQL strings embedded in Python code:
+
+.. code-block:: bash
+
+   # Find all SQL queries referencing a table
+   emend search 'FROM users' src/ --dsl sql
+
+   # Find SELECT * anti-patterns
+   emend search 'SELECT * FROM $TABLE' src/ --dsl sql
+
+   # Lint SQL for anti-patterns
+   cat > .emend/patterns.yaml << 'EOF'
+   rules:
+     no-select-star:
+       dsl: sql
+       find: "SELECT * FROM $TABLE"
+       message: "Avoid SELECT *; enumerate columns explicitly"
+   EOF
+   emend lint src/
+
+   # See which SQL queries are affected by an ORM model change
+   emend impact models.py::User --json
+
+Navigate regex named groups
+---------------------------
+
+Find where regex named groups are defined and used:
+
+.. code-block:: python
+
+   # In your code:
+   pattern = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})")
+   m = pattern.match(text)
+   year = m.group("year")
+
+.. code-block:: bash
+
+   # Inspect with dsl-debug (diagnostic)
+   emend dsl-debug src/parsers.py

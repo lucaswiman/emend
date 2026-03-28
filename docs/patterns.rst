@@ -501,9 +501,38 @@ Output:
      ]
    }
 
+DSL patterns (``--dsl``)
+-----------------------
+
+The ``--dsl`` flag enables pattern matching inside embedded DSL regions
+(SQL strings, CSS, HTML) rather than host-language code. Metavariables work
+inside DSL patterns:
+
+.. code-block:: bash
+
+   # Find all SELECT..FROM patterns in SQL strings
+   emend search 'SELECT $COLS FROM $TABLE' src/ --dsl sql
+
+   # Find all tables referenced in SQL
+   emend search 'FROM $TABLE' src/ --dsl sql
+
+   # List all SQL regions in a directory
+   emend search src/ --dsl sql
+
+Whitespace in DSL patterns is flexible -- a single space matches any whitespace
+including newlines, so patterns work with multi-line SQL strings.
+
+The ``$METAVAR`` captures are reported in JSON output:
+
+.. code-block:: bash
+
+   emend search 'SELECT $COLS FROM $TABLE' src/ --dsl sql --output json
+
+
 Limitations
 -----------
 
 - Patterns match at the expression or statement level; they cannot span multiple statements
 - ``$X:stmt`` type constraint is not yet fully implemented
 - ``:type[X]`` / ``:returns[X]`` oracle constraints require a supported type checker to be installed and only support one level of bracket nesting in the type argument (e.g. ``:type[Optional[str]]`` works; ``:type[Optional[List[str]]]`` does not)
+- DSL patterns use regex-based matching (not tree-sitter) and are case-insensitive

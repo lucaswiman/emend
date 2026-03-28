@@ -97,6 +97,12 @@ Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MO
 |                     | 'def test_*', 'not class', 'MyClass',  |
 |                     | '@decorator', 'print($X)')             |
 +---------------------+----------------------------------------+
+| ``--dsl TYPE``      | Search inside embedded DSL regions     |
+|                     | (``sql``, ``css``, ``html``). When     |
+|                     | set, only DSL regions of the given     |
+|                     | type are searched. Supports            |
+|                     | ``$METAVAR`` captures in patterns.     |
++---------------------+----------------------------------------+
 
 **Examples:**
 
@@ -121,6 +127,11 @@ Auto-detected when not specified. Use ``--output=FORMAT`` or ``--output=BASE::MO
 
    # Metadata mode:
    emend search api.py::my_func --output metadata
+
+   # DSL mode (search inside embedded SQL/CSS/HTML):
+   emend search 'SELECT $COLS FROM $TABLE' src/ --dsl sql
+   emend search 'users' src/ --dsl sql
+   emend search src/ --dsl sql
 
 ---
 
@@ -1011,6 +1022,15 @@ transitively affected via reverse-caller closure.
 | graph    | Show witness edges explaining why each symbol is impacted        |
 +----------+------------------------------------------------------------------+
 
+**DSL impact detection:**
+
+When ORM model classes are among the changed symbols, ``impact`` also detects
+embedded SQL queries that reference the corresponding database tables. These
+appear as ``DSL impacts:`` in the default output, ``dsl_impacts`` in JSON, and
+``--[dsl]-->`` edges in graph mode. Detection uses the same ORM link resolution
+as the ``dsl-debug`` command (singularize+PascalCase convention and
+``__tablename__`` matching).
+
 **Examples:**
 
 .. code-block:: bash
@@ -1027,6 +1047,9 @@ transitively affected via reverse-caller closure.
 
    # Witness graph as JSON
    emend impact mymodule.py::func --output graph --json
+
+   # ORM model change surfaces impacted SQL queries
+   emend impact models.py::User --json
 
 ---
 
@@ -1230,6 +1253,65 @@ DOT output.
 
    # JSON for programmatic use
    emend cfg src/ --format json
+
+---
+
+dsl-debug
+---------
+
+Diagnostic command for inspecting embedded DSL detection and symbol extraction.
+Hidden from normal command help. For production use, DSL support is
+transparently integrated into ``search``, ``refs``, ``lint``, and ``impact``.
+
+.. code-block:: text
+
+   emend dsl-debug PATH [OPTIONS]
+
+**Arguments:**
+
+- ``PATH`` -- File or directory to analyze
+
+**Options:**
+
++-----------------------------+-----------------------------------------------+
+| Option                      | Description                                   |
++=============================+===============================================+
+| ``--type TEXT``             | DSL type to detect: ``sql``, ``css``,         |
+|                             | ``html``, ``graphql``, ``jinja``              |
++-----------------------------+-----------------------------------------------+
+| ``--orm TEXT``              | ORM framework: ``sqlalchemy`` (default),      |
+|                             | ``django``                                    |
++-----------------------------+-----------------------------------------------+
+| ``--resolve``               | Resolve cross-language links to host          |
+|                             | definitions                                   |
++-----------------------------+-----------------------------------------------+
+| ``--json``                  | Output as JSON                                |
++-----------------------------+-----------------------------------------------+
+| ``--project``, ``-p``      | Project root for link resolution              |
++-----------------------------+-----------------------------------------------+
+
+**What it detects:**
+
+- SQL regions in string literals (``SELECT``, ``INSERT``, ``UPDATE``, ``DELETE``,
+  ``CREATE TABLE``, etc.) and magic comments (``# language=sql``)
+- Table and column names extracted from SQL statements
+- ORM links: table names resolved to model class definitions via
+  ``__tablename__`` matching and singularize+PascalCase convention
+
+**Examples:**
+
+.. code-block:: bash
+
+   # Detect SQL in a file
+   emend dsl-debug src/queries.py
+
+   # Detect and resolve to ORM models
+   emend dsl-debug src/ --type sql --resolve --project .
+
+   # JSON output for tooling
+   emend dsl-debug app.py --json
+
+Also available via the hidden alias ``emend dsl``.
 
 ---
 
