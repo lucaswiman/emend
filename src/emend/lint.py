@@ -36,6 +36,9 @@ class LintRule:
     flows_from: str | None = None  # source pattern
     flows_to: str | None = None  # sink pattern
     not_through: str | None = None  # sanitizer pattern
+    # DSL mode: "sql", "css", "html", etc.  When set, the rule matches
+    # inside embedded DSL regions rather than host-language code.
+    dsl: str | None = None
 
 
 @dataclass
@@ -184,6 +187,7 @@ def load_rules(
             flows_from=flows_from if flows_from else None,
             flows_to=flows_to if flows_to else None,
             not_through=not_through if not_through else None,
+            dsl=rule_def.get("dsl"),
         ))
 
     # Parse deadcode section
@@ -407,6 +411,29 @@ def _check_flow_rule(
     return violations
 
 
+def _compile_dsl_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a DSL lint pattern to a regex.
+
+    Supports ``$METAVAR`` placeholders that match identifiers, and
+    ``$...METAVAR`` for capturing multiple tokens.  Other text is
+    matched literally (case-insensitive for SQL).  Whitespace in the
+    pattern matches any whitespace including newlines.
+    """
+    parts = re.split(r'(\$\.\.\.?\w+|\$\w+)', pattern)
+    regex_parts: list[str] = []
+    for part in parts:
+        if part.startswith("$..."):
+            regex_parts.append(r'(.+?)')
+        elif part.startswith("$"):
+            regex_parts.append(r'(\w+(?:\.\w+)*(?:\s*,\s*\w+(?:\.\w+)*)*)')
+        else:
+            escaped = re.escape(part)
+            # Replace whitespace runs with \s+ for cross-line matching
+            escaped = re.sub(r'(\\ )+', r'\\s+', escaped)
+            regex_parts.append(escaped)
+    return re.compile(''.join(regex_parts), re.IGNORECASE | re.DOTALL)
+
+
 def run_lint(
     rules: list[LintRule],
     paths: list[str],
@@ -433,9 +460,10 @@ def run_lint(
     if rule_filter:
         rules = [r for r in rules if r.name == rule_filter]
 
-    # Separate flow rules from pattern rules
+    # Separate flow rules, DSL rules, and pattern rules
     flow_rules = [r for r in rules if r.flows_from and r.flows_to]
-    pattern_rules = [r for r in rules if not (r.flows_from and r.flows_to)]
+    dsl_rules = [r for r in rules if r.dsl and not (r.flows_from and r.flows_to)]
+    pattern_rules = [r for r in rules if not (r.flows_from and r.flows_to) and not r.dsl]
 
     # Split pattern rules into find-only and fix rules
     find_only_rules = [r for r in pattern_rules if not (fix and r.replace)]
@@ -706,6 +734,58 @@ def run_lint(
                     ):
                         continue
                     violations.append(v)
+
+    # --- DSL-aware lint rules ---
+    if dsl_rules:
+        from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+
+        for file_path in paths:
+            source = all_file_contents.get(file_path)
+            if source is None:
+                continue
+
+            # Build noqa ranges for this file
+            if file_path not in noqa_ranges_cache:
+                noqa_comments = parse_noqa_comments(source, language=language)
+                noqa_ranges_for_dsl: list[tuple[int, int, set[str] | None]] = []
+                if noqa_comments:
+                    line_map = _build_statement_line_map(source)
+                    noqa_ranges_for_dsl = build_noqa_ranges(
+                        noqa_comments, line_map
+                    )
+                noqa_ranges_cache[file_path] = noqa_ranges_for_dsl
+
+            regions = detect_dsl_regions(file_path, source=source)
+            if not regions:
+                continue
+
+            for rule in dsl_rules:
+                rule_dsl = rule.dsl.lower() if rule.dsl else ""
+                find_re = _compile_dsl_pattern(rule.find)
+
+                for region in regions:
+                    if region.dsl.value != rule_dsl:
+                        continue
+                    for m in find_re.finditer(region.content):
+                        # Compute host-file line from region offset + match position
+                        match_offset = m.start()
+                        lines_before = region.content[:match_offset].count('\n')
+                        match_line = region.host_start_line + lines_before
+                        match_text = m.group(0).strip()
+
+                        if is_noqa_suppressed(
+                            match_line, rule.name,
+                            noqa_ranges_cache.get(file_path, []),
+                        ):
+                            continue
+
+                        violations.append(LintViolation(
+                            rule_name=rule.name,
+                            message=rule.message,
+                            file_path=file_path,
+                            line=match_line,
+                            match_text=match_text,
+                        ))
 
     # --- Dead code analysis (if configured) ---
     if (deadcode_config is not None

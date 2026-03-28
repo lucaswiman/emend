@@ -388,6 +388,10 @@ def search(
         bool,
         typer.Option("--include-map", help="Take symbol / module mappings into account for resolution")
     ] = False,
+    dsl: Annotated[
+        Optional[str],
+        typer.Option("--dsl", help="Search inside embedded DSL regions (sql, css, html)")
+    ] = None,
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
@@ -462,6 +466,71 @@ def search(
             return
         import json as _json
         typer.echo(_json.dumps(results, indent=2))
+        return
+
+    # --dsl mode: search inside embedded DSL regions
+    if dsl is not None:
+        from emend.dsl import find_in_dsl
+        target_path = path or query
+        _lang = _state["language"]
+        _dsl_files, _ = resolve_files(target_path, language=_lang)
+
+        # Determine the search pattern
+        if "$" in query:
+            search_pattern = query
+        elif path is not None:
+            # query is a literal term to search for in DSL regions
+            search_pattern = None  # will use string contains instead
+        else:
+            # query is the path, list all DSL regions
+            search_pattern = None
+
+        _out = output or "code"
+        total_matches = 0
+        _literal_term = query.lower() if search_pattern is None and path is not None else None
+
+        for dsl_f in _dsl_files:
+            if search_pattern is not None:
+                # Pattern mode: use find_in_dsl
+                matches = find_in_dsl(search_pattern, str(dsl_f), dsl_type=dsl.lower())
+                for m in matches:
+                    total_matches += 1
+                    if _out == "json":
+                        import json as _dsl_json
+                        print(_dsl_json.dumps({
+                            "file": m.host_file,
+                            "line": m.host_line,
+                            "col": m.host_col,
+                            "dsl": m.dsl.value,
+                            "matched_text": m.matched_text,
+                            "captures": m.captures,
+                        }))
+                    elif _out == "location":
+                        print(f"{m.host_file}:{m.host_line}:{m.host_col}")
+                    else:
+                        print(f"{m.host_file}:{m.host_line}:{m.host_col}  [{m.dsl.value}]  {m.matched_text}")
+                    if limit and total_matches >= limit:
+                        break
+            else:
+                # Literal search: find DSL regions containing the term
+                from emend.dsl import detect_dsl_regions as _dsl_detect, DslKind as _DslK
+                regions = _dsl_detect(str(dsl_f))
+                for region in regions:
+                    if region.dsl.value != dsl.lower():
+                        continue
+                    if _literal_term and _literal_term not in region.content.lower():
+                        continue
+                    total_matches += 1
+                    if _out == "location":
+                        print(f"{region.host_file}:{region.host_start_line}:{region.host_start_col}")
+                    else:
+                        # Show the matching region content
+                        display = region.content.strip().replace('\n', ' ')[:120]
+                        print(f"{region.host_file}:{region.host_start_line}:{region.host_start_col}  [{region.dsl.value}]  {display}")
+                    if limit and total_matches >= limit:
+                        break
+            if limit and total_matches >= limit:
+                break
         return
 
     # Parse --where values
@@ -2226,6 +2295,16 @@ def impact_cmd(
             max_depth=max_depth,
         )
 
+        # DSL impact: find SQL queries affected by changed ORM models
+        dsl_impacts: list[tuple[str, str, str]] = []
+        if result.changed_symbols:
+            try:
+                from emend.dsl import find_dsl_impact
+                _proj = project or "."
+                dsl_impacts = find_dsl_impact(result.changed_symbols, _proj)
+            except Exception:
+                pass
+
         if json_output:
             import json
             data = {
@@ -2237,6 +2316,11 @@ def impact_cmd(
                     for e in result.edges
                 ],
             }
+            if dsl_impacts:
+                data["dsl_impacts"] = [
+                    {"file": f, "line": l, "reason": r}
+                    for f, l, r in dsl_impacts
+                ]
             print(json.dumps(data, indent=2))
         elif output == "tests":
             if not result.impacted_tests:
@@ -2250,9 +2334,12 @@ def impact_cmd(
             else:
                 for edge in result.edges:
                     print(f"{edge.source} --[{edge.kind}]--> {edge.target}")
+            if dsl_impacts:
+                for f, l, r in dsl_impacts:
+                    print(f"{f}:{l} --[dsl]--> {r}")
         else:
             # Default: symbols mode
-            if not result.changed_symbols and not result.impacted_symbols:
+            if not result.changed_symbols and not result.impacted_symbols and not dsl_impacts:
                 print("No impacted symbols found.")
             else:
                 if result.changed_symbols:
@@ -2267,6 +2354,10 @@ def impact_cmd(
                     print("Tests:")
                     for t in result.impacted_tests:
                         print(f"  {t}")
+                if dsl_impacts:
+                    print("DSL impacts:")
+                    for f, l, r in dsl_impacts:
+                        print(f"  {f}:{l}  {r}")
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)

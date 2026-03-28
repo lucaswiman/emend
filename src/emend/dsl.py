@@ -595,3 +595,278 @@ def format_symbols(
         lines.append(line)
 
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Find inside DSL regions
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DslMatch:
+    """A pattern match inside a DSL region."""
+    matched_text: str
+    host_file: str
+    host_line: int
+    host_col: int
+    dsl: DslKind
+    captures: dict[str, str] = field(default_factory=dict)
+
+
+def _compile_dsl_find_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a find pattern for DSL regions.
+
+    Supports $METAVAR placeholders that match identifiers or expressions.
+    Whitespace in the pattern matches any whitespace (including newlines).
+    """
+    parts = re.split(r'(\$\.\.\.?\w+|\$\w+)', pattern)
+    regex_parts: list[str] = []
+    group_names: list[str] = []
+    for part in parts:
+        if part.startswith("$..."):
+            name = part[4:]
+            group_names.append(name)
+            regex_parts.append(f'(?P<{name}>.+?)')
+        elif part.startswith("$"):
+            name = part[1:]
+            group_names.append(name)
+            regex_parts.append(f'(?P<{name}>\\w+(?:\\.\\w+)*(?:\\s*,\\s*\\w+(?:\\.\\w+)*)*)')
+        else:
+            # Replace runs of whitespace with \s+ so patterns match across newlines
+            escaped = re.escape(part)
+            escaped = re.sub(r'(\\ )+', r'\\s+', escaped)
+            regex_parts.append(escaped)
+    return re.compile(''.join(regex_parts), re.IGNORECASE | re.DOTALL)
+
+
+def find_in_dsl(
+    pattern: str,
+    file_path: str,
+    source: str | None = None,
+    dsl_type: str = "sql",
+) -> list[DslMatch]:
+    """Find pattern matches inside embedded DSL regions.
+
+    Args:
+        pattern: Pattern string with optional $METAVAR placeholders.
+        file_path: Path to the source file.
+        source: Source text (read from file if None).
+        dsl_type: DSL type to search in ("sql", "css", "html").
+
+    Returns:
+        List of DslMatch objects.
+    """
+    regions = detect_dsl_regions(file_path, source=source)
+    compiled = _compile_dsl_find_pattern(pattern)
+    matches: list[DslMatch] = []
+
+    for region in regions:
+        if region.dsl.value != dsl_type:
+            continue
+        for m in compiled.finditer(region.content):
+            match_offset = m.start()
+            lines_before = region.content[:match_offset].count('\n')
+            match_line = region.host_start_line + lines_before
+
+            # Compute column: find last newline before match in region content
+            last_nl = region.content.rfind('\n', 0, match_offset)
+            if last_nl == -1:
+                match_col = region.host_start_col + match_offset
+            else:
+                match_col = match_offset - last_nl - 1
+
+            captures = {
+                k: v for k, v in m.groupdict().items() if v is not None
+            }
+            matches.append(DslMatch(
+                matched_text=m.group(0),
+                host_file=file_path,
+                host_line=match_line,
+                host_col=match_col,
+                dsl=region.dsl,
+                captures=captures,
+            ))
+
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# Regex named group navigation
+# ---------------------------------------------------------------------------
+
+_NAMED_GROUP_RE = re.compile(r'\(\?P<(\w+)>')
+_GROUP_CALL_RE = re.compile(r'\.group\(\s*["\'](\w+)["\']\s*\)')
+
+
+@dataclass
+class RegexNamedGroup:
+    """A named group in a regex pattern and its usage sites."""
+    name: str
+    definition_file: str
+    definition_line: int
+    definition_col: int
+    usages: list[tuple[str, int, int]] = field(default_factory=list)  # (file, line, col)
+
+
+def extract_regex_named_groups(
+    file_path: str,
+    source: str | None = None,
+) -> list[RegexNamedGroup]:
+    """Extract regex named groups and their .group() call sites from a file.
+
+    Finds ``(?P<name>...)`` definitions and ``.group("name")`` call sites,
+    linking them by group name.
+
+    Args:
+        file_path: Path to the source file.
+        source: Source text (read from file if None).
+
+    Returns:
+        List of RegexNamedGroup objects.
+    """
+    if source is None:
+        try:
+            source = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+
+    # Find all named group definitions
+    groups: dict[str, RegexNamedGroup] = {}
+    for m in _NAMED_GROUP_RE.finditer(source):
+        name = m.group(1)
+        line = source[:m.start()].count('\n') + 1
+        last_nl = source.rfind('\n', 0, m.start())
+        col = m.start() - last_nl - 1 if last_nl >= 0 else m.start()
+        if name not in groups:
+            groups[name] = RegexNamedGroup(
+                name=name,
+                definition_file=file_path,
+                definition_line=line,
+                definition_col=col,
+            )
+
+    # Find all .group("name") call sites
+    for m in _GROUP_CALL_RE.finditer(source):
+        name = m.group(1)
+        line = source[:m.start()].count('\n') + 1
+        last_nl = source.rfind('\n', 0, m.start())
+        col = m.start() - last_nl - 1 if last_nl >= 0 else m.start()
+        if name in groups:
+            groups[name].usages.append((file_path, line, col))
+
+    return list(groups.values())
+
+
+def find_regex_group_references(
+    group_name: str,
+    project_root: str,
+) -> list[tuple[str, int, int]]:
+    """Find all .group("name") call sites for a named regex group across a project.
+
+    Args:
+        group_name: The regex group name to find references for.
+        project_root: Project root directory.
+
+    Returns:
+        List of (file_path, line, col) tuples.
+    """
+    root = Path(project_root)
+    refs: list[tuple[str, int, int]] = []
+    pattern = re.compile(
+        rf'\.group\(\s*["\']' + re.escape(group_name) + r'["\']\s*\)'
+    )
+    for py_file in root.rglob("*.py"):
+        try:
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in pattern.finditer(source):
+            line = source[:m.start()].count('\n') + 1
+            last_nl = source.rfind('\n', 0, m.start())
+            col = m.start() - last_nl - 1 if last_nl >= 0 else m.start()
+            refs.append((str(py_file), line, col))
+    return refs
+
+
+# ---------------------------------------------------------------------------
+# Impact DSL integration
+# ---------------------------------------------------------------------------
+
+def find_dsl_impact(
+    changed_symbols: list[str],
+    project_root: str,
+    orm: str = "sqlalchemy",
+) -> list[tuple[str, str, str]]:
+    """Find DSL regions impacted by changes to host-language symbols.
+
+    When an ORM model class changes, find all SQL queries that reference
+    the corresponding table.
+
+    Args:
+        changed_symbols: List of changed symbol selectors (e.g. "models.py::User").
+        project_root: Project root directory.
+        orm: ORM framework.
+
+    Returns:
+        List of (dsl_file, dsl_line, reason) tuples describing impacted DSL regions.
+    """
+    root = Path(project_root)
+    impacted: list[tuple[str, str, str]] = []
+
+    # Extract class names from changed selectors
+    changed_classes: set[str] = set()
+    for sel in changed_symbols:
+        parts = sel.split("::")
+        if len(parts) >= 2:
+            changed_classes.add(parts[-1].split(".")[-1])
+
+    if not changed_classes:
+        return impacted
+
+    # Build reverse mapping: class -> possible table names
+    class_to_tables: dict[str, set[str]] = {}
+    for cls in changed_classes:
+        # Convention: PascalCase -> snake_case plural
+        snake = re.sub(r'(?<!^)(?=[A-Z])', '_', cls).lower()
+        tables = {snake, snake + "s", snake + "es"}
+        # Also check __tablename__ in project files
+        for py_file in root.rglob("*.py"):
+            try:
+                source = py_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for tn_name, (tn_class, _line) in _find_tablename_mapping(str(py_file)).items():
+                if tn_class == cls:
+                    tables.add(tn_name)
+        class_to_tables[cls] = tables
+
+    all_tables = set()
+    for tables in class_to_tables.values():
+        all_tables |= tables
+
+    if not all_tables:
+        return impacted
+
+    # Scan all files for SQL regions referencing those tables
+    for py_file in root.rglob("*.py"):
+        try:
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        regions = detect_dsl_regions(str(py_file), source=source)
+        for region in regions:
+            if region.dsl != DslKind.SQL:
+                continue
+            for sym in extract_sql_symbols(region):
+                if sym.kind == DslSymbolKind.TABLE and sym.name in all_tables:
+                    # Find which class this table belongs to
+                    for cls, tables in class_to_tables.items():
+                        if sym.name in tables:
+                            impacted.append((
+                                str(py_file),
+                                str(region.host_start_line),
+                                f"SQL query references table '{sym.name}' "
+                                f"linked to changed class '{cls}'",
+                            ))
+                            break
+
+    return impacted

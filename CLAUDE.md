@@ -16,7 +16,7 @@
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
 | `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink`, `TaintSanitizer`, `TaintViolation`, intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_taint_analysis()` with fixed-point iteration; field-sensitive tracking (`_extract_qualified_identifiers`), container-aware propagation (`_find_container_mutations`, `_find_for_loops`), YAML `presets:` key for auto-loading framework rules |
 | `taint_presets.py` | Framework-specific taint rule presets: `get_preset()` for Flask, Django, SQLAlchemy, FastAPI; `merge_configs()` to compose multiple configs; loaded via `emend taint --preset` or YAML `presets:` key |
-| `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `emend dsl` CLI command |
+| `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink`, `DslMatch`, `RegexNamedGroup` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `find_in_dsl()` (pattern matching with `$METAVAR` in DSL regions); `extract_regex_named_groups()` / `find_regex_group_references()` (regex `(?P<name>)` ↔ `.group("name")`); `find_dsl_impact()` (ORM model changes → affected SQL queries); `emend dsl-debug` hidden CLI command |
 | `cfg.py` | Per-function CFG module: `build_cfgs_for_source()`, `build_cfgs_for_file()`, `find_unreachable_blocks()`, text/JSON/DOT formatters; wraps Rust `emend_core.PyCfg` and `build_cfgs()` |
 | `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TaintFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()`, JSON serialization |
 | `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `CustomCheck`; `load_policies()`, `run_policy_checks()`, `validate_policies()`; loads from `.emend/policies.yaml` |
@@ -94,7 +94,7 @@
 | `test_rewrite_engine.py` | Rewrite engine: union-find, e-graph, expression parsing, rule loading, saturation |
 | `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
 | `test_taint_presets.py` | Framework-specific taint presets: preset loading, merge, Flask/Django/SQLAlchemy integration |
-| `test_dsl.py` | DSL support: SQL detection, symbol extraction, ORM link resolution, formatting |
+| `test_dsl.py` | DSL support: SQL detection, symbol extraction, ORM link resolution, formatting, find in DSL regions, DSL lint rules, regex named groups, DSL impact analysis, `--dsl` search flag, `dsl_symbols`/`dsl_links` tables |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 | `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
 | `test_cfg_typescript.py` | TypeScript/JS CFG construction (alternative-style if, c-style for, switch/case fallthrough, try/catch fields-style, arrow functions, methods) |
