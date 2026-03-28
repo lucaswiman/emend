@@ -73,8 +73,8 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 
 ### Phase 4: Tier 2 DSLs + deeper integration
 
-- [ ] Jinja2/Django template support: variable resolution, block inheritance
-- [ ] GraphQL support: schema-to-resolver linking, query-to-type navigation
+- [x] Jinja2/Django template support: variable resolution, block inheritance — `dsl.py` (`extract_jinja_symbols`, `resolve_jinja_links`, `_detect_jinja_regions`), standalone `.html`/`.jinja2`/`.j2` files + embedded Python strings
+- [x] GraphQL support: schema-to-resolver linking, query-to-type navigation — `dsl.py` (`extract_graphql_symbols`, `resolve_graphql_links`, `_detect_graphql_regions`), standalone `.graphql`/`.gql` files + embedded Python strings
 - [x] Regex named group navigation: `(?P<name>...)` → `.group("name")` call sites — `extract_regex_named_groups()` and `find_regex_group_references()` in `dsl.py`
 - [x] `impact` command integration: ORM model changes surface affected SQL queries and JSX call sites — `find_dsl_impact()` in `dsl.py`; `emend impact` outputs `dsl_impacts` in JSON and text modes
 

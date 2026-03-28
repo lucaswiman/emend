@@ -796,24 +796,33 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
-        # DSL symbol extraction (SQL, etc.)
+        # DSL symbol extraction (SQL, Jinja2, GraphQL, etc.)
         try:
-            from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+            from emend.dsl import (
+                detect_dsl_regions, extract_sql_symbols,
+                extract_jinja_symbols, extract_graphql_symbols, DslKind,
+            )
             regions = detect_dsl_regions(py_file, source=content)
             for region in regions:
+                syms = []
                 if region.dsl == DslKind.SQL:
-                    for sym in extract_sql_symbols(region):
-                        dsl_rows.append((
-                            sym.name,
-                            sym.kind.value,
-                            sym.dsl.value,
-                            py_file,
-                            region.host_start_line,
-                            region.host_start_col,
-                            region.host_end_line,
-                            region.host_end_col,
-                            content_hash,
-                        ))
+                    syms = extract_sql_symbols(region)
+                elif region.dsl == DslKind.JINJA:
+                    syms = extract_jinja_symbols(region)
+                elif region.dsl == DslKind.GRAPHQL:
+                    syms = extract_graphql_symbols(region)
+                for sym in syms:
+                    dsl_rows.append((
+                        sym.name,
+                        sym.kind.value,
+                        sym.dsl.value,
+                        py_file,
+                        region.host_start_line,
+                        region.host_start_col,
+                        region.host_end_line,
+                        region.host_end_col,
+                        content_hash,
+                    ))
         except Exception:
             pass
 

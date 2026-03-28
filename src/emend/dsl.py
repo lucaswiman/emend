@@ -1,8 +1,8 @@
 """DSL support for embedded languages.
 
-Detects embedded DSL regions (SQL, CSS, HTML) inside host-language
-string literals, extracts symbols, and resolves cross-language links
-to host-language definitions.
+Detects embedded DSL regions (SQL, CSS, HTML, Jinja2, GraphQL) inside
+host-language string literals and standalone DSL files, extracts symbols,
+and resolves cross-language links to host-language definitions.
 """
 
 from __future__ import annotations
@@ -108,6 +108,53 @@ _TRIPLE_SINGLE_STRING_RE = re.compile(r"'''(.*?)'''", re.DOTALL)
 _SINGLE_DOUBLE_STRING_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
 _SINGLE_SINGLE_STRING_RE = re.compile(r"'([^'\\]*(?:\\.[^'\\]*)*)'")
 
+# Jinja2 template patterns — detect {{ var }}, {% tag %}, {# comment #}
+_JINJA_EXPR_RE = re.compile(r'\{\{.*?\}\}', re.DOTALL)
+_JINJA_TAG_RE = re.compile(r'\{%.*?%\}', re.DOTALL)
+_JINJA_COMMENT_RE = re.compile(r'\{#.*?#\}', re.DOTALL)
+_JINJA_KEYWORD_RE = re.compile(
+    r'\{[%{].*?\b(extends|block|macro|include|import|from|for|if|set|call|filter)\b.*?[%}]\}',
+    re.IGNORECASE | re.DOTALL,
+)
+# Jinja2 file extensions
+_JINJA_EXTENSIONS = frozenset({'.html', '.jinja', '.jinja2', '.j2'})
+
+# GraphQL keyword pattern
+_GRAPHQL_KEYWORD_RE = re.compile(
+    r'\b(type|query|mutation|subscription|schema|input|enum|interface|union|fragment|extend)\s+\w+',
+    re.IGNORECASE,
+)
+# GraphQL file extensions
+_GRAPHQL_EXTENSIONS = frozenset({'.graphql', '.gql'})
+
+# render_template call pattern for Jinja2 context resolution
+_RENDER_TEMPLATE_RE = re.compile(
+    r'render_template\s*\(\s*["\']([^"\']+)["\']\s*(?:,\s*(.+?))?\s*\)',
+    re.DOTALL,
+)
+# Keyword argument pattern for template context
+_KWARG_RE = re.compile(r'(\w+)\s*=')
+
+# GraphQL type/field patterns
+_GQL_TYPE_DEF_RE = re.compile(
+    r'\b(?:type|input|enum|interface|union)\s+(\w+)',
+    re.IGNORECASE,
+)
+_GQL_FIELD_DEF_RE = re.compile(
+    r'^\s+(\w+)\s*(?:\([^)]*\))?\s*:\s*',
+    re.MULTILINE,
+)
+_GQL_QUERY_DEF_RE = re.compile(
+    r'\b(?:query|mutation|subscription)\s+(\w+)',
+    re.IGNORECASE,
+)
+
+# Resolver class/function patterns (Python + TypeScript)
+_RESOLVER_CLASS_RE = re.compile(r'class\s+(\w+(?:Resolver|Query|Mutation))\s*[\(:]', re.MULTILINE)
+_RESOLVER_DECORATOR_RE = re.compile(
+    r'@(?:strawberry\.type|Resolver|resolver|Query|Mutation|Subscription)\b'
+)
+
 
 def _count_newlines_before(text: str, pos: int) -> int:
     """Count newlines in text[:pos], returning 0-based line offset."""
@@ -139,10 +186,54 @@ def detect_dsl_regions(
             logger.warning("Could not read %s: %s", file_path, e)
             return []
 
-    if dsls is None or DslKind.SQL in dsls:
-        return _detect_sql_regions(file_path, source)
+    regions: list[DslRegion] = []
 
-    return []
+    # Check file extension for standalone DSL files
+    ext = Path(file_path).suffix.lower()
+
+    if ext in _JINJA_EXTENSIONS and (dsls is None or DslKind.JINJA in dsls):
+        # Entire file is a Jinja2 template
+        end_line = source.count('\n') + 1
+        end_col = len(source) - source.rfind('\n') - 1 if '\n' in source else len(source)
+        regions.append(DslRegion(
+            dsl=DslKind.JINJA,
+            content=source,
+            host_file=file_path,
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=end_line,
+            host_end_col=max(0, end_col),
+            trigger="file_extension",
+        ))
+        return regions
+
+    if ext in _GRAPHQL_EXTENSIONS and (dsls is None or DslKind.GRAPHQL in dsls):
+        # Entire file is GraphQL
+        end_line = source.count('\n') + 1
+        end_col = len(source) - source.rfind('\n') - 1 if '\n' in source else len(source)
+        regions.append(DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content=source,
+            host_file=file_path,
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=end_line,
+            host_end_col=max(0, end_col),
+            trigger="file_extension",
+        ))
+        return regions
+
+    # Detect DSL regions inside host-language source files
+    if dsls is None or DslKind.SQL in dsls:
+        regions.extend(_detect_sql_regions(file_path, source))
+
+    if dsls is None or DslKind.JINJA in dsls:
+        regions.extend(_detect_jinja_regions(file_path, source))
+
+    if dsls is None or DslKind.GRAPHQL in dsls:
+        regions.extend(_detect_graphql_regions(file_path, source))
+
+    return regions
 
 
 def _detect_sql_regions(file_path: str, source: str) -> list[DslRegion]:
@@ -196,6 +287,104 @@ def _detect_sql_regions(file_path: str, source: str) -> list[DslRegion]:
             content = m.group(1)
             # Skip if already captured as part of triple-quoted
             _add_region(content, m.start(), m.end(), trigger)
+
+    return regions
+
+
+def _detect_jinja_regions(file_path: str, source: str) -> list[DslRegion]:
+    """Detect Jinja2 template regions embedded in Python string literals.
+
+    Looks for strings containing Jinja2 syntax: {{ expr }}, {% tag %}, {# comment #}.
+    Also detects render_template_string() and Template() calls.
+    """
+    regions: list[DslRegion] = []
+    seen_contents: set[str] = set()
+
+    def _add_jinja_region(content: str, match_start: int, match_end: int, trigger: str) -> None:
+        stripped = content.strip()
+        if not stripped or stripped in seen_contents:
+            return
+        # Must contain Jinja2 syntax
+        if not (_JINJA_EXPR_RE.search(stripped) or _JINJA_TAG_RE.search(stripped)):
+            return
+        seen_contents.add(stripped)
+
+        start_line = _count_newlines_before(source, match_start) + 1
+        start_col = match_start - source.rfind('\n', 0, match_start) - 1
+        end_line = _count_newlines_before(source, match_end) + 1
+        end_col = match_end - source.rfind('\n', 0, match_end) - 1
+
+        regions.append(DslRegion(
+            dsl=DslKind.JINJA,
+            content=stripped,
+            host_file=file_path,
+            host_start_line=start_line,
+            host_start_col=max(0, start_col),
+            host_end_line=end_line,
+            host_end_col=max(0, end_col),
+            trigger=trigger,
+        ))
+
+    # Check for magic comment: # language=jinja or # language=jinja2
+    magic_jinja = bool(re.search(r'#\s*language\s*=\s*jinja2?\b', source, re.IGNORECASE))
+    trigger = "magic_comment" if magic_jinja else "literal"
+
+    # Scan triple-quoted strings first
+    for pattern in (_TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE):
+        for m in pattern.finditer(source):
+            _add_jinja_region(m.group(1), m.start(), m.end(), trigger)
+
+    # Scan single-line strings
+    for pattern in (_SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE):
+        for m in pattern.finditer(source):
+            _add_jinja_region(m.group(1), m.start(), m.end(), trigger)
+
+    return regions
+
+
+def _detect_graphql_regions(file_path: str, source: str) -> list[DslRegion]:
+    """Detect GraphQL regions embedded in Python/TypeScript string literals.
+
+    Looks for strings containing GraphQL keywords (type, query, mutation, etc.).
+    Also detects gql() tagged template calls.
+    """
+    regions: list[DslRegion] = []
+    seen_contents: set[str] = set()
+
+    def _add_gql_region(content: str, match_start: int, match_end: int, trigger: str) -> None:
+        stripped = content.strip()
+        if not stripped or stripped in seen_contents:
+            return
+        if not _GRAPHQL_KEYWORD_RE.search(stripped):
+            return
+        seen_contents.add(stripped)
+
+        start_line = _count_newlines_before(source, match_start) + 1
+        start_col = match_start - source.rfind('\n', 0, match_start) - 1
+        end_line = _count_newlines_before(source, match_end) + 1
+        end_col = match_end - source.rfind('\n', 0, match_end) - 1
+
+        regions.append(DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content=stripped,
+            host_file=file_path,
+            host_start_line=start_line,
+            host_start_col=max(0, start_col),
+            host_end_line=end_line,
+            host_end_col=max(0, end_col),
+            trigger=trigger,
+        ))
+
+    magic_gql = bool(re.search(r'#\s*language\s*=\s*graphql\b', source, re.IGNORECASE))
+    trigger = "magic_comment" if magic_gql else "literal"
+
+    for pattern in (_TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE):
+        for m in pattern.finditer(source):
+            _add_gql_region(m.group(1), m.start(), m.end(), trigger)
+
+    for pattern in (_SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE):
+        for m in pattern.finditer(source):
+            _add_gql_region(m.group(1), m.start(), m.end(), trigger)
 
     return regions
 
@@ -321,6 +510,246 @@ def extract_sql_symbols(region: DslRegion) -> list[DslSymbol]:
                     ),
                 ],
             ))
+
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Jinja2 Symbol Extraction
+# ---------------------------------------------------------------------------
+
+# Jinja2 expression variable: {{ user.name }} -> "user"
+_JINJA_VAR_RE = re.compile(r'\{\{\s*(\w+)(?:\.\w+)*\s*(?:\|[^}]*)?\}\}')
+# Jinja2 block tag: {% block content %} -> "content"
+_JINJA_BLOCK_RE = re.compile(r'\{%[-\s]*block\s+(\w+)')
+# Jinja2 extends tag: {% extends "base.html" %} -> "base.html"
+_JINJA_EXTENDS_RE = re.compile(r'\{%[-\s]*extends\s+["\']([^"\']+)["\']')
+# Jinja2 macro: {% macro render_field(field) %} -> "render_field"
+_JINJA_MACRO_RE = re.compile(r'\{%[-\s]*macro\s+(\w+)')
+# Jinja2 include: {% include "header.html" %} -> "header.html"
+_JINJA_INCLUDE_RE = re.compile(r'\{%[-\s]*include\s+["\']([^"\']+)["\']')
+# Jinja2 for loop variable: {% for item in items %} -> "items" (iterable)
+_JINJA_FOR_RE = re.compile(r'\{%[-\s]*for\s+\w+\s+in\s+(\w+)')
+
+# Jinja2 built-in variables and keywords to exclude
+_JINJA_BUILTINS = frozenset({
+    "true", "false", "none", "loop", "range", "lipsum", "dict",
+    "cycler", "joiner", "namespace", "self", "caller",
+})
+
+
+def extract_jinja_symbols(region: DslRegion) -> list[DslSymbol]:
+    """Extract template variables, blocks, macros, and inheritance from a Jinja2 region.
+
+    Parses Jinja2 templates using regex to identify:
+    - Template variables ({{ var }}, {% for x in items %})
+    - Block definitions ({% block name %})
+    - Macro definitions ({% macro name %})
+    - Template inheritance ({% extends "base.html" %})
+    - Template includes ({% include "header.html" %})
+
+    Args:
+        region: A DslRegion containing Jinja2 content.
+
+    Returns:
+        List of DslSymbol objects with appropriate LinkHints.
+    """
+    symbols: list[DslSymbol] = []
+    seen_vars: set[str] = set()
+    seen_blocks: set[str] = set()
+    content = region.content
+
+    # Extract template variables from {{ var }} and {% for x in var %}
+    for pattern in (_JINJA_VAR_RE, _JINJA_FOR_RE):
+        for m in pattern.finditer(content):
+            var_name = m.group(1)
+            if var_name.lower() in _JINJA_BUILTINS or var_name in seen_vars:
+                continue
+            seen_vars.add(var_name)
+
+            line_offset = content[:m.start()].count('\n')
+            symbols.append(DslSymbol(
+                name=var_name,
+                kind=DslSymbolKind.TEMPLATE_VAR,
+                dsl=region.dsl,
+                host_file=region.host_file,
+                host_line=region.host_start_line + line_offset,
+                host_col=region.host_start_col,
+                link_hints=[
+                    LinkHint(
+                        strategy="template_var",
+                        target_pattern=var_name,
+                        target_kind="variable",
+                    ),
+                ],
+            ))
+
+    # Extract block definitions
+    for m in _JINJA_BLOCK_RE.finditer(content):
+        block_name = m.group(1)
+        if block_name in seen_blocks:
+            continue
+        seen_blocks.add(block_name)
+
+        line_offset = content[:m.start()].count('\n')
+        # Block inheritance hint: look for same block in parent template
+        hints: list[LinkHint] = [
+            LinkHint(
+                strategy="template_block",
+                target_pattern=block_name,
+                target_kind="block",
+            ),
+        ]
+        symbols.append(DslSymbol(
+            name=block_name,
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=region.dsl,
+            host_file=region.host_file,
+            host_line=region.host_start_line + line_offset,
+            host_col=region.host_start_col,
+            link_hints=hints,
+        ))
+
+    # Extract macro definitions
+    for m in _JINJA_MACRO_RE.finditer(content):
+        macro_name = m.group(1)
+        line_offset = content[:m.start()].count('\n')
+        symbols.append(DslSymbol(
+            name=macro_name,
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=region.dsl,
+            host_file=region.host_file,
+            host_line=region.host_start_line + line_offset,
+            host_col=region.host_start_col,
+            link_hints=[],
+        ))
+
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# GraphQL Symbol Extraction
+# ---------------------------------------------------------------------------
+
+# GraphQL reserved/built-in type names
+_GQL_BUILTINS = frozenset({
+    "string", "int", "float", "boolean", "id",
+    "query", "mutation", "subscription", "schema",
+})
+
+
+def extract_graphql_symbols(region: DslRegion) -> list[DslSymbol]:
+    """Extract type and field definitions from a GraphQL region.
+
+    Parses GraphQL schemas/queries using regex to identify:
+    - Type definitions (type User, input CreateUserInput, enum Role)
+    - Field definitions (email: String!, posts: [Post!]!)
+    - Query/mutation/subscription definitions
+
+    Each type gets a graphql_type LinkHint; each field gets a graphql_field hint.
+
+    Args:
+        region: A DslRegion containing GraphQL content.
+
+    Returns:
+        List of DslSymbol objects with appropriate LinkHints.
+    """
+    symbols: list[DslSymbol] = []
+    seen_types: set[str] = set()
+    seen_fields: set[str] = set()
+    content = region.content
+
+    # Extract type definitions
+    for m in _GQL_TYPE_DEF_RE.finditer(content):
+        type_name = m.group(1)
+        if type_name.lower() in _GQL_BUILTINS or type_name in seen_types:
+            continue
+        seen_types.add(type_name)
+
+        line_offset = content[:m.start()].count('\n')
+        # Link hint: look for resolver class or model class with matching name
+        resolver_name = f"{type_name}Resolver"
+        symbols.append(DslSymbol(
+            name=type_name,
+            kind=DslSymbolKind.GRAPHQL_TYPE,
+            dsl=region.dsl,
+            host_file=region.host_file,
+            host_line=region.host_start_line + line_offset,
+            host_col=region.host_start_col,
+            link_hints=[
+                LinkHint(
+                    strategy="graphql_type",
+                    target_pattern=type_name,
+                    target_kind="class",
+                ),
+                LinkHint(
+                    strategy="graphql_type",
+                    target_pattern=resolver_name,
+                    target_kind="class",
+                ),
+            ],
+        ))
+
+    # Extract field definitions (only inside type bodies)
+    # Simple heuristic: lines starting with whitespace + identifier + colon
+    current_type: str | None = None
+    for line in content.split('\n'):
+        type_match = _GQL_TYPE_DEF_RE.search(line)
+        if type_match:
+            current_type = type_match.group(1)
+            continue
+        if line.strip() == '}':
+            current_type = None
+            continue
+        if current_type:
+            field_match = _GQL_FIELD_DEF_RE.match(line)
+            if field_match:
+                field_name = field_match.group(1)
+                if field_name.lower() in _GQL_BUILTINS:
+                    continue
+                field_key = f"{current_type}.{field_name}"
+                if field_key in seen_fields:
+                    continue
+                seen_fields.add(field_key)
+                symbols.append(DslSymbol(
+                    name=field_name,
+                    kind=DslSymbolKind.GRAPHQL_FIELD,
+                    dsl=region.dsl,
+                    host_file=region.host_file,
+                    host_line=region.host_start_line,
+                    host_col=region.host_start_col,
+                    link_hints=[
+                        LinkHint(
+                            strategy="graphql_field",
+                            target_pattern=field_name,
+                            target_kind="function",
+                            module_hint=current_type,
+                        ),
+                    ],
+                ))
+
+    # Extract query/mutation/subscription operation names
+    for m in _GQL_QUERY_DEF_RE.finditer(content):
+        op_name = m.group(1)
+        if op_name in seen_types:
+            continue
+        seen_types.add(op_name)
+        line_offset = content[:m.start()].count('\n')
+        symbols.append(DslSymbol(
+            name=op_name,
+            kind=DslSymbolKind.GRAPHQL_TYPE,
+            dsl=region.dsl,
+            host_file=region.host_file,
+            host_line=region.host_start_line + line_offset,
+            host_col=region.host_start_col,
+            link_hints=[
+                LinkHint(
+                    strategy="graphql_type",
+                    target_pattern=op_name,
+                    target_kind="function",
+                ),
+            ],
+        ))
 
     return symbols
 
@@ -483,6 +912,241 @@ def resolve_orm_links(
     return links
 
 
+def resolve_jinja_links(
+    dsl_symbols: list[DslSymbol],
+    project_root: str,
+    framework: str = "flask",
+) -> list[DslLink]:
+    """Resolve Jinja2 template symbols to Python view function context variables.
+
+    For template variables:
+    - Find render_template() calls that render the template file
+    - Extract keyword arguments to identify context variable sources
+
+    For blocks:
+    - Find the parent template ({% extends %}) and locate the same block
+
+    Args:
+        dsl_symbols: Jinja2 symbols to resolve.
+        project_root: Project root directory for searching.
+        framework: Web framework ("flask" or "django").
+
+    Returns:
+        List of DslLink objects.
+    """
+    root = Path(project_root)
+    links: list[DslLink] = []
+
+    # Collect all Python files and scan for render_template calls
+    py_files = list(root.rglob("*.py"))
+
+    # Build index: template_name -> [(file_path, line, context_vars)]
+    template_contexts: dict[str, list[tuple[str, int, set[str]]]] = {}
+    for py_file in py_files:
+        try:
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in _RENDER_TEMPLATE_RE.finditer(source):
+            tpl_name = m.group(1)
+            line = source[:m.start()].count('\n') + 1
+            # Extract keyword arguments from the call
+            context_args = m.group(2) or ""
+            context_vars = set(_KWARG_RE.findall(context_args))
+            template_contexts.setdefault(tpl_name, []).append(
+                (str(py_file), line, context_vars)
+            )
+
+    # Build block index: scan template files for matching block definitions
+    template_dirs = list(root.rglob("*.html")) + list(root.rglob("*.jinja2")) + list(root.rglob("*.j2"))
+    block_index: dict[str, list[tuple[str, int]]] = {}  # block_name -> [(file, line)]
+    extends_map: dict[str, str] = {}  # child_file -> parent_template
+    for tpl_file in template_dirs:
+        try:
+            tpl_source = tpl_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in _JINJA_EXTENDS_RE.finditer(tpl_source):
+            extends_map[str(tpl_file)] = m.group(1)
+        for m in _JINJA_BLOCK_RE.finditer(tpl_source):
+            block_name = m.group(1)
+            line = tpl_source[:m.start()].count('\n') + 1
+            block_index.setdefault(block_name, []).append((str(tpl_file), line))
+
+    for symbol in dsl_symbols:
+        for hint in symbol.link_hints:
+            if hint.strategy == "template_var":
+                # Try to find a render_template call that passes this variable
+                # Match against the symbol's host file name
+                tpl_basename = Path(symbol.host_file).name
+                for tpl_name, contexts in template_contexts.items():
+                    # Match if template name matches the file name or ends with it
+                    if tpl_basename == tpl_name or tpl_basename.endswith(tpl_name):
+                        for ctx_file, ctx_line, ctx_vars in contexts:
+                            if symbol.name in ctx_vars:
+                                links.append(DslLink(
+                                    dsl_symbol=symbol,
+                                    target_qualified_name=f"{Path(ctx_file).stem}.render_template",
+                                    target_file=ctx_file,
+                                    target_line=ctx_line,
+                                    strategy="template_var",
+                                    confidence=0.85,
+                                ))
+                                break
+                    # Also check for partial path matches
+                    elif tpl_name in str(symbol.host_file):
+                        for ctx_file, ctx_line, ctx_vars in contexts:
+                            if symbol.name in ctx_vars:
+                                links.append(DslLink(
+                                    dsl_symbol=symbol,
+                                    target_qualified_name=f"{Path(ctx_file).stem}.render_template",
+                                    target_file=ctx_file,
+                                    target_line=ctx_line,
+                                    strategy="template_var",
+                                    confidence=0.7,
+                                ))
+                                break
+
+            elif hint.strategy == "template_block":
+                # Find matching blocks in other templates (parent or child)
+                block_name = hint.target_pattern
+                if block_name in block_index:
+                    for blk_file, blk_line in block_index[block_name]:
+                        # Skip self-reference
+                        if blk_file == symbol.host_file and blk_line == symbol.host_line:
+                            continue
+                        # Prefer parent template blocks
+                        is_parent = symbol.host_file in extends_map
+                        confidence = 0.9 if is_parent else 0.7
+                        links.append(DslLink(
+                            dsl_symbol=symbol,
+                            target_qualified_name=f"{Path(blk_file).stem}.block.{block_name}",
+                            target_file=blk_file,
+                            target_line=blk_line,
+                            strategy="template_block",
+                            confidence=confidence,
+                        ))
+
+    return links
+
+
+def resolve_graphql_links(
+    dsl_symbols: list[DslSymbol],
+    project_root: str,
+) -> list[DslLink]:
+    """Resolve GraphQL type and field symbols to resolver class/method definitions.
+
+    For types:
+    - Find classes with matching name or name + "Resolver"
+    - Also look for @Resolver-decorated classes
+
+    For fields:
+    - Find methods on the resolved type's resolver class
+
+    Args:
+        dsl_symbols: GraphQL symbols to resolve.
+        project_root: Project root directory.
+
+    Returns:
+        List of DslLink objects.
+    """
+    root = Path(project_root)
+    links: list[DslLink] = []
+
+    # Scan Python and TypeScript files for resolver classes and methods
+    code_files = list(root.rglob("*.py")) + list(root.rglob("*.ts"))
+
+    # Build class/function index
+    class_index: dict[str, tuple[str, int]] = {}  # class_name -> (file, line)
+    method_index: dict[str, list[tuple[str, int, str]]] = {}  # method_name -> [(file, line, class)]
+
+    for code_file in code_files:
+        try:
+            source = code_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        # Index classes
+        for m in _CLASS_DEF_RE.finditer(source):
+            cls_name = m.group(1)
+            line = source[:m.start()].count('\n') + 1
+            if cls_name not in class_index:
+                class_index[cls_name] = (str(code_file), line)
+
+        # Index methods/functions within classes
+        current_class: str | None = None
+        lines = source.split('\n')
+        for i, line_text in enumerate(lines, start=1):
+            class_match = re.match(r'^class\s+(\w+)\s*[\(:]', line_text)
+            if class_match:
+                current_class = class_match.group(1)
+            elif current_class and re.match(r'^\S', line_text) and line_text.strip() and not line_text.startswith('#'):
+                current_class = None
+            if current_class:
+                func_match = re.match(r'\s+(?:async\s+)?def\s+(\w+)\s*\(', line_text)
+                if func_match:
+                    method_name = func_match.group(1)
+                    method_index.setdefault(method_name, []).append(
+                        (str(code_file), i, current_class)
+                    )
+
+        # Also index standalone functions (for functional resolvers)
+        for m in re.finditer(r'^(?:async\s+)?def\s+(\w+)\s*\(', source, re.MULTILINE):
+            func_name = m.group(1)
+            line = source[:m.start()].count('\n') + 1
+            # Store as class_index entry with function kind
+            if func_name not in class_index:
+                class_index[func_name] = (str(code_file), line)
+
+    for symbol in dsl_symbols:
+        if symbol.kind == DslSymbolKind.GRAPHQL_TYPE:
+            for hint in symbol.link_hints:
+                if hint.strategy != "graphql_type":
+                    continue
+                target = hint.target_pattern
+                if target in class_index:
+                    found_file, found_line = class_index[target]
+                    # Higher confidence for "Resolver" suffix
+                    confidence = 0.9 if target.endswith("Resolver") else 0.8
+                    links.append(DslLink(
+                        dsl_symbol=symbol,
+                        target_qualified_name=f"{Path(found_file).stem}.{target}",
+                        target_file=found_file,
+                        target_line=found_line,
+                        strategy="graphql_type",
+                        confidence=confidence,
+                    ))
+                    break
+
+        elif symbol.kind == DslSymbolKind.GRAPHQL_FIELD:
+            field_name = symbol.name
+            parent_type = None
+            for hint in symbol.link_hints:
+                if hint.module_hint:
+                    parent_type = hint.module_hint
+                    break
+
+            if field_name in method_index:
+                for meth_file, meth_line, meth_class in method_index[field_name]:
+                    # Prefer methods on the resolver class for the parent type
+                    confidence = 0.7
+                    if parent_type:
+                        if meth_class == parent_type or meth_class == f"{parent_type}Resolver":
+                            confidence = 0.9
+                    links.append(DslLink(
+                        dsl_symbol=symbol,
+                        target_qualified_name=f"{Path(meth_file).stem}.{meth_class}.{field_name}",
+                        target_file=meth_file,
+                        target_line=meth_line,
+                        strategy="graphql_field",
+                        confidence=confidence,
+                    ))
+                    if confidence >= 0.9:
+                        break  # Found best match
+
+    return links
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -510,10 +1174,22 @@ def analyze_file(
     for region in regions:
         if region.dsl == DslKind.SQL:
             all_symbols.extend(extract_sql_symbols(region))
+        elif region.dsl == DslKind.JINJA:
+            all_symbols.extend(extract_jinja_symbols(region))
+        elif region.dsl == DslKind.GRAPHQL:
+            all_symbols.extend(extract_graphql_symbols(region))
 
     links: list[DslLink] = []
     if project_root and all_symbols:
-        links = resolve_orm_links(all_symbols, project_root, orm=orm)
+        sql_symbols = [s for s in all_symbols if s.dsl == DslKind.SQL]
+        jinja_symbols = [s for s in all_symbols if s.dsl == DslKind.JINJA]
+        gql_symbols = [s for s in all_symbols if s.dsl == DslKind.GRAPHQL]
+        if sql_symbols:
+            links.extend(resolve_orm_links(sql_symbols, project_root, orm=orm))
+        if jinja_symbols:
+            links.extend(resolve_jinja_links(jinja_symbols, project_root))
+        if gql_symbols:
+            links.extend(resolve_graphql_links(gql_symbols, project_root))
 
     return all_symbols, links
 

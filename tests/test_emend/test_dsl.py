@@ -14,11 +14,15 @@ from emend.dsl import (
     RegexNamedGroup,
     detect_dsl_regions,
     extract_sql_symbols,
+    extract_jinja_symbols,
+    extract_graphql_symbols,
     extract_regex_named_groups,
     find_dsl_impact,
     find_in_dsl,
     find_regex_group_references,
     resolve_orm_links,
+    resolve_jinja_links,
+    resolve_graphql_links,
     analyze_file,
     format_symbols,
     _singularize,
@@ -742,3 +746,688 @@ class TestDslIndexTables:
         assert rows[0] == ("users", "table", "sql")
 
         conn.close()
+
+
+# ====================================================================
+# Jinja2 / Django template support (Phase 4)
+# ====================================================================
+
+
+class TestDetectJinjaRegions:
+    """Tests for Jinja2 template region detection."""
+
+    def test_detect_jinja_in_standalone_html(self, tmp_path):
+        """Detects Jinja2 syntax in .html template files."""
+        f = tmp_path / "profile.html"
+        f.write_text(
+            '{% extends "base.html" %}\n'
+            '{% block content %}\n'
+            '  <h1>{{ user.name }}</h1>\n'
+            '{% endblock %}\n'
+        )
+        regions = detect_dsl_regions(str(f))
+        assert len(regions) >= 1
+        assert regions[0].dsl == DslKind.JINJA
+        assert "{{ user.name }}" in regions[0].content
+
+    def test_detect_jinja_in_j2_file(self, tmp_path):
+        """Detects Jinja2 in .jinja2 files."""
+        f = tmp_path / "email.jinja2"
+        f.write_text('Hello {{ name }},\nWelcome to {{ site }}!\n')
+        regions = detect_dsl_regions(str(f))
+        assert len(regions) >= 1
+        assert regions[0].dsl == DslKind.JINJA
+        assert regions[0].trigger == "file_extension"
+
+    def test_detect_jinja_in_python_string(self, tmp_path):
+        """Detects Jinja2 template in Python string literal."""
+        f = tmp_path / "app.py"
+        f.write_text(
+            'template = """\n'
+            '{% for item in items %}\n'
+            '  <li>{{ item.name }}</li>\n'
+            '{% endfor %}\n'
+            '"""\n'
+        )
+        regions = detect_dsl_regions(str(f))
+        jinja_regions = [r for r in regions if r.dsl == DslKind.JINJA]
+        assert len(jinja_regions) >= 1
+
+    def test_no_jinja_in_plain_strings(self, tmp_path):
+        """Does not detect Jinja2 in ordinary strings."""
+        f = tmp_path / "app.py"
+        f.write_text('msg = "Hello, world!"\nname = "Alice"\n')
+        regions = detect_dsl_regions(str(f))
+        jinja_regions = [r for r in regions if r.dsl == DslKind.JINJA]
+        assert len(jinja_regions) == 0
+
+
+class TestExtractJinjaSymbols:
+    """Tests for Jinja2 symbol extraction."""
+
+    def test_extract_template_variables(self):
+        """Extracts template variables from {{ expr }}."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='<h1>{{ user.name }}</h1>\n<p>{{ posts }}</p>',
+            host_file="profile.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=2,
+            host_end_col=20,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
+        assert "user" in var_names
+        assert "posts" in var_names
+
+    def test_extract_block_definitions(self):
+        """Extracts block names from {% block name %}."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='{% block content %}\n  <p>body</p>\n{% endblock %}\n{% block sidebar %}{% endblock %}',
+            host_file="layout.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=4,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        block_names = [s.name for s in symbols if any(h.strategy == "template_block" for h in s.link_hints)]
+        assert "content" in block_names
+        assert "sidebar" in block_names
+
+    def test_extract_macro_definitions(self):
+        """Extracts macro names from {% macro name() %}."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='{% macro render_field(field) %}\n  <div>{{ field.label }}</div>\n{% endmacro %}',
+            host_file="forms.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=3,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        macro_names = [s.name for s in symbols]
+        assert "render_field" in macro_names
+
+    def test_extract_for_loop_variables(self):
+        """Extracts iterable variable from {% for x in items %}."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='{% for post in posts %}\n  <h2>{{ post.title }}</h2>\n{% endfor %}',
+            host_file="blog.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=3,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
+        assert "posts" in var_names
+
+    def test_skip_jinja_builtins(self):
+        """Does not extract Jinja2 built-in variables."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='{{ loop.index }}\n{{ range(10) }}\n{{ true }}',
+            host_file="tmpl.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=3,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
+        assert "loop" not in var_names
+        assert "range" not in var_names
+        assert "true" not in var_names
+
+    def test_link_hints_for_template_var(self):
+        """Template variables get template_var link hints."""
+        region = DslRegion(
+            dsl=DslKind.JINJA,
+            content='{{ user.name }}',
+            host_file="profile.html",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=1,
+            host_end_col=15,
+            trigger="file_extension",
+        )
+        symbols = extract_jinja_symbols(region)
+        assert len(symbols) >= 1
+        assert any(h.strategy == "template_var" for h in symbols[0].link_hints)
+        assert any(h.target_pattern == "user" for h in symbols[0].link_hints)
+
+
+class TestResolveJinjaLinks:
+    """Tests for Jinja2 template variable resolution."""
+
+    def test_resolve_template_var_to_render_call(self, tmp_path):
+        """Resolves template variable to render_template() context."""
+        views = tmp_path / "views.py"
+        views.write_text(
+            'from flask import render_template\n'
+            '\n'
+            '@app.route("/profile")\n'
+            'def profile():\n'
+            '    user = get_current_user()\n'
+            '    return render_template("profile.html", user=user, posts=user.posts)\n'
+        )
+        symbol = DslSymbol(
+            name="user",
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=DslKind.JINJA,
+            host_file=str(tmp_path / "profile.html"),
+            host_line=3,
+            host_col=6,
+            link_hints=[
+                LinkHint(strategy="template_var", target_pattern="user", target_kind="variable"),
+            ],
+        )
+        links = resolve_jinja_links([symbol], str(tmp_path))
+        assert len(links) >= 1
+        assert "render_template" in links[0].target_qualified_name
+
+    def test_resolve_block_to_parent_template(self, tmp_path):
+        """Resolves block to matching block in parent template."""
+        base = tmp_path / "base.html"
+        base.write_text(
+            '<html>\n'
+            '{% block content %}{% endblock %}\n'
+            '{% block sidebar %}{% endblock %}\n'
+            '</html>\n'
+        )
+        child = tmp_path / "page.html"
+        child.write_text(
+            '{% extends "base.html" %}\n'
+            '{% block content %}\n'
+            '  <p>Page content</p>\n'
+            '{% endblock %}\n'
+        )
+        symbol = DslSymbol(
+            name="content",
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=DslKind.JINJA,
+            host_file=str(child),
+            host_line=2,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="template_block", target_pattern="content", target_kind="block"),
+            ],
+        )
+        links = resolve_jinja_links([symbol], str(tmp_path))
+        assert len(links) >= 1
+        assert "base" in links[0].target_file
+        assert links[0].strategy == "template_block"
+
+    def test_resolve_no_match(self, tmp_path):
+        """Returns empty when no matching render_template() call found."""
+        f = tmp_path / "app.py"
+        f.write_text("x = 1\n")
+        symbol = DslSymbol(
+            name="unknown_var",
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=DslKind.JINJA,
+            host_file=str(tmp_path / "missing.html"),
+            host_line=1,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="template_var", target_pattern="unknown_var", target_kind="variable"),
+            ],
+        )
+        links = resolve_jinja_links([symbol], str(tmp_path))
+        assert len(links) == 0
+
+
+class TestJinjaAnalyzeFile:
+    """End-to-end Jinja2 analysis tests."""
+
+    def test_analyze_jinja_template(self, tmp_path):
+        """End-to-end: detect Jinja2 template, extract symbols."""
+        f = tmp_path / "template.html"
+        f.write_text(
+            '{% extends "base.html" %}\n'
+            '{% block content %}\n'
+            '  <h1>{{ title }}</h1>\n'
+            '  {% for item in items %}\n'
+            '    <p>{{ item.name }}</p>\n'
+            '  {% endfor %}\n'
+            '{% endblock %}\n'
+        )
+        symbols, links = analyze_file(str(f))
+        assert len(symbols) >= 2
+        sym_names = [s.name for s in symbols]
+        assert "title" in sym_names
+        assert "items" in sym_names
+        assert "content" in sym_names
+
+    def test_analyze_file_with_jinja_in_python(self, tmp_path):
+        """Detects Jinja2 embedded in Python string."""
+        f = tmp_path / "app.py"
+        f.write_text(
+            'tpl = """\n'
+            '{% if show %}\n'
+            '  <p>{{ message }}</p>\n'
+            '{% endif %}\n'
+            '"""\n'
+        )
+        symbols, links = analyze_file(str(f))
+        jinja_syms = [s for s in symbols if s.dsl == DslKind.JINJA]
+        assert len(jinja_syms) >= 1
+        names = [s.name for s in jinja_syms]
+        assert "message" in names
+
+
+class TestJinjaDslDebugCommand:
+    """Tests for Jinja2 in dsl-debug command."""
+
+    def test_dsl_debug_jinja(self, tmp_path):
+        """dsl-debug --type jinja detects Jinja2 templates."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "template.html"
+        f.write_text(
+            '{% block header %}\n'
+            '  <h1>{{ title }}</h1>\n'
+            '{% endblock %}\n'
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["dsl-debug", str(f), "--type", "jinja"])
+        assert result.exit_code == 0
+        assert "title" in result.output or "header" in result.output
+
+
+class TestJinjaFindInDsl:
+    """Tests for find_in_dsl with Jinja2 regions."""
+
+    def test_find_jinja_pattern(self, tmp_path):
+        """Finds patterns inside Jinja2 template files."""
+        f = tmp_path / "template.html"
+        f.write_text(
+            '{% block content %}\n'
+            '  <h1>{{ title }}</h1>\n'
+            '{% endblock %}\n'
+        )
+        matches = find_in_dsl("{{ $VAR }}", str(f), dsl_type="jinja")
+        assert len(matches) >= 1
+        assert matches[0].captures.get("VAR") is not None
+
+
+# ====================================================================
+# GraphQL support (Phase 4)
+# ====================================================================
+
+
+class TestDetectGraphqlRegions:
+    """Tests for GraphQL region detection."""
+
+    def test_detect_graphql_in_standalone_file(self, tmp_path):
+        """Detects GraphQL in .graphql files."""
+        f = tmp_path / "schema.graphql"
+        f.write_text(
+            'type User {\n'
+            '  id: ID!\n'
+            '  email: String!\n'
+            '  posts: [Post!]!\n'
+            '}\n'
+            '\n'
+            'type Query {\n'
+            '  user(id: ID!): User\n'
+            '}\n'
+        )
+        regions = detect_dsl_regions(str(f))
+        assert len(regions) >= 1
+        assert regions[0].dsl == DslKind.GRAPHQL
+        assert regions[0].trigger == "file_extension"
+
+    def test_detect_graphql_in_gql_file(self, tmp_path):
+        """Detects GraphQL in .gql files."""
+        f = tmp_path / "queries.gql"
+        f.write_text('query GetUser { user { id name } }\n')
+        regions = detect_dsl_regions(str(f))
+        assert len(regions) >= 1
+        assert regions[0].dsl == DslKind.GRAPHQL
+
+    def test_detect_graphql_in_python_string(self, tmp_path):
+        """Detects GraphQL schema in Python string literal."""
+        f = tmp_path / "schema.py"
+        f.write_text(
+            'SCHEMA = """\n'
+            'type User {\n'
+            '  id: ID!\n'
+            '  name: String!\n'
+            '}\n'
+            '"""\n'
+        )
+        regions = detect_dsl_regions(str(f))
+        gql_regions = [r for r in regions if r.dsl == DslKind.GRAPHQL]
+        assert len(gql_regions) >= 1
+
+    def test_no_graphql_in_plain_strings(self, tmp_path):
+        """Does not detect GraphQL in ordinary strings."""
+        f = tmp_path / "app.py"
+        f.write_text('msg = "Hello, world!"\n')
+        regions = detect_dsl_regions(str(f))
+        gql_regions = [r for r in regions if r.dsl == DslKind.GRAPHQL]
+        assert len(gql_regions) == 0
+
+
+class TestExtractGraphqlSymbols:
+    """Tests for GraphQL symbol extraction."""
+
+    def test_extract_type_definitions(self):
+        """Extracts type names from GraphQL schema."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  id: ID!\n  email: String!\n}\n\ntype Post {\n  title: String!\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=8,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
+        assert "User" in type_names
+        assert "Post" in type_names
+
+    def test_extract_field_definitions(self):
+        """Extracts field names from GraphQL types."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  email: String!\n  posts: [Post!]!\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=4,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        field_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
+        assert "email" in field_names
+        assert "posts" in field_names
+
+    def test_extract_input_and_enum(self):
+        """Extracts input and enum type definitions."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='input CreateUserInput {\n  name: String!\n}\n\nenum Role {\n  ADMIN\n  USER\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=8,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
+        assert "CreateUserInput" in type_names
+        assert "Role" in type_names
+
+    def test_extract_query_operations(self):
+        """Extracts query/mutation operation names."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='query GetUser($id: ID!) {\n  user(id: $id) {\n    name\n  }\n}\n\nmutation CreateUser($input: CreateUserInput!) {\n  createUser(input: $input) {\n    id\n  }\n}',
+            host_file="queries.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=11,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        op_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
+        assert "GetUser" in op_names
+        assert "CreateUser" in op_names
+
+    def test_skip_builtin_types(self):
+        """Does not extract GraphQL built-in types."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  name: String\n  age: Int\n  active: Boolean\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=5,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
+        assert "String" not in type_names
+        assert "Int" not in type_names
+        assert "Boolean" not in type_names
+
+    def test_link_hints_for_types(self):
+        """Type symbols get graphql_type link hints with resolver name."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  id: ID!\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=3,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        user_types = [s for s in symbols if s.name == "User"]
+        assert len(user_types) >= 1
+        hints = user_types[0].link_hints
+        assert any(h.strategy == "graphql_type" and h.target_pattern == "UserResolver" for h in hints)
+
+    def test_link_hints_for_fields(self):
+        """Field symbols get graphql_field link hints with parent type."""
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  posts: [Post!]!\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=3,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        fields = [s for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
+        assert len(fields) >= 1
+        assert any(h.strategy == "graphql_field" and h.module_hint == "User" for h in fields[0].link_hints)
+
+
+class TestResolveGraphqlLinks:
+    """Tests for GraphQL resolver linking."""
+
+    def test_resolve_type_to_resolver_class(self, tmp_path):
+        """Resolves GraphQL type to resolver class."""
+        resolver_file = tmp_path / "resolvers.py"
+        resolver_file.write_text(
+            'class UserResolver:\n'
+            '    async def user(self, id: str):\n'
+            '        return get_user(id)\n'
+            '\n'
+            '    async def posts(self, user):\n'
+            '        return user.posts\n'
+        )
+        symbol = DslSymbol(
+            name="User",
+            kind=DslSymbolKind.GRAPHQL_TYPE,
+            dsl=DslKind.GRAPHQL,
+            host_file="schema.graphql",
+            host_line=1,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="graphql_type", target_pattern="User", target_kind="class"),
+                LinkHint(strategy="graphql_type", target_pattern="UserResolver", target_kind="class"),
+            ],
+        )
+        links = resolve_graphql_links([symbol], str(tmp_path))
+        assert len(links) >= 1
+        assert "UserResolver" in links[0].target_qualified_name
+
+    def test_resolve_field_to_method(self, tmp_path):
+        """Resolves GraphQL field to method on resolver class."""
+        resolver_file = tmp_path / "resolvers.py"
+        resolver_file.write_text(
+            'class UserResolver:\n'
+            '    async def posts(self, user):\n'
+            '        return user.posts\n'
+        )
+        symbol = DslSymbol(
+            name="posts",
+            kind=DslSymbolKind.GRAPHQL_FIELD,
+            dsl=DslKind.GRAPHQL,
+            host_file="schema.graphql",
+            host_line=3,
+            host_col=2,
+            link_hints=[
+                LinkHint(
+                    strategy="graphql_field",
+                    target_pattern="posts",
+                    target_kind="function",
+                    module_hint="User",
+                ),
+            ],
+        )
+        links = resolve_graphql_links([symbol], str(tmp_path))
+        assert len(links) >= 1
+        assert "posts" in links[0].target_qualified_name
+        assert "UserResolver" in links[0].target_qualified_name
+
+    def test_resolve_type_to_model_class(self, tmp_path):
+        """Resolves GraphQL type to model class with matching name."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            'class User:\n'
+            '    id: int\n'
+            '    email: str\n'
+        )
+        symbol = DslSymbol(
+            name="User",
+            kind=DslSymbolKind.GRAPHQL_TYPE,
+            dsl=DslKind.GRAPHQL,
+            host_file="schema.graphql",
+            host_line=1,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="graphql_type", target_pattern="User", target_kind="class"),
+                LinkHint(strategy="graphql_type", target_pattern="UserResolver", target_kind="class"),
+            ],
+        )
+        links = resolve_graphql_links([symbol], str(tmp_path))
+        assert len(links) >= 1
+        assert "User" in links[0].target_qualified_name
+
+    def test_resolve_no_match(self, tmp_path):
+        """Returns empty when no matching resolver found."""
+        f = tmp_path / "app.py"
+        f.write_text("x = 1\n")
+        symbol = DslSymbol(
+            name="Widget",
+            kind=DslSymbolKind.GRAPHQL_TYPE,
+            dsl=DslKind.GRAPHQL,
+            host_file="schema.graphql",
+            host_line=1,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="graphql_type", target_pattern="Widget", target_kind="class"),
+                LinkHint(strategy="graphql_type", target_pattern="WidgetResolver", target_kind="class"),
+            ],
+        )
+        links = resolve_graphql_links([symbol], str(tmp_path))
+        assert len(links) == 0
+
+
+class TestGraphqlAnalyzeFile:
+    """End-to-end GraphQL analysis tests."""
+
+    def test_analyze_graphql_schema(self, tmp_path):
+        """End-to-end: detect GraphQL, extract symbols."""
+        f = tmp_path / "schema.graphql"
+        f.write_text(
+            'type User {\n'
+            '  id: ID!\n'
+            '  email: String!\n'
+            '  posts: [Post!]!\n'
+            '}\n'
+            '\n'
+            'type Post {\n'
+            '  title: String!\n'
+            '  author: User!\n'
+            '}\n'
+        )
+        symbols, links = analyze_file(str(f))
+        assert len(symbols) >= 2
+        type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
+        assert "User" in type_names
+        assert "Post" in type_names
+
+    def test_analyze_graphql_in_python(self, tmp_path):
+        """Detects GraphQL schema embedded in Python string."""
+        f = tmp_path / "schema.py"
+        f.write_text(
+            'SCHEMA = """\n'
+            'type User {\n'
+            '  id: ID!\n'
+            '  name: String!\n'
+            '}\n'
+            '"""\n'
+        )
+        symbols, links = analyze_file(str(f))
+        gql_syms = [s for s in symbols if s.dsl == DslKind.GRAPHQL]
+        assert len(gql_syms) >= 1
+        names = [s.name for s in gql_syms]
+        assert "User" in names
+
+    def test_analyze_graphql_with_resolution(self, tmp_path):
+        """End-to-end: detect GraphQL + resolve to Python resolvers."""
+        schema = tmp_path / "schema.graphql"
+        schema.write_text('type User {\n  id: ID!\n  posts: [Post!]!\n}\n')
+        resolver = tmp_path / "resolvers.py"
+        resolver.write_text(
+            'class UserResolver:\n'
+            '    async def posts(self):\n'
+            '        pass\n'
+        )
+        symbols, links = analyze_file(str(schema), project_root=str(tmp_path))
+        assert len(links) >= 1
+        assert any("UserResolver" in lnk.target_qualified_name for lnk in links)
+
+
+class TestGraphqlDslDebugCommand:
+    """Tests for GraphQL in dsl-debug command."""
+
+    def test_dsl_debug_graphql(self, tmp_path):
+        """dsl-debug --type graphql detects GraphQL schemas."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "schema.graphql"
+        f.write_text('type User {\n  id: ID!\n  name: String!\n}\n')
+        runner = CliRunner()
+        result = runner.invoke(app, ["dsl-debug", str(f), "--type", "graphql"])
+        assert result.exit_code == 0
+        assert "User" in result.output
+
+
+class TestGraphqlFindInDsl:
+    """Tests for find_in_dsl with GraphQL regions."""
+
+    def test_find_graphql_type_pattern(self, tmp_path):
+        """Finds patterns inside GraphQL files."""
+        f = tmp_path / "schema.graphql"
+        f.write_text('type User {\n  id: ID!\n  name: String!\n}\n')
+        matches = find_in_dsl("type $TYPE", str(f), dsl_type="graphql")
+        assert len(matches) >= 1
+        assert matches[0].captures.get("TYPE") is not None
