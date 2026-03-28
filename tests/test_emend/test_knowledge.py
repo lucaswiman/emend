@@ -590,7 +590,7 @@ class TestEditorServerRPC:
         result = _module_resolve(engine, {"module": "nonexistent"})
         assert result["items"] == []
 
-    def test_mapping_goto_local_first(self, store):
+    def test_mapping_goto_definition_first(self, store):
         """mapping_goto returns local results when symbol exists in project index."""
         from emend.editor_search import SearchResult, _mapping_goto
 

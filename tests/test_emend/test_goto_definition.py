@@ -13,18 +13,18 @@ def _make_engine(tmp_path, filename, code):
 
 
 def _assert_goto(engine, file_path, line, col, expected_name, expected_line):
-    """Helper: assert goto_local returns expected result."""
-    res = engine.goto_local(str(file_path), line=line, col=col)
+    """Helper: assert goto_definition returns expected result."""
+    res = engine.goto_definition(str(file_path), line=line, col=col)
     assert len(res.items) >= 1, (
-        f"goto_local({line}, {col}) returned no results, "
+        f"goto_definition({line}, {col}) returned no results, "
         f"expected {expected_name} at line {expected_line}"
     )
     assert res.items[0]["name"] == expected_name, (
-        f"goto_local({line}, {col}) returned name={res.items[0]['name']!r}, "
+        f"goto_definition({line}, {col}) returned name={res.items[0]['name']!r}, "
         f"expected {expected_name!r}"
     )
     assert res.items[0]["line"] == expected_line, (
-        f"goto_local({line}, {col}) returned line={res.items[0]['line']}, "
+        f"goto_definition({line}, {col}) returned line={res.items[0]['line']}, "
         f"expected {expected_line}"
     )
 
@@ -32,7 +32,7 @@ def _assert_goto(engine, file_path, line, col, expected_name, expected_line):
 # -- Basic tests --
 
 
-def test_goto_local_python(tmp_path):
+def test_goto_definition_python(tmp_path):
     """Basic goto: local variable and parameter."""
     engine, fp = _make_engine(tmp_path, "test.py", """
 def foo(x):
@@ -48,7 +48,7 @@ z = foo(10)
     engine.close()
 
 
-def test_goto_local_ts(tmp_path):
+def test_goto_definition_ts(tmp_path):
     """Basic goto in TypeScript."""
     engine, fp = _make_engine(tmp_path, "test.ts", """
 function greet(name: string) {
@@ -99,7 +99,7 @@ def foo(x):
     engine.close()
 
 
-def test_goto_local_shadows_import(tmp_path):
+def test_goto_definition_shadows_import(tmp_path):
     """Local variable shadowing an import should resolve to local definition."""
     engine, fp = _make_engine(tmp_path, "test.py", """
 import math
@@ -528,6 +528,6 @@ def func():
 
     return x
 """)
-    res = engine.goto_local(str(fp), line=3, col=1)
+    res = engine.goto_definition(str(fp), line=3, col=1)
     assert len(res.items) == 0, "Empty line should return no results"
     engine.close()

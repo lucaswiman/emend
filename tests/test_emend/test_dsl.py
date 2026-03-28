@@ -410,10 +410,10 @@ class TestRefsDslSymbols:
 
 
 class TestGotoLocalDslFallback:
-    """Tests for DSL fallback in goto_local."""
+    """Tests for DSL fallback in goto_definition."""
 
-    def test_goto_local_resolves_sql_to_orm_model(self, tmp_path):
-        """goto_local resolves SQL table name to ORM model class."""
+    def test_goto_definition_resolves_sql_to_orm_model(self, tmp_path):
+        """goto_definition resolves SQL table name to ORM model class."""
         model_file = tmp_path / "models.py"
         model_file.write_text(
             'class User:\n'
@@ -426,26 +426,26 @@ class TestGotoLocalDslFallback:
         )
         from emend.editor_search import EditorSearchEngine
         engine = EditorSearchEngine(str(tmp_path))
-        result = engine.goto_local(file=str(query_file), line=1, col=25)
+        result = engine.goto_definition(file=str(query_file), line=1, col=25)
         assert result.mode == "symbol"
         if result.items:
             assert any("User" in item.get("qualified_name", "") for item in result.items)
 
-    def test_goto_local_no_dsl_when_normal_ref(self, tmp_path):
-        """goto_local uses normal resolution for non-DSL code."""
+    def test_goto_definition_no_dsl_when_normal_ref(self, tmp_path):
+        """goto_definition uses normal resolution for non-DSL code."""
         f = tmp_path / "app.py"
         f.write_text('def hello():\n    pass\nhello()\n')
         from emend.editor_search import EditorSearchEngine
         engine = EditorSearchEngine(str(tmp_path))
-        result = engine.goto_local(file=str(f), line=3, col=1)
+        result = engine.goto_definition(file=str(f), line=3, col=1)
         assert result.mode == "symbol"
 
-    def test_goto_local_empty_for_plain_string(self, tmp_path):
-        """goto_local returns empty for non-DSL strings."""
+    def test_goto_definition_empty_for_plain_string(self, tmp_path):
+        """goto_definition returns empty for non-DSL strings."""
         f = tmp_path / "app.py"
         f.write_text('msg = "hello world"\n')
         from emend.editor_search import EditorSearchEngine
         engine = EditorSearchEngine(str(tmp_path))
-        result = engine.goto_local(file=str(f), line=1, col=8)
+        result = engine.goto_definition(file=str(f), line=1, col=8)
         # No DSL content, no identifier — empty is fine
         assert result.mode == "symbol"

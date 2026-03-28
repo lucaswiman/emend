@@ -402,7 +402,7 @@ function! emend#rename(new_name) abort
 
   " Resolve QN first
   let [l:line, l:col] = getpos('.')[1:2]
-  call emend#send('goto_local', {
+  call emend#send('goto_definition', {
         \ 'file': expand('%:p'),
         \ 'line': l:line,
         \ 'col': l:col,
@@ -467,7 +467,7 @@ function! emend#move(dest_file) abort
     return
   endif
 
-  call emend#send('goto_local', {
+  call emend#send('goto_definition', {
         \ 'file': expand('%:p'),
         \ 'line': l:line,
         \ 'col': l:col,
@@ -502,7 +502,7 @@ endfunction
 
 function! emend#callers(name) abort
   let [l:line, l:col] = getpos('.')[1:2]
-  call emend#send('goto_local', {
+  call emend#send('goto_definition', {
         \ 'file': expand('%:p'),
         \ 'line': l:line,
         \ 'col': l:col,
@@ -511,7 +511,7 @@ endfunction
 
 function! emend#callees(name) abort
   let [l:line, l:col] = getpos('.')[1:2]
-  call emend#send('goto_local', {
+  call emend#send('goto_definition', {
         \ 'file': expand('%:p'),
         \ 'line': l:line,
         \ 'col': l:col,
