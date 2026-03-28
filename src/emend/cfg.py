@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def build_cfgs_for_source(source: str, ext: str = "py"):
+def build_cfgs_for_source(source: str, ext: str = "py") -> list[Any]:
     """Build CFGs for all functions in *source*.
 
     Returns a list of ``emend_core.PyCfg`` objects.
@@ -27,7 +28,7 @@ def build_cfgs_for_source(source: str, ext: str = "py"):
     return emend_core.build_cfgs(source, ext=ext)
 
 
-def build_cfgs_for_file(file_path: str, *, ext: str | None = None):
+def build_cfgs_for_file(file_path: str, *, ext: str | None = None) -> list[Any]:
     """Build CFGs for all functions in the file at *file_path*.
 
     Returns a list of ``PyCfg`` objects.

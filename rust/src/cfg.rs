@@ -916,18 +916,13 @@ pub fn build_cfg(node: tree_sitter::Node, source: &[u8]) -> FunctionCfg {
 
     // Find the function body
     if let Some(body) = node.child_by_field_name("body") {
+        builder.update_block_range(entry, body);
         let body_end = builder.walk_body(body, entry);
-        // If the body didn't terminate, connect to exit
         if let Some(end) = body_end {
             builder.add_edge(end, builder.exit_block, EdgeKind::Fallthrough);
         }
     } else {
         builder.add_edge(entry, builder.exit_block, EdgeKind::Fallthrough);
-    }
-
-    // Update entry block range from the function body
-    if let Some(body) = node.child_by_field_name("body") {
-        builder.update_block_range(entry, body);
     }
 
     FunctionCfg {
