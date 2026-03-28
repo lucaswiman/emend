@@ -92,8 +92,32 @@ class ImportFact:
     line: int
 
 
+@dataclass(frozen=True)
+class CfgEdgeFact:
+    """A control flow edge within a function."""
+    file_path: str
+    func_qn: str
+    from_block: int
+    to_block: int
+    edge_kind: str  # fallthrough, true_branch, false_branch, exception, finally, back_edge, jump
+    from_line: int
+    to_line: int
+
+
+@dataclass(frozen=True)
+class DefUseFact:
+    """A definition-use relationship within a function."""
+    file_path: str
+    func_qn: str
+    var_name: str
+    def_line: int
+    def_col: int
+    use_line: int
+    use_col: int
+
+
 # Union of all fact types for generic queries.
-Fact = Union[SymbolFact, CallFact, ReferenceFact, TaintFlowFact, TypeFact, ImportFact]
+Fact = Union[SymbolFact, CallFact, ReferenceFact, TaintFlowFact, TypeFact, ImportFact, CfgEdgeFact, DefUseFact]
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +203,26 @@ _SCHEMA_INIT = """\
     line: Int
     =>
     alias: String default ""
+}}
+
+{:create cfg_edge {
+    file_path: String,
+    func_qn: String,
+    from_block: Int,
+    to_block: Int,
+    edge_kind: String,
+    from_line: Int,
+    to_line: Int
+}}
+
+{:create def_use {
+    file_path: String,
+    func_qn: String,
+    var_name: String,
+    def_line: Int,
+    def_col: Int,
+    use_line: Int,
+    use_col: Int
 }}
 """
 
@@ -327,6 +371,40 @@ class FactGraph:
             },
         )
 
+    def add_cfg_edge(self, fact: CfgEdgeFact) -> None:
+        """Add a control flow edge fact."""
+        self._client.run(
+            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] <- "
+            "[[$fp, $fq, $fb, $tb, $ek, $fl, $tl]] "
+            ":put cfg_edge {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+            {
+                "fp": fact.file_path,
+                "fq": fact.func_qn,
+                "fb": fact.from_block,
+                "tb": fact.to_block,
+                "ek": fact.edge_kind,
+                "fl": fact.from_line,
+                "tl": fact.to_line,
+            },
+        )
+
+    def add_def_use(self, fact: DefUseFact) -> None:
+        """Add a definition-use fact."""
+        self._client.run(
+            "?[file_path, func_qn, var_name, def_line, def_col, use_line, use_col] <- "
+            "[[$fp, $fq, $vn, $dl, $dc, $ul, $uc]] "
+            ":put def_use {file_path, func_qn, var_name, def_line, def_col, use_line, use_col}",
+            {
+                "fp": fact.file_path,
+                "fq": fact.func_qn,
+                "vn": fact.var_name,
+                "dl": fact.def_line,
+                "dc": fact.def_col,
+                "ul": fact.use_line,
+                "uc": fact.use_col,
+            },
+        )
+
     # -- Batch mutation (for build_from_project performance) ---------------
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
@@ -376,6 +454,34 @@ class FactGraph:
         self._client.run(
             "?[importing_file, imported_module, imported_name, line, alias] <- $rows "
             ":put import {importing_file, imported_module, imported_name, line => alias}",
+            {"rows": rows},
+        )
+
+    def add_cfg_edges_batch(self, facts: list[CfgEdgeFact]) -> None:
+        """Bulk-insert CFG edge facts."""
+        if not facts:
+            return
+        rows = [
+            [f.file_path, f.func_qn, f.from_block, f.to_block, f.edge_kind, f.from_line, f.to_line]
+            for f in facts
+        ]
+        self._client.run(
+            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] <- $rows "
+            ":put cfg_edge {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+            {"rows": rows},
+        )
+
+    def add_def_uses_batch(self, facts: list[DefUseFact]) -> None:
+        """Bulk-insert def-use facts."""
+        if not facts:
+            return
+        rows = [
+            [f.file_path, f.func_qn, f.var_name, f.def_line, f.def_col, f.use_line, f.use_col]
+            for f in facts
+        ]
+        self._client.run(
+            "?[file_path, func_qn, var_name, def_line, def_col, use_line, use_col] <- $rows "
+            ":put def_use {file_path, func_qn, var_name, def_line, def_col, use_line, use_col}",
             {"rows": rows},
         )
 
@@ -514,6 +620,58 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def cfg_edges(
+        self,
+        func_qn: str | None = None,
+        file_path: str | None = None,
+    ) -> list[CfgEdgeFact]:
+        """Query CFG edge facts with optional filters."""
+        clauses = ["*cfg_edge[fp, fq, fb, tb, ek, fl, tl]"]
+        params: dict[str, Any] = {}
+        if func_qn is not None:
+            clauses.append("fq == $func_qn")
+            params["func_qn"] = func_qn
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        query = "?[fp, fq, fb, tb, ek, fl, tl] := " + ", ".join(clauses)
+        result = self._client.run(query, params)
+        return [
+            CfgEdgeFact(
+                file_path=r[0], func_qn=r[1], from_block=r[2],
+                to_block=r[3], edge_kind=r[4], from_line=r[5], to_line=r[6],
+            )
+            for r in result["rows"]
+        ]
+
+    def def_uses(
+        self,
+        func_qn: str | None = None,
+        var_name: str | None = None,
+        file_path: str | None = None,
+    ) -> list[DefUseFact]:
+        """Query def-use facts with optional filters."""
+        clauses = ["*def_use[fp, fq, vn, dl, dc, ul, uc]"]
+        params: dict[str, Any] = {}
+        if func_qn is not None:
+            clauses.append("fq == $func_qn")
+            params["func_qn"] = func_qn
+        if var_name is not None:
+            clauses.append("vn == $var_name")
+            params["var_name"] = var_name
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        query = "?[fp, fq, vn, dl, dc, ul, uc] := " + ", ".join(clauses)
+        result = self._client.run(query, params)
+        return [
+            DefUseFact(
+                file_path=r[0], func_qn=r[1], var_name=r[2],
+                def_line=r[3], def_col=r[4], use_line=r[5], use_col=r[6],
+            )
+            for r in result["rows"]
+        ]
+
     # -- Transitive closures (Datalog! No more Python BFS) ---------------
 
     def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
@@ -592,6 +750,12 @@ class FactGraph:
         for fact in self._all_imports():
             if predicate(fact):
                 results.append(fact)
+        for fact in self._all_cfg_edges():
+            if predicate(fact):
+                results.append(fact)
+        for fact in self._all_def_uses():
+            if predicate(fact):
+                results.append(fact)
         return results
 
     def _all_calls(self) -> list[CallFact]:
@@ -634,6 +798,30 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def _all_cfg_edges(self) -> list[CfgEdgeFact]:
+        result = self._client.run(
+            "?[fp, fq, fb, tb, ek, fl, tl] := *cfg_edge[fp, fq, fb, tb, ek, fl, tl]"
+        )
+        return [
+            CfgEdgeFact(
+                file_path=r[0], func_qn=r[1], from_block=r[2],
+                to_block=r[3], edge_kind=r[4], from_line=r[5], to_line=r[6],
+            )
+            for r in result["rows"]
+        ]
+
+    def _all_def_uses(self) -> list[DefUseFact]:
+        result = self._client.run(
+            "?[fp, fq, vn, dl, dc, ul, uc] := *def_use[fp, fq, vn, dl, dc, ul, uc]"
+        )
+        return [
+            DefUseFact(
+                file_path=r[0], func_qn=r[1], var_name=r[2],
+                def_line=r[3], def_col=r[4], use_line=r[5], use_col=r[6],
+            )
+            for r in result["rows"]
+        ]
+
     # -- Serialization ----------------------------------------------------
 
     def to_json(self) -> str:
@@ -656,6 +844,10 @@ class FactGraph:
             data.append(_tag(fact))
         for fact in self._all_imports():
             data.append(_tag(fact))
+        for fact in self._all_cfg_edges():
+            data.append(_tag(fact))
+        for fact in self._all_def_uses():
+            data.append(_tag(fact))
         return json.dumps(data, indent=2)
 
     @classmethod
@@ -669,6 +861,8 @@ class FactGraph:
             "TaintFlowFact": (TaintFlowFact, graph.add_taint_flow),
             "TypeFact": (TypeFact, graph.add_type),
             "ImportFact": (ImportFact, graph.add_import),
+            "CfgEdgeFact": (CfgEdgeFact, graph.add_cfg_edge),
+            "DefUseFact": (DefUseFact, graph.add_def_use),
         }
 
         for entry in json.loads(json_str):

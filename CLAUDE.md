@@ -15,7 +15,8 @@
 | `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
 | `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink`, `TaintSanitizer`, `TaintViolation`, intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_taint_analysis()` with fixed-point iteration |
-| `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TaintFlowFact`, `TypeFact`, `ImportFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()`, JSON serialization |
+| `cfg.py` | Per-function CFG module: `build_cfgs_for_source()`, `build_cfgs_for_file()`, `find_unreachable_blocks()`, text/JSON/DOT formatters; wraps Rust `emend_core.PyCfg` and `build_cfgs()` |
+| `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TaintFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()`, JSON serialization |
 | `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `CustomCheck`; `load_policies()`, `run_policy_checks()`, `validate_policies()`; loads from `.emend/policies.yaml` |
 | `rewrite_engine.py` | Experimental equality saturation: `EGraph`, `ENode`, `UnionFind`, `RewriteRule`, `SaturationResult`; `run_saturation()`, `load_rewrite_rules()`; loads from `.emend/rewrites.yaml` |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
@@ -91,6 +92,7 @@
 | `test_rewrite_engine.py` | Rewrite engine: union-find, e-graph, expression parsing, rule loading, saturation |
 | `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
 | `test_visit_project.py` | `visit_project_ts()` helper |
+| `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
 
 ## Commands
 
@@ -115,6 +117,7 @@
 | `facts` | Query the relational fact graph for code invariants (`--type symbols\|calls\|references\|taint_flows\|types\|imports`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`, `--json`) |
 | `policy` | Run declarative policy checks from `.emend/policies.yaml` (`--config`, `--policy`, `--json`; supports flow, structural, type, deadcode, and custom checks) |
 | `saturate` | Experimental equality saturation rewrites from `.emend/rewrites.yaml` (`--config`, `--apply`, `--max-iterations`, `--json`) |
+| `cfg` | Build and display per-function control flow graphs (`--function`, `--format text\|json\|dot`, `--unreachable`). Basic blocks, edges (fallthrough, true/false branch, exception, finally, back-edge, jump), dominators, post-dominators |
 | `types` | Show inferred types for symbols in a file (`--name`, `--kind`, `--definitions-only`, `--json`, `--engine`) |
 | `index` | Pre-build parse, QN-index, and type-cache schema in `parse.db` for faster cross-project operations (`--jobs`) |
 | `editor-search` | One-shot JSON search for editor integration (auto-detects symbol/pattern/selector mode) |
