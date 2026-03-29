@@ -136,7 +136,59 @@ for exact joins.
 
 ---
 
+## Taint-CFG Precision: Effects, Path Quantifiers, and Temporal Sequences
+
+Spec: [taint-cfg-precision.md](taint-cfg-precision.md)
+
+Five general mechanisms that increase the expressive power of the
+taint/CFG/Datalog stack.  Each is independently useful; together they
+replace `attribute_mutation_sinks` and other bespoke features.
+
+### Phase 1: Effect Predicates
+
+- [ ] Add `kind` field (`read`/`write`/`aug_write`/`del`) to `DefUseFact` — `fact_graph.py`, `emend_core`
+- [ ] Update `def_use` CozoDB schema; migrate all existing `*def_use[...]` queries (9→10 columns)
+- [ ] Add `method_call` relation and schema — `fact_graph.py`, `emend_core`
+- [ ] Add augmented assignment regex + `"mutate"` op kind to `_find_assignments_in_source()` — `taint.py`
+- [ ] Implement `effect` key on sinks/sources (resolves `writes($X)`, `reads($X)`) — `taint.py`, `fact_graph.py`
+- [ ] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py`
+- [ ] Add `is_var_or_attr` helper to all Datalog queries using dotted-name prefix matching
+
+### Phase 2: Path-Sensitive Sanitization
+
+- [ ] Rewrite `taint_propagation_datalog()` with `unsanitized` CFG-edge reachability — `fact_graph.py`
+- [ ] Add intra-block line-ordering guard for same-block sanitizer+sink — `fact_graph.py`
+- [ ] Add `quantifier` field (`all_paths`/`some_path`) to sanitizer config — `taint.py`
+- [ ] Implement `through` parameter in `flow_rule_check_datalog()` — `fact_graph.py`
+- [ ] Update Python fallback to per-block taint state — `taint.py`
+
+### Phase 3: Scope Boundaries
+
+- [ ] Add `scope_sanitizers` config key — `taint.py`
+- [ ] Add `scope_kill` inline relation to Datalog propagation — `fact_graph.py`
+- [ ] Document nested-session limitation (kills all taint for label, not per-session)
+
+### Phase 4: Type-Conditioned Filtering
+
+- [ ] Add `type_constraint` field to `TaintSource`/`TaintSink`/`TaintSanitizer` — `taint.py`
+- [ ] Populate `type_binding` relation in `build_from_project()` — `fact_graph.py`
+- [ ] Evaluate constraints via `parse_type_string()` (top-level constructor, not substring)
+- [ ] Add `scalar_type` inline relation for Datalog type filtering — `fact_graph.py`
+
+### Phase 5: Temporal Sequence Patterns
+
+- [ ] Design `sequence` + `path` config schema — `taint.py` or `policy.py`
+- [ ] Implement `compile_sequence_rule()` — sequence-to-CozoScript compiler — `fact_graph.py`
+- [ ] Compose CFG reachability with def-use liveness for binding propagation
+- [ ] Support dual-mode compilation: `data_flow` steps → `tainted` rules, temporal steps → `reachable` rules
+- [ ] Add `SequenceCheck` to policy engine — `policy.py`
+- [ ] Update TOCTOU example in `commands.rst` with sequence rule form
+
+---
+
 ## Reference Documents
+
+- [taint-cfg-precision.md](taint-cfg-precision.md) — taint-CFG precision: mutation tracking, path sensitivity, type filtering
 
 - [taint-analysis.md](taint-analysis.md) — deferred taint precision work
 - [dsl-support.md](dsl-support.md) — DSL support full spec
