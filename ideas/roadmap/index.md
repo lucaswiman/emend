@@ -80,6 +80,42 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 
 ---
 
+## Unified Dead Code Detection via Datalog
+
+Spec: [unified-deadcode-datalog.md](unified-deadcode-datalog.md)
+
+Replace the independent Python-based `deadcode` (reference counting) and
+`cfg --unreachable` (BFS) implementations with a single Datalog query over
+the fact graph. Tag references with their containing CFG block at extraction
+time so reachability is an exact join, not a line-range comparison.
+
+### Phase 1: Schema and CFG population
+
+- [ ] Add `cfg_block` relation to fact graph schema (`file_path`, `func_qn`, `block_id`, `is_entry`, `is_exit`)
+- [ ] Populate `cfg_block` and `cfg_edge` facts in `build_from_project()`
+- [ ] Add `decorator_on` relation for entry point filtering
+
+### Phase 2: Block-tagged references
+
+- [ ] Extend reference extraction to assign `(func_qn, block_id)` per reference via byte-offset intersection with CFG blocks
+- [ ] Add `source_loc` relation separating display positions from relational core
+- [ ] Make analysis queries join on block ID, not line numbers
+
+### Phase 3: Unified dead code query
+
+- [ ] Implement the reachable-block transitive closure + live-reference Datalog query
+- [ ] Wire unified query into `emend deadcode` as the default backend
+- [ ] Port entry point heuristics (dunders, decorators, `__all__`, tests) to Datalog rules
+- [ ] Switch `cfg --unreachable` to query the fact graph instead of Python BFS
+
+### Phase 4: Cleanup
+
+- [ ] Remove `find_dead_code()` Python implementation from `transform.py`
+- [ ] Remove `find_unreachable_blocks()` BFS from `cfg.py`
+- [ ] Update tests to use fact-graph-based dead code detection
+
+---
+
 ## Reference Documents
 
 - [taint-analysis.md](taint-analysis.md) — deferred taint precision work
@@ -88,4 +124,5 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 - [rewrite-and-saturation.md](rewrite-and-saturation.md) — open design questions for the experimental rewrite engine
 - [backend-options.md](backend-options.md) — architecture rationale (CozoDB vs egglog)
 - [relation-to-existing-tools.md](relation-to-existing-tools.md) — positioning vs Semgrep, CodeQL, Pysa
+- [unified-deadcode-datalog.md](unified-deadcode-datalog.md) — unified dead code via Datalog
 - [open-questions.md](open-questions.md) — ongoing design trade-offs
