@@ -63,8 +63,8 @@ impl PyCfg {
     /// - ``"start_byte"`` – byte offset of the first statement (int)
     /// - ``"end_byte"``   – byte offset past the last statement (int)
     /// - ``"statements"`` – list of ``(start_byte, end_byte)`` tuples
-    /// - ``"defs"``       – list of ``(name, line, col)`` tuples
-    /// - ``"uses"``       – list of ``(name, line, col)`` tuples
+    /// - ``"defs"``       – list of ``(name, line, col, kind)`` tuples
+    /// - ``"uses"``       – list of ``(name, line, col, kind)`` tuples
     fn get_blocks(&self, py: Python<'_>) -> PyResult<PyObject> {
         let list = PyList::empty(py);
         for block in &self.inner.blocks {
@@ -82,18 +82,18 @@ impl PyCfg {
             }
             d.set_item("statements", stmts)?;
 
-            // defs: list of (name, line, col)
+            // defs: list of (name, line, col, kind)
             let defs = PyList::empty(py);
-            for (name, line, col) in &block.defs {
-                let t = PyTuple::new(py, [name.as_str().into_pyobject(py)?.into_any(), line.into_pyobject(py)?.into_any(), col.into_pyobject(py)?.into_any()])?;
+            for (name, line, col, kind) in &block.defs {
+                let t = PyTuple::new(py, [name.as_str().into_pyobject(py)?.into_any(), line.into_pyobject(py)?.into_any(), col.into_pyobject(py)?.into_any(), kind.as_str().into_pyobject(py)?.into_any()])?;
                 defs.append(t)?;
             }
             d.set_item("defs", defs)?;
 
-            // uses: list of (name, line, col)
+            // uses: list of (name, line, col, kind)
             let uses = PyList::empty(py);
-            for (name, line, col) in &block.uses {
-                let t = PyTuple::new(py, [name.as_str().into_pyobject(py)?.into_any(), line.into_pyobject(py)?.into_any(), col.into_pyobject(py)?.into_any()])?;
+            for (name, line, col, kind) in &block.uses {
+                let t = PyTuple::new(py, [name.as_str().into_pyobject(py)?.into_any(), line.into_pyobject(py)?.into_any(), col.into_pyobject(py)?.into_any(), kind.as_str().into_pyobject(py)?.into_any()])?;
                 uses.append(t)?;
             }
             d.set_item("uses", uses)?;
@@ -230,11 +230,11 @@ impl PyCfg {
             label_parts.push(format!("lines {}-{}", block.start_line, block.end_line));
 
             if !block.defs.is_empty() {
-                let names: Vec<&str> = block.defs.iter().map(|(n, _, _)| n.as_str()).collect();
+                let names: Vec<&str> = block.defs.iter().map(|(n, _, _, _)| n.as_str()).collect();
                 label_parts.push(format!("defs: {}", names.join(", ")));
             }
             if !block.uses.is_empty() {
-                let names: Vec<&str> = block.uses.iter().map(|(n, _, _)| n.as_str()).collect();
+                let names: Vec<&str> = block.uses.iter().map(|(n, _, _, _)| n.as_str()).collect();
                 label_parts.push(format!("uses: {}", names.join(", ")));
             }
 
@@ -274,8 +274,8 @@ impl PyCfg {
                     "start_line": b.start_line,
                     "end_line": b.end_line,
                     "statements": b.statements.iter().map(|&(s, e)| serde_json::json!([s, e])).collect::<Vec<_>>(),
-                    "defs": b.defs.iter().map(|(n, l, c)| serde_json::json!([n, l, c])).collect::<Vec<_>>(),
-                    "uses": b.uses.iter().map(|(n, l, c)| serde_json::json!([n, l, c])).collect::<Vec<_>>(),
+                    "defs": b.defs.iter().map(|(n, l, c, k)| serde_json::json!([n, l, c, k])).collect::<Vec<_>>(),
+                    "uses": b.uses.iter().map(|(n, l, c, k)| serde_json::json!([n, l, c, k])).collect::<Vec<_>>(),
                 })
             })
             .collect();

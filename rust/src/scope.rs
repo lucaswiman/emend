@@ -920,6 +920,9 @@ pub struct CfgSection {
     /// Node types for attribute/subscript access (use, not def, on LHS).
     #[serde(default)]
     pub attribute_access_nodes: Vec<String>,
+    /// Node types for delete statements (e.g. Python's "delete_statement").
+    #[serde(default)]
+    pub delete_nodes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

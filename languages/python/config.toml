@@ -400,6 +400,7 @@ throw_nodes = ["raise_statement"]
 break_nodes = ["break_statement"]
 continue_nodes = ["continue_statement"]
 assert_nodes = ["assert_statement"]
+delete_nodes = ["delete_statement"]
 
 condition_field = "condition"
 consequence_field = "consequence"
