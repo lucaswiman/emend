@@ -308,7 +308,7 @@ _facts_db_cache: dict[str, object] = {}  # project_root → CozoDB client
 _facts_db_lock = _threading.Lock()
 
 _FACTS_SCHEMA = """\
-{:create fact_symbol {
+{:ensure fact_symbol {
     fp: String,
     mqn: String
     =>
@@ -328,7 +328,7 @@ _FACTS_SCHEMA = """\
     has_noqa: Bool default false
 }}
 
-{:create fact_reference {
+{:ensure fact_reference {
     tqn: String,
     fp: String,
     line: Int,
@@ -337,7 +337,7 @@ _FACTS_SCHEMA = """\
     kind: String
 }}
 
-{:create fact_import {
+{:ensure fact_import {
     fp: String,
     mod: String
 }}
@@ -345,11 +345,14 @@ _FACTS_SCHEMA = """\
 
 
 def _open_facts_db(db_path: str):
-    """Open (or create) a CozoDB facts database at *db_path*."""
+    """Open (or create) a CozoDB facts database at *db_path*.
+
+    Uses ``:ensure`` (not ``:create``) so that existing data is preserved
+    when the database is reopened.
+    """
     from emend.fact_graph import _create_cozo_client
 
     client = _create_cozo_client(db_path)
-    # Ensure relations exist (idempotent).
     for stmt in _FACTS_SCHEMA.strip().split("\n\n"):
         stmt = stmt.strip()
         if stmt:
@@ -520,6 +523,11 @@ def _populate_facts_db(project_root: str) -> None:
         fdb.close()
     except BaseException:
         pass
+
+    # Invalidate the singleton cache so the next _get_facts_db() call
+    # opens a fresh handle that sees the newly written data.
+    key = str(Path(project_root).resolve())
+    _facts_db_cache.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
