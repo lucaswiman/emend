@@ -428,12 +428,23 @@ def _filter_by_depth(symbol: SymbolInfo, depths: list[str]) -> bool:
     for depth_spec in depths:
         if depth_spec.endswith("+"):
             # "2+" means depth >= 2
-            min_depth = int(depth_spec[:-1])
+            try:
+                min_depth = int(depth_spec[:-1])
+            except ValueError:
+                raise ValueError(
+                    f"invalid depth value {depth_spec!r}: expected an integer followed by '+' (e.g. '2+')"
+                )
             if symbol.depth >= min_depth:
                 return True
         else:
             # Exact depth match
-            if symbol.depth == int(depth_spec):
+            try:
+                exact_depth = int(depth_spec)
+            except ValueError:
+                raise ValueError(
+                    f"invalid depth value {depth_spec!r}: expected an integer (e.g. '2')"
+                )
+            if symbol.depth == exact_depth:
                 return True
     return False
 
