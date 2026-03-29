@@ -124,13 +124,31 @@ Effect predicates are resolved into CozoScript subqueries.  The
 Python layer translates `writes($OBJ)` in a sink config into the
 appropriate Datalog join.
 
+**Helper: dotted-name prefix matching.**
+
+CozoDB's `starts_with` is byte-level, so `starts_with("objection", "obj")`
+is true.  All dotted-prefix checks must enforce a dot boundary:
+
+```
+% var_name is var itself, or var.something
+is_var_or_attr[var_name, var] :=
+    var_name == var
+is_var_or_attr[var_name, var] :=
+    starts_with(var_name, concat(var, "."))
+```
+
+This helper is inlined (or emitted as a rule) wherever the proposal
+says "match `var` or `var.*`".
+
 **`writes(var)` in block `B`** — any of:
 
 ```
 % Plain or augmented write to var or var.* in block B
+write_kind[k] <- [["write"], ["aug_write"], ["del"]]
+...
 *def_use[fp, fq, var_name, kind, _, B, _, _, _, _],
-kind in ["write", "aug_write", "del"],
-starts_with(var_name, var)
+write_kind[kind],
+is_var_or_attr[var_name, var]
 
 % OR: method call on var (e.g. var.append(...))
 *method_call[fp, fq, var, _, B, _]
@@ -140,8 +158,13 @@ starts_with(var_name, var)
 
 ```
 *def_use[fp, fq, var_name, "read", _, B, _, _, _, _],
-starts_with(var_name, var)
+is_var_or_attr[var_name, var]
 ```
+
+**CozoScript note:** CozoDB has no `x in [...]` syntax.  Set
+membership is expressed via inline relations joined as subqueries
+(e.g. `write_kind[kind]` above).  All examples in this document
+use that convention.
 
 ### Taint config changes
 
@@ -207,13 +230,16 @@ def taint_propagation_datalog(
 When `effect_sinks` is provided, the violation rule becomes:
 
 ```
+% Allowed write kinds
+write_kind[k] <- [["write"], ["aug_write"], ["del"]]
+
 % Effect-based sink: tainted var is written/mutated in a reachable block
 ?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] :=
     tainted[fp, fq, sink_var, sink_block, lbl],
     effect_sink_label[lbl],
     *def_use[fp, fq, dv, kind, _, sink_block, _, _, sink_line, _],
-    kind in ["write", "aug_write", "del"],
-    starts_with(dv, sink_var),
+    write_kind[kind],
+    is_var_or_attr[dv, sink_var],
     taint_source[fp, fq, src_var, src_block, lbl]
 ```
 
@@ -301,6 +327,31 @@ Key difference: taint only propagates to blocks that are
 **unsanitized-reachable** from the source.  If a sanitizer dominates
 the sink (all paths pass through it), no `unsanitized` fact is
 derived for the sink block, so the violation is suppressed.
+
+**Intra-block ordering caveat.** If a sanitizer and a sink are in
+the *same* basic block, the sanitizer blocks propagation *out of*
+the block but does not prevent violations *within* it.  Example:
+`obj = q.with_for_update().first(); obj.x = 1` where both are in
+block B — block B is unsanitized-reachable from the source, so the
+sink fires even though the sanitizer precedes it.
+
+Fix: when a sanitizer and sink co-occur in the same block, the
+violation query should include a line-ordering guard:
+`sink_line > sanitizer_line` suppresses the violation.  The Python
+layer adds per-block `(sanitizer_line, label)` facts to an inline
+relation, and the violation rule checks:
+
+```
+% Same-block suppression
+not same_block_sanitized[fp, fq, lbl, sink_block, sink_line]
+
+same_block_sanitized[fp, fq, lbl, block, sink_line] :=
+    sanitizer_in_block[fp, fq, lbl, block, san_line],
+    sink_line > san_line
+```
+
+This requires the sanitizer inline relation to carry line numbers
+(already available from pattern matching).
 
 ### Sanitizer block resolution
 
@@ -406,6 +457,29 @@ scope_sanitizers:
     label: unlocked_read
 ```
 
+### Known limitation: nested scopes
+
+Scope sanitizers kill *all* taint for a label, not just taint
+associated with a particular session/handle.  With nested sessions:
+
+```python
+with Session() as outer:
+    obj = outer.query(Model).first()
+    with Session() as inner:
+        inner_obj = inner.query(Model2).first()
+        inner.commit()  # kills ALL unlocked_read taint
+    obj.name = "x"      # false negative: obj's taint was killed
+```
+
+A precise fix requires **scoped labels** — associating taint with
+the session variable that produced it, so `inner.commit()` only
+kills taint from `inner`.  This could be modeled by extending scope
+sanitizers to capture a metavar (`$S.commit()`) and only killing
+taint whose origin was `$S.query(...)`.  The `scope_kill` relation
+would gain an `origin_var` column.  This is deferred: nested
+sessions are uncommon enough that the simpler "kill all" semantics
+is a reasonable first version.  The limitation should be documented.
+
 ### Taint.py changes
 
 In the Python fallback path, scope sanitizers clear all entries for
@@ -458,6 +532,9 @@ The Python layer resolves `type_constraint: "!int & !float"` into a
 CozoScript filter:
 
 ```
+% Scalar type names (inline relation)
+scalar_type[t] <- [["int"], ["float"], ["bool"], ["str"]]
+
 % Type-filtered source: only taint if type is not scalar
 effective_source[fp, fq, var, block, lbl] :=
     taint_source[fp, fq, var, block, lbl],
@@ -467,12 +544,18 @@ scalar_typed[fp, fq, var, block] :=
     taint_source[fp, fq, var, block, _],
     *type_binding[_, fp, line, _, type_str],
     *def_use[fp, fq, var, _, _, block, line, _, _, _],
-    is_in(type_str, ["int", "float", "bool", "str"])
+    scalar_type[type_str]
 ```
 
-For the Python fallback: after pattern matching identifies a source,
-query the type oracle for the target variable.  Skip if the
-constraint fails.
+Note: `scalar_type` uses exact equality, not substring matching.
+A type like `Optional[int]` would *not* match `"int"`.  For
+compound types the Python layer should normalize to the top-level
+constructor before inserting into `type_binding` (e.g.,
+`Optional[int]` → `Optional`), or the inline relation should list
+the full forms.  In practice, the Python fallback handles compound
+types more naturally: after pattern matching identifies a source,
+query the type oracle and evaluate the constraint in Python where
+`parse_type_string()` provides structured access.
 
 ### Config syntax
 
@@ -483,9 +566,11 @@ sources:
     type_constraint: "!int & !float & !bool & !str"
 ```
 
-The constraint language is minimal: `!` (not), `&` (and), `|` (or),
-bare names matched as substrings of the inferred type string.  No
-need for a full type algebra — this is a filter, not a type system.
+The constraint is a boolean expression over type names: `!` (not),
+`&` (and), `|` (or).  Bare names are matched against the
+**top-level** type constructor returned by `parse_type_string()`,
+not as substrings — `int` matches `int` but not `Optional[int]` or
+`MyInteger`.
 
 ---
 
@@ -541,7 +626,14 @@ rules:
 3. **Ordering:** step `load` must appear in a CFG block that
    *precedes* step `mutate` (via CFG reachability), not just in an
    earlier source line.
-4. **Path constraints:** `not_through` between two steps means "there
+4. **Def-use liveness:** when a binding is carried between steps,
+   the variable must still be live (not redefined) between them.
+   If `obj` is reassigned between the load and the mutation, the
+   mutation operates on a different object.  The violation query
+   joins against `def_use` to ensure the definition from step A
+   reaches the use at step B without an intervening redefinition.
+   This prevents false positives from reassignment.
+5. **Path constraints:** `not_through` between two steps means "there
    exists a CFG path from step A's block to step B's block that does
    not pass through any block matching the given pattern."  This
    reuses Phase 2's `unsanitized` propagation.
@@ -555,10 +647,12 @@ A two-step sequence with a `not_through` constraint compiles to:
 step_load[fp, fq, block, line, obj_var] <- [...]  % from Python pattern matching
 
 % Step 2: resolve "mutate" locations (effect-based)
+write_kind[k] <- [["write"], ["aug_write"]]
 step_mutate[fp, fq, block, line, obj_var] :=
     step_load[fp, fq, _, _, obj_var],
-    *def_use[fp, fq, obj_var, kind, _, block, _, _, line, _],
-    kind in ["write", "aug_write"]
+    *def_use[fp, fq, dv, kind, _, block, _, _, line, _],
+    write_kind[kind],
+    is_var_or_attr[dv, obj_var]
 
 % Blocker: not_through pattern locations
 blocker[fp, fq, block] <- [...]  % from Python pattern matching
@@ -572,11 +666,19 @@ reachable[fp, fq, to_block, obj_var] :=
     *cfg_edge[fp, fq, from_block, to_block, _, _, _],
     not blocker[fp, fq, from_block]
 
-% Violation: mutate step reachable from load without passing through blocker
+% Def-use liveness: obj_var's definition from the load step reaches the
+% mutate block without an intervening redefinition
+live_binding[fp, fq, obj_var, load_block, use_block] :=
+    step_load[fp, fq, load_block, _, obj_var],
+    *def_use[fp, fq, obj_var, _, load_block, use_block, _, _, _, _]
+
+% Violation: mutate step reachable from load, without passing through
+% blocker, AND the variable binding is still live (not redefined)
 ?[fp, fq, obj_var, load_line, mutate_line] :=
     reachable[fp, fq, mutate_block, obj_var],
     step_mutate[fp, fq, mutate_block, mutate_line, obj_var],
-    step_load[fp, fq, _, load_line, obj_var]
+    step_load[fp, fq, load_block, load_line, obj_var],
+    live_binding[fp, fq, obj_var, load_block, mutate_block]
 ```
 
 For N-step sequences, the query chains N reachability relations.
@@ -712,6 +814,85 @@ more readable; the taint form composes with interprocedural analysis.
 
 ---
 
+## Migration: `def_use` Schema Change
+
+Adding `kind` to the `def_use` key changes the column count from 9
+to 10.  **Every** existing Datalog query referencing `*def_use[...]`
+must be updated in a single pass:
+
+- `taint_propagation_datalog()` (line ~1507)
+- `flow_rule_check_datalog()` (line ~1614)
+- `dead_code_unified()` (uses def_use indirectly)
+- `interprocedural_taint_datalog()` (line ~1550)
+
+All references change from `*def_use[fp, fq, var, db, ub, ...]` to
+`*def_use[fp, fq, var, _kind, db, ub, ...]` (binding or ignoring
+the new column).  This is a mechanical find-and-replace.
+
+The `DefUseFact` dataclass gains a `kind: str = "read"` field with
+a default to avoid breaking callers that don't set it.
+
+---
+
+## Sequence Rule: Dual-Mode Compilation
+
+The taint-as-sequence example (sqli) uses `data_flow: "$V flows to
+$Q"`, while the TOCTOU example uses temporal ordering + effect.
+These are different mechanisms:
+
+- **Temporal steps** (ordering, effects): compiled to `reachable`
+  rules over CFG edges.
+- **Data-flow steps** (taint propagation): compiled to `tainted`
+  rules over def-use chains.
+
+When both appear in the same sequence, `compile_sequence_rule()`
+emits both kinds of rules and conjoins them in the violation query.
+Steps connected by `data_flow` use Phase 2's `tainted` propagation.
+Steps connected by temporal ordering use `reachable` propagation.
+Steps connected by both require both constraints.
+
+---
+
+## Known Limitations (Not Addressed)
+
+These are inherent to the intraprocedural, variable-name-based model
+and are **not** fixed by this proposal:
+
+- **Tuple unpacking:** `a, b = tainted_func()` — the assignment
+  regex does not match destructuring.  Neither `a` nor `b` is
+  tainted.  Fix requires tree-sitter-level assignment parsing.
+
+- **Walrus operator:** `if (x := source()):` — not matched by the
+  assignment regex.  Same fix needed.
+
+- **Implicit aliasing:** `alias = obj; alias.x = 1` — works (taint
+  propagates through `alias = obj`).  But `items[0].x = 1` where
+  `items` contains tainted objects does not fire `writes($OBJ)` for
+  the original `$OBJ`.  Requires alias/points-to analysis.
+
+- **Indirect mutation via function calls:** `modify(obj)` where
+  `modify` internally writes `obj.x = 1` — the effect predicate
+  only sees direct syntactic writes.  Fix requires interprocedural
+  effect summaries (a `FuncEffectSummaryFact`).
+
+- **Global/nonlocal variables:** Taint on globals written in one
+  function and read in another is invisible to intraprocedural
+  analysis.  The interprocedural system tracks param→return flows
+  but not shared-state flows.
+
+- **Dead code paths:** CFG-edge reachability considers all edges
+  including statically infeasible ones (`if False: ...`).  The
+  `unsanitized` relation may propagate through dead branches.
+
+- **Loop-carried taint via back edges:** If a source is in block 3
+  and a sink in block 2, CFG reachability via a back edge (3→4→5→2)
+  marks the sink as reachable.  This is correct for loop-carried
+  dependencies but can produce first-iteration false positives.  The
+  def-use liveness check (Phase 5, semantic point 4) mitigates this
+  for sequence rules.
+
+---
+
 ## Deferred Work
 
 - **Alias analysis / binding identity:** `$X is $Y` constraints
@@ -726,3 +907,10 @@ more readable; the taint form composes with interprocedural analysis.
 - **Interprocedural sequences:** Sequence steps spanning multiple
   functions.  Requires extending `FuncSummaryFact` to summarize
   effect predicates and sequence participation, not just taint flow.
+  A `FuncEffectSummaryFact(func_qn, param, effect)` would model
+  "this function writes to its first argument."
+
+- **Scoped labels for nested contexts:** Scope sanitizers that only
+  kill taint from a specific origin variable (see Phase 3 caveat).
+  Requires extending the `scope_kill` relation with an `origin_var`
+  column and tracing taint provenance through the origin.

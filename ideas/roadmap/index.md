@@ -136,45 +136,53 @@ for exact joins.
 
 ---
 
-## Taint-CFG Precision: Mutation Tracking and Path-Sensitive Sanitization
+## Taint-CFG Precision: Effects, Path Quantifiers, and Temporal Sequences
 
 Spec: [taint-cfg-precision.md](taint-cfg-precision.md)
 
-Increase the precision of taint analysis by integrating CFG structure,
-mutation kinds, type information, and scope-aware sanitization.  All
-changes are general mechanisms — no bespoke TOCTOU logic.
+Five general mechanisms that increase the expressive power of the
+taint/CFG/Datalog stack.  Each is independently useful; together they
+replace `attribute_mutation_sinks` and other bespoke features.
 
-### Phase 1: Augmented and Compound Assignment Tracking
+### Phase 1: Effect Predicates
 
-- [ ] Add augmented assignment regex path to `_find_assignments_in_source()` — `taint.py` (new `"mutate"` op kind for `+=`, `-=`, etc.)
-- [ ] Handle `"mutate"` ops in Step 2 (propagation) and Step 3.5 (attribute mutation sinks) — `taint.py`
-- [ ] Verify Rust CFG builder emits both def and use for augmented assignment targets — `emend_core`
+- [ ] Add `kind` field (`read`/`write`/`aug_write`/`del`) to `DefUseFact` — `fact_graph.py`, `emend_core`
+- [ ] Update `def_use` CozoDB schema; migrate all existing `*def_use[...]` queries (9→10 columns)
+- [ ] Add `method_call` relation and schema — `fact_graph.py`, `emend_core`
+- [ ] Add augmented assignment regex + `"mutate"` op kind to `_find_assignments_in_source()` — `taint.py`
+- [ ] Implement `effect` key on sinks/sources (resolves `writes($X)`, `reads($X)`) — `taint.py`, `fact_graph.py`
+- [ ] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py`
+- [ ] Add `is_var_or_attr` helper to all Datalog queries using dotted-name prefix matching
 
-### Phase 2: Mutation Kind on Def-Use Facts
+### Phase 2: Path-Sensitive Sanitization
 
-- [ ] Add `kind` field (`read` / `write` / `aug_write` / `del`) to `DefUseFact` — `fact_graph.py`
-- [ ] Tag def/use entries with kind in Rust CFG builder — `emend_core` (tree-sitter node type → kind)
-- [ ] Update `def_use` CozoDB schema to include `kind` column
-- [ ] Replace Python Step 3.5 attribute mutation sink loop with Datalog query over `def_use` kind
+- [ ] Rewrite `taint_propagation_datalog()` with `unsanitized` CFG-edge reachability — `fact_graph.py`
+- [ ] Add intra-block line-ordering guard for same-block sanitizer+sink — `fact_graph.py`
+- [ ] Add `quantifier` field (`all_paths`/`some_path`) to sanitizer config — `taint.py`
+- [ ] Implement `through` parameter in `flow_rule_check_datalog()` — `fact_graph.py`
+- [ ] Update Python fallback to per-block taint state — `taint.py`
 
-### Phase 3: Path-Sensitive Sanitization via CFG Reachability
+### Phase 3: Scope Boundaries
 
-- [ ] Rewrite `taint_propagation_datalog()` to propagate along CFG edges with per-block sanitizer checks — `fact_graph.py`
-- [ ] Implement `through` (must-pass-through) parameter in `flow_rule_check_datalog()` — `fact_graph.py`
-- [ ] Update Python fallback in `taint.py` to use per-block taint state instead of flat dict
+- [ ] Add `scope_sanitizers` config key — `taint.py`
+- [ ] Add `scope_kill` inline relation to Datalog propagation — `fact_graph.py`
+- [ ] Document nested-session limitation (kills all taint for label, not per-session)
 
-### Phase 4: Type-Conditioned Taint Filtering
+### Phase 4: Type-Conditioned Filtering
 
-- [ ] Add optional `type_constraint` field to `TaintSource` / `TaintSink` / `TaintSanitizer` — `taint.py`
-- [ ] Query `TypeOracle` during source/sink identification to evaluate constraints — `taint.py`
-- [ ] Wire `TypeFact` population into `build_from_project()` — `fact_graph.py`
-- [ ] Add type-filtered source relation to Datalog taint queries — `fact_graph.py`
+- [ ] Add `type_constraint` field to `TaintSource`/`TaintSink`/`TaintSanitizer` — `taint.py`
+- [ ] Populate `type_binding` relation in `build_from_project()` — `fact_graph.py`
+- [ ] Evaluate constraints via `parse_type_string()` (top-level constructor, not substring)
+- [ ] Add `scalar_type` inline relation for Datalog type filtering — `fact_graph.py`
 
-### Phase 5: Scope-Expiry Sanitization
+### Phase 5: Temporal Sequence Patterns
 
-- [ ] Add `scope_sanitizers` config key (clears all variables with a label, not just captured ones) — `taint.py`
-- [ ] Add `scope_kill` relation to Datalog taint propagation — `fact_graph.py`
-- [ ] Update TOCTOU example in `commands.rst` with revised config using all new features
+- [ ] Design `sequence` + `path` config schema — `taint.py` or `policy.py`
+- [ ] Implement `compile_sequence_rule()` — sequence-to-CozoScript compiler — `fact_graph.py`
+- [ ] Compose CFG reachability with def-use liveness for binding propagation
+- [ ] Support dual-mode compilation: `data_flow` steps → `tainted` rules, temporal steps → `reachable` rules
+- [ ] Add `SequenceCheck` to policy engine — `policy.py`
+- [ ] Update TOCTOU example in `commands.rst` with sequence rule form
 
 ---
 
