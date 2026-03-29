@@ -28,6 +28,7 @@ name: Build Wheels
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   # ── Linux x86_64: manylinux for 3.10–3.14 ────────────────────────────────
@@ -37,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -69,6 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -106,6 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -142,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -179,6 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -218,6 +224,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -249,6 +256,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -289,6 +297,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -321,6 +330,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -360,6 +370,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -391,6 +402,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set version from release tag
+        if: github.event_name == 'release'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -414,6 +426,7 @@ jobs:
   # ── Publish to PyPI ───────────────────────────────────────────────────────
   publish:
     name: Publish to PyPI
+    if: github.event_name == 'release'
     needs:
       - linux-x86-manylinux
       - linux-x86-freethread
