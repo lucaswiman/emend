@@ -527,6 +527,27 @@ infrastructure.
 
 ---
 
+## Queries enabled by the schema
+
+Once `def_use` is block-tagged and in the graph, several analyses become
+one-liner Datalog queries without new infrastructure:
+
+- **Program slicing** (forward/backward) — transitive closure over
+  `def_use`. The building blocks exist today (taint propagation,
+  `semantic_context`) but there's no direct "what affects/is affected by
+  this variable" surface. Whether this warrants a command, an MCP tool,
+  or just a canned `emend query` example is TBD.
+- **Unused imports** — `import` joined against negated `reference` in
+  the same file.
+- **Circular import detection** — transitive closure over `import`.
+- **Dead parameters** — function params with a def in `def_use` but no
+  corresponding use.
+- **Shadowing detection** — two defs of the same name where one block
+  dominates the other (dominance from `cfg_edge` closure).
+
+These don't need dedicated phases — they fall out of the schema once
+phases 1-2 are done.
+
 ## Open questions
 
 - **Incremental updates.** The fact graph is currently rebuilt from
