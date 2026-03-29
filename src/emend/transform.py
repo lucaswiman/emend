@@ -5381,7 +5381,7 @@ def find_impact(
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
-    use_fact_graph: bool = False,
+    use_fact_graph: bool = True,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5393,8 +5393,8 @@ def find_impact(
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
         max_depth: Maximum BFS depth for transitive closure (default 10).
-        use_fact_graph: If True, delegate the transitive closure to a
-            Datalog query on the FactGraph instead of Python BFS.
+        use_fact_graph: If True (default), delegate the transitive closure
+            to a Datalog query on the FactGraph instead of Python BFS.
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -6064,7 +6064,7 @@ def safe_delete(
     cascade: bool = False,
     project_path: str | None = None,
     apply: bool = False,
-    use_fact_graph: bool = False,
+    use_fact_graph: bool = True,
 ) -> DeletePlan:
     """Delete a symbol and optionally cascade to newly-dead dependents.
 
@@ -6078,8 +6078,8 @@ def safe_delete(
         cascade: If True, transitively delete newly-dead dependents.
         project_path: Project root (auto-detected if None).
         apply: If True, write changes to files.
-        use_fact_graph: If True, use Datalog queries on the FactGraph
-            to compute the cascade set instead of imperative BFS.
+        use_fact_graph: If True (default), use Datalog queries on the
+            FactGraph to compute the cascade set instead of imperative BFS.
 
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.

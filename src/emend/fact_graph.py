@@ -746,18 +746,42 @@ class FactGraph:
         # transitive callers.  CozoDB inline relations use the syntax:
         #   changed[x] <- [["val1"], ["val2"]]
         seed_rows = ", ".join(f'["{qn}"]' for qn in changed_qns)
-        query = (
-            f"changed[x] <- [{seed_rows}]\n"
-            # impacted_node: any symbol that is a caller (direct or transitive)
-            # of a changed symbol
-            "impacted_node[caller] := *call[caller, callee, _, _, _], changed[callee]\n"
-            "impacted_node[caller] := *call[caller, mid, _, _, _], impacted_node[mid]\n"
-            # Edges: record witness (caller, callee_or_mid) for each hop
-            "edge[caller, callee] := *call[caller, callee, _, _, _], changed[callee]\n"
-            "edge[caller, mid] := *call[caller, mid, _, _, _], impacted_node[mid]\n"
-            # Return impacted nodes (excluding changed set) with edges
+
+        if max_depth <= 0:
+            return {"impacted": set(), "edges": []}
+
+        # Build depth-bounded rules by unrolling the recursion.
+        # layer_0 = direct callers of changed; layer_N = callers of layer_(N-1).
+        # This avoids unbounded recursion and respects max_depth exactly.
+        rules = [f"changed[x] <- [{seed_rows}]\n"]
+        rules.append(
+            "layer_0[caller] := *call[caller, callee, _, _, _], changed[callee]\n"
+        )
+        for i in range(1, max_depth):
+            rules.append(
+                f"layer_{i}[caller] := *call[caller, mid, _, _, _], "
+                f"layer_{i - 1}[mid]\n"
+            )
+        # Union all layers into impacted_node
+        for i in range(max_depth):
+            rules.append(f"impacted_node[x] := layer_{i}[x]\n")
+        # Edges: witness pairs — only between impacted nodes and their
+        # callees that are either changed or themselves impacted.
+        rules.append(
+            "edge[caller, callee] := impacted_node[caller], "
+            "*call[caller, callee, _, _, _], changed[callee]\n"
+        )
+        if max_depth > 1:
+            # Inner edges: caller in layer_N calls mid in layer_(N-1)
+            for i in range(1, max_depth):
+                rules.append(
+                    f"edge[caller, mid] := layer_{i}[caller], "
+                    f"*call[caller, mid, _, _, _], layer_{i - 1}[mid]\n"
+                )
+        rules.append(
             "?[caller, callee] := edge[caller, callee], not changed[caller]"
         )
+        query = "".join(rules)
         result = self._client.run(query)
         edges = [(r[0], r[1]) for r in result["rows"]]
         impacted = {r[0] for r in result["rows"]}
