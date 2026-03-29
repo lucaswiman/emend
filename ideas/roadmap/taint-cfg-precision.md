@@ -124,47 +124,86 @@ Effect predicates are resolved into CozoScript subqueries.  The
 Python layer translates `writes($OBJ)` in a sink config into the
 appropriate Datalog join.
 
-**Helper: dotted-name prefix matching.**
+**`kind` semantics.** The `kind` field on `def_use` describes the
+action at the **`def_block` endpoint** — what the definition *does*:
 
-CozoDB's `starts_with` is byte-level, so `starts_with("objection", "obj")`
-is true.  All dotted-prefix checks must enforce a dot boundary:
+| `kind` | Meaning | Example |
+|---|---|---|
+| `"write"` | Plain assignment (creates/overwrites binding) | `x = 1`, `obj.f = v` |
+| `"aug_write"` | Augmented assignment (read-modify-write) | `x += 1`, `obj.f -= v` |
+| `"read"` | Pure read (use without definition) | `print(x)`, `y = x + 1` |
+| `"del"` | Name deletion | `del x` |
+
+For augmented assignments like `obj.x += 1`, the Rust CFG builder
+emits **two** `def_use` facts: one with `kind="read"` (the read of
+the prior value, `def_block` = prior definition's block) and one
+with `kind="aug_write"` (`def_block` = current block, creating a
+new definition that reaches future uses).
+
+**CozoScript conventions.**
+
+CozoDB has no `x in [...]` syntax and no `or` in rule bodies.  Set
+membership is expressed via inline relation joins.  Disjunction is
+expressed as multiple rules with the same head.  All examples in
+this document follow these conventions.
+
+Dotted-name prefix matching ("`var` or `var.*`") must enforce a dot
+boundary — `starts_with("objection", "obj")` is true but should not
+match.  CozoDB cannot define a standalone helper rule with ungrounded
+variables.  Instead, the Python codegen layer emits **two rules per
+disjunction** wherever the proposal says "match `var` or `var.*`":
 
 ```
-% var_name is var itself, or var.something
-is_var_or_attr[var_name, var] :=
-    var_name == var
-is_var_or_attr[var_name, var] :=
+% Rule variant 1: exact match
+some_rule[..., var_name, ...] := ..., var_name == var, ...
+
+% Rule variant 2: dotted prefix
+some_rule[..., var_name, ...] := ..., starts_with(var_name, concat(var, ".")), ...
+```
+
+In the examples below, we write `is_var_or_attr(var_name, var)` as
+shorthand for this two-rule expansion.
+
+**`writes(var)` in block `B`** — any write or augmented write to
+`var` or `var.*`.  Note: `kind` describes the def-site, so we bind
+`B` to `def_block` (column 5):
+
+```
+% Mutation kinds (excludes "del" — unbinding a name is not an object mutation)
+mutate_kind[k] <- [["write"], ["aug_write"]]
+
+% Rule variant 1: exact var match
+has_write[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var, kind, B, _, line, _, _, _],
+    mutate_kind[kind]
+
+% Rule variant 2: dotted attribute match (obj.field, obj.field.sub, etc.)
+has_write[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var_name, kind, B, _, line, _, _, _],
+    mutate_kind[kind],
+    starts_with(var_name, concat(var, "."))
+
+% Rule variant 3: method call on var (e.g. var.append(...))
+has_write[fp, fq, var, B, line] :=
+    *method_call[fp, fq, var, _, B, line]
+```
+
+**`reads(var)` in block `B`** — `kind` is `"read"`, and reads are
+at the `use_block` end (the definition is elsewhere):
+
+```
+has_read[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var, "read", _, B, _, _, line, _]
+
+has_read[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var_name, "read", _, B, _, _, line, _],
     starts_with(var_name, concat(var, "."))
 ```
 
-This helper is inlined (or emitted as a rule) wherever the proposal
-says "match `var` or `var.*`".
-
-**`writes(var)` in block `B`** — any of:
-
-```
-% Plain or augmented write to var or var.* in block B
-write_kind[k] <- [["write"], ["aug_write"], ["del"]]
-...
-*def_use[fp, fq, var_name, kind, _, B, _, _, _, _],
-write_kind[kind],
-is_var_or_attr[var_name, var]
-
-% OR: method call on var (e.g. var.append(...))
-*method_call[fp, fq, var, _, B, _]
-```
-
-**`reads(var)` in block `B`**:
-
-```
-*def_use[fp, fq, var_name, "read", _, B, _, _, _, _],
-is_var_or_attr[var_name, var]
-```
-
-**CozoScript note:** CozoDB has no `x in [...]` syntax.  Set
-membership is expressed via inline relations joined as subqueries
-(e.g. `write_kind[kind]` above).  All examples in this document
-use that convention.
+**Why `"del"` is excluded from `writes`.** `del obj` unbinds the
+name; it does not mutate the object.  For TOCTOU, `del obj` should
+not trigger a violation.  A separate `deletes($X)` effect predicate
+is available if needed for use-after-del rules.
 
 ### Taint config changes
 
@@ -230,16 +269,16 @@ def taint_propagation_datalog(
 When `effect_sinks` is provided, the violation rule becomes:
 
 ```
-% Allowed write kinds
-write_kind[k] <- [["write"], ["aug_write"], ["del"]]
+% Reuses has_write[fp, fq, var, B, line] from the effect predicate
+% definition above.
 
-% Effect-based sink: tainted var is written/mutated in a reachable block
+% Effect-based sink: tainted var is written/mutated in a reachable block.
+% sink_block here is the block where the write occurs (= def_block of
+% the write, since kind describes the def-site action).
 ?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] :=
     tainted[fp, fq, sink_var, sink_block, lbl],
     effect_sink_label[lbl],
-    *def_use[fp, fq, dv, kind, _, sink_block, _, _, sink_line, _],
-    write_kind[kind],
-    is_var_or_attr[dv, sink_var],
+    has_write[fp, fq, sink_var, sink_block, _],
     taint_source[fp, fq, src_var, src_block, lbl]
 ```
 
@@ -319,7 +358,7 @@ tainted[fp, fq, var, block, lbl] :=
 
 tainted[fp, fq, var, use_block, lbl] :=
     tainted[fp, fq, var, def_block, lbl],
-    *def_use[fp, fq, var, kind, def_block, use_block, _, _, _, _],
+    *def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _],
     unsanitized[fp, fq, lbl, use_block]
 ```
 
@@ -647,12 +686,10 @@ A two-step sequence with a `not_through` constraint compiles to:
 step_load[fp, fq, block, line, obj_var] <- [...]  % from Python pattern matching
 
 % Step 2: resolve "mutate" locations (effect-based)
-write_kind[k] <- [["write"], ["aug_write"]]
+% Reuses has_write from Phase 1 effect predicates.
 step_mutate[fp, fq, block, line, obj_var] :=
     step_load[fp, fq, _, _, obj_var],
-    *def_use[fp, fq, dv, kind, _, block, _, _, line, _],
-    write_kind[kind],
-    is_var_or_attr[dv, obj_var]
+    has_write[fp, fq, obj_var, block, line]
 
 % Blocker: not_through pattern locations
 blocker[fp, fq, block] <- [...]  % from Python pattern matching
@@ -730,6 +767,92 @@ Sequence rules are compiled to Datalog by a new
 
 The function returns a CozoScript string that can be passed to
 `self._client.run()`.
+
+---
+
+## Combined Datalog Query: TOCTOU End-to-End
+
+This is the complete CozoScript query for the TOCTOU case, composing
+all phases (effect sinks, path-sensitive sanitization, scope kill,
+intra-block ordering, type filtering):
+
+```
+% --- Inline relations (populated by Python pattern matching) ---
+taint_source[fp, fq, var, block, lbl] <- [...]
+sanitizer_block[fp, fq, lbl, block] <- [...]
+sanitizer_in_block[fp, fq, lbl, block, san_line] <- [...]
+scope_kill[fp, fq, lbl, block] <- [...]
+effect_sink_label[lbl] <- [["unlocked_read"]]
+mutate_kind[k] <- [["write"], ["aug_write"]]
+scalar_type[t] <- [["int"], ["float"], ["bool"], ["str"]]
+
+% --- Phase 4: type-filtered sources ---
+scalar_typed[fp, fq, var, block] :=
+    taint_source[fp, fq, var, block, _],
+    *type_binding[_, fp, line, _, type_str],
+    *def_use[fp, fq, var, _, _, block, line, _, _, _],
+    scalar_type[type_str]
+
+effective_source[fp, fq, var, block, lbl] :=
+    taint_source[fp, fq, var, block, lbl],
+    not scalar_typed[fp, fq, var, block]
+
+% --- Phase 2: unsanitized CFG reachability (with Phase 3 scope kills) ---
+unsanitized[fp, fq, lbl, block] :=
+    effective_source[fp, fq, _, block, lbl]
+
+unsanitized[fp, fq, lbl, to_block] :=
+    unsanitized[fp, fq, lbl, from_block],
+    *cfg_edge[fp, fq, from_block, to_block, _, _, _],
+    not sanitizer_block[fp, fq, lbl, from_block],
+    not scope_kill[fp, fq, lbl, from_block]
+
+% --- Taint propagation (same-variable, def-use chains, path-gated) ---
+tainted[fp, fq, var, block, lbl] :=
+    effective_source[fp, fq, var, block, lbl]
+
+tainted[fp, fq, var, use_block, lbl] :=
+    tainted[fp, fq, var, def_block, lbl],
+    *def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _],
+    unsanitized[fp, fq, lbl, use_block]
+
+% --- Phase 1: effect-based writes (exact var match) ---
+has_write[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var, kind, B, _, line, _, _, _],
+    mutate_kind[kind]
+
+% Effect-based writes (dotted attribute match)
+has_write[fp, fq, var, B, line] :=
+    *def_use[fp, fq, var_name, kind, B, _, line, _, _, _],
+    mutate_kind[kind],
+    starts_with(var_name, concat(var, "."))
+
+% Effect-based writes (method call)
+has_write[fp, fq, var, B, line] :=
+    *method_call[fp, fq, var, _, B, line]
+
+% --- Intra-block ordering guard ---
+same_block_sanitized[fp, fq, lbl, block, sink_line] :=
+    sanitizer_in_block[fp, fq, lbl, block, san_line],
+    sink_line > san_line
+
+% --- Violation: tainted var is mutated, no all-paths sanitizer ---
+?[fp, fq, src_var, sink_var, lbl, src_block, sink_block, sink_line] :=
+    tainted[fp, fq, sink_var, sink_block, lbl],
+    effect_sink_label[lbl],
+    has_write[fp, fq, sink_var, sink_block, sink_line],
+    effective_source[fp, fq, src_var, src_block, lbl],
+    not same_block_sanitized[fp, fq, lbl, sink_block, sink_line]
+```
+
+**Stratification order:** `scalar_type`, `mutate_kind`,
+`effect_sink_label`, `sanitizer_*`, `scope_kill` (stratum 0: inline).
+→ `scalar_typed`, `has_write`, `same_block_sanitized` (stratum 1:
+depends on inline + stored).  → `effective_source` (stratum 2:
+negates `scalar_typed`).  → `unsanitized` (stratum 3: recursive,
+negates stratum-0 inline relations).  → `tainted` (stratum 4:
+depends on `unsanitized`).  → `?` (stratum 5: negates stratum-1
+`same_block_sanitized`).  All negations target lower strata — legal.
 
 ---
 
@@ -883,6 +1006,22 @@ and are **not** fixed by this proposal:
 - **Dead code paths:** CFG-edge reachability considers all edges
   including statically infeasible ones (`if False: ...`).  The
   `unsanitized` relation may propagate through dead branches.
+
+- **Cross-variable assignment in Datalog path:** `y = f(tainted_x)`
+  creates a new variable `y` — the `def_use` chain tracks each
+  variable name independently, so taint on `tainted_x` does not
+  propagate to `y` via Datalog.  The Python fallback handles this
+  via RHS identifier extraction in assignment parsing.  The Datalog
+  path is sound for same-variable propagation only; cross-variable
+  flows require the Python fallback or a future `assignment` relation
+  pairing def-of-target with uses-in-RHS.
+
+- **Scope kill intra-block ordering:** If a scope sanitizer and a
+  source are in the same block (`session.commit(); obj = session.query
+  (...).first()`), the commit blocks propagation *out of* the block
+  but the source still fires within it.  A `same_block_scope_kill`
+  guard (analogous to `same_block_sanitized` for regular sanitizers)
+  should be added if scope kills need intra-block precision.
 
 - **Loop-carried taint via back edges:** If a source is in block 3
   and a sink in block 2, CFG reachability via a back edge (3→4→5→2)
