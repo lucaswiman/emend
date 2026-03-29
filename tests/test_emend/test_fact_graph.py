@@ -323,6 +323,134 @@ class TestBatchOperations:
         assert len(imports) == 2
 
 
+class TestImpactClosure:
+    """Test the impact_closure() Datalog query method."""
+
+    def test_impact_direct_callers(self):
+        """Changing a symbol finds its direct callers as impacted."""
+        g = _make_graph()
+        result = g.impact_closure({"lib.compute"})
+        # app.main and app.helper both call lib.compute
+        assert "app.main" in result["impacted"]
+        assert "app.helper" in result["impacted"]
+
+    def test_impact_transitive(self):
+        """Impact propagates transitively through the call graph."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "a", "a.a", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("b.py", "b", "b.b", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("c.py", "c", "c.c", "function", 1, 5, None))
+        g.add_call(CallFact("a.a", "b.b", "a.py", 2, 0))
+        g.add_call(CallFact("b.b", "c.c", "b.py", 2, 0))
+
+        result = g.impact_closure({"c.c"})
+        # b.b calls c.c directly, a.a calls b.b transitively
+        assert "b.b" in result["impacted"]
+        assert "a.a" in result["impacted"]
+        assert len(result["edges"]) >= 2
+
+    def test_impact_empty_changes(self):
+        g = _make_graph()
+        result = g.impact_closure(set())
+        assert result["impacted"] == set()
+        assert result["edges"] == []
+
+    def test_impact_excludes_changed_symbols(self):
+        """Changed symbols themselves are not in the impacted set."""
+        g = _make_graph()
+        result = g.impact_closure({"lib.compute"})
+        assert "lib.compute" not in result["impacted"]
+
+    def test_impact_edges_are_witness_pairs(self):
+        """Each edge is a (caller, callee) witness for why the caller is impacted."""
+        g = _make_graph()
+        result = g.impact_closure({"lib.compute"})
+        for src, tgt in result["edges"]:
+            assert src in result["impacted"]
+
+
+class TestCascadeDead:
+    """Test the cascade_dead() Datalog query method."""
+
+    def test_cascade_finds_orphaned_callees(self):
+        """Deleting the only caller of a symbol marks the callee as cascade-dead."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "caller", "a.caller", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("b.py", "callee", "b.callee", "function", 1, 5, None))
+        g.add_call(CallFact("a.caller", "b.callee", "a.py", 2, 0))
+        # b.callee's only caller is a.caller
+
+        cascade = g.cascade_dead({"a.caller"})
+        cascade_qns = {s.qualified_name for s in cascade}
+        assert "b.callee" in cascade_qns
+
+    def test_cascade_spares_externally_called(self):
+        """If a callee has callers outside the delete set, it's not cascade-dead."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "caller1", "a.caller1", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("a.py", "caller2", "a.caller2", "function", 7, 10, None))
+        g.add_symbol(SymbolFact("b.py", "callee", "b.callee", "function", 1, 5, None))
+        g.add_call(CallFact("a.caller1", "b.callee", "a.py", 2, 0))
+        g.add_call(CallFact("a.caller2", "b.callee", "a.py", 8, 0))
+
+        # Only delete caller1; caller2 still references callee
+        cascade = g.cascade_dead({"a.caller1"})
+        cascade_qns = {s.qualified_name for s in cascade}
+        assert "b.callee" not in cascade_qns
+
+    def test_cascade_empty_deletes(self):
+        g = _make_graph()
+        assert g.cascade_dead(set()) == []
+
+    def test_cascade_excludes_initial_deletes(self):
+        """Initial delete targets are not returned in cascade results."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "f", "a.f", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("b.py", "g", "b.g", "function", 1, 5, None))
+        g.add_call(CallFact("a.f", "b.g", "a.py", 2, 0))
+
+        cascade = g.cascade_dead({"a.f"})
+        cascade_qns = {s.qualified_name for s in cascade}
+        assert "a.f" not in cascade_qns
+
+
+class TestUnreferencedSymbols:
+    """Test the unreferenced_symbols() Datalog query method."""
+
+    def test_basic_unreferenced(self):
+        """Without exclusions, behaves like dead_code()."""
+        g = _make_graph()
+        dead = g.unreferenced_symbols()
+        dead_qns = {s.qualified_name for s in dead}
+        # main, helper, method have no references
+        assert "app.main" in dead_qns
+        assert "app.helper" in dead_qns
+
+    def test_unreferenced_with_exclusions(self):
+        """Excluding a caller makes its callee unreferenced."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "f", "a.f", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("b.py", "g", "b.g", "function", 1, 5, None))
+        g.add_call(CallFact("a.f", "b.g", "a.py", 2, 0))
+        g.add_reference(ReferenceFact("b.g", "a.py", 2, 0, "call"))
+
+        # Without exclusions, b.g is referenced
+        dead = g.unreferenced_symbols()
+        dead_qns = {s.qualified_name for s in dead}
+        assert "b.g" not in dead_qns
+
+        # Excluding a.f's refs, b.g becomes unreferenced
+        dead = g.unreferenced_symbols(exclude_qns={"a.f"})
+        dead_qns = {s.qualified_name for s in dead}
+        assert "b.g" in dead_qns
+
+    def test_unreferenced_filter_by_kind(self):
+        g = _make_graph()
+        dead = g.unreferenced_symbols(kinds={"function"})
+        for s in dead:
+            assert s.kind == "function"
+
+
 class TestPersistence:
     """Test that CozoDB SQLite backend persists data."""
 

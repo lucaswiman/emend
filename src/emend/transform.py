@@ -308,7 +308,7 @@ _facts_db_cache: dict[str, object] = {}  # project_root → CozoDB client
 _facts_db_lock = _threading.Lock()
 
 _FACTS_SCHEMA = """\
-{:create fact_symbol {
+{:ensure fact_symbol {
     fp: String,
     mqn: String
     =>
@@ -328,7 +328,7 @@ _FACTS_SCHEMA = """\
     has_noqa: Bool default false
 }}
 
-{:create fact_reference {
+{:ensure fact_reference {
     tqn: String,
     fp: String,
     line: Int,
@@ -337,7 +337,7 @@ _FACTS_SCHEMA = """\
     kind: String
 }}
 
-{:create fact_import {
+{:ensure fact_import {
     fp: String,
     mod: String
 }}
@@ -345,11 +345,14 @@ _FACTS_SCHEMA = """\
 
 
 def _open_facts_db(db_path: str):
-    """Open (or create) a CozoDB facts database at *db_path*."""
+    """Open (or create) a CozoDB facts database at *db_path*.
+
+    Uses ``:ensure`` (not ``:create``) so that existing data is preserved
+    when the database is reopened.
+    """
     from emend.fact_graph import _create_cozo_client
 
     client = _create_cozo_client(db_path)
-    # Ensure relations exist (idempotent).
     for stmt in _FACTS_SCHEMA.strip().split("\n\n"):
         stmt = stmt.strip()
         if stmt:
@@ -442,6 +445,14 @@ def _populate_facts_db(project_root: str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
 
         worktree_id = _get_worktree_id(project_root)
+        resolved_root = str(Path(project_root).resolve())
+
+        def _to_rel(abs_path: str) -> str:
+            """Convert an absolute file path to relative (to project root)."""
+            try:
+                return str(Path(abs_path).relative_to(resolved_root))
+            except ValueError:
+                return abs_path
 
         # Symbols — use :replace so the entire relation is atomically
         # swapped, which also removes any stale rows from deleted symbols.
@@ -457,7 +468,7 @@ def _populate_facts_db(project_root: str) -> None:
         ).fetchall()
 
         cozo_sym = [
-            [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+            [_to_rel(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7],
              r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
              bool(r[13]), bool(r[14]), bool(r[15])]
             for r in sym_rows
@@ -480,7 +491,7 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        cozo_ref = [list(r) for r in ref_rows]
+        cozo_ref = [[r[0], _to_rel(r[1]), r[2], r[3], r[4]] for r in ref_rows]
         fdb.run(
             "?[tqn, fp, line, col, kind] <- $rows "
             ":replace fact_reference {tqn, fp, line, col => kind}",
@@ -497,7 +508,7 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        cozo_imp = [list(r) for r in imp_rows]
+        cozo_imp = [[_to_rel(r[0]), r[1]] for r in imp_rows]
         fdb.run(
             "?[fp, mod] <- $rows "
             ":replace fact_import {fp, mod}",
@@ -512,6 +523,11 @@ def _populate_facts_db(project_root: str) -> None:
         fdb.close()
     except BaseException:
         pass
+
+    # Invalidate the singleton cache so the next _get_facts_db() call
+    # opens a fresh handle that sees the newly written data.
+    key = str(Path(project_root).resolve())
+    _facts_db_cache.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -537,27 +553,6 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     except Exception:
         pass
     return None
-
-
-def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
-    """Cache a file's qualified-name set (best-effort)."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return
-    try:
-        import pickle
-        import zlib
-        data = zlib.compress(
-            pickle.dumps(qnames, protocol=pickle.HIGHEST_PROTOCOL), level=1
-        )
-        with _disk_cache_lock:
-            conn.execute(
-                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)",
-                (content_hash, data),
-            )
-            conn.commit()
-    except Exception:
-        pass
 
 
 _ALL_RE = re.compile(
@@ -1246,7 +1241,6 @@ def query_symbol_index(
 
     project_root = _find_project_root(project_path)
 
-    # Try CozoDB facts database first.
     results = _query_symbol_index_cozo(
         project_root,
         name_pattern=name_pattern,
@@ -1255,16 +1249,6 @@ def query_symbol_index(
         qualified_name=qualified_name,
         limit=limit,
     )
-    if results is None:
-        # Fallback to SQLite
-        results = _query_symbol_index_sqlite(
-            project_root,
-            name_pattern=name_pattern,
-            kind=kind,
-            file_path=file_path,
-            qualified_name=qualified_name,
-            limit=limit,
-        )
     if results is None:
         return None
 
@@ -1336,9 +1320,14 @@ def _query_symbol_index_cozo(
             params["kind"] = kind
 
         if file_path:
+            # facts.db stores relative paths; convert absolute to relative.
             resolved = str(Path(file_path).resolve())
+            try:
+                rel_fp = str(Path(resolved).relative_to(Path(project_root).resolve()))
+            except ValueError:
+                rel_fp = resolved
             clauses.append("fp == $file_path")
-            params["file_path"] = resolved
+            params["file_path"] = rel_fp
 
         if qualified_name:
             # Match qn, mqn, or mqn prefix
@@ -1357,12 +1346,13 @@ def _query_symbol_index_cozo(
             query += f"\n:limit {limit}"
 
         result = fdb.run(query, params)
+        abs_root = str(Path(project_root).resolve())
         return [
             {
                 "name": r[0],
                 "qualified_name": r[1],
                 "kind": r[2],
-                "file_path": r[3],
+                "file_path": str(Path(abs_root) / r[3]) if not Path(r[3]).is_absolute() else r[3],
                 "line": r[4],
                 "end_line": r[5],
                 "depth": r[6],
@@ -1374,90 +1364,7 @@ def _query_symbol_index_cozo(
             for r in result["rows"]
         ]
     except Exception:
-        logger.debug("CozoDB query_symbol_index failed, falling back", exc_info=True)
-        return None
-
-
-def _query_symbol_index_sqlite(
-    project_root: str,
-    *,
-    name_pattern: str | None = None,
-    kind: str | None = None,
-    file_path: str | None = None,
-    qualified_name: str | None = None,
-    limit: int = 0,
-) -> list[dict] | None:
-    """Query symbol_index via SQLite (legacy fallback)."""
-    import sqlite3 as _sql3
-
-    cache_dir = _cache_db_dir(project_root)
-    db_path = cache_dir / "parse.db"
-
-    try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
-        return None
-
-    try:
-        conditions = []
-        params: list = []
-
-        if name_pattern:
-            if "*" in name_pattern or "?" in name_pattern:
-                conditions.append("name GLOB ?")
-                params.append(name_pattern)
-            else:
-                conditions.append("name = ?")
-                params.append(name_pattern)
-
-        if kind:
-            conditions.append("kind = ?")
-            params.append(kind)
-
-        if file_path:
-            resolved = str(Path(file_path).resolve())
-            conditions.append("file_path = ?")
-            params.append(resolved)
-
-        if qualified_name:
-            conditions.append(
-                "(qualified_name = ? OR module_qn = ? OR module_qn LIKE ?)"
-            )
-            params.extend([qualified_name, qualified_name, qualified_name + ".%"])
-
-        where = " AND ".join(conditions) if conditions else "1=1"
-        query = (
-            f"SELECT name, qualified_name, kind, file_path, line, end_line, "
-            f"depth, parent, signature, returns, decorators "
-            f"FROM symbol_index WHERE {where} ORDER BY name, file_path, line"
-        )
-        if limit > 0:
-            query += f" LIMIT {limit}"
-
-        rows = conn.execute(query, params).fetchall()
-        results = []
-        for row in rows:
-            results.append({
-                "name": row[0],
-                "qualified_name": row[1],
-                "kind": row[2],
-                "file_path": row[3],
-                "line": row[4],
-                "end_line": row[5],
-                "depth": row[6],
-                "parent": row[7],
-                "signature": row[8],
-                "returns": row[9],
-                "decorators": row[10].split(",") if row[10] else [],
-            })
-        conn.close()
-        return results
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        logger.debug("CozoDB query_symbol_index failed", exc_info=True)
         return None
 
 
@@ -1832,7 +1739,7 @@ def query_reference_index(
     ref_kind: str | None = None,
     language: str = "python",
 ) -> list[dict] | None:
-    """Query references via CozoDB (with SQLite fallback).
+    """Query references via CozoDB Datalog.
 
     Returns a list of dicts with reference info, or None if the index
     is not available or not fresh.
@@ -1842,64 +1749,33 @@ def query_reference_index(
 
     project_root = _find_project_root(project_path)
 
-    # Try CozoDB first
     fdb = _get_facts_db(project_root)
-    if fdb is not None:
-        try:
-            clauses = ["*fact_reference[tqn, fp, line, col, kind]", "tqn == $qn"]
-            params: dict = {"qn": target_qn}
-            if ref_kind:
-                clauses.append("kind == $ref_kind")
-                params["ref_kind"] = ref_kind
-            query = (
-                "?[fp, line, col, kind] := " + ", ".join(clauses)
-                + "\n:order fp, line"
-            )
-            result = fdb.run(query, params)
-            return [
-                {"file_path": r[0], "line": r[1], "col": r[2], "ref_kind": r[3]}
-                for r in result["rows"]
-            ]
-        except Exception:
-            logger.debug("CozoDB query_reference_index failed, falling back", exc_info=True)
-
-    # SQLite fallback
-    import sqlite3 as _sql3
-
-    cache_dir = _cache_db_dir(project_root)
-    db_path = cache_dir / "parse.db"
-
-    try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
+    if fdb is None:
         return None
 
     try:
+        clauses = ["*fact_reference[tqn, fp, line, col, kind]", "tqn == $qn"]
+        params: dict = {"qn": target_qn}
         if ref_kind:
-            rows = conn.execute(
-                "SELECT file_path, line, col, ref_kind FROM reference_index "
-                "WHERE target_qn = ? AND ref_kind = ? "
-                "ORDER BY file_path, line",
-                (target_qn, ref_kind),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT file_path, line, col, ref_kind FROM reference_index "
-                "WHERE target_qn = ? ORDER BY file_path, line",
-                (target_qn,),
-            ).fetchall()
-        results = [
-            {"file_path": r[0], "line": r[1], "col": r[2], "ref_kind": r[3]}
-            for r in rows
+            clauses.append("kind == $ref_kind")
+            params["ref_kind"] = ref_kind
+        query = (
+            "?[fp, line, col, kind] := " + ", ".join(clauses)
+            + "\n:order fp, line"
+        )
+        result = fdb.run(query, params)
+        abs_root = str(Path(project_root).resolve())
+        return [
+            {
+                "file_path": str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0],
+                "line": r[1],
+                "col": r[2],
+                "ref_kind": r[3],
+            }
+            for r in result["rows"]
         ]
-        conn.close()
-        return results
     except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        logger.debug("CozoDB query_reference_index failed", exc_info=True)
         return None
 
 
@@ -1907,43 +1783,28 @@ def query_import_graph(
     project_path: str,
     imported_module: str,
 ) -> list[str] | None:
-    """Query for files importing a module (CozoDB with SQLite fallback).
+    """Query for files importing a module via CozoDB Datalog.
 
     Returns file paths, or None if index not available.
     """
     project_root = _find_project_root(project_path)
 
-    # Try CozoDB first
     fdb = _get_facts_db(project_root)
-    if fdb is not None:
-        try:
-            result = fdb.run(
-                "?[fp] := *fact_import[fp, mod], mod == $mod",
-                {"mod": imported_module},
-            )
-            return [r[0] for r in result["rows"]]
-        except Exception:
-            logger.debug("CozoDB query_import_graph failed, falling back", exc_info=True)
-
-    # SQLite fallback
-    import sqlite3 as _sql3
-
-    cache_dir = _cache_db_dir(project_root)
-    db_path = cache_dir / "parse.db"
-    if not db_path.exists():
+    if fdb is None:
         return None
 
     try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        rows = conn.execute(
-            "SELECT DISTINCT file_path FROM import_graph "
-            "WHERE imported_module = ?",
-            (imported_module,),
-        ).fetchall()
-        conn.close()
-        return [row[0] for row in rows]
+        result = fdb.run(
+            "?[fp] := *fact_import[fp, mod], mod == $mod",
+            {"mod": imported_module},
+        )
+        abs_root = str(Path(project_root).resolve())
+        return [
+            str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0]
+            for r in result["rows"]
+        ]
     except Exception:
+        logger.debug("CozoDB query_import_graph failed", exc_info=True)
         return None
 
 
@@ -4686,27 +4547,6 @@ def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: i
     return False
 
 
-def _get_all_exported_names(content: str) -> set[str]:
-    """Extract names listed in __all__ from file content."""
-    try:
-        tree = ast.parse(content)
-    except Exception:
-        return set()
-
-    names: set[str] = set()
-    for stmt in tree.body:
-        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-            target = stmt.targets[0]
-            if isinstance(target, ast.Name) and target.id == '__all__':
-                value = stmt.value
-                if isinstance(value, (ast.List, ast.Tuple)):
-                    for el in value.elts:
-                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-                            names.add(el.value)
-    return names
-
-
-
 def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
     """Use ``git log -S`` to find the last commit that added/removed *symbol_name*.
 
@@ -4900,11 +4740,44 @@ def _find_dead_code_cozo(
         # Build the Datalog query piece by piece.
         # has_ref: symbols that have at least one external reference
         # (by qualified_name or module_qn, excluding self-references).
+        #
+        # When exclude_references_from has simple (non-glob) paths,
+        # incorporate them as CozoDB conditions directly.  Glob patterns
+        # are deferred to Python post-filtering.
+        excl_conditions = []
+        abs_root = str(Path(project_root).resolve())
+        if exclude_references_from:
+            for excl_path in exclude_references_from:
+                has_glob = "*" in excl_path or "?" in excl_path
+                if not has_glob:
+                    resolved = str(Path(excl_path).resolve())
+                    try:
+                        rel_excl = str(Path(resolved).relative_to(abs_root))
+                    except ValueError:
+                        rel_excl = resolved
+                    excl_conditions.append(
+                        f'not starts_with(ref_fp, "{rel_excl}")'
+                    )
+                elif excl_path.startswith("**/"):
+                    # Extract the directory segment after ** and use
+                    # str_includes() to match any path containing it.
+                    segment = excl_path[3:]
+                    if segment.endswith("/"):
+                        segment = "/" + segment
+                    else:
+                        segment = "/" + segment
+                    excl_conditions.append(
+                        f'not str_includes(ref_fp, "{segment}")'
+                    )
+
+        excl_clause = ", ".join(excl_conditions)
+        excl_suffix = f", {excl_clause}" if excl_clause else ""
+
         rules = [
             "has_ref[mqn] := "
             "*fact_reference[mqn, ref_fp, ref_line, _, _], "
             "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
-            "not (ref_fp == sym_fp, ref_line == sym_line)",
+            f"not (ref_fp == sym_fp, ref_line == sym_line){excl_suffix}",
         ]
 
         # Also check references via module_qn
@@ -4914,14 +4787,8 @@ def _find_dead_code_cozo(
             "qn != \"\", "
             "*fact_reference[qn, ref_fp, ref_line, _, _], "
             "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
-            "not (ref_fp == sym_fp, ref_line == sym_line)"
+            f"not (ref_fp == sym_fp, ref_line == sym_line){excl_suffix}"
         )
-
-        # If exclude_references_from, add a more selective has_ref
-        if exclude_references_from:
-            # For now, fall back to SQLite for this complex case
-            # (CozoDB lacks LIKE/GLOB for path matching)
-            return None
 
         # Build candidate conditions
         candidate_clauses = [
@@ -4948,14 +4815,23 @@ def _find_dead_code_cozo(
                 '(not starts_with(name, "_") or starts_with(name, "__"))'
             )
 
+        # Exclude paths: simple prefixes in CozoDB, globs in Python.
+        # facts.db uses relative paths, so convert exclusions to relative.
+        glob_exclude_paths: list[str] = []
         if exclude_paths:
             for ep in exclude_paths:
-                resolved = str(Path(ep).resolve()) if not ep.startswith("*") else ep
+                if ep.startswith("*"):
+                    glob_exclude_paths.append(ep)
+                    continue
+                resolved = str(Path(ep).resolve())
                 if "*" not in resolved:
-                    candidate_clauses.append(f'not starts_with(fp, "{resolved}")')
+                    try:
+                        rel_ep = str(Path(resolved).relative_to(abs_root))
+                    except ValueError:
+                        rel_ep = resolved
+                    candidate_clauses.append(f'not starts_with(fp, "{rel_ep}")')
                 else:
-                    # Complex glob — fall back to SQLite
-                    return None
+                    glob_exclude_paths.append(ep)
 
         if entry_point_names:
             # CozoDB doesn't have NOT IN for inline lists easily;
@@ -4971,16 +4847,47 @@ def _find_dead_code_cozo(
         query = "\n".join(rules)
         result = fdb.run(query)
 
-        rows = [tuple(r) for r in result["rows"]]
+        # Convert relative paths back to absolute for callers.
+        rows = [
+            (r[0], r[1], r[2],
+             str(Path(abs_root) / r[3]) if not Path(r[3]).is_absolute() else r[3],
+             r[4], r[5])
+            for r in result["rows"]
+        ]
 
         # Post-filter entry_point_names in Python
         if entry_point_names:
             ep_set = set(entry_point_names)
             rows = [r for r in rows if r[0] not in ep_set]
 
+        # Post-filter glob exclude_paths in Python
+        if glob_exclude_paths:
+            import fnmatch
+            def _matches_any_glob(fp: str) -> bool:
+                for pat in glob_exclude_paths:
+                    # Match against both the raw path and one with a
+                    # trailing separator so that **/scripts/ matches
+                    # files inside that directory.
+                    if fnmatch.fnmatch(fp, pat) or fnmatch.fnmatch(fp, pat + "*"):
+                        return True
+                    # Also try matching path segments
+                    if "**" in pat:
+                        # Convert ** glob to match any path depth
+                        pat_re = pat.replace("**", "*")
+                        if fnmatch.fnmatch(fp, pat_re) or fnmatch.fnmatch(fp, pat_re + "*"):
+                            return True
+                    # Check if any parent directory matches
+                    from pathlib import PurePosixPath
+                    for parent in PurePosixPath(fp).parents:
+                        pstr = str(parent) + "/"
+                        if fnmatch.fnmatch(pstr, pat):
+                            return True
+                return False
+            rows = [r for r in rows if not _matches_any_glob(r[3])]
+
         return rows
     except Exception:
-        logger.debug("CozoDB dead code query failed, falling back to SQLite", exc_info=True)
+        logger.debug("CozoDB dead code query failed", exc_info=True)
         return None
 
 
@@ -4996,39 +4903,13 @@ def _find_dead_code_cached(
     exclude_paths: list[str] | None = None,
     language: str = "python",
 ) -> list[DeadSymbol]:
-    """Index-accelerated dead code detection.
+    """Index-accelerated dead code detection via CozoDB Datalog.
 
-    Uses CozoDB Datalog when available, with SQLite ``parse.db`` fallback.
     The heavy lifting (candidate filtering + reference checking) is a
-    Datalog query (or SQL ``NOT EXISTS``); the lightweight string-literal
-    post-filter runs in Python on the small result set.
+    Datalog query; the lightweight string-literal post-filter runs in
+    Python on the small result set.
     """
-    import sqlite3 as _sql3
-
     scan_root = str(Path(project_path).resolve())
-
-    def _glob_to_like(pattern: str) -> str:
-        """Convert a path pattern (possibly with globs) to SQL LIKE.
-
-        Supports ``*`` (any chars in one segment), ``**`` (any path
-        segments), and ``?`` (single char).  Patterns without glob
-        characters are treated as directory prefixes.
-        """
-        has_glob = "*" in pattern or "?" in pattern
-        if not has_glob:
-            resolved = str(Path(pattern).resolve())
-            safe = resolved.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            return f"{safe}%"
-        # Glob pattern: resolve relative portion if not starting with * or /
-        if not pattern.startswith("*") and not Path(pattern).is_absolute():
-            pattern = str(Path(scan_root) / pattern)
-        # Escape literal LIKE chars before converting globs.
-        pattern = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        # Order matters: ** before * to avoid double replacement.
-        pattern = pattern.replace("**", "%").replace("*", "%").replace("?", "_")
-        if not pattern.endswith("%"):
-            pattern += "%"
-        return pattern
 
     # Ensure the index is fresh; build it if necessary.
     if not _ensure_index_fresh(scan_root, language=language):
@@ -5037,111 +4918,18 @@ def _find_dead_code_cached(
 
     project_root = _find_project_root(scan_root)
 
-    # Try CozoDB Datalog path first (returns candidate rows or None).
     cozo_rows = _find_dead_code_cozo(
         project_root, kind, include_private, exclude_references_from,
         entry_point_names=entry_point_names,
         exclude_paths=exclude_paths,
     )
-    if cozo_rows is not None:
-        return _dead_code_postfilter(
-            cozo_rows, scan_root, all_files, strings_count_as_references,
-            entry_point_decorators, exclude_references_from,
-        )
-    worktree_id = _get_worktree_id(project_root)
-    cache_dir = _cache_db_dir(project_root)
-    db_path = cache_dir / "parse.db"
+    if cozo_rows is None:
+        return []
 
-    conn = _sql3.connect(str(db_path), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-
-    try:
-        # ---- Build the single query ---------------------------------
-        conditions = [
-            "si.depth = 1",
-            "si.is_entry_point = 0",
-            "si.is_exported = 0",
-            "si.has_noqa = 0",
-        ]
-        params: list = []
-
-        if kind == "function":
-            conditions.append("si.kind IN ('function', 'async_function')")
-        elif kind == "class":
-            conditions.append("si.kind = 'class'")
-        else:
-            # By default, only analyze functions, async functions, methods,
-            # and classes.  Variables are excluded since module-level
-            # assignments are often configs/constants.
-            conditions.append(
-                "si.kind IN ('function', 'async_function', 'method', "
-                "'async_method', 'class')"
-            )
-
-        if not include_private:
-            # Exclude _private names (but keep dunders — they're already
-            # filtered by is_entry_point).
-            conditions.append(
-                "(si.name NOT LIKE '\\_%' ESCAPE '\\' OR si.name LIKE '\\_\\_%\\_\\_%' ESCAPE '\\')"
-            )
-
-        # Exclude entire directories from analysis (supports globs).
-        if exclude_paths:
-            for pattern in exclude_paths:
-                conditions.append("si.file_path NOT LIKE ? ESCAPE '\\'")
-                params.append(_glob_to_like(pattern))
-
-        # Custom entry point names: filter at SQL level.
-        if entry_point_names:
-            placeholders = ", ".join("?" for _ in entry_point_names)
-            conditions.append(f"si.name NOT IN ({placeholders})")
-            params.extend(entry_point_names)
-
-        # Reference exclusion: ignore references from certain dirs (supports globs).
-        exclude_clause = ""
-        if exclude_references_from:
-            like_parts = []
-            for pattern in exclude_references_from:
-                like_parts.append("ri.file_path NOT LIKE ? ESCAPE '\\'")
-                params.append(_glob_to_like(pattern))
-            exclude_clause = " AND " + " AND ".join(like_parts)
-
-        where = " AND ".join(conditions)
-
-        query = f"""
-            SELECT si.name, si.qualified_name, si.kind, si.file_path,
-                   si.line, si.decorators
-            FROM symbol_index si
-            INNER JOIN file_manifest fm
-              ON si.content_hash = fm.content_hash
-                 AND si.file_path = fm.path
-                 AND fm.worktree_id = ?
-            WHERE {where}
-              AND NOT EXISTS (
-                SELECT 1 FROM reference_index ri
-                WHERE (ri.target_qn = si.qualified_name
-                       OR ri.target_qn = si.module_qn)
-                  AND NOT (ri.file_path = si.file_path
-                           AND ri.line = si.line)
-                  {exclude_clause}
-              )
-            ORDER BY si.file_path, si.line
-        """
-
-        rows = conn.execute(query, [worktree_id] + params).fetchall()
-        conn.close()
-
-        return _dead_code_postfilter(
-            rows, scan_root, all_files, strings_count_as_references,
-            entry_point_decorators, exclude_references_from,
-        )
-
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        raise
+    return _dead_code_postfilter(
+        cozo_rows, scan_root, all_files, strings_count_as_references,
+        entry_point_decorators, exclude_references_from,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5281,11 +5069,199 @@ def _is_test_symbol(selector: str) -> bool:
     return False
 
 
+def _find_impact_via_fact_graph(
+    changed_selectors: list[str],
+    proj_root: str,
+    max_depth: int = 10,
+) -> ImpactResult | None:
+    """Compute impact using a Datalog query on the persisted ``facts.db``.
+
+    Uses the CozoDB ``facts.db`` that is populated by ``emend index``.
+    The query constructs a call graph from ``fact_reference`` (kind == "call")
+    joined with ``fact_symbol`` (to find the enclosing function), then
+    computes the transitive reverse-caller closure via recursive Datalog.
+
+    Returns None if facts.db is unavailable (caller falls back to BFS).
+    """
+    fdb = _get_facts_db(proj_root)
+    if fdb is None:
+        return None
+
+    # Resolve selectors to module-qualified names (mqn) in facts.db.
+    changed_mqns: set[str] = set()
+    sel_to_mqn: dict[str, str] = {}
+    mqn_to_sel: dict[str, str] = {}
+
+    for sel_str in changed_selectors:
+        try:
+            sel = parse_extended_selector(sel_str)
+        except Exception:
+            continue
+        if not sel.symbol_path:
+            continue
+        name = sel.symbol_path[-1]
+        # Try both the raw file_path and a relative version.
+        for fp in (sel.file_path, _try_relative(sel.file_path, proj_root)):
+            if fp is None:
+                continue
+            try:
+                result = fdb.run(
+                    "?[mqn] := *fact_symbol[fp, mqn, name, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                    "fp == $fp, name == $name",
+                    {"fp": fp, "name": name},
+                )
+                if result["rows"]:
+                    mqn = result["rows"][0][0]
+                    changed_mqns.add(mqn)
+                    sel_to_mqn[sel_str] = mqn
+                    mqn_to_sel[mqn] = sel_str
+                    break
+            except Exception:
+                continue
+
+    if not changed_mqns:
+        return ImpactResult(
+            changed_symbols=changed_selectors,
+            impacted_symbols=[],
+            impacted_tests=[],
+            edges=[],
+        )
+
+    # Build a Datalog query against the persisted facts.db schema:
+    #
+    #   fact_symbol: (fp, mqn) => (name, qn, kind, line, end_line, ...)
+    #   fact_reference: (tqn, fp, line, col) => (kind)
+    #
+    # A "call" is a fact_reference where kind == "call".  To find the
+    # caller, we join with fact_symbol to find which function encloses
+    # the reference line.
+    seed_rows = ", ".join(f'["{mqn}"]' for mqn in changed_mqns)
+
+    rules = [f"changed[x] <- [{seed_rows}]\n"]
+
+    # call_edge: derive (caller_mqn, callee_mqn) from references + enclosing symbols
+    rules.append(
+        'call_edge[caller_mqn, callee_mqn] := '
+        '*fact_reference[callee_mqn, fp, ref_line, _, kind], kind == "call", '
+        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+        'caller_kind in ["function", "async_function", "method", "async_method"], '
+        'caller_line <= ref_line, ref_line <= caller_end\n'
+    )
+
+    # Also match references by qn (short qualified name)
+    rules.append(
+        'call_edge[caller_mqn, callee_mqn] := '
+        '*fact_symbol[_, callee_mqn, _, callee_qn, _, _, _, _, _, _, _, _, _, _, _, _], '
+        'callee_qn != "", '
+        '*fact_reference[callee_qn, fp, ref_line, _, kind], kind == "call", '
+        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+        'caller_kind in ["function", "async_function", "method", "async_method"], '
+        'caller_line <= ref_line, ref_line <= caller_end\n'
+    )
+
+    # Depth-bounded transitive reverse-caller closure
+    rules.append(
+        "layer_0[caller] := call_edge[caller, callee], changed[callee]\n"
+    )
+    for i in range(1, max_depth):
+        rules.append(
+            f"layer_{i}[caller] := call_edge[caller, mid], layer_{i - 1}[mid]\n"
+        )
+    for i in range(max_depth):
+        rules.append(f"impacted[x] := layer_{i}[x]\n")
+
+    # Edges: witness pairs
+    rules.append(
+        "edge[caller, callee] := impacted[caller], call_edge[caller, callee], changed[callee]\n"
+    )
+    if max_depth > 1:
+        for i in range(1, max_depth):
+            rules.append(
+                f"edge[caller, mid] := layer_{i}[caller], call_edge[caller, mid], layer_{i - 1}[mid]\n"
+            )
+
+    # Return impacted symbols with file paths for selector construction
+    rules.append(
+        "?[caller_mqn, caller_fp, caller_name, callee_mqn] := "
+        "edge[caller_mqn, callee_mqn], not changed[caller_mqn], "
+        "*fact_symbol[caller_fp, caller_mqn, caller_name, _, _, _, _, _, _, _, _, _, _, _, _, _]"
+    )
+
+    try:
+        result = fdb.run("".join(rules))
+    except Exception:
+        logger.debug("facts.db impact query failed", exc_info=True)
+        return None
+
+    # Build the result
+    impacted: list[str] = []
+    all_edges: list[ImpactEdge] = []
+    seen_impacted: set[str] = set()
+
+    abs_root = str(Path(proj_root).resolve())
+    for row in result["rows"]:
+        caller_mqn, caller_fp, caller_name, callee_mqn = row[0], row[1], row[2], row[3]
+
+        # Convert relative path back to absolute for selectors.
+        if not Path(caller_fp).is_absolute():
+            caller_fp = str(Path(abs_root) / caller_fp)
+
+        # Build selector for the caller
+        if caller_mqn not in mqn_to_sel:
+            mqn_to_sel[caller_mqn] = f"{caller_fp}::{caller_name}"
+        caller_sel = mqn_to_sel[caller_mqn]
+        callee_sel = mqn_to_sel.get(callee_mqn, callee_mqn)
+
+        all_edges.append(ImpactEdge(
+            source=callee_sel,
+            target=caller_sel,
+            kind="calls",
+        ))
+
+        if caller_sel not in seen_impacted and caller_sel not in changed_selectors:
+            seen_impacted.add(caller_sel)
+            impacted.append(caller_sel)
+
+    # Identify impacted tests
+    impacted_tests: list[str] = []
+    all_impacted = changed_selectors + impacted
+
+    for sel_str in all_impacted:
+        file_part = sel_str.split('::', 1)[0] if '::' in sel_str else sel_str
+        if _is_test_file(file_part) or _is_test_symbol(sel_str):
+            if sel_str not in impacted_tests:
+                impacted_tests.append(sel_str)
+                for edge in all_edges:
+                    if edge.target == sel_str:
+                        all_edges.append(ImpactEdge(
+                            source=edge.source,
+                            target=sel_str,
+                            kind="test",
+                        ))
+                        break
+
+    return ImpactResult(
+        changed_symbols=changed_selectors,
+        impacted_symbols=impacted,
+        impacted_tests=impacted_tests,
+        edges=all_edges,
+    )
+
+
+def _try_relative(path: str, root: str) -> str | None:
+    """Try to make *path* relative to *root*; return None on failure."""
+    try:
+        return str(Path(path).relative_to(Path(root).resolve()))
+    except ValueError:
+        return None
+
+
 def find_impact(
     selectors: list[ExtendedSelector] | None = None,
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
+    use_fact_graph: bool = True,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5296,7 +5272,9 @@ def find_impact(
         diff_spec: Git diff specification (e.g. ``"HEAD"``, ``"abc..def"``).
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
-        max_depth: Maximum BFS depth for transitive closure (default 10).
+        max_depth: Maximum depth for transitive closure (default 10).
+        use_fact_graph: Accepted for backwards compatibility (ignored;
+            the Datalog path on ``facts.db`` is always used).
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -5337,91 +5315,29 @@ def find_impact(
             edges=[],
         )
 
-    # Step 2: BFS to compute transitive reverse-caller closure
-    from .ast_utils import find_nested_definitions, find_symbol_by_line
+    # Datalog query on the persisted facts.db.
+    dl_result = _find_impact_via_fact_graph(
+        changed_selectors, proj_root, max_depth=max_depth,
+    )
+    if dl_result is not None:
+        return dl_result
 
-    all_edges: list[ImpactEdge] = []
-    visited: set[str] = set(changed_selectors)
-    impacted: list[str] = []
-    frontier: list[str] = list(changed_selectors)
-
-    for _depth in range(max_depth):
-        next_frontier: list[str] = []
-
-        for sel_str in frontier:
-            try:
-                sel = parse_extended_selector(sel_str)
-            except Exception:
-                continue
-
-            if not sel.symbol_path:
-                continue
-
-            try:
-                callers = list(find_callers(sel, project_path=proj_root))
-            except (ValueError, FileNotFoundError):
-                continue
-
-            for caller_ref in callers:
-                caller_file = caller_ref.file_path
-                caller_line = caller_ref.line
-
-                try:
-                    symbols = find_nested_definitions(caller_file)
-                    caller_sym = find_symbol_by_line(symbols, caller_line)
-                except Exception:
-                    continue
-
-                if caller_sym is None:
-                    continue
-
-                caller_sel = f"{caller_file}::{'.'.join(caller_sym.path)}"
-
-                all_edges.append(ImpactEdge(
-                    source=sel_str,
-                    target=caller_sel,
-                    kind="calls",
-                ))
-
-                if caller_sel not in visited:
-                    visited.add(caller_sel)
-                    impacted.append(caller_sel)
-                    next_frontier.append(caller_sel)
-
-        frontier = next_frontier
-        if not frontier:
-            break
-
-    # Step 3: Identify impacted tests
-    impacted_tests: list[str] = []
-    all_impacted = changed_selectors + impacted
-
-    for sel_str in all_impacted:
-        if '::' in sel_str:
-            file_part = sel_str.split('::', 1)[0]
-        else:
-            file_part = sel_str
-
-        if _is_test_file(file_part) or _is_test_symbol(sel_str):
-            if sel_str not in impacted_tests:
-                impacted_tests.append(sel_str)
-                # Add a "test" edge from the changed symbol to the test
-                # Find the first edge that led to this test
-                for edge in all_edges:
-                    if edge.target == sel_str:
-                        # Already has a "calls" edge; add a "test" annotation
-                        all_edges.append(ImpactEdge(
-                            source=edge.source,
-                            target=sel_str,
-                            kind="test",
-                        ))
-                        break
+    # facts.db unavailable — warm the index and retry once.
+    try:
+        warm_caches(proj_root, type_engine="none")
+    except Exception:
+        pass
+    dl_result = _find_impact_via_fact_graph(
+        changed_selectors, proj_root, max_depth=max_depth,
+    )
+    if dl_result is not None:
+        return dl_result
 
     return ImpactResult(
         changed_symbols=changed_selectors,
-        impacted_symbols=impacted,
-        impacted_tests=impacted_tests,
-        edges=all_edges,
+        impacted_symbols=[],
+        impacted_tests=[],
+        edges=[],
     )
 
 
@@ -5960,11 +5876,13 @@ def safe_delete(
     cascade: bool = False,
     project_path: str | None = None,
     apply: bool = False,
+    use_fact_graph: bool = False,
 ) -> DeletePlan:
     """Delete a symbol and optionally cascade to newly-dead dependents.
 
     Without ``--cascade``, removes the target symbol only.  With cascade,
-    iteratively identifies symbols that become dead after the deletion
+    uses CozoDB Datalog queries on the persisted ``facts.db`` to
+    iteratively identify symbols that become dead after the deletion
     (i.e. symbols whose *only* remaining callers are in the delete set)
     and includes them in the plan.
 
@@ -5973,6 +5891,7 @@ def safe_delete(
         cascade: If True, transitively delete newly-dead dependents.
         project_path: Project root (auto-detected if None).
         apply: If True, write changes to files.
+        use_fact_graph: Accepted for backwards compatibility (ignored).
 
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.
@@ -6011,112 +5930,75 @@ def safe_delete(
     delete_qns.add(target_qn)
 
     if cascade:
-        # BFS: for each symbol in the delete set, find its callees, then
-        # check whether each callee has references outside the delete set.
-        queue_idx = 0
-        while queue_idx < len(delete_set):
-            entry = delete_set[queue_idx]
-            queue_idx += 1
-
-            # Build a selector for the current entry.
-            entry_sel = parse_extended_selector(entry["selector"])
-
-            try:
-                callees = find_callees(entry_sel, project_path=scan_root)
-            except (ValueError, FileNotFoundError):
-                continue
-
-            for callee in callees:
-                qn = callee.qualified_name
-                if not qn or qn in delete_qns:
-                    continue
-
-                # Resolve callee to a file via the symbol index.
-                sym_rows = query_symbol_index(scan_root, qualified_name=qn)
-                if not sym_rows:
-                    # Try just the name — the QN might be short.
-                    sym_rows = query_symbol_index(
-                        scan_root, name_pattern=callee.name
+        # Compute cascade via CozoDB queries on the persisted facts.db.
+        # Iteratively finds callees of deleted symbols, then checks
+        # whether each callee has references outside the delete set.
+        fdb = _get_facts_db(scan_root)
+        if fdb is not None:
+            changed = True
+            while changed:
+                changed = False
+                # Build inline relation for current delete set
+                del_rows = ", ".join(f'["{qn}"]' for qn in delete_qns)
+                try:
+                    # Find callees of deleted symbols that have no
+                    # external references (references not from deleted symbols).
+                    result = fdb.run(
+                        f'deleted[mqn] <- [{del_rows}]\n'
+                        # Find callees: symbols called by deleted functions
+                        'callee_of_deleted[callee_mqn] := '
+                        '  deleted[caller_mqn], '
+                        '  *fact_reference[callee_mqn, fp, ref_line, _, kind], kind == "call", '
+                        '  *fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+                        '  caller_kind in ["function", "async_function", "method", "async_method"], '
+                        '  caller_line <= ref_line, ref_line <= caller_end, '
+                        '  not deleted[callee_mqn]\n'
+                        # Also match by short qn
+                        'callee_of_deleted[callee_mqn] := '
+                        '  deleted[caller_mqn], '
+                        '  *fact_symbol[_, callee_mqn, _, callee_qn, _, _, _, _, _, _, _, _, _, _, _, _], '
+                        '  callee_qn != "", '
+                        '  *fact_reference[callee_qn, fp, ref_line, _, kind], kind == "call", '
+                        '  *fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+                        '  caller_kind in ["function", "async_function", "method", "async_method"], '
+                        '  caller_line <= ref_line, ref_line <= caller_end, '
+                        '  not deleted[callee_mqn]\n'
+                        # Has external ref: reference from a non-deleted symbol
+                        'has_ext_ref[mqn] := '
+                        '  callee_of_deleted[mqn], '
+                        '  *fact_reference[mqn, ref_fp, ref_line, _, _], '
+                        '  *fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], '
+                        '  not (ref_fp == sym_fp, ref_line == sym_line), '
+                        '  *fact_symbol[ref_fp, ref_mqn, _, _, ref_kind, ref_start, ref_end, _, _, _, _, _, _, _, _, _], '
+                        '  ref_kind in ["function", "async_function", "method", "async_method"], '
+                        '  ref_start <= ref_line, ref_line <= ref_end, '
+                        '  not deleted[ref_mqn]\n'
+                        # Cascade candidates: callees with no external refs
+                        '?[mqn, name, kind, fp, line] := '
+                        '  callee_of_deleted[mqn], not has_ext_ref[mqn], '
+                        '  *fact_symbol[fp, mqn, name, _, kind, line, _, depth, _, _, _, _, _, is_entry, is_exported, _], '
+                        '  depth == 1, is_entry == false, is_exported == false, '
+                        '  not starts_with(name, "test_"), not starts_with(name, "Test"), '
+                        '  not (starts_with(name, "__"), ends_with(name, "__"))\n'
                     )
-                    if sym_rows:
-                        sym_rows = [
-                            r for r in sym_rows
-                            if r.get("qualified_name", "").endswith(callee.name)
-                        ]
-                if not sym_rows:
-                    continue
-
-                # For each matching symbol, check remaining references.
-                for sym_row in sym_rows:
-                    sym_qn = sym_row.get("qualified_name", "")
-                    sym_fp = sym_row["file_path"]
-                    sym_name = sym_row["name"]
-                    if sym_qn in delete_qns:
-                        continue
-
-                    # Skip entry points / dunders / test functions.
-                    if sym_row.get("is_entry_point") or sym_row.get("is_exported"):
-                        continue
-                    if sym_name.startswith("__") and sym_name.endswith("__"):
-                        continue
-                    if sym_name.startswith("test_") or sym_name.startswith("Test"):
-                        continue
-
-                    # Query all non-definition references.  The reference
-                    # index stores target_qn as the module-qualified name,
-                    # so try both the short qualified_name and the full
-                    # module_qn (derived from the file path).
-                    all_refs = query_reference_index(scan_root, sym_qn)
-                    if all_refs is None or not all_refs:
-                        # Try with the module-qualified name.
-                        mod_qn = _file_to_module(sym_fp, scan_root)
-                        full_qn = f"{mod_qn}.{sym_name}" if mod_qn else sym_name
-                        refs2 = query_reference_index(scan_root, full_qn)
-                        if refs2:
-                            all_refs = refs2
-                        elif all_refs is None:
-                            continue
-
-                    # Filter out definition/import references and refs from
-                    # symbols we are already planning to delete.  Import
-                    # refs are excluded because they become unused once
-                    # all call-site references are removed.
-                    external_refs = []
-                    for ref in all_refs:
-                        if ref["ref_kind"] in ("definition", "import"):
-                            continue
-                        # Check if the reference comes from a file+line
-                        # that is inside a symbol we're deleting.
-                        ref_from_deleted = False
-                        for d in delete_set:
-                            if ref["file_path"] == d["file_path"]:
-                                # Rough containment check: if ref line is
-                                # within the symbol's range.
-                                d_sel = parse_extended_selector(d["selector"])
-                                try:
-                                    d_syms = find_nested_definitions(d["file_path"])
-                                    d_sym = find_symbol_by_path(
-                                        d_syms, d_sel.symbol_path
-                                    )
-                                    if d_sym and d_sym.line_start <= ref["line"] <= d_sym.line_end:
-                                        ref_from_deleted = True
-                                        break
-                                except Exception:
-                                    pass
-                        if not ref_from_deleted:
-                            external_refs.append(ref)
-
-                    if not external_refs:
-                        sym_selector = f"{sym_fp}::{sym_name}"
-                        delete_set.append({
-                            "selector": sym_selector,
-                            "file_path": sym_fp,
-                            "name": sym_name,
-                            "kind": sym_row.get("kind", "function"),
-                            "line": sym_row.get("line", 0),
-                            "reason": f"only referenced by deleted symbol(s)",
-                        })
-                        delete_qns.add(sym_qn)
+                    for row in result["rows"]:
+                        mqn, name, sym_kind, fp, line = row
+                        if mqn not in delete_qns:
+                            # Convert relative path back to absolute.
+                            abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
+                            sym_selector = f"{abs_fp}::{name}"
+                            delete_set.append({
+                                "selector": sym_selector,
+                                "file_path": abs_fp,
+                                "name": name,
+                                "kind": sym_kind,
+                                "line": line,
+                                "reason": "only referenced by deleted symbol(s)",
+                            })
+                            delete_qns.add(mqn)
+                            changed = True
+                except Exception:
+                    logger.debug("CozoDB cascade query failed", exc_info=True)
 
     # ----- Phase 2: Apply deletions and collect diffs --------------------
     # Group by file, process in reverse line order to avoid offset shifts.

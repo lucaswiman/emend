@@ -722,6 +722,179 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    # -- Impact closure (Datalog transitive reverse-caller with edges) ----
+
+    def impact_closure(
+        self,
+        changed_qns: set[str],
+        max_depth: int = 10,
+    ) -> dict[str, Any]:
+        """Compute the transitive set of impacted symbols from a set of changes.
+
+        Uses a Datalog recursive rule to find all transitive callers of the
+        changed symbols, returning both the impacted set and witness edges.
+
+        Returns:
+            Dict with keys:
+              - ``impacted``: set of qualified names transitively impacted
+              - ``edges``: list of (source_qn, caller_qn) witness edges
+        """
+        if not changed_qns:
+            return {"impacted": set(), "edges": []}
+
+        # Build a Datalog rule: seed the "changed" relation, then compute
+        # transitive callers.  CozoDB inline relations use the syntax:
+        #   changed[x] <- [["val1"], ["val2"]]
+        seed_rows = ", ".join(f'["{qn}"]' for qn in changed_qns)
+
+        if max_depth <= 0:
+            return {"impacted": set(), "edges": []}
+
+        # Build depth-bounded rules by unrolling the recursion.
+        # layer_0 = direct callers of changed; layer_N = callers of layer_(N-1).
+        # This avoids unbounded recursion and respects max_depth exactly.
+        rules = [f"changed[x] <- [{seed_rows}]\n"]
+        rules.append(
+            "layer_0[caller] := *call[caller, callee, _, _, _], changed[callee]\n"
+        )
+        for i in range(1, max_depth):
+            rules.append(
+                f"layer_{i}[caller] := *call[caller, mid, _, _, _], "
+                f"layer_{i - 1}[mid]\n"
+            )
+        # Union all layers into impacted_node
+        for i in range(max_depth):
+            rules.append(f"impacted_node[x] := layer_{i}[x]\n")
+        # Edges: witness pairs — only between impacted nodes and their
+        # callees that are either changed or themselves impacted.
+        rules.append(
+            "edge[caller, callee] := impacted_node[caller], "
+            "*call[caller, callee, _, _, _], changed[callee]\n"
+        )
+        if max_depth > 1:
+            # Inner edges: caller in layer_N calls mid in layer_(N-1)
+            for i in range(1, max_depth):
+                rules.append(
+                    f"edge[caller, mid] := layer_{i}[caller], "
+                    f"*call[caller, mid, _, _, _], layer_{i - 1}[mid]\n"
+                )
+        rules.append(
+            "?[caller, callee] := edge[caller, callee], not changed[caller]"
+        )
+        query = "".join(rules)
+        result = self._client.run(query)
+        edges = [(r[0], r[1]) for r in result["rows"]]
+        impacted = {r[0] for r in result["rows"]}
+        return {"impacted": impacted, "edges": edges}
+
+    # -- Cascade dead code (Datalog negation) -------------------------------
+
+    def cascade_dead(
+        self,
+        initial_deletes: set[str],
+        exclude_entry_points: bool = True,
+    ) -> list[SymbolFact]:
+        """Find symbols that become dead after deleting *initial_deletes*.
+
+        Uses Datalog with stratified negation:
+        1. Mark initial deletes
+        2. Find symbols whose *only* references come from the delete set
+        3. Transitively add those to the delete set
+
+        This is a fixed-point computation expressed as recursive Datalog
+        rules — CozoDB's semi-naive evaluation handles convergence.
+
+        Returns:
+            List of SymbolFacts that would become dead (excluding the
+            initial deletes themselves).
+        """
+        if not initial_deletes:
+            return []
+
+        # Seed the delete set using CozoDB inline relation syntax
+        seed_rows = ", ".join(f'["{qn}"]' for qn in initial_deletes)
+        query = (
+            f"to_delete[x] <- [{seed_rows}]\n"
+            # A symbol has an external caller if called by something NOT
+            # in the delete set.
+            "has_external_caller[qn] := *call[caller, qn, _, _, _], "
+            "not to_delete[caller]\n"
+            # Cascade targets: callees of deleted symbols with no external callers,
+            # excluding the initial deletes themselves.
+            "callee_of_deleted[qn] := *call[caller, qn, _, _, _], to_delete[caller]\n"
+            "cascade[qn] := callee_of_deleted[qn], "
+            "not has_external_caller[qn], "
+            "not to_delete[qn]\n"
+            # Return full symbol info for cascade targets
+            "?[fp, name, qn, kind, line, end_line, parent] := "
+            "cascade[qn], "
+            "*symbol[qn, fp, name, kind, line, end_line, parent]"
+        )
+        result = self._client.run(query)
+        return [
+            SymbolFact(
+                file_path=r[0], name=r[1], qualified_name=r[2],
+                kind=r[3], line=r[4], end_line=r[5],
+                parent=r[6] if r[6] else None,
+            )
+            for r in result["rows"]
+        ]
+
+    # -- Symbols with no external references (parameterised dead code) ------
+
+    def unreferenced_symbols(
+        self,
+        exclude_qns: set[str] | None = None,
+        kinds: set[str] | None = None,
+    ) -> list[SymbolFact]:
+        """Find symbols with no references, optionally excluding refs from *exclude_qns*.
+
+        This generalises ``dead_code()`` by allowing a set of qualified
+        names to be excluded from the reference check — useful for
+        "what would become dead if we removed these symbols?"
+
+        Args:
+            exclude_qns: If provided, references from these symbols are
+                ignored when checking liveness.
+            kinds: If provided, only return symbols of these kinds.
+        """
+        if exclude_qns:
+            seed_rows = ", ".join(f'["{qn}"]' for qn in exclude_qns)
+            # When excluding callers, we only consider a symbol alive if
+            # it has a call-site caller NOT in the excluded set.  We use
+            # call facts (which carry the caller QN) rather than bare
+            # reference facts (which don't).
+            query = (
+                f"excluded[x] <- [{seed_rows}]\n"
+                "alive[qn] := *call[caller, qn, _, _, _], not excluded[caller]\n"
+                "dead[qn, fp, name, kind, line, end_line, parent] := "
+                "*symbol[qn, fp, name, kind, line, end_line, parent], "
+                "not alive[qn]\n"
+                "?[fp, name, qn, kind, line, end_line, parent] := "
+                "dead[qn, fp, name, kind, line, end_line, parent]"
+            )
+        else:
+            query = (
+                'has_ref[qn] := *reference[qn, _, _, _, _]\n'
+                'dead[qn, fp, name, kind, line, end_line, parent] := '
+                '*symbol[qn, fp, name, kind, line, end_line, parent], '
+                'not has_ref[qn]\n'
+                '?[fp, name, qn, kind, line, end_line, parent] := '
+                'dead[qn, fp, name, kind, line, end_line, parent]'
+            )
+        result = self._client.run(query)
+        facts = [
+            SymbolFact(
+                file_path=r[0], name=r[1], qualified_name=r[2],
+                kind=r[3], line=r[4], end_line=r[5],
+                parent=r[6] if r[6] else None,
+            )
+            for r in result["rows"]
+        ]
+        if kinds:
+            facts = [f for f in facts if f.kind in kinds]
+        return facts
+
     # -- Generic query (predicate-based, for backwards compat) -----------
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
@@ -900,46 +1073,59 @@ class FactGraph:
         project_root = _find_project_root(project_path)
         source_files = _collect_source_files(project_root, language=language)
 
-        for file_path in source_files:
+        # The scope resolver may fail if pointed at a repo root with
+        # incompatible config.  Use the user-supplied project_path as
+        # the resolver root (typically ``src/pkg``), falling back to
+        # the detected project_root.
+        resolver_root = str(Path(project_path).resolve())
+
+        for abs_file_path in source_files:
             try:
-                content = Path(file_path).read_text(encoding="utf-8")
+                content = Path(abs_file_path).read_text(encoding="utf-8")
             except Exception:
-                logger.debug("Could not read %s", file_path, exc_info=True)
+                logger.debug("Could not read %s", abs_file_path, exc_info=True)
                 continue
 
-            module_name = _file_to_module(file_path, project_root)
+            # Store relative paths in the fact graph so they match
+            # selector paths regardless of working directory.
+            try:
+                rel_path = str(Path(abs_file_path).relative_to(Path(project_root).resolve()))
+            except ValueError:
+                rel_path = abs_file_path
+
+            module_name = _file_to_module(abs_file_path, project_root)
 
             # -- Symbol facts (via Rust symbol collection) ----------------
             try:
-                ext = Path(file_path).suffix.lstrip(".") or "py"
+                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
                 raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
             except Exception:
-                logger.debug("Could not parse %s for symbols", file_path, exc_info=True)
+                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
                 raw_symbols = []
 
             sym_facts: list[SymbolFact] = []
-            _walk_symbols(sym_facts, raw_symbols, file_path, module_name, parent_qn=None)
+            _walk_symbols(sym_facts, raw_symbols, rel_path, module_name, parent_qn=None)
             graph.add_symbols_batch(sym_facts)
 
             # -- Reference and call facts (via scope resolver) ------------
             try:
-                ext = Path(file_path).suffix.lstrip(".") or "py"
-                resolver = _rust.PyScopeResolver(project_root, ext)
-                resolver.index_file(file_path, content)
+                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
+                resolver = _rust.PyScopeResolver(resolver_root, ext)
+                resolver.index_file(abs_file_path, content)
             except Exception:
                 logger.debug(
-                    "Could not build scope resolver for %s", file_path, exc_info=True
+                    "Could not build scope resolver for %s", abs_file_path, exc_info=True
                 )
                 resolver = None
 
             if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, file_path)
+                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
 
                 try:
-                    refs = resolver.references_in_file(file_path)
+                    refs = resolver.references_in_file(abs_file_path)
                 except Exception:
                     logger.debug(
-                        "references_in_file failed for %s", file_path, exc_info=True
+                        "references_in_file failed for %s", abs_file_path, exc_info=True
                     )
                     refs = []
 
@@ -948,7 +1134,7 @@ class FactGraph:
                 for qn, line, col, _offset, _end_offset, kind in refs:
                     ref_kind = _map_ref_kind(kind)
                     ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=file_path,
+                        symbol_qn=qn, file_path=rel_path,
                         line=line, col=col, ref_kind=ref_kind,
                     ))
 
@@ -957,14 +1143,14 @@ class FactGraph:
                         if caller is not None:
                             call_facts.append(CallFact(
                                 caller_qn=caller, callee_qn=qn,
-                                file_path=file_path, line=line, col=col,
+                                file_path=rel_path, line=line, col=col,
                             ))
 
                 graph.add_references_batch(ref_facts)
                 graph.add_calls_batch(call_facts)
 
             # -- Import facts (via stdlib ast) ----------------------------
-            import_facts = _extract_imports(file_path, content)
+            import_facts = _extract_imports(rel_path, content)
             graph.add_imports_batch(import_facts)
 
         return graph
