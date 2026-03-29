@@ -332,8 +332,19 @@ class TestLanguageRegistry:
     def test_all_languages_includes_new(self):
         from emend.language_registry import get_all_languages
         langs = get_all_languages()
-        for lang in ("html", "css", "sql", "jinja2"):
+        for lang in ("html", "css", "sql", "jinja2", "datalog"):
             assert lang in langs
+
+    def test_detect_datalog(self):
+        from emend.language_registry import detect_language
+        assert detect_language("analysis.dl") == "datalog"
+        assert detect_language("rules.datalog") == "datalog"
+
+    def test_get_extensions_datalog(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("datalog")
+        assert "dl" in exts
+        assert "datalog" in exts
 
     def test_is_source_file(self):
         from emend.language_registry import is_source_file
@@ -342,3 +353,109 @@ class TestLanguageRegistry:
         assert is_source_file("test.sql")
         assert is_source_file("test.jinja2")
         assert is_source_file("test.j2")
+        assert is_source_file("test.dl")
+        assert is_source_file("test.datalog")
+
+    def test_all_languages_includes_datalog(self):
+        from emend.language_registry import get_all_languages
+        langs = get_all_languages()
+        assert "datalog" in langs
+
+
+# ---------------------------------------------------------------------------
+# Datalog (Soufflé) parsing
+# ---------------------------------------------------------------------------
+
+
+class TestDatalogParsing:
+    """Verify Datalog (Soufflé) tree-sitter grammar is loaded and can parse."""
+
+    def test_datalog_parse_fact(self):
+        source = 'edge("a", "b").'
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_rule(self):
+        source = "path(x, y) :- edge(x, y)."
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_transitive_rule(self):
+        source = """\
+            path(x, y) :- edge(x, y).
+            path(x, z) :- path(x, y), edge(y, z).
+        """
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_relation_decl(self):
+        source = """\
+            .decl edge(from: symbol, to: symbol)
+            .decl path(from: symbol, to: symbol)
+        """
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_directives(self):
+        source = """\
+            .decl edge(from: symbol, to: symbol)
+            .input edge
+            .decl path(from: symbol, to: symbol)
+            .output path
+        """
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_type_decl(self):
+        source = '.type Node <: symbol'
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_negation(self):
+        source = "unreachable(x) :- node(x), !reachable(x)."
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_aggregation(self):
+        source = "count_edges(n) :- n = count : { edge(_, _) }."
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_component(self):
+        source = """\
+            .comp Graph {
+                .decl edge(from: symbol, to: symbol)
+                .decl path(from: symbol, to: symbol)
+                path(x, y) :- edge(x, y).
+                path(x, z) :- path(x, y), edge(y, z).
+            }
+        """
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_disjunction(self):
+        source = "connected(x, y) :- edge(x, y); edge(y, x)."
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_parse_arithmetic(self):
+        source = "double(x, y) :- value(x), y = x * 2."
+        result = _parse(source, "dl")
+        assert isinstance(result, list)
+
+    def test_datalog_extension(self):
+        source = "fact(1, 2)."
+        result = _parse(source, "datalog")
+        assert isinstance(result, list)
+
+    def test_datalog_scope_resolver(self, tmp_path):
+        f = tmp_path / "test.dl"
+        source = """\
+.decl edge(from: symbol, to: symbol)
+.decl path(from: symbol, to: symbol)
+path(x, y) :- edge(x, y).
+path(x, z) :- path(x, y), edge(y, z).
+"""
+        f.write_text(source)
+        resolver = _scope_resolver(tmp_path, "dl")
+        resolver.index_file(str(f), source)

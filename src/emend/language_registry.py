@@ -37,6 +37,7 @@ _BUILTIN: dict[str, list[str]] = {
     "css": ["css"],
     "sql": ["sql"],
     "jinja2": ["jinja", "jinja2", "j2"],
+    "datalog": ["dl", "datalog"],
 }
 
 

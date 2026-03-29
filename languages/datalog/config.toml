@@ -1,0 +1,210 @@
+# Datalog (Soufflé) language configuration for emend scope resolver.
+#
+# Soufflé is a logic programming language (Datalog variant) used for
+# program analysis, security analysis, and database querying.
+# Uses the tree-sitter-souffle grammar.
+
+[language]
+name = "datalog"
+tree_sitter_grammar = "tree-sitter-souffle"
+file_extensions = ["dl", "datalog"]
+comment_prefix = "//"
+keywords = [
+    "nil", "true", "false",
+    "band", "bor", "bxor", "bnot", "bshl", "bshr", "bshru",
+    "land", "lor", "lxor", "lnot",
+    "cat", "ord", "strlen", "substr", "contains", "match",
+    "to_float", "to_number", "to_string", "to_unsigned",
+    "min", "max", "sum", "count", "mean", "range",
+    "autoinc", "as",
+]
+
+# ---------------------------------------------------------------------------
+# Scoping rules
+# ---------------------------------------------------------------------------
+[scoping]
+
+[[scoping.scope_creators]]
+node = "program"
+kind = "module"
+
+[[scoping.scope_creators]]
+node = "monotonic_rule"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "subsumptive_rule"
+kind = "function"
+
+[[scoping.scope_creators]]
+node = "component_decl"
+kind = "class"
+
+[scoping.rules.module]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.function]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.rules.class]
+is_closure_boundary = false
+names_visible_to_inner = true
+
+[scoping.declarations]
+
+# ---------------------------------------------------------------------------
+# Binding rules
+# ---------------------------------------------------------------------------
+[bindings]
+
+[[bindings.assignment]]
+node = "fact"
+target = "atom"
+
+[bindings.parameters]
+param_nodes = ["variable"]
+name_field = "ident"
+
+[bindings.definitions]
+function_def = "monotonic_rule"
+class_def = "component_decl"
+name_field = "head"
+
+# ---------------------------------------------------------------------------
+# Import resolution
+# ---------------------------------------------------------------------------
+[imports]
+import_statement = ""
+module_field = ""
+name_field = ""
+resolution = "none"
+dotted_name = ""
+identifier = "ident"
+
+# ---------------------------------------------------------------------------
+# Qualified name construction
+# ---------------------------------------------------------------------------
+[qualified_names]
+module_separator = "."
+class_member_prefix = true
+nested_function_prefix = false
+locals_marker = ""
+
+# ---------------------------------------------------------------------------
+# Export rules
+# ---------------------------------------------------------------------------
+[exports]
+public_by_default = true
+private_prefix = ""
+
+# ---------------------------------------------------------------------------
+# Symbols
+# ---------------------------------------------------------------------------
+[symbols]
+function_node = "monotonic_rule"
+class_node = "component_decl"
+decorated_node = ""
+definition_field = ""
+async_keyword = ""
+name_field = "head"
+parameters_field = ""
+return_type_field = ""
+body_field = "body"
+superclasses_field = ""
+decorator_node = ""
+expression_statement_node = ""
+
+[symbols.statements]
+simple = [
+    "fact", "directive", "pragma", "preprocessor",
+    "line_comment", "block_comment",
+]
+compound = [
+    "monotonic_rule", "subsumptive_rule",
+    "relation_decl", "type_decl", "functor_decl",
+    "component_decl", "component_init",
+]
+recurse_into = ["program", "component_decl"]
+
+[builtins]
+names = [
+    "nil", "cat", "ord", "strlen", "substr", "to_float",
+    "to_number", "to_string", "to_unsigned", "autoinc",
+    "min", "max", "sum", "count", "mean", "range",
+    "band", "bor", "bxor", "bnot", "bshl", "bshr", "bshru",
+    "land", "lor", "lxor", "lnot",
+    "sin", "cos", "tan", "asin", "acos", "atan",
+    "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+    "log", "exp",
+]
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+[pattern_matching]
+function_def = "monotonic_rule"
+class_def = "component_decl"
+decorated_def = ""
+call = "atom"
+attribute = ""
+identifier = "ident"
+assignment = ""
+augmented_assignment = ""
+annotated_assignment = ""
+return_stmt = ""
+if_stmt = ""
+while_stmt = ""
+for_stmt = ""
+with_stmt = ""
+try_stmt = ""
+except_handler = ""
+for_in_clause = ""
+if_clause = ""
+pair = ""
+import_stmt = ""
+import_from_stmt = ""
+assert_stmt = ""
+raise_stmt = ""
+delete_stmt = ""
+global_stmt = ""
+nonlocal_stmt = ""
+await_expr = ""
+yield_expr = ""
+lambda = ""
+named_expr = ""
+integer = "integer"
+float = "float"
+string = "string"
+list = ""
+tuple = ""
+set = ""
+dict = ""
+binary_operator = "binary_op"
+boolean_operator = "binary_op"
+unary_operator = "unary_op"
+comparison_operator = "comparison"
+subscript = ""
+keyword_argument = ""
+list_splat = ""
+dictionary_splat = ""
+statement_nodes = [
+    "monotonic_rule", "subsumptive_rule", "fact",
+    "relation_decl", "type_decl", "functor_decl",
+    "component_decl", "component_init",
+    "directive", "pragma",
+]
+func_field = "relation"
+args_field = "argument"
+object_field = ""
+attr_field = ""
+left_field = "left"
+right_field = "right"
+operator_field = "operator"
+annotation_field = ""
+value_field = ""
+condition_field = ""
+target_field = ""
+iter_field = ""
+elt_field = ""

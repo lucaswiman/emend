@@ -15,6 +15,7 @@ fn get_parser(lang_name: &str) -> Parser {
         "css" => tree_sitter_css::LANGUAGE,
         "sql" => tree_sitter_sequel::LANGUAGE,
         "jinja2" => tree_sitter_jinja2::LANGUAGE,
+        "datalog" => tree_sitter_souffle::LANGUAGE,
         _ => tree_sitter_python::LANGUAGE,
     };
     parser
@@ -65,6 +66,12 @@ pub(crate) fn parse_jinja2(source: &str) -> Option<Tree> {
     parser.parse(source.as_bytes(), None)
 }
 
+/// Parse Datalog (Soufflé) source into a tree-sitter Tree.
+pub(crate) fn parse_datalog(source: &str) -> Option<Tree> {
+    let mut parser = get_parser("datalog");
+    parser.parse(source.as_bytes(), None)
+}
+
 /// Parse source based on file extension.
 pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
     match ext {
@@ -77,6 +84,7 @@ pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
         "css" => parse_css(source),
         "sql" => parse_sql(source),
         "jinja" | "jinja2" | "j2" => parse_jinja2(source),
+        "dl" | "datalog" => parse_datalog(source),
         _ => parse_python(source),
     }
 }
