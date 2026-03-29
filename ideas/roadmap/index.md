@@ -80,6 +80,62 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 
 ---
 
+## Datalog-First Analysis
+
+Spec: [unified-deadcode-datalog.md](unified-deadcode-datalog.md)
+
+Move reasoning and inference to Datalog over the fact graph. Pattern
+matching, code transformation, and heuristic filtering (e.g. string
+literal dead code suppression) stay in Python/Rust. The schema drops
+absolute line numbers from the relational core (moved to `source_loc`
+for display) and tags references/calls with their containing CFG block
+for exact joins.
+
+### Phase 1: Schema and CFG population
+
+- [ ] Add `cfg_block` relation (`file_path`, `func_qn`, `block_id`, `is_entry`, `is_exit`)
+- [ ] Add `decorator_on` relation (`symbol_qn`, `decorator`)
+- [ ] Populate `cfg_block` and `cfg_edge` in `build_from_project()`
+- [ ] Add `source_loc` relation; move all display positions there
+
+### Phase 2: Block-tagged references
+
+- [ ] Assign `(func_qn, block_id)` to each reference via byte-offset intersection with CFG blocks
+- [ ] Same for `call` facts
+- [ ] Populate `def_use` from CFG builder's block defs/uses (block IDs, not lines)
+
+### Phase 3: Direct relation queries — `refs`, `callers`, `callees`, `graph`
+
+- [ ] `refs` → Datalog query on `reference` (replace `find_references()` file traversal)
+- [ ] `callers` → Datalog query on `call` (replace `find_callers()` file traversal)
+- [ ] `callees` → Datalog query on `call` scoped by `func_qn` (replace line-range filtering)
+- [ ] `graph` → Datalog query on `call` + Python formatting (replace Rust `collect_callees`)
+- [ ] Remove Python traversal code from `transform.py` for these commands
+
+### Phase 4: Unified dead code
+
+- [ ] Implement reachable-block closure + live-reference Datalog query
+- [ ] Port entry point heuristics (dunders, decorators, `__all__`, tests) to Datalog rules
+- [ ] Wire into `emend deadcode` as default backend (string literal filtering stays as Python post-filter)
+- [ ] Switch `cfg --unreachable` to query the fact graph
+- [ ] Remove `find_dead_code()` from `transform.py` and `find_unreachable_blocks()` from `cfg.py`
+
+### Phase 5: Taint migration
+
+- [ ] Add `func_summary` relation (param → return/sink flow)
+- [ ] Rewrite intraprocedural taint propagation as Datalog over `def_use` (pattern matching stays in Python)
+- [ ] Rewrite interprocedural fixed-point as recursive Datalog (replaces Python loop)
+- [ ] Migrate flow-based lint rules (`flows-from`/`flows-to`/`not-through`) to same propagation
+- [ ] Remove Python taint simulation and fixed-point iteration
+
+### Phase 6: Cleanup
+
+- [ ] Enforce fact-graph-only path for `impact` (remove non-Datalog fallback)
+- [ ] Evaluate consolidating `parse.db` (SQLite) and `facts.db` (CozoDB)
+- [ ] Update all tests
+
+---
+
 ## Reference Documents
 
 - [taint-analysis.md](taint-analysis.md) — deferred taint precision work
@@ -88,4 +144,5 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 - [rewrite-and-saturation.md](rewrite-and-saturation.md) — open design questions for the experimental rewrite engine
 - [backend-options.md](backend-options.md) — architecture rationale (CozoDB vs egglog)
 - [relation-to-existing-tools.md](relation-to-existing-tools.md) — positioning vs Semgrep, CodeQL, Pysa
+- [unified-deadcode-datalog.md](unified-deadcode-datalog.md) — unified dead code via Datalog
 - [open-questions.md](open-questions.md) — ongoing design trade-offs
