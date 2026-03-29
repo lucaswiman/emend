@@ -1,7 +1,10 @@
 """Intraprocedural taint analysis engine for emend.
 
 Tracks value flow from sources to sinks within individual functions,
-with sanitizers and path traces.
+with sanitizers and path traces.  Supports Datalog-based propagation
+via :class:`~emend.fact_graph.FactGraph` when ``use_datalog=True``
+(the default), falling back to the regex-based Python simulation
+when fact graph construction fails or is unavailable.
 """
 
 from __future__ import annotations
@@ -11,10 +14,14 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from emend.transform import find_pattern, PatternMatch
+
+if TYPE_CHECKING:
+    from emend.fact_graph import FactGraph
 
 logger = logging.getLogger(__name__)
 
@@ -607,17 +614,21 @@ def run_taint_analysis(
     config: TaintConfig,
     label_filter: str | None = None,
     language: str = "python",
+    project_path: str | None = None,
 ) -> list[TaintViolation]:
     """Run taint analysis on the given files.
 
-    For each file, iterates over function definitions and performs
-    intraprocedural taint tracking (sources -> propagation -> sanitizers -> sinks).
+    Tries Datalog-based propagation over the FactGraph first (pattern matching
+    identifies sources/sinks, Datalog handles propagation through def-use chains).
+    Falls back to the Python regex-based simulation when the fact graph is
+    unavailable.
 
     Args:
         paths: List of source file paths to analyze.
         config: Taint configuration (sources, sinks, sanitizers, labels).
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
+        project_path: Project root for FactGraph construction (optional).
 
     Returns:
         List of TaintViolation objects.
@@ -625,8 +636,19 @@ def run_taint_analysis(
     if not config.sources or not config.sinks:
         return []
 
+    # Try Datalog path: pattern-match sources/sinks, propagate via FactGraph
+    if project_path:
+        try:
+            datalog_result = _run_taint_datalog(
+                paths, config, label_filter, language, project_path,
+            )
+            if datalog_result is not None:
+                return datalog_result
+        except Exception:
+            logger.debug("Datalog taint analysis failed, falling back", exc_info=True)
+
+    # Fallback: Python regex-based simulation
     from emend.ast_utils import find_nested_definitions
-    from emend.component_selector import NestedSymbol
 
     violations: list[TaintViolation] = []
 
@@ -666,6 +688,97 @@ def run_taint_analysis(
             )
             violations.extend(func_violations)
 
+    return _deduplicate_violations(violations)
+
+
+def _run_taint_datalog(
+    paths: list[str],
+    config: TaintConfig,
+    label_filter: str | None,
+    language: str,
+    project_path: str,
+) -> list[TaintViolation] | None:
+    """Datalog-based taint: pattern-match sources/sinks, propagate via FactGraph.
+
+    Returns None if the FactGraph is unavailable or the Datalog query fails,
+    signalling the caller to fall back to Python simulation.
+    """
+    from emend.transform import _get_or_build_fact_graph
+
+    graph = _get_or_build_fact_graph(project_path)
+
+    # Pattern-match sources and sinks across all files
+    sources: list[tuple[str, str, str, int, str]] = []
+    sinks: list[tuple[str, str, str, int, str]] = []
+    sanitizers: list[tuple[str, str, str, int, str]] = []
+
+    for file_path in paths:
+        path_obj = Path(file_path)
+        if not path_obj.exists():
+            continue
+        try:
+            source_text = path_obj.read_text()
+        except Exception:
+            continue
+
+        for src_def in config.sources:
+            if label_filter and src_def.label != label_filter:
+                continue
+            matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
+            for m in matches:
+                if m.line is not None:
+                    # Extract variable names from captures
+                    var_names = set()
+                    for _cn, ct in m.captures.items():
+                        var_names |= _extract_names_from_text(ct)
+                    for var in var_names:
+                        sources.append((file_path, "", var, -1, src_def.label))
+
+        for sink_def in config.sinks:
+            if label_filter and sink_def.label != label_filter:
+                continue
+            matches = find_pattern(sink_def.pattern, file_path, source_override=source_text, language=language)
+            for m in matches:
+                if m.line is not None:
+                    var_names = set()
+                    for _cn, ct in m.captures.items():
+                        var_names |= _extract_names_from_text(ct)
+                    for var in var_names:
+                        sinks.append((file_path, "", var, -1, sink_def.label))
+
+        for san_def in config.sanitizers:
+            if label_filter and san_def.label != label_filter:
+                continue
+            matches = find_pattern(san_def.pattern, file_path, source_override=source_text, language=language)
+            for m in matches:
+                if m.line is not None:
+                    var_names = set()
+                    for _cn, ct in m.captures.items():
+                        var_names |= _extract_names_from_text(ct)
+                    for var in var_names:
+                        sanitizers.append((file_path, "", var, -1, san_def.label))
+
+    if not sources or not sinks:
+        return []
+
+    taint_facts = graph.taint_propagation_datalog(
+        sources=sources,
+        sinks=sinks,
+        sanitizers=sanitizers if sanitizers else None,
+    )
+
+    # Convert TaintFlowFact -> TaintViolation
+    violations: list[TaintViolation] = []
+    for tf in taint_facts:
+        violations.append(TaintViolation(
+            file_path=tf.file_path,
+            line=tf.sink_line,
+            source_line=tf.source_line,
+            source_pattern=tf.source_var,
+            sink_pattern=tf.sink_var,
+            label=tf.label,
+            trace=[],
+        ))
     return _deduplicate_violations(violations)
 
 
@@ -979,12 +1092,13 @@ def run_interprocedural_taint_analysis(
     label_filter: str | None = None,
     language: str = "python",
     max_iterations: int = 10,
+    project_path: str | None = None,
 ) -> InterproceduralResult:
     """Run interprocedural taint analysis across the given files.
 
-    Builds function summaries describing how taint flows through parameters
-    to return values and sinks, then iterates to a fixed point so that
-    callers inherit callee taint behavior.
+    Tries Datalog-based recursive propagation over the FactGraph first,
+    falling back to the Python fixed-point iteration when the fact graph
+    is unavailable.
 
     Args:
         paths: List of source file paths to analyze.
@@ -992,12 +1106,40 @@ def run_interprocedural_taint_analysis(
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
         max_iterations: Maximum number of fixed-point iterations.
+        project_path: Project root for FactGraph construction (optional).
 
     Returns:
         An InterproceduralResult with violations, summaries, and iteration count.
     """
     if not config.sources or not config.sinks:
         return InterproceduralResult(violations=[], summaries={}, iterations=0)
+
+    # Try Datalog interprocedural path
+    if project_path:
+        try:
+            from emend.transform import _get_or_build_fact_graph
+            graph = _get_or_build_fact_graph(project_path)
+            taint_facts = graph.interprocedural_taint_datalog(
+                max_iterations=max_iterations,
+            )
+            if taint_facts:
+                violations = [
+                    TaintViolation(
+                        file_path=tf.file_path or "",
+                        line=tf.sink_line,
+                        source_line=tf.source_line,
+                        source_pattern=tf.source_var,
+                        sink_pattern=tf.sink_var,
+                        label=tf.label,
+                        trace=[],
+                    )
+                    for tf in taint_facts
+                ]
+                return InterproceduralResult(
+                    violations=violations, summaries={}, iterations=1,
+                )
+        except Exception:
+            logger.debug("Datalog interprocedural taint failed, falling back", exc_info=True)
 
     from emend.ast_utils import find_nested_definitions
 

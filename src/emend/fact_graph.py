@@ -1022,6 +1022,8 @@ class FactGraph:
         self,
         entry_point_decorators: list[str] | None = None,
         entry_point_names: list[str] | None = None,
+        exclude_reference_paths: list[str] | None = None,
+        exclude_reference_segments: list[str] | None = None,
     ) -> list[SymbolFact]:
         """Unified dead code detection via Datalog.
 
@@ -1051,6 +1053,20 @@ class FactGraph:
             except Exception:
                 pass
 
+        # Build excluded-path filter clauses for CozoDB
+        excl_clauses = ""
+        excl_parts: list[str] = []
+        if exclude_reference_paths:
+            for ep in exclude_reference_paths:
+                excl_parts.append(f'not starts_with(fp, "{ep}")')
+        if exclude_reference_segments:
+            for seg in exclude_reference_segments:
+                # Match paths containing this directory segment
+                excl_parts.append(f'not str_includes(fp, "{seg}/")')
+                excl_parts.append(f'not str_includes(fp, "{seg}\\\\")')
+        if excl_parts:
+            excl_clauses = ", " + ", ".join(excl_parts)
+
         query = (
             # Reachable blocks (transitive closure from entry)
             "reachable[fp, fq, bid] := "
@@ -1060,25 +1076,38 @@ class FactGraph:
             "reachable[fp, fq, fb], "
             "*cfg_edge[fp, fq, fb, tb, _, _, _]\n"
 
-            # Live references: from reachable code
+            # Live references: from reachable code (exclude self-references
+            # where the reference target is the containing function itself)
             "live_ref[sq] := "
             "*reference[sq, fp, _, _, _, fq, bid], "
-            "reachable[fp, fq, bid]\n"
+            "reachable[fp, fq, bid], "
+            f"sq != fq{excl_clauses}\n"
 
             # Live references: from module level (no function context)
+            # Exclude self-references where the reference is the symbol's own definition
             'live_ref[sq] := '
-            '*reference[sq, _, _, _, _, fq, bid], '
-            'fq == "", bid == -1\n'
+            '*reference[sq, ref_fp, ref_line, _, _, fq, bid], '
+            'fq == "", bid == -1, '
+            '*symbol[sq, sym_fp, _, _, sym_line, _, _], '
+            f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses.replace("fp", "ref_fp") if excl_clauses else ""}\n'
 
             # Entry points: dunder methods
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
             'starts_with(name, "__"), ends_with(name, "__")\n'
 
-            # Entry points: test functions
+            # Entry points: test functions (test_, Test, describe_)
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
             'starts_with(name, "test_")\n'
+
+            'entry_point[qn] := '
+            '*symbol[qn, _, name, _, _, _, _], '
+            'starts_with(name, "Test")\n'
+
+            'entry_point[qn] := '
+            '*symbol[qn, _, name, _, _, _, _], '
+            'starts_with(name, "describe_")\n'
 
             # Entry points: decorated symbols
             'entry_point[qn] := '
@@ -1090,9 +1119,10 @@ class FactGraph:
             '*symbol[qn, _, name, _, _, _, _], '
             '*entry_point_name[name]\n'
 
-            # Dead symbols: no live reference and not an entry point
+            # Dead symbols: top-level only (parent == ""), no live reference, not entry point
             "dead[qn, fp, name, kind, line, end_line, parent] := "
             "*symbol[qn, fp, name, kind, line, end_line, parent], "
+            'parent == "", '
             "not live_ref[qn], "
             "not entry_point[qn]\n"
 
@@ -1386,13 +1416,13 @@ class FactGraph:
     def callees_datalog(self, func_qn: str) -> list[CallFact]:
         """Find all callees of *func_qn* via Datalog query.
 
-        Uses func_qn tag on call facts -- no line-range filtering needed.
+        Uses caller_qn on call facts to find what a function calls.
         Replaces Python line-range filtering in find_callees().
         """
         result = self._client.run(
             "?[caller_qn, callee_qn, fp, line, col, fq, bid] := "
             "*call[caller_qn, callee_qn, fp, line, col, fq, bid], "
-            "fq == $fqn",
+            "caller_qn == $fqn",
             {"fqn": func_qn},
         )
         return [
@@ -1995,12 +2025,13 @@ class FactGraph:
 
                     if ref_kind == "call":
                         caller = _enclosing_symbol(symbol_ranges, line)
-                        if caller is not None:
-                            call_facts.append(CallFact(
-                                caller_qn=caller, callee_qn=qn,
-                                file_path=rel_path, line=line, col=col,
-                                func_qn=fq, block_id=bid,
-                            ))
+                        # Use module name as caller for module-level calls
+                        caller_qn = caller if caller is not None else module_name
+                        call_facts.append(CallFact(
+                            caller_qn=caller_qn, callee_qn=qn,
+                            file_path=rel_path, line=line, col=col,
+                            func_qn=fq, block_id=bid,
+                        ))
 
                 graph.add_references_batch(ref_facts)
                 graph.add_calls_batch(call_facts)
@@ -2092,9 +2123,21 @@ def _walk_symbols(
             parent=parent_qn,
         ))
 
-        # Extract decorators
+        # Extract decorators — strip @ prefix and arguments so that
+        # ``@router.get('/users')`` becomes ``router.get`` and also
+        # stores the basename ``get`` for broader matching.
         for dec_name in (d.get("decorators", []) or []):
-            dec_out.append(DecoratorOnFact(symbol_qn=qn, decorator=dec_name))
+            cleaned = dec_name
+            if cleaned.startswith("@"):
+                cleaned = cleaned[1:]
+            if "(" in cleaned:
+                cleaned = cleaned[:cleaned.index("(")]
+            cleaned = cleaned.strip()
+            dec_out.append(DecoratorOnFact(symbol_qn=qn, decorator=cleaned))
+            # Also store the basename for broader matching
+            basename = cleaned.rsplit(".", 1)[-1] if "." in cleaned else None
+            if basename and basename != cleaned:
+                dec_out.append(DecoratorOnFact(symbol_qn=qn, decorator=basename))
 
         children = d.get("children", [])
         if children:

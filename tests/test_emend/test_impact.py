@@ -416,7 +416,7 @@ class TestImpactWithDiff:
 
 
 class TestFindImpactFactGraph:
-    """Tests for find_impact() with use_fact_graph=True (Datalog path)."""
+    """Tests for find_impact() via Datalog path."""
 
     def test_impact_fact_graph_direct_caller(self, tmp_path):
         """Fact-graph-based impact finds direct callers."""
@@ -449,7 +449,6 @@ class TestFindImpactFactGraph:
         result = find_impact(
             selectors=[selector],
             project_path=str(project),
-            use_fact_graph=True,
         )
 
         assert len(result.changed_symbols) == 1
@@ -495,7 +494,6 @@ class TestFindImpactFactGraph:
         result = find_impact(
             selectors=[selector],
             project_path=str(project),
-            use_fact_graph=True,
         )
 
         impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]

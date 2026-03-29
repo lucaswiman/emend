@@ -1505,6 +1505,8 @@ def taint_cmd(
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
+        _proj_root = project or str(Path(path).resolve())
+
         if interprocedural:
             from emend.taint import run_interprocedural_taint_analysis
             result = run_interprocedural_taint_analysis(
@@ -1512,6 +1514,7 @@ def taint_cmd(
                 label_filter=label,
                 language=_lang,
                 max_iterations=max_iterations,
+                project_path=_proj_root,
             )
             violations = result.violations
             if not json_output:
@@ -1525,6 +1528,7 @@ def taint_cmd(
                 files, taint_config,
                 label_filter=label,
                 language=_lang,
+                project_path=_proj_root,
             )
 
         output = format_violations(violations, show_trace=trace, json_output=json_output)
@@ -3609,14 +3613,43 @@ def cfg_cmd(
 
         if unreachable:
             results = []
-            for i, cfg in enumerate(all_cfgs):
-                blocks = find_unreachable_blocks(cfg)
-                if blocks:
+
+            # Try Datalog path first via FactGraph
+            datalog_used = False
+            try:
+                from emend.transform import _get_or_build_fact_graph
+                graph = _get_or_build_fact_graph(path)
+                func_filter = function if function else None
+                unr_blocks = graph.unreachable_blocks_datalog(func_qn=func_filter)
+                datalog_used = True
+                # Group by (file_path, func_qn)
+                from collections import defaultdict
+                grouped: dict[tuple[str, str], list] = defaultdict(list)
+                for blk in unr_blocks:
+                    grouped[(blk.file_path, blk.func_qn)].append(blk)
+                for (fp, fq), blks in grouped.items():
                     results.append({
-                        "file": cfg_files[i],
-                        "function": cfg.func_name,
-                        "unreachable_blocks": blocks,
+                        "file": fp,
+                        "function": fq.rsplit(".", 1)[-1] if "." in fq else fq,
+                        "unreachable_blocks": [
+                            {"id": b.block_id, "start_line": 0, "end_line": 0}
+                            for b in blks
+                        ],
                     })
+            except Exception:
+                logger.debug("Datalog unreachable query failed, falling back", exc_info=True)
+
+            # Fallback to per-CFG BFS
+            if not datalog_used:
+                for i, cfg in enumerate(all_cfgs):
+                    blocks = find_unreachable_blocks(cfg)
+                    if blocks:
+                        results.append({
+                            "file": cfg_files[i],
+                            "function": cfg.func_name,
+                            "unreachable_blocks": blocks,
+                        })
+
             if output_format == "json":
                 import json
                 print(json.dumps(results, indent=2))
@@ -3626,10 +3659,10 @@ def cfg_cmd(
                 for r in results:
                     for blk in r["unreachable_blocks"]:
                         print(
-                            f"{r['file']}:{blk['start_line']+1}: "
+                            f"{r['file']}:{blk.get('start_line', 0)+1}: "
                             f"unreachable code in {r['function']} "
-                            f"(block B{blk['id']}, "
-                            f"lines {blk['start_line']}-{blk['end_line']})"
+                            f"(block B{blk.get('id', blk.get('block_id', '?'))}, "
+                            f"lines {blk.get('start_line', '?')}-{blk.get('end_line', '?')})"
                         )
             raise typer.Exit(0)
 

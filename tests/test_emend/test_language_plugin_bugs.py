@@ -397,14 +397,13 @@ class TestFindSourceRootLanguageThreading:
             "query_reference_index() is missing a 'language' keyword parameter"
         )
 
-    def test_find_dead_code_cached_accepts_language(self):
-        """_find_dead_code_cached() should accept a language parameter so it can
-        forward it to _ensure_index_fresh() and warm_caches()."""
+    def test_find_dead_code_uses_fact_graph(self):
+        """find_dead_code() should use FactGraph.dead_code_unified() for detection."""
         import inspect
-        from emend.transform import _find_dead_code_cached
-        sig = inspect.signature(_find_dead_code_cached)
-        assert "language" in sig.parameters, (
-            "_find_dead_code_cached() is missing a 'language' keyword parameter"
+        from emend.transform import find_dead_code
+        sig = inspect.signature(find_dead_code)
+        assert "project_path" in sig.parameters, (
+            "find_dead_code() is missing a 'project_path' parameter"
         )
 
     def test_query_symbol_index_passes_language_to_ensure_index_fresh(self, tmp_path):
@@ -437,50 +436,17 @@ class TestFindSourceRootLanguageThreading:
                 f"expected 'typescript'"
             )
 
-    def test_find_dead_code_cached_passes_language_to_ensure_index_fresh(self, tmp_path):
-        """_find_dead_code_cached() should forward its language parameter to
-        _ensure_index_fresh() and warm_caches()."""
-        from unittest.mock import patch
-        from emend.transform import _find_dead_code_cached
+    def test_find_dead_code_uses_datalog_backend(self, tmp_path):
+        """find_dead_code() should delegate to FactGraph.dead_code_unified()."""
+        from unittest.mock import patch, MagicMock
+        from emend.transform import find_dead_code
 
-        # _ensure_index_fresh returns True so _find_dead_code_cached skips
-        # the warm_caches() fallback and proceeds to open the DB.
-        # We also need to mock DB-related helpers so it doesn't fail.
-        import sqlite3
-        db = tmp_path / "parse.db"
-        conn = sqlite3.connect(str(db))
-        # Create minimal tables that _find_dead_code_cached expects
-        conn.execute("CREATE TABLE IF NOT EXISTS symbol_index "
-                     "(worktree_id TEXT, file TEXT, name TEXT, kind TEXT, "
-                     "line INTEGER, col INTEGER, end_line INTEGER, end_col INTEGER, "
-                     "qualified_name TEXT, decorators TEXT, is_exported INTEGER, "
-                     "content_hash BLOB)")
-        conn.execute("CREATE TABLE IF NOT EXISTS reference_index "
-                     "(worktree_id TEXT, file TEXT, name TEXT, line INTEGER, "
-                     "col INTEGER, kind TEXT, target_qn TEXT, content_hash BLOB)")
-        conn.commit()
-        conn.close()
+        mock_graph = MagicMock()
+        mock_graph.dead_code_unified.return_value = []
 
-        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
-            with patch("emend.transform.warm_caches") as mock_wc:
-                with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
-                    with patch("emend.transform._get_worktree_id", return_value="test"):
-                        with patch("emend.transform._cache_db_dir", return_value=tmp_path):
-                            try:
-                                _find_dead_code_cached(str(tmp_path), None, False, None, True, False, language="rust")
-                            except Exception:
-                                pass  # We only care about the mock calls
+        with patch("emend.transform._get_or_build_fact_graph", return_value=mock_graph):
+            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
+                result = list(find_dead_code(str(tmp_path)))
 
-                assert mock_eif.called
-                call_kwargs = mock_eif.call_args.kwargs
-                assert call_kwargs.get("language") == "rust", (
-                    f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
-                    f"expected 'rust'"
-                )
-                # warm_caches should also get the language
-                assert mock_wc.called, "warm_caches() should be called when index is not fresh"
-                wc_kwargs = mock_wc.call_args.kwargs
-                assert wc_kwargs.get("language") == "rust", (
-                    f"warm_caches() was called with language={wc_kwargs.get('language')!r}, "
-                    f"expected 'rust'"
-                )
+        assert result == []
+        mock_graph.dead_code_unified.assert_called_once()

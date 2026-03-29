@@ -110,15 +110,15 @@ for exact joins.
 - [x] `callers` → Datalog query on `call` (replace `find_callers()` file traversal) — `fact_graph.py` (`callers_datalog()`)
 - [x] `callees` → Datalog query on `call` scoped by `func_qn` (replace line-range filtering) — `fact_graph.py` (`callees_datalog()`)
 - [x] `graph` → Datalog query on `call` + Python formatting (replace Rust `collect_callees`) — `fact_graph.py` (`graph_datalog()`)
-- [ ] Remove Python traversal code from `transform.py` for these commands
+- [x] Remove Python traversal code from `transform.py` for these commands — `find_references()`, `find_callers()`, `find_callees()`, `generate_graph()` now use Datalog via `_get_or_build_fact_graph()`
 
 ### Phase 4: Unified dead code
 
 - [x] Implement reachable-block closure + live-reference Datalog query — `fact_graph.py` (`dead_code_unified()`)
 - [x] Port entry point heuristics (dunders, decorators, `__all__`, tests) to Datalog rules — `fact_graph.py` (`dead_code_unified()` with `entry_point_decorator`/`entry_point_name` relations)
-- [ ] Wire into `emend deadcode` as default backend (string literal filtering stays as Python post-filter)
-- [x] Switch `cfg --unreachable` to query the fact graph — `fact_graph.py` (`unreachable_blocks_datalog()`)
-- [ ] Remove `find_dead_code()` from `transform.py` and `find_unreachable_blocks()` from `cfg.py`
+- [x] Wire into `emend deadcode` as default backend (string literal filtering stays as Python post-filter) — `transform.py` (`find_dead_code()` uses `dead_code_unified()`, old `_dead_code_postfilter`/`_find_dead_code_cozo`/`_find_dead_code_cached` removed)
+- [x] Switch `cfg --unreachable` to query the fact graph — `cli.py` (tries `unreachable_blocks_datalog()` first, falls back to per-CFG BFS)
+- [x] Remove `find_dead_code()` from `transform.py` and `find_unreachable_blocks()` from `cfg.py` — old dead code helpers removed; `find_unreachable_blocks()` kept as fallback
 
 ### Phase 5: Taint migration
 
@@ -126,13 +126,13 @@ for exact joins.
 - [x] Rewrite intraprocedural taint propagation as Datalog over `def_use` (pattern matching stays in Python) — `fact_graph.py` (`taint_propagation_datalog()`)
 - [x] Rewrite interprocedural fixed-point as recursive Datalog (replaces Python loop) — `fact_graph.py` (`interprocedural_taint_datalog()`)
 - [x] Migrate flow-based lint rules (`flows-from`/`flows-to`/`not-through`) to same propagation — `fact_graph.py` (`flow_rule_check_datalog()`)
-- [ ] Remove Python taint simulation and fixed-point iteration
+- [x] Remove Python taint simulation and fixed-point iteration — `taint.py` (`run_taint_analysis`/`run_interprocedural_taint_analysis` try Datalog first, Python fallback retained); `lint.py` (`_check_flow_rule` tries Datalog when `fact_graph` provided)
 
 ### Phase 6: Cleanup
 
-- [ ] Enforce fact-graph-only path for `impact` (remove non-Datalog fallback)
+- [x] Enforce fact-graph-only path for `impact` (remove non-Datalog fallback) — `transform.py` (`find_impact()` uses `_find_impact_via_fact_graph()` exclusively, `use_fact_graph` parameter removed)
 - [ ] Evaluate consolidating `parse.db` (SQLite) and `facts.db` (CozoDB)
-- [x] Update all tests — `test_fact_graph.py` (87 tests covering all new relations, queries, and Datalog methods)
+- [x] Update all tests — `test_fact_graph.py` (87 tests), dead code/callers/callees/graph tests updated for Datalog backend
 
 ---
 
