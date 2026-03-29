@@ -136,7 +136,51 @@ for exact joins.
 
 ---
 
+## Taint-CFG Precision: Mutation Tracking and Path-Sensitive Sanitization
+
+Spec: [taint-cfg-precision.md](taint-cfg-precision.md)
+
+Increase the precision of taint analysis by integrating CFG structure,
+mutation kinds, type information, and scope-aware sanitization.  All
+changes are general mechanisms — no bespoke TOCTOU logic.
+
+### Phase 1: Augmented and Compound Assignment Tracking
+
+- [ ] Add augmented assignment regex path to `_find_assignments_in_source()` — `taint.py` (new `"mutate"` op kind for `+=`, `-=`, etc.)
+- [ ] Handle `"mutate"` ops in Step 2 (propagation) and Step 3.5 (attribute mutation sinks) — `taint.py`
+- [ ] Verify Rust CFG builder emits both def and use for augmented assignment targets — `emend_core`
+
+### Phase 2: Mutation Kind on Def-Use Facts
+
+- [ ] Add `kind` field (`read` / `write` / `aug_write` / `del`) to `DefUseFact` — `fact_graph.py`
+- [ ] Tag def/use entries with kind in Rust CFG builder — `emend_core` (tree-sitter node type → kind)
+- [ ] Update `def_use` CozoDB schema to include `kind` column
+- [ ] Replace Python Step 3.5 attribute mutation sink loop with Datalog query over `def_use` kind
+
+### Phase 3: Path-Sensitive Sanitization via CFG Reachability
+
+- [ ] Rewrite `taint_propagation_datalog()` to propagate along CFG edges with per-block sanitizer checks — `fact_graph.py`
+- [ ] Implement `through` (must-pass-through) parameter in `flow_rule_check_datalog()` — `fact_graph.py`
+- [ ] Update Python fallback in `taint.py` to use per-block taint state instead of flat dict
+
+### Phase 4: Type-Conditioned Taint Filtering
+
+- [ ] Add optional `type_constraint` field to `TaintSource` / `TaintSink` / `TaintSanitizer` — `taint.py`
+- [ ] Query `TypeOracle` during source/sink identification to evaluate constraints — `taint.py`
+- [ ] Wire `TypeFact` population into `build_from_project()` — `fact_graph.py`
+- [ ] Add type-filtered source relation to Datalog taint queries — `fact_graph.py`
+
+### Phase 5: Scope-Expiry Sanitization
+
+- [ ] Add `scope_sanitizers` config key (clears all variables with a label, not just captured ones) — `taint.py`
+- [ ] Add `scope_kill` relation to Datalog taint propagation — `fact_graph.py`
+- [ ] Update TOCTOU example in `commands.rst` with revised config using all new features
+
+---
+
 ## Reference Documents
+
+- [taint-cfg-precision.md](taint-cfg-precision.md) — taint-CFG precision: mutation tracking, path sensitivity, type filtering
 
 - [taint-analysis.md](taint-analysis.md) — deferred taint precision work
 - [dsl-support.md](dsl-support.md) — DSL support full spec
