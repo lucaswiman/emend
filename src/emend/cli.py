@@ -3278,13 +3278,13 @@ def query_cmd(
       emend query '?[name, file] := *symbol[qn, file, name, "function", l, e, p]'
 
       # Dead code (symbols with no references)
-      emend query 'has_ref[qn] := *reference[qn, _, _, _, _]
+      emend query 'has_ref[qn] := *reference[qn, _, _, _, _, _, _]
         dead[name, file, line] := *symbol[qn, file, name, kind, line, _, _], not has_ref[qn]
         ?[name, file, line] := dead[name, file, line]'
 
       # Transitive callers of a function
-      emend query 'reaches[a] := *call[a, "mymod.func", _, _, _]
-        reaches[a] := *call[a, mid, _, _, _], reaches[mid]
+      emend query 'reaches[a] := *call[a, "mymod.func", _, _, _, _, _]
+        reaches[a] := *call[a, mid, _, _, _, _, _], reaches[mid]
         ?[a] := reaches[a]'
     """
     import json as json_mod

@@ -445,6 +445,8 @@ class TestFactGraphIntegration:
             file_path="test.py",
             func_qn="test::f",
             var_name="x",
+            def_block=0,
+            use_block=1,
             def_line=2,
             def_col=4,
             use_line=5,
@@ -466,7 +468,8 @@ class TestFactGraphIntegration:
         ))
         graph.add_def_use(DefUseFact(
             file_path="a.py", func_qn="a::f",
-            var_name="x", def_line=1, def_col=0, use_line=2, use_col=4,
+            var_name="x", def_block=0, use_block=1,
+            def_line=1, def_col=0, use_line=2, use_col=4,
         ))
 
         json_str = graph.to_json()

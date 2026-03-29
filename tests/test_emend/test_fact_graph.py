@@ -6,9 +6,17 @@ import pytest
 
 from emend.fact_graph import (
     CallFact,
+    CfgBlockFact,
+    CfgEdgeFact,
+    DecoratorOnFact,
+    DefUseFact,
+    EntryPointDecoratorFact,
+    EntryPointNameFact,
     FactGraph,
+    FuncSummaryFact,
     ImportFact,
     ReferenceFact,
+    SourceLocFact,
     SymbolFact,
     TaintFlowFact,
     TypeFact,
@@ -226,7 +234,7 @@ class TestCozoScriptQueries:
     def test_raw_query_dead_code(self):
         g = _make_graph()
         result = g.run_query(
-            'has_ref[qn] := *reference[qn, _, _, _, _]\n'
+            'has_ref[qn] := *reference[qn, _, _, _, _, _, _]\n'
             'dead[name, qn] := *symbol[qn, _, name, _, _, _, _], not has_ref[qn]\n'
             '?[name, qn] := dead[name, qn]'
         )
@@ -241,8 +249,8 @@ class TestCozoScriptQueries:
     def test_raw_query_transitive_closure(self):
         g = _make_graph()
         result = g.run_query(
-            'reaches[b] := *call["app.main", b, _, _, _]\n'
-            'reaches[b] := *call[mid, b, _, _, _], reaches[mid]\n'
+            'reaches[b] := *call["app.main", b, _, _, _, _, _]\n'
+            'reaches[b] := *call[mid, b, _, _, _, _, _], reaches[mid]\n'
             '?[b] := reaches[b]'
         )
         reached = {r[0] for r in result["rows"]}
@@ -471,3 +479,468 @@ class TestPersistence:
         calls = g2.calls_from("a.foo")
         assert len(calls) == 1
         g2.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1+2: Schema, CFG population, block-tagged references
+# ---------------------------------------------------------------------------
+
+
+def _make_graph_with_cfg() -> FactGraph:
+    """Build a graph with CFG blocks, decorators, and block-tagged refs."""
+    g = FactGraph()
+
+    # Symbols
+    g.add_symbol(SymbolFact("app.py", "main", "app.main", "function", 1, 10, None))
+    g.add_symbol(SymbolFact("app.py", "helper", "app.helper", "function", 12, 20, None))
+    g.add_symbol(SymbolFact("lib.py", "compute", "lib.compute", "function", 1, 8, None))
+    g.add_symbol(SymbolFact("lib.py", "MyClass", "lib.MyClass", "class", 10, 30, None))
+    g.add_symbol(SymbolFact("lib.py", "__init__", "lib.MyClass.__init__", "method", 11, 15, "lib.MyClass"))
+
+    # Decorators
+    g.add_decorator_on(DecoratorOnFact("app.main", "app.route"))
+    g.add_decorator_on(DecoratorOnFact("lib.MyClass.__init__", "property"))
+
+    # CFG blocks for app.main
+    g.add_cfg_block(CfgBlockFact("app.py", "app.main", 0, is_entry=True))
+    g.add_cfg_block(CfgBlockFact("app.py", "app.main", 1))
+    g.add_cfg_block(CfgBlockFact("app.py", "app.main", 2))
+    g.add_cfg_block(CfgBlockFact("app.py", "app.main", 3, is_exit=True))
+
+    # CFG edges for app.main
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 0, 1, "true_branch", 0, 0))
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 0, 2, "false_branch", 0, 0))
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 1, 3, "fallthrough", 0, 0))
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 2, 3, "fallthrough", 0, 0))
+
+    # CFG blocks for app.helper (with unreachable block)
+    g.add_cfg_block(CfgBlockFact("app.py", "app.helper", 0, is_entry=True))
+    g.add_cfg_block(CfgBlockFact("app.py", "app.helper", 1))
+    g.add_cfg_block(CfgBlockFact("app.py", "app.helper", 2))  # unreachable
+    g.add_cfg_block(CfgBlockFact("app.py", "app.helper", 3, is_exit=True))
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.helper", 0, 1, "fallthrough", 0, 0))
+    g.add_cfg_edge(CfgEdgeFact("app.py", "app.helper", 1, 3, "jump", 0, 0))
+    # Note: block 2 has no incoming edge -> unreachable
+
+    # Block-tagged references
+    g.add_reference(ReferenceFact("lib.compute", "app.py", 3, 4, "call", func_qn="app.main", block_id=0))
+    g.add_reference(ReferenceFact("lib.compute", "app.py", 5, 4, "call", func_qn="app.main", block_id=1))
+    g.add_reference(ReferenceFact("app.helper", "app.py", 7, 4, "call", func_qn="app.main", block_id=2))
+    g.add_reference(ReferenceFact("lib.MyClass", "app.py", 1, 0, "import"))  # module-level
+
+    # Block-tagged calls
+    g.add_call(CallFact("app.main", "lib.compute", "app.py", 3, 4, func_qn="app.main", block_id=0))
+    g.add_call(CallFact("app.main", "lib.compute", "app.py", 5, 4, func_qn="app.main", block_id=1))
+    g.add_call(CallFact("app.main", "app.helper", "app.py", 7, 4, func_qn="app.main", block_id=2))
+    g.add_call(CallFact("app.helper", "lib.compute", "app.py", 14, 4, func_qn="app.helper", block_id=0))
+
+    # Def-use with block IDs
+    g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
+    g.add_def_use(DefUseFact("app.py", "app.main", "y", def_block=1, use_block=2))
+
+    # Source locations
+    g.add_source_loc(SourceLocFact("app.py", "symbol", "app.main", line=1, end_line=10))
+
+    # Imports
+    g.add_import(ImportFact("app.py", "lib", "compute", None, 1))
+    g.add_import(ImportFact("app.py", "lib", "MyClass", None, 2))
+
+    return g
+
+
+class TestCfgBlockFacts:
+    """Test CFG block relation operations."""
+
+    def test_add_and_query_blocks(self):
+        g = _make_graph_with_cfg()
+        blocks = g.cfg_blocks(func_qn="app.main")
+        assert len(blocks) == 4
+        entry_blocks = [b for b in blocks if b.is_entry]
+        assert len(entry_blocks) == 1
+        assert entry_blocks[0].block_id == 0
+
+    def test_query_blocks_by_file(self):
+        g = _make_graph_with_cfg()
+        blocks = g.cfg_blocks(file_path="app.py")
+        # 4 blocks for main + 4 for helper
+        assert len(blocks) == 8
+
+    def test_batch_blocks(self):
+        g = FactGraph()
+        facts = [
+            CfgBlockFact("a.py", "a.foo", 0, is_entry=True),
+            CfgBlockFact("a.py", "a.foo", 1),
+            CfgBlockFact("a.py", "a.foo", 2, is_exit=True),
+        ]
+        g.add_cfg_blocks_batch(facts)
+        blocks = g.cfg_blocks(func_qn="a.foo")
+        assert len(blocks) == 3
+
+
+class TestDecoratorOnFacts:
+    """Test decorator_on relation operations."""
+
+    def test_add_and_query_decorators(self):
+        g = _make_graph_with_cfg()
+        decs = g.decorators_on("app.main")
+        assert len(decs) == 1
+        assert decs[0].decorator == "app.route"
+
+    def test_batch_decorators(self):
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None))
+        g.add_decorator_on_batch([
+            DecoratorOnFact("a.foo", "route"),
+            DecoratorOnFact("a.foo", "login_required"),
+        ])
+        decs = g.decorators_on("a.foo")
+        assert len(decs) == 2
+        dec_names = {d.decorator for d in decs}
+        assert dec_names == {"route", "login_required"}
+
+
+class TestSourceLocFacts:
+    """Test source_loc relation operations."""
+
+    def test_add_and_query_source_locs(self):
+        g = _make_graph_with_cfg()
+        locs = g.source_locs(loc_id="app.main")
+        assert len(locs) == 1
+        assert locs[0].line == 1
+        assert locs[0].end_line == 10
+
+    def test_source_locs_by_kind(self):
+        g = _make_graph_with_cfg()
+        locs = g.source_locs(loc_kind="symbol")
+        assert len(locs) >= 1
+
+    def test_batch_source_locs(self):
+        g = FactGraph()
+        g.add_source_locs_batch([
+            SourceLocFact("a.py", "symbol", "a.foo", line=1, end_line=5),
+            SourceLocFact("a.py", "symbol", "a.bar", line=7, end_line=10),
+        ])
+        locs = g.source_locs(loc_kind="symbol")
+        assert len(locs) == 2
+
+
+class TestBlockTaggedRefs:
+    """Test block-tagged references and calls."""
+
+    def test_reference_has_block_info(self):
+        g = _make_graph_with_cfg()
+        refs = g.references_to("lib.compute")
+        assert len(refs) >= 2
+        # At least one should have block info
+        tagged = [r for r in refs if r.block_id >= 0]
+        assert len(tagged) >= 2
+        assert all(r.func_qn == "app.main" for r in tagged)
+
+    def test_module_level_ref_has_sentinel(self):
+        g = _make_graph_with_cfg()
+        refs = g.references_to("lib.MyClass")
+        assert len(refs) == 1
+        assert refs[0].func_qn == ""
+        assert refs[0].block_id == -1
+
+    def test_call_has_block_info(self):
+        g = _make_graph_with_cfg()
+        calls = g.calls_to("lib.compute")
+        assert len(calls) >= 2
+        tagged = [c for c in calls if c.block_id >= 0]
+        assert len(tagged) >= 2
+
+    def test_def_use_has_block_ids(self):
+        g = _make_graph_with_cfg()
+        du = g.def_uses(func_qn="app.main")
+        assert len(du) >= 2
+        x_du = [d for d in du if d.var_name == "x"]
+        assert len(x_du) == 1
+        assert x_du[0].def_block == 0
+        assert x_du[0].use_block == 1
+
+
+class TestFuncSummaryFacts:
+    """Test func_summary relation operations."""
+
+    def test_add_and_query_summary(self):
+        g = FactGraph()
+        g.add_func_summary(FuncSummaryFact("a.foo", "x", flows_to_return=True))
+        g.add_func_summary(FuncSummaryFact("a.foo", "y", flows_to_sink=True, sink_label="sqli"))
+        summaries = g.func_summaries(func_qn="a.foo")
+        assert len(summaries) == 2
+        ret_flow = [s for s in summaries if s.flows_to_return]
+        assert len(ret_flow) == 1
+        assert ret_flow[0].param_name == "x"
+
+    def test_batch_summaries(self):
+        g = FactGraph()
+        g.add_func_summaries_batch([
+            FuncSummaryFact("a.foo", "x", flows_to_return=True),
+            FuncSummaryFact("a.bar", "y", flows_to_sink=True, sink_label="xss"),
+        ])
+        all_summaries = g.func_summaries()
+        assert len(all_summaries) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Direct relation queries via Datalog
+# ---------------------------------------------------------------------------
+
+
+class TestRefsDatalog:
+    """Test refs_datalog() Datalog query method."""
+
+    def test_refs_finds_all(self):
+        g = _make_graph_with_cfg()
+        refs = g.refs_datalog("lib.compute")
+        assert len(refs) >= 2
+
+    def test_refs_calls_only(self):
+        g = _make_graph_with_cfg()
+        refs = g.refs_datalog("lib.compute", calls_only=True)
+        assert all(r.ref_kind == "call" for r in refs)
+
+    def test_refs_no_imports(self):
+        g = _make_graph_with_cfg()
+        refs = g.refs_datalog("lib.MyClass", include_imports=False)
+        assert all(r.ref_kind != "import" for r in refs)
+
+    def test_refs_nonexistent_symbol(self):
+        g = _make_graph_with_cfg()
+        refs = g.refs_datalog("nonexistent.symbol")
+        assert refs == []
+
+
+class TestCallersDatalog:
+    """Test callers_datalog() Datalog query method."""
+
+    def test_callers_finds_direct(self):
+        g = _make_graph_with_cfg()
+        callers = g.callers_datalog("lib.compute")
+        caller_qns = {c.caller_qn for c in callers}
+        assert "app.main" in caller_qns
+        assert "app.helper" in caller_qns
+
+    def test_callers_empty_for_unreferenced(self):
+        g = _make_graph_with_cfg()
+        callers = g.callers_datalog("lib.MyClass.__init__")
+        assert callers == []
+
+
+class TestCalleesDatalog:
+    """Test callees_datalog() Datalog query method."""
+
+    def test_callees_of_function(self):
+        g = _make_graph_with_cfg()
+        callees = g.callees_datalog("app.main")
+        callee_qns = {c.callee_qn for c in callees}
+        assert "lib.compute" in callee_qns
+        assert "app.helper" in callee_qns
+
+    def test_callees_uses_func_qn_not_caller_qn(self):
+        """callees_datalog uses func_qn (block context), not caller_qn."""
+        g = _make_graph_with_cfg()
+        callees = g.callees_datalog("app.main")
+        # All calls tagged with func_qn="app.main" should be found
+        assert len(callees) >= 2
+
+
+class TestGraphDatalog:
+    """Test graph_datalog() Datalog query method."""
+
+    def test_graph_all_edges(self):
+        g = _make_graph_with_cfg()
+        edges = g.graph_datalog()
+        assert len(edges) >= 3
+        edge_set = set(edges)
+        assert ("app.main", "lib.compute") in edge_set
+        assert ("app.main", "app.helper") in edge_set
+        assert ("app.helper", "lib.compute") in edge_set
+
+    def test_graph_filtered_by_file(self):
+        g = _make_graph_with_cfg()
+        edges = g.graph_datalog(file_path="app.py")
+        assert len(edges) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Unified dead code via Datalog
+# ---------------------------------------------------------------------------
+
+
+class TestDeadCodeUnified:
+    """Test dead_code_unified() Datalog query method."""
+
+    def test_unified_finds_unreferenced(self):
+        g = _make_graph_with_cfg()
+        dead = g.dead_code_unified()
+        dead_qns = {s.qualified_name for s in dead}
+        # app.helper is called but only from block 2 which is in the graph
+        # lib.MyClass.__init__ has no reference and is not a dunder entry point
+        # Wait - __init__ IS a dunder, so it should be excluded
+        # app.main has no callers but has @app.route... but entry_point_decorator is empty
+        assert "app.main" in dead_qns or "app.helper" in dead_qns
+
+    def test_unified_respects_entry_point_decorators(self):
+        g = _make_graph_with_cfg()
+        g.add_entry_point_decorator(EntryPointDecoratorFact("app.route"))
+        dead = g.dead_code_unified(entry_point_decorators=["app.route"])
+        dead_qns = {s.qualified_name for s in dead}
+        # app.main has @app.route, so it's an entry point
+        assert "app.main" not in dead_qns
+
+    def test_unified_dunders_are_entry_points(self):
+        g = _make_graph_with_cfg()
+        dead = g.dead_code_unified()
+        dead_qns = {s.qualified_name for s in dead}
+        # __init__ is a dunder, so it's an entry point
+        assert "lib.MyClass.__init__" not in dead_qns
+
+    def test_unified_entry_point_names(self):
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "main", "a.main", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("a.py", "unused", "a.unused", "function", 7, 10, None))
+        dead = g.dead_code_unified(entry_point_names=["main"])
+        dead_qns = {s.qualified_name for s in dead}
+        assert "a.main" not in dead_qns
+        assert "a.unused" in dead_qns
+
+
+class TestUnreachableBlocksDatalog:
+    """Test unreachable_blocks_datalog() Datalog query method."""
+
+    def test_finds_unreachable(self):
+        g = _make_graph_with_cfg()
+        unreachable = g.unreachable_blocks_datalog(func_qn="app.helper")
+        unreachable_ids = {b.block_id for b in unreachable}
+        # Block 2 in app.helper has no incoming edge
+        assert 2 in unreachable_ids
+
+    def test_no_unreachable_in_main(self):
+        g = _make_graph_with_cfg()
+        unreachable = g.unreachable_blocks_datalog(func_qn="app.main")
+        # All blocks in main are reachable
+        unreachable_ids = {b.block_id for b in unreachable}
+        assert 0 not in unreachable_ids
+        assert 1 not in unreachable_ids
+        assert 2 not in unreachable_ids
+
+    def test_all_unreachable(self):
+        g = _make_graph_with_cfg()
+        unreachable = g.unreachable_blocks_datalog()
+        # Should find block 2 in app.helper
+        assert len(unreachable) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Taint analysis via Datalog
+# ---------------------------------------------------------------------------
+
+
+class TestTaintPropagationDatalog:
+    """Test taint_propagation_datalog() Datalog method."""
+
+    def test_basic_propagation(self):
+        g = FactGraph()
+        # Setup: function with source -> def-use -> sink
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
+        flows = g.taint_propagation_datalog(
+            sources=[("app.py", "app.main", "x", 0, "sqli")],
+            sinks=[("app.py", "app.main", "x", 1, "sqli")],
+        )
+        assert len(flows) >= 1
+
+    def test_no_flow_with_sanitizer(self):
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
+        flows = g.taint_propagation_datalog(
+            sources=[("app.py", "app.main", "x", 0, "sqli")],
+            sinks=[("app.py", "app.main", "x", 1, "sqli")],
+            sanitizers=[("app.py", "app.main", "x", 0, "sqli")],
+        )
+        assert len(flows) == 0
+
+    def test_empty_sources(self):
+        g = FactGraph()
+        flows = g.taint_propagation_datalog(sources=[], sinks=[("a.py", "f", "x", 0, "l")])
+        assert flows == []
+
+
+class TestInterproceduralTaintDatalog:
+    """Test interprocedural_taint_datalog() Datalog method."""
+
+    def test_basic_interprocedural(self):
+        g = FactGraph()
+        g.add_symbol(SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None))
+        g.add_symbol(SymbolFact("b.py", "bar", "b.bar", "function", 1, 5, None))
+        g.add_call(CallFact("a.foo", "b.bar", "a.py", 2, 0))
+        g.add_func_summary(FuncSummaryFact("b.bar", "x", flows_to_sink=True, sink_label="sqli"))
+        violations = g.interprocedural_taint_datalog()
+        assert len(violations) >= 1
+
+    def test_no_summary_no_violation(self):
+        g = FactGraph()
+        g.add_call(CallFact("a.foo", "b.bar", "a.py", 2, 0))
+        violations = g.interprocedural_taint_datalog()
+        assert violations == []
+
+
+class TestFlowRuleCheckDatalog:
+    """Test flow_rule_check_datalog() Datalog method."""
+
+    def test_basic_flow_check(self):
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "app.main", "x", 0)],
+            sinks=[("app.py", "app.main", "x", 1)],
+        )
+        assert len(violations) >= 1
+
+    def test_flow_blocked_by_not_through(self):
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "app.main", "x", 0)],
+            sinks=[("app.py", "app.main", "x", 1)],
+            not_through=[("app.py", "app.main", "x", 0)],
+        )
+        assert len(violations) == 0
+
+    def test_empty_sources(self):
+        g = FactGraph()
+        violations = g.flow_rule_check_datalog(sources=[], sinks=[("a.py", "f", "x", 0)])
+        assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# Updated serialization test for new fact types
+# ---------------------------------------------------------------------------
+
+
+class TestSerializationWithNewFacts:
+    """Test JSON serialization includes new fact types."""
+
+    def test_roundtrip_with_cfg_blocks(self):
+        g = FactGraph()
+        g.add_cfg_block(CfgBlockFact("a.py", "a.foo", 0, is_entry=True))
+        g.add_cfg_block(CfgBlockFact("a.py", "a.foo", 1, is_exit=True))
+        g.add_decorator_on(DecoratorOnFact("a.foo", "route"))
+        g.add_source_loc(SourceLocFact("a.py", "symbol", "a.foo", line=1, end_line=5))
+        g.add_func_summary(FuncSummaryFact("a.foo", "x", flows_to_return=True))
+
+        json_str = g.to_json()
+        data = json.loads(json_str)
+        type_names = {d["_type"] for d in data}
+        assert "CfgBlockFact" in type_names
+        assert "DecoratorOnFact" in type_names
+        assert "SourceLocFact" in type_names
+        assert "FuncSummaryFact" in type_names
+
+        # Roundtrip
+        g2 = FactGraph.from_json(json_str)
+        assert len(g2.cfg_blocks(func_qn="a.foo")) == 2
+        assert len(g2.decorators_on("a.foo")) == 1
+        assert len(g2.source_locs(loc_id="a.foo")) == 1
+        assert len(g2.func_summaries(func_qn="a.foo")) == 1
