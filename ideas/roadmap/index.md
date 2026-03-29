@@ -80,39 +80,59 @@ into `search`, `refs`, `lint`, `impact`, and `editor-server`.  The
 
 ---
 
-## Unified Dead Code Detection via Datalog
+## Datalog-First Analysis
 
 Spec: [unified-deadcode-datalog.md](unified-deadcode-datalog.md)
 
-Replace the independent Python-based `deadcode` (reference counting) and
-`cfg --unreachable` (BFS) implementations with a single Datalog query over
-the fact graph. Tag references with their containing CFG block at extraction
-time so reachability is an exact join, not a line-range comparison.
+Move reasoning and inference to Datalog over the fact graph. Pattern
+matching, code transformation, and heuristic filtering (e.g. string
+literal dead code suppression) stay in Python/Rust. The schema drops
+absolute line numbers from the relational core (moved to `source_loc`
+for display) and tags references/calls with their containing CFG block
+for exact joins.
 
 ### Phase 1: Schema and CFG population
 
-- [ ] Add `cfg_block` relation to fact graph schema (`file_path`, `func_qn`, `block_id`, `is_entry`, `is_exit`)
-- [ ] Populate `cfg_block` and `cfg_edge` facts in `build_from_project()`
-- [ ] Add `decorator_on` relation for entry point filtering
+- [ ] Add `cfg_block` relation (`file_path`, `func_qn`, `block_id`, `is_entry`, `is_exit`)
+- [ ] Add `decorator_on` relation (`symbol_qn`, `decorator`)
+- [ ] Populate `cfg_block` and `cfg_edge` in `build_from_project()`
+- [ ] Add `source_loc` relation; move all display positions there
 
 ### Phase 2: Block-tagged references
 
-- [ ] Extend reference extraction to assign `(func_qn, block_id)` per reference via byte-offset intersection with CFG blocks
-- [ ] Add `source_loc` relation separating display positions from relational core
-- [ ] Make analysis queries join on block ID, not line numbers
+- [ ] Assign `(func_qn, block_id)` to each reference via byte-offset intersection with CFG blocks
+- [ ] Same for `call` facts
+- [ ] Populate `def_use` from CFG builder's block defs/uses (block IDs, not lines)
 
-### Phase 3: Unified dead code query
+### Phase 3: Direct relation queries — `refs`, `callers`, `callees`, `graph`
 
-- [ ] Implement the reachable-block transitive closure + live-reference Datalog query
-- [ ] Wire unified query into `emend deadcode` as the default backend
+- [ ] `refs` → Datalog query on `reference` (replace `find_references()` file traversal)
+- [ ] `callers` → Datalog query on `call` (replace `find_callers()` file traversal)
+- [ ] `callees` → Datalog query on `call` scoped by `func_qn` (replace line-range filtering)
+- [ ] `graph` → Datalog query on `call` + Python formatting (replace Rust `collect_callees`)
+- [ ] Remove Python traversal code from `transform.py` for these commands
+
+### Phase 4: Unified dead code
+
+- [ ] Implement reachable-block closure + live-reference Datalog query
 - [ ] Port entry point heuristics (dunders, decorators, `__all__`, tests) to Datalog rules
-- [ ] Switch `cfg --unreachable` to query the fact graph instead of Python BFS
+- [ ] Wire into `emend deadcode` as default backend (string literal filtering stays as Python post-filter)
+- [ ] Switch `cfg --unreachable` to query the fact graph
+- [ ] Remove `find_dead_code()` from `transform.py` and `find_unreachable_blocks()` from `cfg.py`
 
-### Phase 4: Cleanup
+### Phase 5: Taint migration
 
-- [ ] Remove `find_dead_code()` Python implementation from `transform.py`
-- [ ] Remove `find_unreachable_blocks()` BFS from `cfg.py`
-- [ ] Update tests to use fact-graph-based dead code detection
+- [ ] Add `func_summary` relation (param → return/sink flow)
+- [ ] Rewrite intraprocedural taint propagation as Datalog over `def_use` (pattern matching stays in Python)
+- [ ] Rewrite interprocedural fixed-point as recursive Datalog (replaces Python loop)
+- [ ] Migrate flow-based lint rules (`flows-from`/`flows-to`/`not-through`) to same propagation
+- [ ] Remove Python taint simulation and fixed-point iteration
+
+### Phase 6: Cleanup
+
+- [ ] Enforce fact-graph-only path for `impact` (remove non-Datalog fallback)
+- [ ] Evaluate consolidating `parse.db` (SQLite) and `facts.db` (CozoDB)
+- [ ] Update all tests
 
 ---
 
