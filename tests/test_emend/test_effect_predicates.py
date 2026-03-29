@@ -6,7 +6,7 @@ Tests cover:
 - Effect-based sinks in taint_propagation_datalog()
 - Augmented assignment detection in _find_assignments_in_source()
 - is_var_or_attr Datalog pattern (dotted-name prefix matching)
-- Removal of attribute_mutation_sinks / Step 3.5 (replaced by effect sinks)
+- Effect sinks replace the old attribute_mutation_sinks mechanism
 """
 
 import pytest
@@ -402,8 +402,8 @@ class TestEffectSinkConfig:
         assert len(effect_sinks) == 1
         assert effect_sinks[0].effect == "writes($OBJ)"
 
-    def test_effect_replaces_attribute_mutation_sinks(self, tmp_path):
-        """Old attribute_mutation_sinks config can be expressed as effect sinks."""
+    def test_effect_sinks_in_config(self, tmp_path):
+        """Effect sinks are loaded from YAML config."""
         config_dict = {
             "taint": {
                 "labels": ["unlocked_read"],
@@ -421,7 +421,6 @@ class TestEffectSinkConfig:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(yaml.dump(config_dict))
         config = load_taint_config(str(config_file))
-        # Should not have attribute_mutation_sinks — they're replaced by effect sinks
         assert len(config.sinks) == 1
         assert config.sinks[0].effect == "writes($OBJ)"
 

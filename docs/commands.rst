@@ -1122,12 +1122,12 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
        - pattern: "escape($X)"
          label: user_input
 
-     # Optional: flag any dotted attribute assignment on a tainted object
-     # (e.g.  obj.field = value  where obj carries a taint label).
-     # Unlike regular sinks, no pattern is needed -- the trigger is structural.
-     attribute_mutation_sinks:
-       - label: user_input
-         message: "Tainted object attribute mutated"
+     # Optional: flag any write/mutation on a tainted object via effect sinks.
+     # The effect key resolves via the fact graph -- no explicit pattern needed.
+     # sinks:
+     #   - effect: "writes($OBJ)"
+     #     label: user_input
+     #     message: "Tainted object mutated"
 
 **SQLAlchemy TOCTOU example:**
 
@@ -1136,9 +1136,10 @@ fetched without a row-level lock (``SELECT FOR UPDATE``) and then mutated
 within the same transaction.  A concurrent transaction can commit between
 the read and the write, producing a lost update.
 
-The ``attribute_mutation_sinks`` feature lets emend catch the assignment
-form (``obj.field = value``) in addition to the explicit ``setattr(obj, …)``
-call form.
+Effect-based sinks (``effect: "writes($OBJ)"``) let emend catch the
+assignment form (``obj.field = value``), augmented assignments
+(``obj.field += value``), and method-call mutations (``obj.items.append()``)
+in addition to the explicit ``setattr(obj, …)`` call form.
 
 .. code-block:: yaml
 
@@ -1179,9 +1180,9 @@ call form.
          label: unlocked_read
          message: "TOCTOU: setattr() on ORM object loaded without SELECT FOR UPDATE"
 
-     # Direct attribute assignment (obj.balance = x) requires this key
-     attribute_mutation_sinks:
-       - label: unlocked_read
+     # Direct attribute assignment (obj.balance = x) uses effect sinks
+       - effect: "writes($OBJ)"
+         label: unlocked_read
          message: "TOCTOU: attribute mutation on ORM object loaded without SELECT FOR UPDATE; use .with_for_update() on the query"
 
 This config flags the vulnerable pattern::
