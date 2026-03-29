@@ -146,13 +146,13 @@ replace `attribute_mutation_sinks` and other bespoke features.
 
 ### Phase 1: Effect Predicates
 
-- [ ] Add `kind` field (`read`/`write`/`aug_write`/`del`) to `DefUseFact` — `fact_graph.py`, `emend_core`
-- [ ] Update `def_use` CozoDB schema; migrate all existing `*def_use[...]` queries (9→10 columns)
-- [ ] Add `method_call` relation and schema — `fact_graph.py`, `emend_core`
-- [ ] Add augmented assignment regex + `"mutate"` op kind to `_find_assignments_in_source()` — `taint.py`
-- [ ] Implement `effect` key on sinks/sources (resolves `writes($X)`, `reads($X)`) — `taint.py`, `fact_graph.py`
-- [ ] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py`
-- [ ] Add `is_var_or_attr` helper to all Datalog queries using dotted-name prefix matching
+- [x] Add `kind` field (`read`/`write`/`aug_write`/`del`) to `DefUseFact` — `fact_graph.py`, `emend_core` (`cfg.rs`, `cfg_py.rs`)
+- [x] Update `def_use` CozoDB schema; migrate all existing `*def_use[...]` queries (9→10 columns) — `fact_graph.py`
+- [x] Add `method_call` relation and schema — `fact_graph.py` (`MethodCallFact`, `add_method_call`, `method_calls`)
+- [x] Add augmented assignment regex + `"mutate"` op kind to `_find_assignments_in_source()` — `taint.py` (`_AUG_ASSIGN_RE`)
+- [x] Implement `effect` key on sinks/sources (resolves `writes($X)`, `reads($X)`) — `taint.py` (`TaintSink.effect`), `fact_graph.py` (`taint_propagation_datalog(effect_sinks=)`)
+- [ ] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py` (deferred: backwards-compat retained until Phase 2 path-sensitive sanitization)
+- [x] Add `is_var_or_attr` helper to all Datalog queries using dotted-name prefix matching — `fact_graph.py` (two-rule expansion in effect violation rules)
 
 ### Phase 2: Path-Sensitive Sanitization
 

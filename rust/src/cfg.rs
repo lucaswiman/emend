@@ -58,10 +58,12 @@ pub struct BasicBlock {
     pub end_line: u32,
     /// Byte ranges of statements in this block.
     pub statements: Vec<(usize, usize)>,
-    /// Variable definitions: (name, line, col).
-    pub defs: Vec<(String, u32, u32)>,
-    /// Variable uses: (name, line, col).
-    pub uses: Vec<(String, u32, u32)>,
+    /// Variable definitions: (name, line, col, kind).
+    /// Kind is "write", "aug_write", or "del".
+    pub defs: Vec<(String, u32, u32, String)>,
+    /// Variable uses: (name, line, col, kind).
+    /// Kind is "read".
+    pub uses: Vec<(String, u32, u32, String)>,
 }
 
 /// A control-flow edge.
@@ -316,11 +318,31 @@ impl<'a> CfgBuilder<'a> {
     fn collect_defs_uses(&mut self, block_id: BlockId, node: tree_sitter::Node) {
         let kind = node.kind();
 
+        // Check delete_nodes first (del x → def with kind="del")
+        if self.cfg_sec.delete_nodes.iter().any(|n| n == kind) {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    self.collect_defs_from_target(block_id, child, "del");
+                }
+            }
+            return;
+        }
+
         // Check def_use_rules from config
         for rule in &self.cfg_sec.def_use_rules {
             if kind == rule.node {
+                // Determine the def kind based on the node type.
+                // Augmented assignments (+=, -=, etc.) read-then-write the target.
+                let is_augmented = kind.contains("augmented");
+                let def_kind = if is_augmented { "aug_write" } else { "write" };
+
                 if let Some(target) = node.child_by_field_name(&rule.target) {
-                    self.collect_defs_from_target(block_id, target);
+                    self.collect_defs_from_target(block_id, target, def_kind);
+                    // For augmented assignment, the target is also read.
+                    if is_augmented {
+                        self.collect_uses_from_expr(block_id, target);
+                    }
                 }
                 if let Some(value) = node.child_by_field_name(&rule.value) {
                     self.collect_uses_from_expr(block_id, value);
@@ -369,7 +391,7 @@ impl<'a> CfgBuilder<'a> {
         }
     }
 
-    fn collect_defs_from_target(&mut self, block_id: BlockId, node: tree_sitter::Node) {
+    fn collect_defs_from_target(&mut self, block_id: BlockId, node: tree_sitter::Node, def_kind: &str) {
         let kind = node.kind();
         let id_node = &self.cfg_sec.identifier_node;
 
@@ -377,7 +399,7 @@ impl<'a> CfgBuilder<'a> {
             let name = self.node_text(node).to_string();
             let line = node.start_position().row as u32;
             let col = node.start_position().column as u32;
-            self.block_mut(block_id).defs.push((name, line, col));
+            self.block_mut(block_id).defs.push((name, line, col, def_kind.to_string()));
             return;
         }
 
@@ -386,7 +408,7 @@ impl<'a> CfgBuilder<'a> {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.is_named() {
-                    self.collect_defs_from_target(block_id, child);
+                    self.collect_defs_from_target(block_id, child, def_kind);
                 }
             }
             return;
@@ -410,7 +432,7 @@ impl<'a> CfgBuilder<'a> {
             }
             let line = node.start_position().row as u32;
             let col = node.start_position().column as u32;
-            self.block_mut(block_id).uses.push((name, line, col));
+            self.block_mut(block_id).uses.push((name, line, col, "read".to_string()));
             return;
         }
         // Recurse into children
@@ -787,7 +809,7 @@ impl<'a> CfgBuilder<'a> {
         self.add_edge(current, header, EdgeKind::Fallthrough);
 
         if let Some(left) = node.child_by_field_name(var_field) {
-            self.collect_defs_from_target(header, left);
+            self.collect_defs_from_target(header, left, "write");
         }
         if let Some(right) = node.child_by_field_name(iter_field) {
             self.collect_uses_from_expr(header, right);
@@ -1024,6 +1046,7 @@ impl<'a> CfgBuilder<'a> {
                             name,
                             c.start_position().row as u32,
                             c.start_position().column as u32,
+                            "write".to_string(),
                         ));
                     }
                     if !try_body_kind.is_empty() && c.kind() == try_body_kind.as_str() {
@@ -1176,14 +1199,14 @@ impl<'a> CfgBuilder<'a> {
                             self.collect_uses_from_expr(current, val);
                         }
                         if let Some(alias) = item.child_by_field_name("alias") {
-                            self.collect_defs_from_target(current, alias);
+                            self.collect_defs_from_target(current, alias, "write");
                         }
                     } else if item.kind() == "as_pattern" {
                         if let Some(val) = item.child(0) {
                             self.collect_uses_from_expr(current, val);
                         }
                         if let Some(alias) = item.child(2) {
-                            self.collect_defs_from_target(current, alias);
+                            self.collect_defs_from_target(current, alias, "write");
                         }
                     }
                 }

@@ -114,12 +114,24 @@ class DefUseFact:
     file_path: str
     func_qn: str
     var_name: str
-    def_block: int
-    use_block: int
+    kind: str = "write"  # "read", "write", "aug_write", "del"
+    def_block: int = 0
+    use_block: int = 0
     def_line: int = 0    # kept for backwards compat display
     def_col: int = 0
     use_line: int = 0
     use_col: int = 0
+
+
+@dataclass(frozen=True)
+class MethodCallFact:
+    """A method call on a receiver object (e.g. obj.append())."""
+    file_path: str
+    func_qn: str
+    receiver: str
+    method: str
+    block_id: int = 0
+    line: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,8 +188,9 @@ class EntryPointNameFact:
 # Union of all fact types for generic queries.
 Fact = Union[
     SymbolFact, CallFact, ReferenceFact, TaintFlowFact, TypeFact,
-    ImportFact, CfgEdgeFact, DefUseFact, CfgBlockFact, DecoratorOnFact,
-    SourceLocFact, FuncSummaryFact, EntryPointDecoratorFact, EntryPointNameFact,
+    ImportFact, CfgEdgeFact, DefUseFact, MethodCallFact, CfgBlockFact,
+    DecoratorOnFact, SourceLocFact, FuncSummaryFact,
+    EntryPointDecoratorFact, EntryPointNameFact,
 ]
 
 
@@ -285,6 +298,7 @@ _SCHEMA_INIT = """\
     file_path: String,
     func_qn: String,
     var_name: String,
+    kind: String default "write",
     def_block: Int,
     use_block: Int
     =>
@@ -292,6 +306,15 @@ _SCHEMA_INIT = """\
     def_col: Int default 0,
     use_line: Int default 0,
     use_col: Int default 0
+}}
+
+{:create method_call {
+    file_path: String,
+    func_qn: String,
+    receiver: String,
+    method: String,
+    block_id: Int,
+    line: Int
 }}
 
 {:create cfg_block {
@@ -502,13 +525,14 @@ class FactGraph:
     def add_def_use(self, fact: DefUseFact) -> None:
         """Add a definition-use fact."""
         self._client.run(
-            "?[file_path, func_qn, var_name, def_block, use_block, def_line, def_col, use_line, use_col] <- "
-            "[[$fp, $fq, $vn, $db, $ub, $dl, $dc, $ul, $uc]] "
-            ":put def_use {file_path, func_qn, var_name, def_block, use_block => def_line, def_col, use_line, use_col}",
+            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- "
+            "[[$fp, $fq, $vn, $k, $db, $ub, $dl, $dc, $ul, $uc]] "
+            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block => def_line, def_col, use_line, use_col}",
             {
                 "fp": fact.file_path,
                 "fq": fact.func_qn,
                 "vn": fact.var_name,
+                "k": fact.kind,
                 "db": fact.def_block,
                 "ub": fact.use_block,
                 "dl": fact.def_line,
@@ -589,12 +613,12 @@ class FactGraph:
         if not facts:
             return
         rows = [
-            [f.file_path, f.func_qn, f.var_name, f.def_block, f.use_block, f.def_line, f.def_col, f.use_line, f.use_col]
+            [f.file_path, f.func_qn, f.var_name, f.kind, f.def_block, f.use_block, f.def_line, f.def_col, f.use_line, f.use_col]
             for f in facts
         ]
         self._client.run(
-            "?[file_path, func_qn, var_name, def_block, use_block, def_line, def_col, use_line, use_col] <- $rows "
-            ":put def_use {file_path, func_qn, var_name, def_block, use_block => def_line, def_col, use_line, use_col}",
+            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- $rows "
+            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block => def_line, def_col, use_line, use_col}",
             {"rows": rows},
         )
 
@@ -616,6 +640,30 @@ class FactGraph:
         self._client.run(
             "?[file_path, func_qn, block_id, is_entry, is_exit] <- $rows "
             ":put cfg_block {file_path, func_qn, block_id => is_entry, is_exit}",
+            {"rows": rows},
+        )
+
+    def add_method_call(self, fact: MethodCallFact) -> None:
+        """Add a method call fact."""
+        self._client.run(
+            "?[file_path, func_qn, receiver, method, block_id, line] <- "
+            "[[$fp, $fq, $rcv, $meth, $bid, $ln]] "
+            ":put method_call {file_path, func_qn, receiver, method, block_id, line}",
+            {
+                "fp": fact.file_path, "fq": fact.func_qn,
+                "rcv": fact.receiver, "meth": fact.method,
+                "bid": fact.block_id, "ln": fact.line,
+            },
+        )
+
+    def add_method_calls_batch(self, facts: list[MethodCallFact]) -> None:
+        """Bulk-insert method call facts."""
+        if not facts:
+            return
+        rows = [[f.file_path, f.func_qn, f.receiver, f.method, f.block_id, f.line] for f in facts]
+        self._client.run(
+            "?[file_path, func_qn, receiver, method, block_id, line] <- $rows "
+            ":put method_call {file_path, func_qn, receiver, method, block_id, line}",
             {"rows": rows},
         )
 
@@ -887,7 +935,7 @@ class FactGraph:
         file_path: str | None = None,
     ) -> list[DefUseFact]:
         """Query def-use facts with optional filters."""
-        clauses = ["*def_use[fp, fq, vn, db, ub, dl, dc, ul, uc]"]
+        clauses = ["*def_use[fp, fq, vn, k, db, ub, dl, dc, ul, uc]"]
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
@@ -898,13 +946,37 @@ class FactGraph:
         if file_path is not None:
             clauses.append("fp == $file_path")
             params["file_path"] = file_path
-        query = "?[fp, fq, vn, db, ub, dl, dc, ul, uc] := " + ", ".join(clauses)
+        query = "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
             DefUseFact(
                 file_path=r[0], func_qn=r[1], var_name=r[2],
-                def_block=r[3], use_block=r[4],
-                def_line=r[5], def_col=r[6], use_line=r[7], use_col=r[8],
+                kind=r[3], def_block=r[4], use_block=r[5],
+                def_line=r[6], def_col=r[7], use_line=r[8], use_col=r[9],
+            )
+            for r in result["rows"]
+        ]
+
+    def method_calls(
+        self,
+        func_qn: str | None = None,
+        file_path: str | None = None,
+    ) -> list[MethodCallFact]:
+        """Query method call facts with optional filters."""
+        clauses = ["*method_call[fp, fq, rcv, meth, bid, ln]"]
+        params: dict[str, Any] = {}
+        if func_qn is not None:
+            clauses.append("fq == $func_qn")
+            params["func_qn"] = func_qn
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        query = "?[fp, fq, rcv, meth, bid, ln] := " + ", ".join(clauses)
+        result = self._client.run(query, params)
+        return [
+            MethodCallFact(
+                file_path=r[0], func_qn=r[1], receiver=r[2],
+                method=r[3], block_id=r[4], line=r[5],
             )
             for r in result["rows"]
         ]
@@ -1458,8 +1530,9 @@ class FactGraph:
     def taint_propagation_datalog(
         self,
         sources: list[tuple[str, str, str, int, str]],  # (file_path, func_qn, var_name, block_id, label)
-        sinks: list[tuple[str, str, str, int, str]],     # (file_path, func_qn, var_name, block_id, label)
-        sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same format
+        sinks: list[tuple[str, str, str, int, str]] | None = None,  # (file_path, func_qn, var_name, block_id, label)
+        effect_sinks: list[tuple[str, str]] | None = None,  # (label, effect_kind) e.g. [("toctou", "writes")]
+        sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same as sources
     ) -> list[TaintFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
 
@@ -1467,9 +1540,15 @@ class FactGraph:
         This method handles propagation: given pre-computed source/sink locations,
         it traces taint through def-use chains using Datalog recursion.
 
+        When ``effect_sinks`` is provided, violations are also detected when a
+        tainted variable (or its attributes) is written/mutated in a reachable
+        block.  This replaces the old ``attribute_mutation_sinks`` mechanism.
+
         Returns TaintFlowFact entries for each source-to-sink violation found.
         """
-        if not sources or not sinks:
+        if not sources:
+            return []
+        if not sinks and not effect_sinks:
             return []
 
         # Insert source matches as temporary inline relations
@@ -1477,10 +1556,15 @@ class FactGraph:
             f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
             for fp, fq, var, bid, lbl in sources
         )
-        sink_rows = ", ".join(
-            f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
-            for fp, fq, var, bid, lbl in sinks
-        )
+
+        if sinks:
+            sink_rows = ", ".join(
+                f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
+                for fp, fq, var, bid, lbl in sinks
+            )
+            sink_rule = f"taint_sink[fp, fq, var, bid, lbl] <- [{sink_rows}]\n"
+        else:
+            sink_rule = "taint_sink[fp, fq, var, bid, lbl] <- []\n"
 
         if sanitizers:
             san_rows = ", ".join(
@@ -1489,13 +1573,23 @@ class FactGraph:
             )
             sanitizer_rule = f"sanitizer[fp, fq, var, bid, lbl] <- [{san_rows}]\n"
         else:
-            # Empty sanitizer relation
             sanitizer_rule = "sanitizer[fp, fq, var, bid, lbl] <- []\n"
+
+        # Build effect sink rules if provided
+        effect_rules = ""
+        if effect_sinks:
+            # Build inline relation for effect sink labels
+            esl_rows = ", ".join(f'["{lbl}"]' for lbl, _ in effect_sinks)
+            effect_rules += f"effect_sink_label[lbl] <- [{esl_rows}]\n"
+
+            # Mutation kinds (excludes "del" — unbinding is not mutation)
+            effect_rules += 'mutate_kind[k] <- [["write"], ["aug_write"]]\n'
 
         query = (
             f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
-            f"taint_sink[fp, fq, var, bid, lbl] <- [{sink_rows}]\n"
+            f"{sink_rule}"
             f"{sanitizer_rule}"
+            f"{effect_rules}"
 
             # Taint sources are tainted
             "tainted[fp, fq, var, block, lbl] := "
@@ -1504,15 +1598,56 @@ class FactGraph:
             # Propagation through def-use chains (same function)
             "tainted[fp, fq, target, use_block, lbl] := "
             "tainted[fp, fq, source, def_block, lbl], "
-            "*def_use[fp, fq, source, def_block, use_block, _, _, _, _], "
+            "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
             "target = source, "
             "not sanitizer[fp, fq, source, def_block, lbl]\n"
 
-            # Violations: taint reaches sink
-            "?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+            # Pattern-based violations: taint reaches sink
+            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
             "tainted[fp, fq, sink_var, sink_block, lbl], "
             "taint_sink[fp, fq, sink_var, sink_block, lbl], "
-            "taint_source[fp, fq, src_var, src_block, lbl]"
+            "taint_source[fp, fq, src_var, src_block, lbl]\n"
+        )
+
+        # Effect-based violations: tainted var is written/mutated
+        # Three rule variants implement is_var_or_attr matching.
+        # Each excludes the source block to avoid self-triggering (the source
+        # definition itself is a "write" but should not count as a violation).
+        if effect_sinks:
+            # Variant 1: exact var match — write to the tainted var itself
+            query += (
+                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+                "tainted[fp, fq, sink_var, sink_block, lbl], "
+                "effect_sink_label[lbl], "
+                "*def_use[fp, fq, sink_var, kind, sink_block, _, _, _, _, _], "
+                "mutate_kind[kind], "
+                "taint_source[fp, fq, src_var, src_block, lbl], "
+                "sink_block != src_block\n"
+            )
+            # Variant 2: dotted attribute — write to sink_var.field
+            query += (
+                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+                "tainted[fp, fq, sink_var, sink_block, lbl], "
+                "effect_sink_label[lbl], "
+                "*def_use[fp, fq, var_name, kind, sink_block, _, _, _, _, _], "
+                "mutate_kind[kind], "
+                'starts_with(var_name, concat(sink_var, ".")), '
+                "taint_source[fp, fq, src_var, src_block, lbl], "
+                "sink_block != src_block\n"
+            )
+            # Variant 3: method call on tainted var (e.g. sink_var.append())
+            query += (
+                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+                "tainted[fp, fq, sink_var, sink_block, lbl], "
+                "effect_sink_label[lbl], "
+                "*method_call[fp, fq, sink_var, _, sink_block, _], "
+                "taint_source[fp, fq, src_var, src_block, lbl], "
+                "sink_block != src_block\n"
+            )
+
+        query += (
+            "?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block]"
         )
 
         result = self._client.run(query)
@@ -1547,7 +1682,7 @@ class FactGraph:
             "param_flows_to_return[caller_fq, caller_param] := "
             "*call[caller_fq, callee_fq, _, _, _, _, _], "
             "param_flows_to_return[callee_fq, callee_param], "
-            "*def_use[_, caller_fq, caller_param, _, _, _, _, _, _]\n"
+            "*def_use[_, caller_fq, caller_param, _, _, _, _, _, _, _]\n"
 
             # Violations: tainted param flows to sink through call chain
             "violation[caller_fq, callee_fq, param, lbl] := "
@@ -1611,7 +1746,7 @@ class FactGraph:
 
             "reaches[fp, fq, target, use_block] := "
             "reaches[fp, fq, source, def_block], "
-            "*def_use[fp, fq, source, def_block, use_block, _, _, _, _], "
+            "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
             "target = source, "
             "not blocked[fp, fq, source, def_block]\n"
 
@@ -1734,13 +1869,25 @@ class FactGraph:
 
     def _all_def_uses(self) -> list[DefUseFact]:
         result = self._client.run(
-            "?[fp, fq, vn, db, ub, dl, dc, ul, uc] := *def_use[fp, fq, vn, db, ub, dl, dc, ul, uc]"
+            "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := *def_use[fp, fq, vn, k, db, ub, dl, dc, ul, uc]"
         )
         return [
             DefUseFact(
                 file_path=r[0], func_qn=r[1], var_name=r[2],
-                def_block=r[3], use_block=r[4],
-                def_line=r[5], def_col=r[6], use_line=r[7], use_col=r[8],
+                kind=r[3], def_block=r[4], use_block=r[5],
+                def_line=r[6], def_col=r[7], use_line=r[8], use_col=r[9],
+            )
+            for r in result["rows"]
+        ]
+
+    def _all_method_calls(self) -> list[MethodCallFact]:
+        result = self._client.run(
+            "?[fp, fq, rcv, meth, bid, ln] := *method_call[fp, fq, rcv, meth, bid, ln]"
+        )
+        return [
+            MethodCallFact(
+                file_path=r[0], func_qn=r[1], receiver=r[2],
+                method=r[3], block_id=r[4], line=r[5],
             )
             for r in result["rows"]
         ]
@@ -1819,6 +1966,8 @@ class FactGraph:
             data.append(_tag(fact))
         for fact in self._all_def_uses():
             data.append(_tag(fact))
+        for fact in self._all_method_calls():
+            data.append(_tag(fact))
         for fact in self._all_cfg_blocks():
             data.append(_tag(fact))
         for fact in self._all_decorator_on():
@@ -1846,6 +1995,7 @@ class FactGraph:
             "ImportFact": (ImportFact, graph.add_import),
             "CfgEdgeFact": (CfgEdgeFact, graph.add_cfg_edge),
             "DefUseFact": (DefUseFact, graph.add_def_use),
+            "MethodCallFact": (MethodCallFact, graph.add_method_call),
             "CfgBlockFact": (CfgBlockFact, graph.add_cfg_block),
             "DecoratorOnFact": (DecoratorOnFact, graph.add_decorator_on),
             "SourceLocFact": (SourceLocFact, graph.add_source_loc),
@@ -2038,6 +2188,7 @@ class FactGraph:
 
             # -- Def-use facts with block IDs ----------------------------
             def_use_facts: list[DefUseFact] = []
+            method_call_facts: list[MethodCallFact] = []
             for cfg in cfgs:
                 func_name = cfg.func_name
                 func_qn = ""
@@ -2048,15 +2199,16 @@ class FactGraph:
                 if not func_qn:
                     func_qn = f"{module_name}.{func_name}"
 
-                # Build def map: var_name -> [(block_id, line, col)]
-                defs_map: dict[str, list[tuple[int, int, int]]] = {}
+                # Build def map: var_name -> [(block_id, line, col, kind)]
+                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
                 for block in cfg.get_blocks():
                     bid = block["id"]
                     for d in block.get("defs", []) or []:
                         var_name = d[0] if isinstance(d, (list, tuple)) else d
                         dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
                         dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                        defs_map.setdefault(var_name, []).append((bid, dline, dcol))
+                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
 
                 # Build use map and create def-use pairs
                 for block in cfg.get_blocks():
@@ -2065,12 +2217,14 @@ class FactGraph:
                         var_name = u[0] if isinstance(u, (list, tuple)) else u
                         uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
                         ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
+                        ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
                         if var_name in defs_map:
-                            for def_bid, dl, dc in defs_map[var_name]:
+                            for def_bid, dl, dc, dk in defs_map[var_name]:
                                 def_use_facts.append(DefUseFact(
                                     file_path=rel_path,
                                     func_qn=func_qn,
                                     var_name=var_name,
+                                    kind=dk,
                                     def_block=def_bid,
                                     use_block=bid,
                                     def_line=dl,
@@ -2079,7 +2233,24 @@ class FactGraph:
                                     use_col=ucol,
                                 ))
 
+            # -- Method call facts (from call references with dotted names) --
+            if resolver is not None:
+                for qn, line, col, _offset, _end_offset, kind in refs:
+                    if _map_ref_kind(kind) == "call" and "." in qn:
+                        parts = qn.rsplit(".", 1)
+                        if len(parts) == 2:
+                            fq, bid = _find_containing_block(block_ranges, line)
+                            method_call_facts.append(MethodCallFact(
+                                file_path=rel_path,
+                                func_qn=fq,
+                                receiver=parts[0].rsplit(".", 1)[-1],
+                                method=parts[1],
+                                block_id=bid,
+                                line=line,
+                            ))
+
             graph.add_def_uses_batch(def_use_facts)
+            graph.add_method_calls_batch(method_call_facts)
 
             # -- Import facts (via stdlib ast) ----------------------------
             import_facts = _extract_imports(rel_path, content)

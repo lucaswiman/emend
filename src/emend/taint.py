@@ -39,10 +39,16 @@ class TaintSource:
 
 @dataclass
 class TaintSink:
-    """A pattern that should not receive tainted values."""
-    pattern: str  # emend pattern string
+    """A pattern that should not receive tainted values.
+
+    Either ``pattern`` or ``effect`` (or both) must be set.  An ``effect``
+    key like ``"writes($OBJ)"`` resolves via the fact graph instead of
+    pattern matching — see :meth:`FactGraph.taint_propagation_datalog`.
+    """
+    pattern: str  # emend pattern string (may be "" when effect is set)
     label: str  # taint label name (which labels are forbidden)
     message: str  # violation message
+    effect: str = ""  # e.g. "writes($OBJ)", "reads($OBJ)"
 
 
 @dataclass
@@ -135,9 +141,10 @@ def load_taint_config(config_path: str) -> TaintConfig:
     sinks = []
     for s in raw.get("sinks", []) or []:
         sinks.append(TaintSink(
-            pattern=s["pattern"],
+            pattern=s.get("pattern", ""),
             label=s["label"],
             message=s.get("message", "Tainted value reaches sink"),
+            effect=s.get("effect", ""),
         ))
 
     sanitizers = []
@@ -175,6 +182,13 @@ def load_taint_config(config_path: str) -> TaintConfig:
 
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
 _QUALIFIED_IDENT_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b")
+
+# Augmented assignment regex: ``x += expr``, ``obj.field -= expr``, etc.
+_AUG_ASSIGN_RE = re.compile(
+    r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*"
+    r"(\+|-|\*|/|//|%|\*\*|&|\||\^|>>|<<)=\s*(.+)",
+    re.DOTALL,
+)
 
 
 def _extract_identifiers(expr: str) -> set[str]:
@@ -244,6 +258,14 @@ def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int,
         if m_dotted:
             target = m_dotted.group(1)
             rhs = m_dotted.group(2).strip()
+            assignments.append((start, target, rhs))
+            continue
+
+        # Augmented assignment: target op= value (+=, -=, *=, etc.)
+        m_aug = _AUG_ASSIGN_RE.match(stmt_text)
+        if m_aug:
+            target = m_aug.group(1)
+            rhs = m_aug.group(3).strip()
             assignments.append((start, target, rhs))
 
     return assignments
