@@ -28,6 +28,7 @@ const HTML_CONFIG_TOML: &str = include_str!("../../languages/html/config.toml");
 const CSS_CONFIG_TOML: &str = include_str!("../../languages/css/config.toml");
 const SQL_CONFIG_TOML: &str = include_str!("../../languages/sql/config.toml");
 const JINJA2_CONFIG_TOML: &str = include_str!("../../languages/jinja2/config.toml");
+const DATALOG_CONFIG_TOML: &str = include_str!("../../languages/datalog/config.toml");
 
 /// Return a cached `&'static LanguageConfig` for the given file extension.
 /// Defaults to Python config for unknown extensions.
@@ -39,6 +40,7 @@ pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
     static CSS_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     static SQL_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     static JINJA2_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
+    static DATALOG_CONFIG: OnceLock<LanguageConfig> = OnceLock::new();
     match ext {
         "py" | "pyi" => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -67,6 +69,10 @@ pub fn config_for_ext(ext: &str) -> &'static LanguageConfig {
         "jinja" | "jinja2" | "j2" => JINJA2_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(JINJA2_CONFIG_TOML)
                 .expect("Failed to parse Jinja2 config")
+        }),
+        "dl" | "datalog" => DATALOG_CONFIG.get_or_init(|| {
+            LanguageConfig::from_toml(DATALOG_CONFIG_TOML)
+                .expect("Failed to parse Datalog config")
         }),
         _ => PY_CONFIG.get_or_init(|| {
             LanguageConfig::from_toml(PYTHON_CONFIG_TOML)
@@ -2632,6 +2638,7 @@ impl LanguageConfig {
             "css" => "css",
             "sql" => "sql",
             "jinja" | "jinja2" | "j2" => "jinja2",
+            "dl" | "datalog" => "datalog",
             _ => return Err(format!("Unsupported extension: {}", ext)),
         };
         let config_path = lang_dir.join(lang_name).join("config.toml");
@@ -2649,6 +2656,7 @@ impl LanguageConfig {
             "css" => Ok(Self::from_toml(CSS_CONFIG_TOML).expect("Failed to parse embedded CSS config")),
             "sql" => Ok(Self::from_toml(SQL_CONFIG_TOML).expect("Failed to parse embedded SQL config")),
             "jinja2" => Ok(Self::from_toml(JINJA2_CONFIG_TOML).expect("Failed to parse embedded Jinja2 config")),
+            "datalog" => Ok(Self::from_toml(DATALOG_CONFIG_TOML).expect("Failed to parse embedded Datalog config")),
             _ => Err(format!("No config found for {}", lang_name)),
         }
     }
