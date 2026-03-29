@@ -4172,6 +4172,29 @@ def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: 
     return load_plugin(language).comment_handler.rename_in_docstrings(content, old_name, new_name)
 
 
+def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
+    """Get or build a FactGraph for the project.
+
+    Tries to load a persisted facts.db first, falls back to building
+    from scratch via build_from_project().
+    """
+    from .fact_graph import FactGraph
+
+    project_root = _find_project_root(project_path)
+    emend_dir = Path(project_root) / ".emend" / "cache"
+    facts_db = emend_dir / "facts_graph.db"
+
+    if facts_db.exists():
+        try:
+            return FactGraph(db_path=str(facts_db))
+        except Exception:
+            logger.debug("Failed to load facts_graph.db, rebuilding", exc_info=True)
+
+    # Build from scratch
+    graph = FactGraph.build_from_project(project_path)
+    return graph
+
+
 def find_references(
     selector: ExtendedSelector,
     project_path: str | None = None,
@@ -4182,23 +4205,7 @@ def find_references(
 ) -> Iterator[Reference]:
     """Find all references to a symbol across the project.
 
-    Uses Rust scope resolver for scope-aware resolution: only returns
-    references that actually refer to the target symbol, not coincidental
-    same-named symbols in other scopes or files.
-
-    Args:
-        selector: Symbol to find references for
-        project_path: Project root (auto-detected if None)
-        include_definition: Include the definition itself
-        include_imports: Include import statements
-        writes_only: Only return write (assignment) references
-        reads_only: Only return read (load) references
-
-    Returns:
-        List of Reference objects with location info
-
-    Raises:
-        ValueError: If symbol not found
+    Uses Datalog query over the FactGraph for scope-aware resolution.
     """
     if writes_only and reads_only:
         raise ValueError("Cannot specify both writes_only and reads_only")
@@ -4207,85 +4214,50 @@ def find_references(
     if not symbol_name:
         raise ValueError("Symbol path is required for find_references")
 
-    # scan_root: where to collect files (respects --project for scope limiting)
-    # module_root: project root for computing dotted module names (always git root)
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
-    resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
+    target_qn = f"{target_module}.{symbol_name}"
 
-    # Compute the set of qualified names we're looking for
-    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+    from .fact_graph import FactGraph
 
-    # Warm path: try reference_index first
-    cached_refs = query_reference_index(scan_root, f"{target_module}.{symbol_name}")
-    if cached_refs is None and symbol_name:
-        cached_refs = query_reference_index(scan_root, symbol_name)
+    graph = _get_or_build_fact_graph(scan_root)
 
-    if cached_refs is not None:
-        def _gen_warm() -> Iterator[Reference]:
-            for entry in cached_refs:
-                ref_kind = entry["ref_kind"]
-                is_def = ref_kind == "definition"
-                is_imp = ref_kind == "import"
-                is_wr = ref_kind == "write"
-                if not include_definition and is_def:
-                    continue
-                if not include_imports and is_imp:
-                    continue
-                if writes_only and not is_wr:
-                    continue
-                if reads_only and is_wr:
-                    continue
-                yield Reference(
-                    file_path=entry["file_path"],
-                    line=entry["line"],
-                    column=entry["col"],
-                    offset=0,
-                    is_definition=is_def,
-                    is_import=is_imp,
-                    is_write=is_wr,
-                )
-        return _gen_warm()
+    ref_facts = graph.refs_datalog(
+        target_qn,
+        writes_only=writes_only,
+        reads_only=reads_only,
+        include_definition=include_definition,
+        include_imports=include_imports,
+    )
+    # Also try bare name if qualified name yields nothing
+    if not ref_facts:
+        ref_facts = graph.refs_datalog(
+            symbol_name,
+            writes_only=writes_only,
+            reads_only=reads_only,
+            include_definition=include_definition,
+            include_imports=include_imports,
+        )
 
-    # Cold path: full project scan
-    language = selector.language
-    candidates = _files_importing_module(scan_root, target_module, language=language)
-    language = selector.language
+    project_root_resolved = str(Path(module_root).resolve())
 
     def _gen() -> Iterator[Reference]:
-        for py_file, _content, resolver in visit_project_ts(
-            name_hint=symbol_name,
-            project_path=scan_root,
-            target_file=resolved_target,
-            candidate_files=candidates,
-            target_qnames=all_target_qns,
-            language=language,
-        ):
-            for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
-                if qn in all_target_qns:
-                    is_def = kind == "definition"
-                    is_imp = kind == "import"
-                    is_wr = kind == "write"
-
-                    if not include_definition and is_def:
-                        continue
-                    if not include_imports and is_imp:
-                        continue
-                    if writes_only and not is_wr:
-                        continue
-                    if reads_only and is_wr:
-                        continue
-
-                    yield Reference(
-                        file_path=py_file,
-                        line=line,
-                        column=col,
-                        offset=0,
-                        is_definition=is_def,
-                        is_import=is_imp,
-                        is_write=is_wr,
-                    )
+        for r in ref_facts:
+            # Convert relative paths back to absolute
+            abs_path = str(Path(project_root_resolved) / r.file_path)
+            is_def = r.ref_kind == "definition"
+            is_imp = r.ref_kind == "import"
+            is_wr = r.ref_kind == "write"
+            yield Reference(
+                file_path=abs_path,
+                line=r.line,
+                column=r.col,
+                offset=0,
+                is_definition=is_def,
+                is_import=is_imp,
+                is_write=is_wr,
+            )
 
     return _gen()
 
@@ -4305,53 +4277,37 @@ def find_callers(
 ) -> Iterator[Reference]:
     """Find all places where a function is called across the project.
 
-    Unlike find_references, this only returns actual call sites,
-    not imports or other references.
-
-    Args:
-        selector: Symbol to find callers for
-        project_path: Project root (auto-detected if None)
-
-    Returns:
-        Iterator of Reference objects at call sites
+    Uses Datalog query on the call relation.
     """
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callers")
 
-    # scan_root: where to collect files (respects --project for scope limiting)
-    # module_root: project root for computing dotted module names (always git root)
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
-    resolved_target = str(Path(selector.file_path).resolve())
     target_module = _file_to_module(selector.file_path, module_root)
+    target_qn = f"{target_module}.{symbol_name}"
 
-    # Use import graph to pre-filter files
-    language = selector.language
-    candidates = _files_importing_module(scan_root, target_module, language=language)
+    graph = _get_or_build_fact_graph(scan_root)
 
-    all_target_qns = {symbol_name, f"{target_module}.{symbol_name}"}
+    call_facts = graph.callers_datalog(target_qn)
+    if not call_facts:
+        call_facts = graph.callers_datalog(symbol_name)
+
+    project_root_resolved = str(Path(module_root).resolve())
 
     def _gen() -> Iterator[Reference]:
-        for py_file, _content, resolver in visit_project_ts(
-            name_hint=symbol_name,
-            project_path=scan_root,
-            target_file=resolved_target,
-            candidate_files=candidates,
-            target_qnames=all_target_qns,
-            language=language,
-        ):
-            for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
-                if qn in all_target_qns and kind == "call":
-                    yield Reference(
-                        file_path=py_file,
-                        line=line,
-                        column=col,
-                        offset=0,
-                        is_definition=False,
-                        is_import=False,
-                        is_write=False,
-                    )
+        for c in call_facts:
+            abs_path = str(Path(project_root_resolved) / c.file_path)
+            yield Reference(
+                file_path=abs_path,
+                line=c.line,
+                column=c.col,
+                offset=0,
+                is_definition=False,
+                is_import=False,
+                is_write=False,
+            )
 
     return _gen()
 
@@ -4362,53 +4318,37 @@ def find_callees(
 ) -> list[Callee]:
     """Find all functions/methods called inside a function.
 
-    Args:
-        selector: Function to analyze
-        project_path: Project root (auto-detected if None)
-
-    Returns:
-        List of Callee objects
+    Uses Datalog query on call facts scoped by func_qn.
     """
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:
         raise ValueError("Symbol path is required for find_callees")
 
     file_path = selector.file_path
-    try:
-        content = Path(file_path).read_text()
-    except FileNotFoundError:
+    if not Path(file_path).exists():
         raise ValueError(f"File not found: {file_path}")
 
-    # Use tree-sitter symbols to find the target symbol's range
-    from .ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(file_path)
-    target_sym = find_symbol_by_path(symbols, selector.symbol_path)
-    if target_sym is None:
-        raise ValueError(f"Symbol not found: {'.'.join(selector.symbol_path)}")
+    scan_root = project_path if project_path else _find_project_root(file_path)
+    module_root = _find_project_root(file_path)
+    target_module = _file_to_module(file_path, module_root)
+    target_qn = f"{target_module}.{symbol_name}"
 
-    # Use scope resolver to find all call references in the file
-    project_root = project_path if project_path else _find_project_root(file_path)
-    resolver = _rust.PyScopeResolver(project_root)
-    resolver.index_file(file_path, content)
-    
-    refs = resolver.references_in_file(file_path)
-    
+    graph = _get_or_build_fact_graph(scan_root)
+
+    call_facts = graph.callees_datalog(target_qn)
+
     callees: list[Callee] = []
     seen: set[tuple[str, int]] = set()
-
-    for qn, line, col, offset, end_offset, kind in refs:
-        if kind == "call" and target_sym.line_start <= line <= target_sym.line_end:
-            # deduplicate by (QN, line) to match old _CalleeCollector._seen behavior
-            # (which was by name, but now we have line info too)
-            name = qn.rsplit('.', 1)[-1]
-            if (qn, line) not in seen:
-                seen.add((qn, line))
-                callees.append(Callee(
-                    name=name,
-                    qualified_name=qn,
-                    file_path=None,  # Not easily resolvable to file here
-                    line=line,
-                ))
+    for c in call_facts:
+        name = c.callee_qn.rsplit('.', 1)[-1]
+        if (c.callee_qn, c.line) not in seen:
+            seen.add((c.callee_qn, c.line))
+            callees.append(Callee(
+                name=name,
+                qualified_name=c.callee_qn,
+                file_path=None,
+                line=c.line,
+            ))
 
     return callees
 
@@ -4420,20 +4360,38 @@ def generate_graph(
 ) -> str:
     """Generate a call graph for all functions in a file.
 
-    Args:
-        file_path: Python file to analyze
-        project_path: Project root (auto-detected if None)
-        format: Output format - "plain", "json", or "dot"
-
-    Returns:
-        Graph in the requested format
+    Uses Datalog query on call facts.
     """
-    from .component_selector import ExtendedSelector
+    if not Path(file_path).exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
 
-    content = Path(file_path).read_text()
+    scan_root = project_path if project_path else _find_project_root(file_path)
+    module_root = _find_project_root(file_path)
 
-    raw = _rust.collect_callees(content)
-    edges: dict[str, list[str]] = {name: callees for name, callees in raw}
+    try:
+        rel_path = str(Path(file_path).resolve().relative_to(Path(module_root).resolve()))
+    except ValueError:
+        rel_path = file_path
+
+    graph = _get_or_build_fact_graph(scan_root)
+    edge_pairs = graph.graph_datalog(file_path=rel_path)
+
+    # Build edges dict from Datalog results
+    edges: dict[str, list[str]] = {}
+    for caller_qn, callee_qn in edge_pairs:
+        caller_name = caller_qn.rsplit('.', 1)[-1]
+        callee_name = callee_qn.rsplit('.', 1)[-1]
+        edges.setdefault(caller_name, [])
+        if callee_name not in edges[caller_name]:
+            edges[caller_name].append(callee_name)
+
+    # Also include functions and classes with no calls
+    syms = graph.symbols(file_path=rel_path)
+    for s in syms:
+        if s.kind in ("function", "async_function", "method", "async_method", "class"):
+            name = s.name
+            if name not in edges:
+                edges[name] = []
 
     if format == "json":
         return json.dumps(edges, indent=2)
@@ -4445,7 +4403,6 @@ def generate_graph(
         lines.append("}")
         return "\n".join(lines)
     else:
-        # plain text
         lines = []
         for caller, callees_list in edges.items():
             if callees_list:
@@ -4569,367 +4526,84 @@ def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
     return None
 
 
-def _dead_code_postfilter(
-    rows: list[tuple],
+def _string_literal_filter(
+    candidates: list["DeadSymbol"],
     scan_root: str,
     all_files: bool,
-    strings_count_as_references: bool,
-    entry_point_decorators: list[str] | None,
     exclude_references_from: list[str] | None,
-) -> list[DeadSymbol]:
-    """Shared post-filter for dead code candidates.
+) -> list["DeadSymbol"]:
+    """Filter out dead code candidates that have string-literal references.
 
-    Applies entry-point decorator filtering and string-literal scanning
-    to the candidate rows returned by either CozoDB or SQLite.
-
-    Args:
-        rows: List of (name, qname, kind, file_path, line, decorators) tuples.
+    Scans project source files for occurrences of each candidate's name in
+    string literals or other non-reference contexts.  This reduces false
+    positives from dynamic dispatch, serialization, and similar patterns.
     """
-    # Post-filter: built-in entry point decorators (applied at query time so
-    # changes to _ENTRY_POINT_DECORATOR_BASENAMES take effect without a full
-    # cache rebuild) plus any user-supplied entry_point_decorators.
-    combined_decs = set(_ENTRY_POINT_DECORATORS)
-    combined_basenames = set(_ENTRY_POINT_DECORATOR_BASENAMES)
-    if entry_point_decorators:
-        for d in entry_point_decorators:
-            combined_decs.add(d)
-            combined_basenames.add(d.rsplit(".", 1)[-1])
+    str_names = {d.name for d in candidates if len(d.name) > 3}
+    if not str_names:
+        return candidates
 
-    if rows:
-        filtered = []
-        for row in rows:
-            dec_str = row[5]  # decorators column
-            if dec_str:
-                skip = False
-                for dec in dec_str.split(","):
-                    dec_clean = dec.strip()
-                    if dec_clean.startswith("@"):
-                        dec_clean = dec_clean[1:]
-                    if "(" in dec_clean:
-                        dec_clean = dec_clean[:dec_clean.index("(")]
-                    if dec_clean in combined_decs:
-                        skip = True
-                        break
-                    basename = dec_clean.rsplit(".", 1)[-1] if "." in dec_clean else dec_clean
-                    if basename in combined_basenames:
-                        skip = True
-                        break
-                if skip:
-                    continue
-            filtered.append(row)
-        rows = filtered
+    source_files = _collect_source_files(
+        scan_root, git_tracked_only=not all_files,
+    )
 
-    if not rows:
-        return []
+    _exclude_prefixes: list[str] = []
+    _exclude_globs: list[str] = []
+    if exclude_references_from:
+        import fnmatch as _fnmatch
+        for pattern in exclude_references_from:
+            if "*" in pattern or "?" in pattern:
+                if not pattern.startswith("*") and not Path(pattern).is_absolute():
+                    pattern = str(Path(scan_root) / pattern)
+                if not pattern.endswith("*"):
+                    pattern = pattern.rstrip("/") + "/*"
+                _exclude_globs.append(pattern)
+            else:
+                _exclude_prefixes.append(str(Path(pattern).resolve()))
 
-    if not strings_count_as_references:
-        return [
-            DeadSymbol(
-                file_path=fp, name=name, kind=sym_kind,
-                line=line, selector=f"{fp}::{qname}",
-                reason="no references found",
-            )
-            for name, qname, sym_kind, fp, line, _decs in rows
-        ]
+    def _is_excluded_ref(path: str) -> bool:
+        if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
+            return True
+        if _exclude_globs:
+            return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
+        return False
 
-    # String-literal post-filter
-    str_names = {name for name, _, _, _, _, _ in rows if len(name) > 3}
+    file_cache: dict[str, str] = {}
+    for _fp in source_files:
+        _r = str(Path(_fp).resolve())
+        if _is_excluded_ref(_r):
+            continue
+        try:
+            _content = Path(_fp).read_text(errors="replace")
+        except Exception:
+            continue
+        if any(n in _content for n in str_names):
+            file_cache[_r] = _content
 
     names_with_str_ref: set[tuple[str, str]] = set()
-    if str_names:
-        source_files = _collect_source_files(
-            scan_root, git_tracked_only=not all_files,
-        )
-
-        _exclude_prefixes: list[str] = []
-        _exclude_globs: list[str] = []
-        if exclude_references_from:
-            import fnmatch as _fnmatch
-            for pattern in exclude_references_from:
-                if "*" in pattern or "?" in pattern:
-                    if not pattern.startswith("*") and not Path(pattern).is_absolute():
-                        pattern = str(Path(scan_root) / pattern)
-                    if not pattern.endswith("*"):
-                        pattern = pattern.rstrip("/") + "/*"
-                    _exclude_globs.append(pattern)
-                else:
-                    _exclude_prefixes.append(str(Path(pattern).resolve()))
-
-        def _is_excluded_ref(path: str) -> bool:
-            if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
-                return True
-            if _exclude_globs:
-                return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
-            return False
-
-        file_cache: dict[str, str] = {}
-        # Build file cache: scan all source files for any candidate name.
-        # Note: _rust.read_and_filter_files uses AND semantics (all names must
-        # be present), so we use a Python-level OR scan here instead.
-        for _fp in source_files:
-            _r = str(Path(_fp).resolve())
-            if _is_excluded_ref(_r):
-                continue
-            try:
-                _content = Path(_fp).read_text(errors="replace")
-            except Exception:
-                continue
-            if any(n in _content for n in str_names):
-                file_cache[_r] = _content
-
-        for name, qname, sym_kind, fp, line, _decs in rows:
-            if len(name) <= 3:
-                continue
-            r = str(Path(fp).resolve())
-
-            # Same-file scan: any occurrence on a different line counts as a
-            # reference.  The SQL/CozoDB index only captures module-level
-            # references; method-body references are missed by the scope
-            # resolver, so we fall back to a text scan here.
-            content = file_cache.get(r)
-            if content and name in content:
-                for i, lt in enumerate(content.splitlines(), 1):
-                    if i == line or name not in lt:
-                        continue
-                    names_with_str_ref.add((fp, name))
-                    break
-
-            if (fp, name) in names_with_str_ref:
-                continue
-
-            for other_r, other_content in file_cache.items():
-                if other_r == r:
-                    continue
-                if name in other_content:
-                    names_with_str_ref.add((fp, name))
-                    break
-
-    dead_symbols = []
-    for name, qname, sym_kind, fp, line, _decs in rows:
-        if (fp, name) in names_with_str_ref:
+    for d in candidates:
+        if len(d.name) <= 3:
             continue
-        dead_symbols.append(
-            DeadSymbol(
-                file_path=fp, name=name, kind=sym_kind,
-                line=line, selector=f"{fp}::{qname}",
-                reason="no references found",
-            )
-        )
-    return dead_symbols
+        r = str(Path(d.file_path).resolve())
 
-
-def _find_dead_code_cozo(
-    project_root: str,
-    kind: str | None,
-    include_private: bool,
-    exclude_references_from: list[str] | None,
-    entry_point_names: list[str] | None = None,
-    exclude_paths: list[str] | None = None,
-) -> list[tuple] | None:
-    """CozoScript dead code candidate query.
-
-    Returns rows as (name, qualified_name, kind, file_path, line, decorators)
-    tuples, or None if CozoDB is unavailable.  Post-filtering for
-    entry_point_decorators and string literals is done by the caller.
-    """
-    fdb = _get_facts_db(project_root)
-    if fdb is None:
-        return None
-
-    try:
-        # Build the Datalog query piece by piece.
-        # has_ref: symbols that have at least one external reference
-        # (by qualified_name or module_qn, excluding self-references).
-        #
-        # When exclude_references_from has simple (non-glob) paths,
-        # incorporate them as CozoDB conditions directly.  Glob patterns
-        # are deferred to Python post-filtering.
-        excl_conditions = []
-        abs_root = str(Path(project_root).resolve())
-        if exclude_references_from:
-            for excl_path in exclude_references_from:
-                has_glob = "*" in excl_path or "?" in excl_path
-                if not has_glob:
-                    resolved = str(Path(excl_path).resolve())
-                    try:
-                        rel_excl = str(Path(resolved).relative_to(abs_root))
-                    except ValueError:
-                        rel_excl = resolved
-                    excl_conditions.append(
-                        f'not starts_with(ref_fp, "{rel_excl}")'
-                    )
-                elif excl_path.startswith("**/"):
-                    # Extract the directory segment after ** and use
-                    # str_includes() to match any path containing it.
-                    segment = excl_path[3:]
-                    if segment.endswith("/"):
-                        segment = "/" + segment
-                    else:
-                        segment = "/" + segment
-                    excl_conditions.append(
-                        f'not str_includes(ref_fp, "{segment}")'
-                    )
-
-        excl_clause = ", ".join(excl_conditions)
-        excl_suffix = f", {excl_clause}" if excl_clause else ""
-
-        rules = [
-            "has_ref[mqn] := "
-            "*fact_reference[mqn, ref_fp, ref_line, _, _], "
-            "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
-            f"not (ref_fp == sym_fp, ref_line == sym_line){excl_suffix}",
-        ]
-
-        # Also check references via module_qn
-        rules.append(
-            "has_ref[mqn] := "
-            "*fact_symbol[_, mqn, _, qn, _, _, _, _, _, _, _, _, _, _, _, _], "
-            "qn != \"\", "
-            "*fact_reference[qn, ref_fp, ref_line, _, _], "
-            "*fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], "
-            f"not (ref_fp == sym_fp, ref_line == sym_line){excl_suffix}"
-        )
-
-        # Build candidate conditions
-        candidate_clauses = [
-            "*fact_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
-            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa]",
-            "depth == 1",
-            "is_entry == false",
-            "is_exported == false",
-            "has_noqa == false",
-            "not has_ref[mqn]",
-        ]
-
-        if kind == "function":
-            candidate_clauses.append('kind in ["function", "async_function"]')
-        elif kind == "class":
-            candidate_clauses.append('kind == "class"')
-        else:
-            candidate_clauses.append(
-                'kind in ["function", "async_function", "method", "async_method", "class"]'
-            )
-
-        if not include_private:
-            candidate_clauses.append(
-                '(not starts_with(name, "_") or starts_with(name, "__"))'
-            )
-
-        # Exclude paths: simple prefixes in CozoDB, globs in Python.
-        # facts.db uses relative paths, so convert exclusions to relative.
-        glob_exclude_paths: list[str] = []
-        if exclude_paths:
-            for ep in exclude_paths:
-                if ep.startswith("*"):
-                    glob_exclude_paths.append(ep)
+        content = file_cache.get(r)
+        if content and d.name in content:
+            for i, lt in enumerate(content.splitlines(), 1):
+                if i == d.line or d.name not in lt:
                     continue
-                resolved = str(Path(ep).resolve())
-                if "*" not in resolved:
-                    try:
-                        rel_ep = str(Path(resolved).relative_to(abs_root))
-                    except ValueError:
-                        rel_ep = resolved
-                    candidate_clauses.append(f'not starts_with(fp, "{rel_ep}")')
-                else:
-                    glob_exclude_paths.append(ep)
+                names_with_str_ref.add((d.file_path, d.name))
+                break
 
-        if entry_point_names:
-            # CozoDB doesn't have NOT IN for inline lists easily;
-            # filter in Python post-processing instead
-            pass
+        if (d.file_path, d.name) in names_with_str_ref:
+            continue
 
-        rules.append(
-            "?[name, qn, kind, fp, line, decs] := "
-            + ", ".join(candidate_clauses)
-            + "\n:order fp, line"
-        )
+        for other_r, other_content in file_cache.items():
+            if other_r == r:
+                continue
+            if d.name in other_content:
+                names_with_str_ref.add((d.file_path, d.name))
+                break
 
-        query = "\n".join(rules)
-        result = fdb.run(query)
-
-        # Convert relative paths back to absolute for callers.
-        rows = [
-            (r[0], r[1], r[2],
-             str(Path(abs_root) / r[3]) if not Path(r[3]).is_absolute() else r[3],
-             r[4], r[5])
-            for r in result["rows"]
-        ]
-
-        # Post-filter entry_point_names in Python
-        if entry_point_names:
-            ep_set = set(entry_point_names)
-            rows = [r for r in rows if r[0] not in ep_set]
-
-        # Post-filter glob exclude_paths in Python
-        if glob_exclude_paths:
-            import fnmatch
-            def _matches_any_glob(fp: str) -> bool:
-                for pat in glob_exclude_paths:
-                    # Match against both the raw path and one with a
-                    # trailing separator so that **/scripts/ matches
-                    # files inside that directory.
-                    if fnmatch.fnmatch(fp, pat) or fnmatch.fnmatch(fp, pat + "*"):
-                        return True
-                    # Also try matching path segments
-                    if "**" in pat:
-                        # Convert ** glob to match any path depth
-                        pat_re = pat.replace("**", "*")
-                        if fnmatch.fnmatch(fp, pat_re) or fnmatch.fnmatch(fp, pat_re + "*"):
-                            return True
-                    # Check if any parent directory matches
-                    from pathlib import PurePosixPath
-                    for parent in PurePosixPath(fp).parents:
-                        pstr = str(parent) + "/"
-                        if fnmatch.fnmatch(pstr, pat):
-                            return True
-                return False
-            rows = [r for r in rows if not _matches_any_glob(r[3])]
-
-        return rows
-    except Exception:
-        logger.debug("CozoDB dead code query failed", exc_info=True)
-        return None
-
-
-def _find_dead_code_cached(
-    project_path: str,
-    kind: str | None,
-    include_private: bool,
-    exclude_references_from: list[str] | None,
-    strings_count_as_references: bool,
-    all_files: bool,
-    entry_point_decorators: list[str] | None = None,
-    entry_point_names: list[str] | None = None,
-    exclude_paths: list[str] | None = None,
-    language: str = "python",
-) -> list[DeadSymbol]:
-    """Index-accelerated dead code detection via CozoDB Datalog.
-
-    The heavy lifting (candidate filtering + reference checking) is a
-    Datalog query; the lightweight string-literal post-filter runs in
-    Python on the small result set.
-    """
-    scan_root = str(Path(project_path).resolve())
-
-    # Ensure the index is fresh; build it if necessary.
-    if not _ensure_index_fresh(scan_root, language=language):
-        logger.info("dead_code: index stale/missing — warming caches")
-        warm_caches(scan_root, type_engine="none", language=language)
-
-    project_root = _find_project_root(scan_root)
-
-    cozo_rows = _find_dead_code_cozo(
-        project_root, kind, include_private, exclude_references_from,
-        entry_point_names=entry_point_names,
-        exclude_paths=exclude_paths,
-    )
-    if cozo_rows is None:
-        return []
-
-    return _dead_code_postfilter(
-        cozo_rows, scan_root, all_files, strings_count_as_references,
-        entry_point_decorators, exclude_references_from,
-    )
+    return [d for d in candidates if (d.file_path, d.name) not in names_with_str_ref]
 
 
 # ---------------------------------------------------------------------------
@@ -5261,7 +4935,6 @@ def find_impact(
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
-    use_fact_graph: bool = True,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5273,8 +4946,6 @@ def find_impact(
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
         max_depth: Maximum depth for transitive closure (default 10).
-        use_fact_graph: Accepted for backwards compatibility (ignored;
-            the Datalog path on ``facts.db`` is always used).
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -5801,9 +5472,9 @@ def find_dead_code(
 ) -> Iterator[DeadSymbol]:
     """Find potentially dead (unreferenced) code in a project.
 
-    Uses ``symbol_index`` and ``reference_index`` from ``parse.db`` for
-    fast lookups.  When the index is stale or missing it is automatically
-    rebuilt so that the result is always based on current sources.
+    Uses ``dead_code_unified()`` Datalog query over the FactGraph for
+    combined reachable-block + unreferenced-symbol detection.  String
+    literal filtering stays as a Python post-filter.
 
     Args:
         project_path: Project root directory.
@@ -5833,17 +5504,125 @@ def find_dead_code(
         DeadSymbol objects sorted by file path and line number.
     """
     t0 = time.monotonic()
-    dead_symbols = _find_dead_code_cached(
-        project_path,
-        kind=kind,
-        include_private=include_private,
-        exclude_references_from=exclude_references_from,
-        strings_count_as_references=strings_count_as_references,
-        all_files=all_files,
-        entry_point_decorators=entry_point_decorators,
-        entry_point_names=entry_point_names,
-        exclude_paths=exclude_paths,
+    scan_root = str(Path(project_path).resolve())
+
+    # Build the FactGraph and run the unified Datalog dead code query.
+    graph = _get_or_build_fact_graph(project_path)
+
+    # Combine built-in + user-supplied entry point info for the Datalog query.
+    all_ep_decorators = list(_ENTRY_POINT_DECORATORS)
+    all_ep_basenames = list(_ENTRY_POINT_DECORATOR_BASENAMES)
+    if entry_point_decorators:
+        all_ep_decorators.extend(entry_point_decorators)
+        all_ep_basenames.extend(
+            d.rsplit(".", 1)[-1] for d in entry_point_decorators
+        )
+    all_ep_names = list(_ENTRY_POINT_NAMES)
+    if entry_point_names:
+        all_ep_names.extend(entry_point_names)
+
+    project_root_resolved = str(Path(_find_project_root(project_path)).resolve())
+
+    # Convert exclude_references_from to relative paths for the fact graph
+    excl_ref_paths: list[str] | None = None
+    excl_ref_segments: list[str] | None = None  # For ** glob patterns
+    if exclude_references_from:
+        excl_ref_paths = []
+        excl_ref_segments = []
+        for excl_path in exclude_references_from:
+            if excl_path.startswith("**/"):
+                # Extract directory segment for str_includes matching
+                segment = excl_path[3:].rstrip("/")
+                if segment:
+                    excl_ref_segments.append(segment)
+            elif "*" in excl_path or "?" in excl_path:
+                continue  # Complex globs not supported in Datalog
+            else:
+                resolved = str(Path(excl_path).resolve())
+                try:
+                    rel = str(Path(resolved).relative_to(project_root_resolved))
+                except ValueError:
+                    rel = resolved
+                excl_ref_paths.append(rel)
+
+    raw_dead = graph.dead_code_unified(
+        entry_point_decorators=all_ep_decorators + all_ep_basenames,
+        entry_point_names=all_ep_names,
+        exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
+        exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
     )
+
+    # Build file content cache for noqa checking
+    _file_lines_cache: dict[str, list[str]] = {}
+
+    def _has_noqa(fp: str, line: int) -> bool:
+        """Check if the definition line has a # noqa comment."""
+        if fp not in _file_lines_cache:
+            try:
+                _file_lines_cache[fp] = Path(fp).read_text(errors="replace").splitlines()
+            except Exception:
+                _file_lines_cache[fp] = []
+        lines = _file_lines_cache[fp]
+        if 0 < line <= len(lines):
+            line_text = lines[line - 1]
+            if "# noqa" in line_text:
+                return True
+        return False
+
+    # Convert SymbolFact results to DeadSymbol, applying Python post-filters.
+    dead_symbols: list[DeadSymbol] = []
+    for sym in raw_dead:
+        abs_fp = (
+            str(Path(project_root_resolved) / sym.file_path)
+            if not Path(sym.file_path).is_absolute()
+            else sym.file_path
+        )
+
+        # Kind filter
+        if kind == "function" and sym.kind not in ("function", "async_function"):
+            continue
+        if kind == "class" and sym.kind != "class":
+            continue
+
+        # Private filter
+        if not include_private and sym.name.startswith("_") and not sym.name.startswith("__"):
+            continue
+
+        # Exclude paths filter
+        if exclude_paths:
+            import fnmatch
+            skip = False
+            for ep in exclude_paths:
+                if fnmatch.fnmatch(abs_fp, ep) or fnmatch.fnmatch(abs_fp, ep + "*"):
+                    skip = True
+                    break
+                if "**" in ep:
+                    pat_re = ep.replace("**", "*")
+                    if fnmatch.fnmatch(abs_fp, pat_re) or fnmatch.fnmatch(abs_fp, pat_re + "*"):
+                        skip = True
+                        break
+            if skip:
+                continue
+
+        # noqa suppression
+        if _has_noqa(abs_fp, sym.line):
+            continue
+
+        dead_symbols.append(DeadSymbol(
+            file_path=abs_fp,
+            name=sym.name,
+            kind=sym.kind,
+            line=sym.line,
+            selector=f"{abs_fp}::{sym.qualified_name}",
+            reason="no references found",
+        ))
+
+    # String-literal post-filter
+    if strings_count_as_references:
+        dead_symbols = _string_literal_filter(
+            dead_symbols, scan_root, all_files, exclude_references_from,
+        )
+
     logger.info(
         "dead_code: %d dead symbols in %.3fs",
         len(dead_symbols), time.monotonic() - t0,
@@ -5876,7 +5655,6 @@ def safe_delete(
     cascade: bool = False,
     project_path: str | None = None,
     apply: bool = False,
-    use_fact_graph: bool = False,
 ) -> DeletePlan:
     """Delete a symbol and optionally cascade to newly-dead dependents.
 
@@ -5891,7 +5669,6 @@ def safe_delete(
         cascade: If True, transitively delete newly-dead dependents.
         project_path: Project root (auto-detected if None).
         apply: If True, write changes to files.
-        use_fact_graph: Accepted for backwards compatibility (ignored).
 
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.

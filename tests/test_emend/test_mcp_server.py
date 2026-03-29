@@ -528,8 +528,8 @@ def test_datalog_query_transitive_callers(tmp_path):
     # Find all callers of c (directly or transitively)
     result = datalog_query(
         query=(
-            'reaches[caller] := *call[caller, callee, _, _, _], callee == "example.c"\n'
-            'reaches[caller] := *call[caller, mid, _, _, _], reaches[mid]\n'
+            'reaches[caller] := *call[caller, callee, _, _, _, _, _], callee == "example.c"\n'
+            'reaches[caller] := *call[caller, mid, _, _, _, _, _], reaches[mid]\n'
             '?[caller] := reaches[caller]'
         ),
         project=str(tmp_path),
