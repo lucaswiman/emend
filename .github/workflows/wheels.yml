@@ -123,6 +123,7 @@ jobs:
         with:
           target: aarch64
           manylinux: auto
+          before-script-linux: export CFLAGS_aarch64_unknown_linux_gnu="-std=gnu99"
           args: >-
             --release --out dist
             --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
