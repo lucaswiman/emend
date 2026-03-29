@@ -455,6 +455,21 @@ def test_query_no_matches(sample_file):
     assert result.stdout.strip() == "", f"Expected empty output but got: {result.stdout}"
 
 
+def test_query_depth_invalid_spec(sample_file):
+    """Invalid --depth value should give a clear, user-friendly error message.
+
+    Passing a non-integer like '--depth foo' previously surfaced a raw Python
+    internal error: "invalid literal for int() with base 10: 'foo'".
+    The error message should mention 'depth' so the user knows what to fix.
+    """
+    result = runner.invoke(app, ["search", str(sample_file), "--depth", "foo"])
+    assert result.exit_code != 0, "Expected non-zero exit for invalid depth"
+    # The error message should mention 'depth' so the user knows what went wrong
+    assert "depth" in result.output.lower(), (
+        f"Expected 'depth' in error output, got: {result.output!r}"
+    )
+
+
 def test_query_no_filters(sample_file):
     """No filters returns all symbols."""
     result = runner.invoke(app, ["search", f"{sample_file}::*", "--output", "count"])

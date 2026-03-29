@@ -155,18 +155,25 @@ background on startup.
 
 ## MCP Server
 
-The MCP server exposes emend functionality to Claude Code and other LLM clients via 10 tools:
+The MCP server exposes emend functionality to Claude Code and other LLM clients via 17 tools:
 
-1. **`grep`** — Search code (pattern/symbol lookup/summary mode)
-2. **`modify`** — Edit symbols and components (set/add/remove)
-3. **`move`** — Move symbols/modules or copy with copy_only flag
-4. **`replace`** — Pattern-based code substitution
+1. **`search`** — Search for code patterns or symbols in Python files
+2. **`replace`** — Pattern-based code substitution
+3. **`modify`** — Edit symbols and components (set/add/remove)
+4. **`refs`** — Find all references (with filters)
 5. **`rename`** — Rename symbols/modules across the project
-6. **`refs`** — Find all references (with filters)
+6. **`move`** — Move symbols/modules or copy with copy_only flag
 7. **`graph`** — Generate call graphs
-8. **`batch`** — Apply bulk refactoring operations
+8. **`deadcode`** — Find unreferenced code
 9. **`lint`** — Run linting rules
-10. **`deadcode`** — Find unreferenced code
+10. **`impact`** — Compute transitive set of impacted symbols from a change
+11. **`semantic_context`** — Check a symbol for hidden dangers before editing it
+12. **`taint`** — Run taint analysis to detect unsafe data flows
+13. **`datalog_query`** — Query the project fact graph via CozoScript or structured params
+14. **`check_policies`** — Run policy checks against source code
+15. **`map_read`** — Read from the mapping store
+16. **`map_write`** — Write to the mapping store: add or delete entries
+17. **`grammar_and_cookbook`** — Return the emend grammar reference and cookbook
 
 See the [grammar_and_cookbook.rst](src/emend/grammar_and_cookbook.rst) reference for full command documentation.
 
@@ -559,28 +566,23 @@ def my_entry_point():  # noqa: emend:deadcode
     ...
 ```
 
-### Knowledge Base
+### Mapping Store
 
-emend includes a built-in knowledge base for cross-service identifier mappings, module-to-repo mappings, and free-form architectural notes. Stored in `.emend/knowledge.db` with FTS5 trigram search.
+emend includes a built-in mapping store for cross-service identifier mappings and module-to-repo mappings. Stored in `.emend/mappings.yaml`.
 
 ```bash
-# Notes — searchable scratchpad for decisions, conventions, patterns
-emend kb add "Auth flow" "Uses OAuth2 with PKCE. Tokens in Redis." --category architecture
-emend kb search "oauth"
-
 # Identifier mappings — cross-service relationships
-emend mapping add \
-    --source-project backend --source-id "UserService.create" --source-kind function \
-    --target-project gateway --target-id "POST /api/v1/users" --target-kind endpoint
-emend mapping search "UserService"
+emend map add backend "UserService.create" gateway "POST /api/v1/users" \
+    --source-kind function --target-kind endpoint
+emend map search "UserService"
 
 # Module mappings — map module prefixes to repos or local dirs
-emend modmap add payments --repo org/payments-service
-emend modmap add shared.utils --path /home/user/shared-utils
-emend modmap resolve payments.models.Order
+emend map add-module payments --repo org/payments-service
+emend map add-module shared.utils --path /home/user/shared-utils
+emend map resolve payments.models.Order
 ```
 
-Module mappings that reference GitHub repos are automatically cloned (via `gh`) and checked out as git worktrees under `~/.cache/emend/repo-checkouts/`. Set `EMEND_CACHE_DIR` to relocate this cache. See [Knowledge Base documentation](https://lucaswiman.github.io/emend/knowledge.html) for full details.
+Module mappings that reference GitHub repos are automatically cloned (via `gh`) and checked out as git worktrees under `~/.cache/emend/repo-checkouts/`. Set `EMEND_CACHE_DIR` to relocate this cache.
 
 ### pre-commit integration
 
