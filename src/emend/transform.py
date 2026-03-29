@@ -442,6 +442,14 @@ def _populate_facts_db(project_root: str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
 
         worktree_id = _get_worktree_id(project_root)
+        resolved_root = str(Path(project_root).resolve())
+
+        def _to_rel(abs_path: str) -> str:
+            """Convert an absolute file path to relative (to project root)."""
+            try:
+                return str(Path(abs_path).relative_to(resolved_root))
+            except ValueError:
+                return abs_path
 
         # Symbols — use :replace so the entire relation is atomically
         # swapped, which also removes any stale rows from deleted symbols.
@@ -457,7 +465,7 @@ def _populate_facts_db(project_root: str) -> None:
         ).fetchall()
 
         cozo_sym = [
-            [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+            [_to_rel(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7],
              r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
              bool(r[13]), bool(r[14]), bool(r[15])]
             for r in sym_rows
@@ -480,7 +488,7 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        cozo_ref = [list(r) for r in ref_rows]
+        cozo_ref = [[r[0], _to_rel(r[1]), r[2], r[3], r[4]] for r in ref_rows]
         fdb.run(
             "?[tqn, fp, line, col, kind] <- $rows "
             ":replace fact_reference {tqn, fp, line, col => kind}",
@@ -497,7 +505,7 @@ def _populate_facts_db(project_root: str) -> None:
             (worktree_id,),
         ).fetchall()
 
-        cozo_imp = [list(r) for r in imp_rows]
+        cozo_imp = [[_to_rel(r[0]), r[1]] for r in imp_rows]
         fdb.run(
             "?[fp, mod] <- $rows "
             ":replace fact_import {fp, mod}",
@@ -1325,9 +1333,14 @@ def _query_symbol_index_cozo(
             params["kind"] = kind
 
         if file_path:
+            # facts.db stores relative paths; convert absolute to relative.
             resolved = str(Path(file_path).resolve())
+            try:
+                rel_fp = str(Path(resolved).relative_to(Path(project_root).resolve()))
+            except ValueError:
+                rel_fp = resolved
             clauses.append("fp == $file_path")
-            params["file_path"] = resolved
+            params["file_path"] = rel_fp
 
         if qualified_name:
             # Match qn, mqn, or mqn prefix
@@ -1346,12 +1359,13 @@ def _query_symbol_index_cozo(
             query += f"\n:limit {limit}"
 
         result = fdb.run(query, params)
+        abs_root = str(Path(project_root).resolve())
         return [
             {
                 "name": r[0],
                 "qualified_name": r[1],
                 "kind": r[2],
-                "file_path": r[3],
+                "file_path": str(Path(abs_root) / r[3]) if not Path(r[3]).is_absolute() else r[3],
                 "line": r[4],
                 "end_line": r[5],
                 "depth": r[6],
@@ -1363,7 +1377,7 @@ def _query_symbol_index_cozo(
             for r in result["rows"]
         ]
     except Exception:
-        logger.debug("CozoDB query_symbol_index failed, falling back", exc_info=True)
+        logger.debug("CozoDB query_symbol_index failed", exc_info=True)
         return None
 
 
@@ -1738,7 +1752,7 @@ def query_reference_index(
     ref_kind: str | None = None,
     language: str = "python",
 ) -> list[dict] | None:
-    """Query references via CozoDB (with SQLite fallback).
+    """Query references via CozoDB Datalog.
 
     Returns a list of dicts with reference info, or None if the index
     is not available or not fresh.
@@ -1763,8 +1777,14 @@ def query_reference_index(
             + "\n:order fp, line"
         )
         result = fdb.run(query, params)
+        abs_root = str(Path(project_root).resolve())
         return [
-            {"file_path": r[0], "line": r[1], "col": r[2], "ref_kind": r[3]}
+            {
+                "file_path": str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0],
+                "line": r[1],
+                "col": r[2],
+                "ref_kind": r[3],
+            }
             for r in result["rows"]
         ]
     except Exception:
@@ -1776,7 +1796,7 @@ def query_import_graph(
     project_path: str,
     imported_module: str,
 ) -> list[str] | None:
-    """Query for files importing a module (CozoDB with SQLite fallback).
+    """Query for files importing a module via CozoDB Datalog.
 
     Returns file paths, or None if index not available.
     """
@@ -1791,7 +1811,11 @@ def query_import_graph(
             "?[fp] := *fact_import[fp, mod], mod == $mod",
             {"mod": imported_module},
         )
-        return [r[0] for r in result["rows"]]
+        abs_root = str(Path(project_root).resolve())
+        return [
+            str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0]
+            for r in result["rows"]
+        ]
     except Exception:
         logger.debug("CozoDB query_import_graph failed", exc_info=True)
         return None
@@ -4755,13 +4779,18 @@ def _find_dead_code_cozo(
         # incorporate them as CozoDB conditions directly.  Glob patterns
         # are deferred to Python post-filtering.
         excl_conditions = []
+        abs_root = str(Path(project_root).resolve())
         if exclude_references_from:
             for excl_path in exclude_references_from:
                 has_glob = "*" in excl_path or "?" in excl_path
                 if not has_glob:
                     resolved = str(Path(excl_path).resolve())
+                    try:
+                        rel_excl = str(Path(resolved).relative_to(abs_root))
+                    except ValueError:
+                        rel_excl = resolved
                     excl_conditions.append(
-                        f'not starts_with(ref_fp, "{resolved}")'
+                        f'not starts_with(ref_fp, "{rel_excl}")'
                     )
                 elif excl_path.startswith("**/"):
                     # Extract the directory segment after ** and use
@@ -4821,12 +4850,20 @@ def _find_dead_code_cozo(
             )
 
         # Exclude paths: simple prefixes in CozoDB, globs in Python.
+        # facts.db uses relative paths, so convert exclusions to relative.
         glob_exclude_paths: list[str] = []
         if exclude_paths:
             for ep in exclude_paths:
-                resolved = str(Path(ep).resolve()) if not ep.startswith("*") else ep
+                if ep.startswith("*"):
+                    glob_exclude_paths.append(ep)
+                    continue
+                resolved = str(Path(ep).resolve())
                 if "*" not in resolved:
-                    candidate_clauses.append(f'not starts_with(fp, "{resolved}")')
+                    try:
+                        rel_ep = str(Path(resolved).relative_to(abs_root))
+                    except ValueError:
+                        rel_ep = resolved
+                    candidate_clauses.append(f'not starts_with(fp, "{rel_ep}")')
                 else:
                     glob_exclude_paths.append(ep)
 
@@ -4844,7 +4881,13 @@ def _find_dead_code_cozo(
         query = "\n".join(rules)
         result = fdb.run(query)
 
-        rows = [tuple(r) for r in result["rows"]]
+        # Convert relative paths back to absolute for callers.
+        rows = [
+            (r[0], r[1], r[2],
+             str(Path(abs_root) / r[3]) if not Path(r[3]).is_absolute() else r[3],
+             r[4], r[5])
+            for r in result["rows"]
+        ]
 
         # Post-filter entry_point_names in Python
         if entry_point_names:
@@ -5189,8 +5232,13 @@ def _find_impact_via_fact_graph(
     all_edges: list[ImpactEdge] = []
     seen_impacted: set[str] = set()
 
+    abs_root = str(Path(proj_root).resolve())
     for row in result["rows"]:
         caller_mqn, caller_fp, caller_name, callee_mqn = row[0], row[1], row[2], row[3]
+
+        # Convert relative path back to absolute for selectors.
+        if not Path(caller_fp).is_absolute():
+            caller_fp = str(Path(abs_root) / caller_fp)
 
         # Build selector for the caller
         if caller_mqn not in mqn_to_sel:
@@ -5970,10 +6018,12 @@ def safe_delete(
                     for row in result["rows"]:
                         mqn, name, sym_kind, fp, line = row
                         if mqn not in delete_qns:
-                            sym_selector = f"{fp}::{name}"
+                            # Convert relative path back to absolute.
+                            abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
+                            sym_selector = f"{abs_fp}::{name}"
                             delete_set.append({
                                 "selector": sym_selector,
-                                "file_path": fp,
+                                "file_path": abs_fp,
                                 "name": name,
                                 "kind": sym_kind,
                                 "line": line,
