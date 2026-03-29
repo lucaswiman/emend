@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 ### Features
 
 #### Impact Analysis (`impact` command)
