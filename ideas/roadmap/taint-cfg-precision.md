@@ -582,7 +582,7 @@ effective_source[fp, fq, var, block, lbl] :=
 scalar_typed[fp, fq, var, block] :=
     taint_source[fp, fq, var, block, _],
     *type_binding[_, fp, line, _, type_str],
-    *def_use[fp, fq, var, _, _, block, line, _, _, _],
+    *def_use[fp, fq, var, _, block, _, line, _, _, _],
     scalar_type[type_str]
 ```
 
@@ -790,7 +790,7 @@ scalar_type[t] <- [["int"], ["float"], ["bool"], ["str"]]
 scalar_typed[fp, fq, var, block] :=
     taint_source[fp, fq, var, block, _],
     *type_binding[_, fp, line, _, type_str],
-    *def_use[fp, fq, var, _, _, block, line, _, _, _],
+    *def_use[fp, fq, var, _, block, _, line, _, _, _],
     scalar_type[type_str]
 
 effective_source[fp, fq, var, block, lbl] :=
