@@ -555,27 +555,6 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     return None
 
 
-def _store_qnames(content_hash: bytes, qnames: set[str]) -> None:
-    """Cache a file's qualified-name set (best-effort)."""
-    conn = _get_disk_cache()
-    if conn is None:
-        return
-    try:
-        import pickle
-        import zlib
-        data = zlib.compress(
-            pickle.dumps(qnames, protocol=pickle.HIGHEST_PROTOCOL), level=1
-        )
-        with _disk_cache_lock:
-            conn.execute(
-                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)",
-                (content_hash, data),
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
 _ALL_RE = re.compile(
     r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
     re.MULTILINE | re.DOTALL,
@@ -4566,27 +4545,6 @@ def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: i
             return True
 
     return False
-
-
-def _get_all_exported_names(content: str) -> set[str]:
-    """Extract names listed in __all__ from file content."""
-    try:
-        tree = ast.parse(content)
-    except Exception:
-        return set()
-
-    names: set[str] = set()
-    for stmt in tree.body:
-        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-            target = stmt.targets[0]
-            if isinstance(target, ast.Name) and target.id == '__all__':
-                value = stmt.value
-                if isinstance(value, (ast.List, ast.Tuple)):
-                    for el in value.elts:
-                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-                            names.add(el.value)
-    return names
-
 
 
 def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
