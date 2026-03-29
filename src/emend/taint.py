@@ -53,12 +53,26 @@ class TaintSanitizer:
 
 
 @dataclass
+class AttributeMutationSink:
+    """A sink triggered when any attribute is written on a tainted object.
+
+    Unlike :class:`TaintSink`, there is no ``pattern`` field — the trigger is
+    purely structural: ``<tainted_var>.<attr> = <value>``.  This is used to
+    detect TOCTOU races where an ORM object is loaded without a row-lock and
+    then mutated.
+    """
+    label: str   # which taint label triggers this sink
+    message: str  # violation message
+
+
+@dataclass
 class TaintConfig:
     """Configuration for taint analysis from patterns.yaml."""
     labels: list[str] = field(default_factory=list)
     sources: list[TaintSource] = field(default_factory=list)
     sinks: list[TaintSink] = field(default_factory=list)
     sanitizers: list[TaintSanitizer] = field(default_factory=list)
+    attribute_mutation_sinks: list[AttributeMutationSink] = field(default_factory=list)
 
 
 @dataclass
@@ -130,11 +144,19 @@ def load_taint_config(config_path: str) -> TaintConfig:
     for s in raw.get("sanitizers", []) or []:
         sanitizers.append(TaintSanitizer(pattern=s["pattern"], label=s["label"]))
 
+    attribute_mutation_sinks = []
+    for s in raw.get("attribute_mutation_sinks", []) or []:
+        attribute_mutation_sinks.append(AttributeMutationSink(
+            label=s["label"],
+            message=s.get("message", "Attribute mutation on tainted object"),
+        ))
+
     explicit_config = TaintConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
+        attribute_mutation_sinks=attribute_mutation_sinks,
     )
 
     # Support a ``presets`` key that merges named framework presets
@@ -542,8 +564,49 @@ def _analyze_function(
                     if not taint_state[var]:
                         del taint_state[var]
 
-    # Step 4: Check sinks for tainted values
+    # Step 3.5: Check attribute mutation sinks (TOCTOU / write-after-unlocked-read).
+    # Fires after sanitizers so that with_for_update() correctly suppresses it.
+    # For each dotted assignment  ``base.attr = value``  in line order, check
+    # whether ``base`` is still tainted with a relevant label.
     violations: list[TaintViolation] = []
+    if config.attribute_mutation_sinks:
+        for op_line_rel, op_kind, op_payload in _ops:
+            if op_kind != "assign":
+                continue
+            target, _rhs = op_payload
+            if "." not in target:
+                continue  # not an attribute mutation
+            base = target.split(".")[0]
+            if base not in taint_state:
+                continue
+            op_line_abs = op_line_rel + body_start - 1
+            for mut_sink in config.attribute_mutation_sinks:
+                if label_filter and mut_sink.label != label_filter:
+                    continue
+                if mut_sink.label not in taint_state[base]:
+                    continue
+                origin = taint_state[base][mut_sink.label]
+                violations.append(TaintViolation(
+                    file_path=file_path,
+                    line=op_line_abs,
+                    col=0,
+                    label=mut_sink.label,
+                    sink_pattern=f"{target} = ...",
+                    message=mut_sink.message,
+                    trace=[
+                        origin,
+                        TaintTraceStep(
+                            file_path=file_path,
+                            line=op_line_abs,
+                            col=0,
+                            description=f"sink: attribute mutation {target}",
+                            variable=base,
+                        ),
+                    ],
+                ))
+                break  # one violation per dotted-assignment line
+
+    # Step 4: Check sinks for tainted values
     for sink_def in config.sinks:
         if label_filter and sink_def.label != label_filter:
             continue

@@ -1122,6 +1122,85 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
        - pattern: "escape($X)"
          label: user_input
 
+     # Optional: flag any dotted attribute assignment on a tainted object
+     # (e.g.  obj.field = value  where obj carries a taint label).
+     # Unlike regular sinks, no pattern is needed -- the trigger is structural.
+     attribute_mutation_sinks:
+       - label: user_input
+         message: "Tainted object attribute mutated"
+
+**SQLAlchemy TOCTOU example:**
+
+A *time-of-check / time-of-use* (TOCTOU) race occurs when an ORM row is
+fetched without a row-level lock (``SELECT FOR UPDATE``) and then mutated
+within the same transaction.  A concurrent transaction can commit between
+the read and the write, producing a lost update.
+
+The ``attribute_mutation_sinks`` feature lets emend catch the assignment
+form (``obj.field = value``) in addition to the explicit ``setattr(obj, …)``
+call form.
+
+.. code-block:: yaml
+
+   # .emend/patterns.yaml
+   taint:
+     labels:
+       - unlocked_read
+
+     sources:
+       # SQLAlchemy 1.x / 2.x query() chain -- taints whatever variable
+       # receives the result
+       - pattern: "session.query($MODEL)"
+         label: unlocked_read
+       - pattern: "db.session.query($MODEL)"
+         label: unlocked_read
+       # SQLAlchemy 2.x Session.get()
+       - pattern: "session.get($MODEL, $ID)"
+         label: unlocked_read
+       - pattern: "db.session.get($MODEL, $ID)"
+         label: unlocked_read
+       # Core 2.x scalar / scalars
+       - pattern: "session.scalar($STMT)"
+         label: unlocked_read
+       - pattern: "session.scalars($STMT)"
+         label: unlocked_read
+
+     sanitizers:
+       # with_for_update() anywhere in the query chain removes the label
+       # from the assignment target on the same line.
+       - pattern: "$QUERY.with_for_update()"
+         label: unlocked_read
+       - pattern: "$QUERY.with_for_update($ARGS)"
+         label: unlocked_read
+
+     sinks:
+       # Explicit setattr() is caught as a normal expression sink
+       - pattern: "setattr($OBJ, $ATTR, $VAL)"
+         label: unlocked_read
+         message: "TOCTOU: setattr() on ORM object loaded without SELECT FOR UPDATE"
+
+     # Direct attribute assignment (obj.balance = x) requires this key
+     attribute_mutation_sinks:
+       - label: unlocked_read
+         message: "TOCTOU: attribute mutation on ORM object loaded without SELECT FOR UPDATE; use .with_for_update() on the query"
+
+This config flags the vulnerable pattern::
+
+   # FLAGGED -- no row-level lock
+   obj = session.query(Account).filter_by(id=account_id).first()
+   obj.balance = obj.balance - amount   # ← TOCTOU violation
+
+And accepts the safe form::
+
+   # OK -- with_for_update() sanitises the taint
+   obj = session.query(Account).with_for_update().filter_by(id=account_id).first()
+   obj.balance = obj.balance - amount   # safe
+
+The sanitizer is matched on the same line as the assignment, so both
+inline chains (``session.query(…).with_for_update().first()``) and
+broken-out chains (``q = q.with_for_update(); obj = q.first()``) are
+handled correctly.
+
 **Examples:**
 
 .. code-block:: bash
