@@ -1536,6 +1536,7 @@ class FactGraph:
         sanitizer_quantifier: str = "all_paths",  # "all_paths" or "some_path"
         sanitizer_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
+        scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
     ) -> list[TaintFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
 
@@ -1619,6 +1620,16 @@ class FactGraph:
         else:
             sink_line_rule = "sink_in_block[fp, fq, lbl, bid, line] <- []\n"
 
+        # Build scope_kill relation from scope sanitizer tuples
+        if scope_kills:
+            sk_rows = ", ".join(
+                f'["{fp}", "{fq}", "{lbl}", {bid}]'
+                for fp, fq, lbl, bid in scope_kills
+            )
+            scope_kill_rule = f"scope_kill[fp, fq, lbl, bid] <- [{sk_rows}]\n"
+        else:
+            scope_kill_rule = "scope_kill[fp, fq, lbl, bid] <- []\n"
+
         # -- Build the Datalog query --
 
         if sanitizer_quantifier == "some_path":
@@ -1632,6 +1643,7 @@ class FactGraph:
                 f"{effect_rules}"
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
+                f"{scope_kill_rule}"
 
                 # CFG reachability (for some_path sanitizer check)
                 "cfg_reaches[fp, fq, block, block] := "
@@ -1656,7 +1668,8 @@ class FactGraph:
                 # suppression happens at violation level for some_path)
                 "tainted[fp, fq, var, use_block, lbl] := "
                 "tainted[fp, fq, var, def_block, lbl], "
-                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _]\n"
+                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
+                "not scope_kill[fp, fq, lbl, def_block]\n"
 
                 # Pattern-based violations: taint reaches sink, not sanitized
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
@@ -1676,6 +1689,7 @@ class FactGraph:
                 f"{effect_rules}"
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
+                f"{scope_kill_rule}"
 
                 # Check if any CFG edges exist for functions with taint sources
                 "has_cfg[fp, fq] := "
@@ -1691,7 +1705,8 @@ class FactGraph:
                 "unsanitized[fp, fq, lbl, from_block], "
                 "has_cfg[fp, fq], "
                 "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
-                "not sanitizer_block[fp, fq, lbl, from_block]\n"
+                "not sanitizer_block[fp, fq, lbl, from_block], "
+                "not scope_kill[fp, fq, lbl, from_block]\n"
 
                 # Without CFG (fallback): propagate unsanitized via def-use,
                 # still blocking at sanitizer blocks (no path sensitivity,
@@ -1700,7 +1715,8 @@ class FactGraph:
                 "unsanitized[fp, fq, lbl, def_block], "
                 "not has_cfg[fp, fq], "
                 "*def_use[fp, fq, _, _, def_block, use_block, _, _, _, _], "
-                "not sanitizer_block[fp, fq, lbl, def_block]\n"
+                "not sanitizer_block[fp, fq, lbl, def_block], "
+                "not scope_kill[fp, fq, lbl, def_block]\n"
 
                 # A variable is tainted in a block if:
                 #   (a) it's a source in that block, OR
