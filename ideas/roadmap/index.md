@@ -151,16 +151,16 @@ replace `attribute_mutation_sinks` and other bespoke features.
 - [x] Add `method_call` relation and schema — `fact_graph.py` (`MethodCallFact`, `add_method_call`, `method_calls`)
 - [x] Add augmented assignment regex + `"mutate"` op kind to `_find_assignments_in_source()` — `taint.py` (`_AUG_ASSIGN_RE`)
 - [x] Implement `effect` key on sinks/sources (resolves `writes($X)`, `reads($X)`) — `taint.py` (`TaintSink.effect`), `fact_graph.py` (`taint_propagation_datalog(effect_sinks=)`)
-- [ ] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py` (deferred: backwards-compat retained until Phase 2 path-sensitive sanitization)
+- [x] Remove `attribute_mutation_sinks` and Python Step 3.5 loop — `taint.py` (removed in Phase 2; effect sinks replace this)
 - [x] Add `is_var_or_attr` helper to all Datalog queries using dotted-name prefix matching — `fact_graph.py` (two-rule expansion in effect violation rules)
 
 ### Phase 2: Path-Sensitive Sanitization
 
-- [ ] Rewrite `taint_propagation_datalog()` with `unsanitized` CFG-edge reachability — `fact_graph.py`
-- [ ] Add intra-block line-ordering guard for same-block sanitizer+sink — `fact_graph.py`
-- [ ] Add `quantifier` field (`all_paths`/`some_path`) to sanitizer config — `taint.py`
-- [ ] Implement `through` parameter in `flow_rule_check_datalog()` — `fact_graph.py`
-- [ ] Update Python fallback to per-block taint state — `taint.py`
+- [x] Rewrite `taint_propagation_datalog()` with `unsanitized` CFG-edge reachability — `fact_graph.py`
+- [x] Add intra-block line-ordering guard for same-block sanitizer+sink — `fact_graph.py`
+- [x] Add `quantifier` field (`all_paths`/`some_path`) to sanitizer config — `taint.py`
+- [x] Implement `through` parameter in `flow_rule_check_datalog()` — `fact_graph.py`
+- [x] Update Python fallback to per-block taint state — `taint.py`
 
 ### Phase 3: Scope Boundaries
 

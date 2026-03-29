@@ -327,17 +327,14 @@ def get_preset(name: str) -> TaintConfig:
 def merge_configs(*configs: TaintConfig) -> TaintConfig:
     """Merge multiple TaintConfigs, deduplicating labels.
 
-    Sources, sinks, sanitizers, and attribute_mutation_sinks are concatenated;
+    Sources, sinks, and sanitizers are concatenated;
     labels are deduplicated while preserving first-seen order.
     """
-    from emend.taint import AttributeMutationSink
-
     seen_labels: set[str] = set()
     labels: list[str] = []
     sources: list[TaintSource] = []
     sinks: list[TaintSink] = []
     sanitizers: list[TaintSanitizer] = []
-    attribute_mutation_sinks: list[AttributeMutationSink] = []
 
     for cfg in configs:
         for lbl in cfg.labels:
@@ -347,12 +344,10 @@ def merge_configs(*configs: TaintConfig) -> TaintConfig:
         sources.extend(cfg.sources)
         sinks.extend(cfg.sinks)
         sanitizers.extend(cfg.sanitizers)
-        attribute_mutation_sinks.extend(cfg.attribute_mutation_sinks)
 
     return TaintConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
-        attribute_mutation_sinks=attribute_mutation_sinks,
     )

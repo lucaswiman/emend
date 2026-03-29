@@ -56,19 +56,7 @@ class TaintSanitizer:
     """A pattern that removes taint."""
     pattern: str  # emend pattern string
     label: str  # which label is sanitized
-
-
-@dataclass
-class AttributeMutationSink:
-    """A sink triggered when any attribute is written on a tainted object.
-
-    Unlike :class:`TaintSink`, there is no ``pattern`` field — the trigger is
-    purely structural: ``<tainted_var>.<attr> = <value>``.  This is used to
-    detect TOCTOU races where an ORM object is loaded without a row-lock and
-    then mutated.
-    """
-    label: str   # which taint label triggers this sink
-    message: str  # violation message
+    quantifier: str = "all_paths"  # "all_paths" or "some_path"
 
 
 @dataclass
@@ -78,7 +66,6 @@ class TaintConfig:
     sources: list[TaintSource] = field(default_factory=list)
     sinks: list[TaintSink] = field(default_factory=list)
     sanitizers: list[TaintSanitizer] = field(default_factory=list)
-    attribute_mutation_sinks: list[AttributeMutationSink] = field(default_factory=list)
 
 
 @dataclass
@@ -149,13 +136,9 @@ def load_taint_config(config_path: str) -> TaintConfig:
 
     sanitizers = []
     for s in raw.get("sanitizers", []) or []:
-        sanitizers.append(TaintSanitizer(pattern=s["pattern"], label=s["label"]))
-
-    attribute_mutation_sinks = []
-    for s in raw.get("attribute_mutation_sinks", []) or []:
-        attribute_mutation_sinks.append(AttributeMutationSink(
-            label=s["label"],
-            message=s.get("message", "Attribute mutation on tainted object"),
+        sanitizers.append(TaintSanitizer(
+            pattern=s["pattern"], label=s["label"],
+            quantifier=s.get("quantifier", "all_paths"),
         ))
 
     explicit_config = TaintConfig(
@@ -163,7 +146,6 @@ def load_taint_config(config_path: str) -> TaintConfig:
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
-        attribute_mutation_sinks=attribute_mutation_sinks,
     )
 
     # Support a ``presets`` key that merges named framework presets
@@ -546,7 +528,75 @@ def _analyze_function(
                                 variable=loop_var,
                             )
 
-    # Step 3: Apply sanitizers to remove taint
+    # Step 3: Apply sanitizers to remove taint.
+    # Path-sensitive: only remove taint if sanitizer(s) cover all paths from
+    # the source to the function exit.  When a sanitizer is in a conditional
+    # branch but the other branch is uncovered, taint is preserved.
+
+    # Build CFG for path-sensitive sanitizer analysis.
+    _cfg_for_func = None
+    _cfg_edges: dict[int, list[int]] | None = None
+    try:
+        from emend.cfg import build_cfgs_for_source
+        func_source = "\n".join(lines[func_start - 1 : func_end])
+        cfgs = build_cfgs_for_source(func_source, ext="py")
+        if cfgs:
+            _cfg_for_func = cfgs[0]
+            # Build adjacency list for BFS
+            _cfg_edges = {}
+            for edge in _cfg_for_func.get_edges():
+                src_b = edge["from"]
+                _cfg_edges.setdefault(src_b, []).append(edge["to"])
+    except Exception:
+        logger.debug("CFG construction failed for sanitizer path analysis", exc_info=True)
+
+    def _find_block_for_line(match_line: int) -> int | None:
+        """Find the most specific CFG block containing match_line."""
+        if _cfg_for_func is None:
+            return None
+        rel_line = match_line - func_start
+        best_block_id = None
+        best_size = float("inf")
+        for block in _cfg_for_func.get_blocks():
+            if block["start_line"] <= rel_line <= block["end_line"]:
+                size = block["end_line"] - block["start_line"]
+                if size < best_size:
+                    best_size = size
+                    best_block_id = block["id"]
+        return best_block_id
+
+    def _all_paths_sanitized(san_blocks: set[int]) -> bool:
+        """Check if all CFG paths from entry to exit pass through a san block.
+
+        Uses BFS from the entry block, treating sanitizer blocks as impassable.
+        If the exit is unreachable, all paths are sanitized.
+        """
+        if _cfg_for_func is None or _cfg_edges is None:
+            return True  # fallback: assume all paths sanitized (old behaviour)
+        entry = _cfg_for_func.entry
+        exit_b = _cfg_for_func.exit
+        # BFS avoiding sanitizer blocks
+        visited: set[int] = set()
+        queue = [entry]
+        while queue:
+            block = queue.pop(0)
+            if block in visited:
+                continue
+            visited.add(block)
+            if block == exit_b:
+                return False  # reached exit without going through sanitizer
+            if block in san_blocks:
+                continue  # sanitizer blocks stop propagation
+            for succ in _cfg_edges.get(block, []):
+                if succ not in visited:
+                    queue.append(succ)
+        return True  # exit not reachable without going through sanitizers
+
+    # First pass: collect all sanitizer matches grouped by (var, label)
+    # to evaluate path coverage collectively.
+    _san_matches: dict[tuple[str, str], list[tuple[int, str]]] = {}  # (var, label) -> [(match_line, quantifier)]
+    _san_match_details: list[tuple[str, str, int, str]] = []  # (var, label, match_line, quantifier)
+
     for san_def in config.sanitizers:
         if label_filter and san_def.label != label_filter:
             continue
@@ -575,58 +625,46 @@ def _analyze_function(
             if assign_match:
                 sanitized_vars.add(assign_match.group(1))
 
-            # Also sanitize any variables appearing in metavar captures
             for cap_name, cap_val in (match.captures or {}).items():
                 if cap_val and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cap_val):
                     sanitized_vars.add(cap_val)
 
             for var in sanitized_vars:
-                if var in taint_state and san_def.label in taint_state[var]:
-                    del taint_state[var][san_def.label]
-                    if not taint_state[var]:
-                        del taint_state[var]
+                key = (var, san_def.label)
+                _san_matches.setdefault(key, []).append(
+                    (match_line, san_def.quantifier)
+                )
 
-    # Step 3.5: Check attribute mutation sinks (TOCTOU / write-after-unlocked-read).
-    # Fires after sanitizers so that with_for_update() correctly suppresses it.
-    # For each dotted assignment  ``base.attr = value``  in line order, check
-    # whether ``base`` is still tainted with a relevant label.
+    # Apply sanitizers: path-sensitive check
+    for (var, label), match_entries in _san_matches.items():
+        if var not in taint_state or label not in taint_state[var]:
+            continue
+
+        # Collect all sanitizer blocks for this (var, label)
+        san_blocks: set[int] = set()
+        any_some_path = False
+        for match_line, quantifier in match_entries:
+            if quantifier == "some_path":
+                any_some_path = True
+                break
+            block_id = _find_block_for_line(match_line)
+            if block_id is not None:
+                san_blocks.add(block_id)
+
+        # With some_path quantifier, any single match suffices
+        if any_some_path:
+            del taint_state[var][label]
+            if not taint_state[var]:
+                del taint_state[var]
+            continue
+
+        # With all_paths: check if sanitizer blocks cover all paths
+        if _all_paths_sanitized(san_blocks):
+            del taint_state[var][label]
+            if not taint_state[var]:
+                del taint_state[var]
+
     violations: list[TaintViolation] = []
-    if config.attribute_mutation_sinks:
-        for op_line_rel, op_kind, op_payload in _ops:
-            if op_kind != "assign":
-                continue
-            target, _rhs = op_payload
-            if "." not in target:
-                continue  # not an attribute mutation
-            base = target.split(".")[0]
-            if base not in taint_state:
-                continue
-            op_line_abs = op_line_rel + body_start - 1
-            for mut_sink in config.attribute_mutation_sinks:
-                if label_filter and mut_sink.label != label_filter:
-                    continue
-                if mut_sink.label not in taint_state[base]:
-                    continue
-                origin = taint_state[base][mut_sink.label]
-                violations.append(TaintViolation(
-                    file_path=file_path,
-                    line=op_line_abs,
-                    col=0,
-                    label=mut_sink.label,
-                    sink_pattern=f"{target} = ...",
-                    message=mut_sink.message,
-                    trace=[
-                        origin,
-                        TaintTraceStep(
-                            file_path=file_path,
-                            line=op_line_abs,
-                            col=0,
-                            description=f"sink: attribute mutation {target}",
-                            variable=base,
-                        ),
-                    ],
-                ))
-                break  # one violation per dotted-assignment line
 
     # Step 4: Check sinks for tainted values
     for sink_def in config.sinks:

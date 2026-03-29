@@ -1533,12 +1533,26 @@ class FactGraph:
         sinks: list[tuple[str, str, str, int, str]] | None = None,  # (file_path, func_qn, var_name, block_id, label)
         effect_sinks: list[tuple[str, str]] | None = None,  # (label, effect_kind) e.g. [("toctou", "writes")]
         sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same as sources
+        sanitizer_quantifier: str = "all_paths",  # "all_paths" or "some_path"
+        sanitizer_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
+        sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
     ) -> list[TaintFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
 
         Pattern matching (identifying sources/sinks/sanitizers) stays in Python.
         This method handles propagation: given pre-computed source/sink locations,
-        it traces taint through def-use chains using Datalog recursion.
+        it traces taint through CFG-edge reachability and def-use chains.
+
+        **Path-sensitive sanitization**: Taint only propagates to blocks that are
+        *unsanitized-reachable* from the source via CFG edges.  With the default
+        ``all_paths`` quantifier, a sanitizer must appear on **every** CFG path
+        from source to sink to suppress the violation.  With ``some_path``, a
+        sanitizer on **any** path suffices (the old behaviour).
+
+        **Intra-block line ordering**: When a sanitizer and sink co-occur in the
+        same basic block, the violation is suppressed only if the sanitizer line
+        precedes the sink line.  Pass ``sanitizer_lines`` and ``sink_lines`` to
+        enable this guard.
 
         When ``effect_sinks`` is provided, violations are also detected when a
         tainted variable (or its attributes) is written/mutated in a reachable
@@ -1566,14 +1580,15 @@ class FactGraph:
         else:
             sink_rule = "taint_sink[fp, fq, var, bid, lbl] <- []\n"
 
+        # Build sanitizer block relation from sanitizer tuples
         if sanitizers:
-            san_rows = ", ".join(
-                f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
-                for fp, fq, var, bid, lbl in sanitizers
+            san_block_rows = ", ".join(
+                f'["{fp}", "{fq}", "{lbl}", {bid}]'
+                for fp, fq, _var, bid, lbl in sanitizers
             )
-            sanitizer_rule = f"sanitizer[fp, fq, var, bid, lbl] <- [{san_rows}]\n"
+            sanitizer_block_rule = f"sanitizer_block[fp, fq, lbl, bid] <- [{san_block_rows}]\n"
         else:
-            sanitizer_rule = "sanitizer[fp, fq, var, bid, lbl] <- []\n"
+            sanitizer_block_rule = "sanitizer_block[fp, fq, lbl, bid] <- []\n"
 
         # Build effect sink rules if provided
         effect_rules = ""
@@ -1585,29 +1600,125 @@ class FactGraph:
             # Mutation kinds (excludes "del" — unbinding is not mutation)
             effect_rules += 'mutate_kind[k] <- [["write"], ["aug_write"]]\n'
 
-        query = (
-            f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
-            f"{sink_rule}"
-            f"{sanitizer_rule}"
-            f"{effect_rules}"
+        # Intra-block line-ordering: sanitizer_in_block and sink_in_block
+        if sanitizer_lines:
+            sl_rows = ", ".join(
+                f'["{fp}", "{fq}", "{lbl}", {bid}, {line}]'
+                for fp, fq, lbl, bid, line in sanitizer_lines
+            )
+            san_line_rule = f"sanitizer_in_block[fp, fq, lbl, bid, line] <- [{sl_rows}]\n"
+        else:
+            san_line_rule = "sanitizer_in_block[fp, fq, lbl, bid, line] <- []\n"
 
-            # Taint sources are tainted
-            "tainted[fp, fq, var, block, lbl] := "
-            "taint_source[fp, fq, var, block, lbl]\n"
+        if sink_lines:
+            skl_rows = ", ".join(
+                f'["{fp}", "{fq}", "{lbl}", {bid}, {line}]'
+                for fp, fq, lbl, bid, line in sink_lines
+            )
+            sink_line_rule = f"sink_in_block[fp, fq, lbl, bid, line] <- [{skl_rows}]\n"
+        else:
+            sink_line_rule = "sink_in_block[fp, fq, lbl, bid, line] <- []\n"
 
-            # Propagation through def-use chains (same function)
-            "tainted[fp, fq, target, use_block, lbl] := "
-            "tainted[fp, fq, source, def_block, lbl], "
-            "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
-            "target = source, "
-            "not sanitizer[fp, fq, source, def_block, lbl]\n"
+        # -- Build the Datalog query --
 
-            # Pattern-based violations: taint reaches sink
-            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-            "tainted[fp, fq, sink_var, sink_block, lbl], "
-            "taint_sink[fp, fq, sink_var, sink_block, lbl], "
-            "taint_source[fp, fq, src_var, src_block, lbl]\n"
-        )
+        if sanitizer_quantifier == "some_path":
+            # some_path: sanitizer on ANY path suppresses.
+            # If source can reach a sanitizer block, and that sanitizer block
+            # can reach the sink, the violation is suppressed.
+            query = (
+                f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
+                f"{sink_rule}"
+                f"{sanitizer_block_rule}"
+                f"{effect_rules}"
+                f"{san_line_rule}"
+                f"{sink_line_rule}"
+
+                # CFG reachability (for some_path sanitizer check)
+                "cfg_reaches[fp, fq, block, block] := "
+                "*cfg_block[fp, fq, block, _, _]\n"
+
+                "cfg_reaches[fp, fq, from_b, to_b] := "
+                "cfg_reaches[fp, fq, from_b, mid], "
+                "*cfg_edge[fp, fq, mid, to_b, _, _, _]\n"
+
+                # A sink block is sanitized if source→sanitizer→sink via CFG
+                "sink_sanitized[fp, fq, lbl, sink_block] := "
+                "taint_source[fp, fq, _, src_block, lbl], "
+                "sanitizer_block[fp, fq, lbl, san_block], "
+                "cfg_reaches[fp, fq, src_block, san_block], "
+                "cfg_reaches[fp, fq, san_block, sink_block]\n"
+
+                # Taint sources are tainted
+                "tainted[fp, fq, var, block, lbl] := "
+                "taint_source[fp, fq, var, block, lbl]\n"
+
+                # Propagation through def-use chains (no blocking — sanitizer
+                # suppression happens at violation level for some_path)
+                "tainted[fp, fq, var, use_block, lbl] := "
+                "tainted[fp, fq, var, def_block, lbl], "
+                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _]\n"
+
+                # Pattern-based violations: taint reaches sink, not sanitized
+                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+                "tainted[fp, fq, sink_var, sink_block, lbl], "
+                "taint_sink[fp, fq, sink_var, sink_block, lbl], "
+                "taint_source[fp, fq, src_var, src_block, lbl], "
+                "not sink_sanitized[fp, fq, lbl, sink_block]\n"
+            )
+        else:
+            # all_paths (default): sanitizer must be on EVERY path.
+            # Use CFG-edge reachability: taint only reaches blocks that are
+            # unsanitized-reachable from the source.
+            query = (
+                f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
+                f"{sink_rule}"
+                f"{sanitizer_block_rule}"
+                f"{effect_rules}"
+                f"{san_line_rule}"
+                f"{sink_line_rule}"
+
+                # Check if any CFG edges exist for functions with taint sources
+                "has_cfg[fp, fq] := "
+                "taint_source[fp, fq, _, _, _], "
+                "*cfg_edge[fp, fq, _, _, _, _, _]\n"
+
+                # Base case: source block is unsanitized-reachable
+                "unsanitized[fp, fq, lbl, block] := "
+                "taint_source[fp, fq, _, block, lbl]\n"
+
+                # With CFG: propagate along CFG edges, blocked by sanitizer blocks
+                "unsanitized[fp, fq, lbl, to_block] := "
+                "unsanitized[fp, fq, lbl, from_block], "
+                "has_cfg[fp, fq], "
+                "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
+                "not sanitizer_block[fp, fq, lbl, from_block]\n"
+
+                # Without CFG (fallback): propagate unsanitized via def-use,
+                # still blocking at sanitizer blocks (no path sensitivity,
+                # but sanitizers still work).
+                "unsanitized[fp, fq, lbl, use_block] := "
+                "unsanitized[fp, fq, lbl, def_block], "
+                "not has_cfg[fp, fq], "
+                "*def_use[fp, fq, _, _, def_block, use_block, _, _, _, _], "
+                "not sanitizer_block[fp, fq, lbl, def_block]\n"
+
+                # A variable is tainted in a block if:
+                #   (a) it's a source in that block, OR
+                #   (b) taint propagates via def-use AND block is unsanitized-reachable
+                "tainted[fp, fq, var, block, lbl] := "
+                "taint_source[fp, fq, var, block, lbl]\n"
+
+                "tainted[fp, fq, var, use_block, lbl] := "
+                "tainted[fp, fq, var, def_block, lbl], "
+                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
+                "unsanitized[fp, fq, lbl, use_block]\n"
+
+                # Pattern-based violations: taint reaches sink
+                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
+                "tainted[fp, fq, sink_var, sink_block, lbl], "
+                "taint_sink[fp, fq, sink_var, sink_block, lbl], "
+                "taint_source[fp, fq, src_var, src_block, lbl]\n"
+            )
 
         # Effect-based violations: tainted var is written/mutated
         # Three rule variants implement is_var_or_attr matching.
@@ -1645,9 +1756,31 @@ class FactGraph:
                 "sink_block != src_block\n"
             )
 
+        # Same-block suppression: if sanitizer precedes sink in the same block,
+        # filter out those violations.
+        # For pattern-based sinks: use sink_in_block line info.
+        query += (
+            "same_block_sanitized[fp, fq, lbl, block] := "
+            "sanitizer_in_block[fp, fq, lbl, block, san_line], "
+            "sink_in_block[fp, fq, lbl, block, sink_line], "
+            "san_line < sink_line\n"
+        )
+        # For effect-based sinks: the mutation line is the def_line in def_use.
+        if effect_sinks:
+            # Exact var write
+            query += (
+                "same_block_sanitized[fp, fq, lbl, block] := "
+                "sanitizer_in_block[fp, fq, lbl, block, san_line], "
+                "effect_sink_label[lbl], "
+                "*def_use[fp, fq, _, kind, block, _, write_line, _, _, _], "
+                "mutate_kind[kind], "
+                "san_line < write_line\n"
+            )
+
         query += (
             "?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block]"
+            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block], "
+            "not same_block_sanitized[fp, fq, lbl, sink_block]"
         )
 
         result = self._client.run(query)
@@ -1713,6 +1846,14 @@ class FactGraph:
         """Check flow-based lint rules via Datalog.
 
         Replaces _check_flow_rule() in lint.py for flows-from/flows-to/not-through rules.
+
+        ``through`` uses CFG-edge reachability: a violation fires if any path
+        from source to sink *avoids* the required through-point (i.e., the
+        complement of ``all_paths`` — the through-point must appear on every
+        path to suppress the violation).
+
+        ``not_through`` blocks propagation through the specified points.
+
         Returns list of (file_path, func_qn, source_var, sink_var) violations.
         """
         if not sources or not sinks:
@@ -1736,10 +1877,47 @@ class FactGraph:
         else:
             not_through_rule = "blocked[fp, fq, var, bid] <- []\n"
 
+        if through:
+            # Build required-point relation for CFG-edge avoidance check
+            req_rows = ", ".join(
+                f'["{fp}", "{fq}", {bid}]'
+                for fp, fq, _var, bid in through
+            )
+            required_rule = f"required[fp, fq, bid] <- [{req_rows}]\n"
+
+            # CFG-edge reachability that avoids required points
+            through_rules = (
+                f"{required_rule}"
+
+                # blocked_block: union of required (for through) and not_through blocks
+                "blocked_cfg[fp, fq, bid] := required[fp, fq, bid]\n"
+                "blocked_cfg[fp, fq, bid] := blocked[fp, fq, _, bid]\n"
+
+                # Base case: source blocks can avoid required points
+                "avoids_required[fp, fq, block] := "
+                "flow_source[fp, fq, _, block]\n"
+
+                # Recursive: propagate along CFG edges, skipping blocked blocks
+                "avoids_required[fp, fq, to_block] := "
+                "avoids_required[fp, fq, from_block], "
+                "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
+                "not blocked_cfg[fp, fq, from_block]\n"
+
+                # through-violation: sink reachable while avoiding required point
+                "through_violation[fp, fq, src_var, sink_var] := "
+                "avoids_required[fp, fq, sink_block], "
+                "flow_sink[fp, fq, sink_var, sink_block], "
+                "flow_source[fp, fq, src_var, _]\n"
+            )
+        else:
+            through_rules = ""
+
+        # Standard def-use reachability (for not_through and basic flow)
         query = (
             f"flow_source[fp, fq, var, bid] <- [{src_rows}]\n"
             f"flow_sink[fp, fq, var, bid] <- [{sink_rows}]\n"
             f"{not_through_rule}"
+            f"{through_rules}"
 
             "reaches[fp, fq, var, block] := "
             "flow_source[fp, fq, var, block]\n"
@@ -1749,12 +1927,23 @@ class FactGraph:
             "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
             "target = source, "
             "not blocked[fp, fq, source, def_block]\n"
-
-            "?[fp, fq, src_var, sink_var] := "
-            "reaches[fp, fq, sink_var, sink_block], "
-            "flow_sink[fp, fq, sink_var, sink_block], "
-            "flow_source[fp, fq, src_var, _]"
         )
+
+        if through:
+            # Violation requires BOTH: flow reaches sink AND path avoids required
+            query += (
+                "?[fp, fq, src_var, sink_var] := "
+                "reaches[fp, fq, sink_var, sink_block], "
+                "flow_sink[fp, fq, sink_var, sink_block], "
+                "through_violation[fp, fq, src_var, sink_var]"
+            )
+        else:
+            query += (
+                "?[fp, fq, src_var, sink_var] := "
+                "reaches[fp, fq, sink_var, sink_block], "
+                "flow_sink[fp, fq, sink_var, sink_block], "
+                "flow_source[fp, fq, src_var, _]"
+            )
 
         result = self._client.run(query)
         return [(r[0], r[1], r[2], r[3]) for r in result["rows"]]
