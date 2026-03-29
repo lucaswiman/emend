@@ -413,3 +413,91 @@ class TestImpactWithDiff:
         assert len(result.changed_symbols) >= 1
         changed_names = [s.split("::")[-1] for s in result.changed_symbols]
         assert "greet" in changed_names
+
+
+class TestFindImpactFactGraph:
+    """Tests for find_impact() with use_fact_graph=True (Datalog path)."""
+
+    def test_impact_fact_graph_direct_caller(self, tmp_path):
+        """Fact-graph-based impact finds direct callers."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "lib.py"
+        lib.write_text(
+            "def helper(x):\n"
+            "    return x + 1\n"
+        )
+
+        app = project / "app.py"
+        app.write_text(
+            "from lib import helper\n"
+            "\n"
+            "def main():\n"
+            "    return helper(42)\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["helper"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(
+            selectors=[selector],
+            project_path=str(project),
+            use_fact_graph=True,
+        )
+
+        assert len(result.changed_symbols) == 1
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "main" in impacted_names
+
+    def test_impact_fact_graph_transitive(self, tmp_path):
+        """Fact-graph-based impact computes transitive closure."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        c_file = project / "c_mod.py"
+        c_file.write_text(
+            "def deep_func():\n"
+            "    return 42\n"
+        )
+
+        b_file = project / "b_mod.py"
+        b_file.write_text(
+            "from c_mod import deep_func\n"
+            "\n"
+            "def middle_func():\n"
+            "    return deep_func()\n"
+        )
+
+        a_file = project / "a_mod.py"
+        a_file.write_text(
+            "from b_mod import middle_func\n"
+            "\n"
+            "def top_func():\n"
+            "    return middle_func()\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(c_file),
+            symbol_path=["deep_func"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(
+            selectors=[selector],
+            project_path=str(project),
+            use_fact_graph=True,
+        )
+
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "middle_func" in impacted_names
+        assert "top_func" in impacted_names

@@ -722,6 +722,155 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    # -- Impact closure (Datalog transitive reverse-caller with edges) ----
+
+    def impact_closure(
+        self,
+        changed_qns: set[str],
+        max_depth: int = 10,
+    ) -> dict[str, Any]:
+        """Compute the transitive set of impacted symbols from a set of changes.
+
+        Uses a Datalog recursive rule to find all transitive callers of the
+        changed symbols, returning both the impacted set and witness edges.
+
+        Returns:
+            Dict with keys:
+              - ``impacted``: set of qualified names transitively impacted
+              - ``edges``: list of (source_qn, caller_qn) witness edges
+        """
+        if not changed_qns:
+            return {"impacted": set(), "edges": []}
+
+        # Build a Datalog rule: seed the "changed" relation, then compute
+        # transitive callers.  CozoDB inline relations use the syntax:
+        #   changed[x] <- [["val1"], ["val2"]]
+        seed_rows = ", ".join(f'["{qn}"]' for qn in changed_qns)
+        query = (
+            f"changed[x] <- [{seed_rows}]\n"
+            # impacted_node: any symbol that is a caller (direct or transitive)
+            # of a changed symbol
+            "impacted_node[caller] := *call[caller, callee, _, _, _], changed[callee]\n"
+            "impacted_node[caller] := *call[caller, mid, _, _, _], impacted_node[mid]\n"
+            # Edges: record witness (caller, callee_or_mid) for each hop
+            "edge[caller, callee] := *call[caller, callee, _, _, _], changed[callee]\n"
+            "edge[caller, mid] := *call[caller, mid, _, _, _], impacted_node[mid]\n"
+            # Return impacted nodes (excluding changed set) with edges
+            "?[caller, callee] := edge[caller, callee], not changed[caller]"
+        )
+        result = self._client.run(query)
+        edges = [(r[0], r[1]) for r in result["rows"]]
+        impacted = {r[0] for r in result["rows"]}
+        return {"impacted": impacted, "edges": edges}
+
+    # -- Cascade dead code (Datalog negation) -------------------------------
+
+    def cascade_dead(
+        self,
+        initial_deletes: set[str],
+        exclude_entry_points: bool = True,
+    ) -> list[SymbolFact]:
+        """Find symbols that become dead after deleting *initial_deletes*.
+
+        Uses Datalog with stratified negation:
+        1. Mark initial deletes
+        2. Find symbols whose *only* references come from the delete set
+        3. Transitively add those to the delete set
+
+        This is a fixed-point computation expressed as recursive Datalog
+        rules — CozoDB's semi-naive evaluation handles convergence.
+
+        Returns:
+            List of SymbolFacts that would become dead (excluding the
+            initial deletes themselves).
+        """
+        if not initial_deletes:
+            return []
+
+        # Seed the delete set using CozoDB inline relation syntax
+        seed_rows = ", ".join(f'["{qn}"]' for qn in initial_deletes)
+        query = (
+            f"to_delete[x] <- [{seed_rows}]\n"
+            # A symbol has an external caller if called by something NOT
+            # in the delete set.
+            "has_external_caller[qn] := *call[caller, qn, _, _, _], "
+            "not to_delete[caller]\n"
+            # Cascade targets: callees of deleted symbols with no external callers,
+            # excluding the initial deletes themselves.
+            "callee_of_deleted[qn] := *call[caller, qn, _, _, _], to_delete[caller]\n"
+            "cascade[qn] := callee_of_deleted[qn], "
+            "not has_external_caller[qn], "
+            "not to_delete[qn]\n"
+            # Return full symbol info for cascade targets
+            "?[fp, name, qn, kind, line, end_line, parent] := "
+            "cascade[qn], "
+            "*symbol[qn, fp, name, kind, line, end_line, parent]"
+        )
+        result = self._client.run(query)
+        return [
+            SymbolFact(
+                file_path=r[0], name=r[1], qualified_name=r[2],
+                kind=r[3], line=r[4], end_line=r[5],
+                parent=r[6] if r[6] else None,
+            )
+            for r in result["rows"]
+        ]
+
+    # -- Symbols with no external references (parameterised dead code) ------
+
+    def unreferenced_symbols(
+        self,
+        exclude_qns: set[str] | None = None,
+        kinds: set[str] | None = None,
+    ) -> list[SymbolFact]:
+        """Find symbols with no references, optionally excluding refs from *exclude_qns*.
+
+        This generalises ``dead_code()`` by allowing a set of qualified
+        names to be excluded from the reference check — useful for
+        "what would become dead if we removed these symbols?"
+
+        Args:
+            exclude_qns: If provided, references from these symbols are
+                ignored when checking liveness.
+            kinds: If provided, only return symbols of these kinds.
+        """
+        if exclude_qns:
+            seed_rows = ", ".join(f'["{qn}"]' for qn in exclude_qns)
+            # When excluding callers, we only consider a symbol alive if
+            # it has a call-site caller NOT in the excluded set.  We use
+            # call facts (which carry the caller QN) rather than bare
+            # reference facts (which don't).
+            query = (
+                f"excluded[x] <- [{seed_rows}]\n"
+                "alive[qn] := *call[caller, qn, _, _, _], not excluded[caller]\n"
+                "dead[qn, fp, name, kind, line, end_line, parent] := "
+                "*symbol[qn, fp, name, kind, line, end_line, parent], "
+                "not alive[qn]\n"
+                "?[fp, name, qn, kind, line, end_line, parent] := "
+                "dead[qn, fp, name, kind, line, end_line, parent]"
+            )
+        else:
+            query = (
+                'has_ref[qn] := *reference[qn, _, _, _, _]\n'
+                'dead[qn, fp, name, kind, line, end_line, parent] := '
+                '*symbol[qn, fp, name, kind, line, end_line, parent], '
+                'not has_ref[qn]\n'
+                '?[fp, name, qn, kind, line, end_line, parent] := '
+                'dead[qn, fp, name, kind, line, end_line, parent]'
+            )
+        result = self._client.run(query)
+        facts = [
+            SymbolFact(
+                file_path=r[0], name=r[1], qualified_name=r[2],
+                kind=r[3], line=r[4], end_line=r[5],
+                parent=r[6] if r[6] else None,
+            )
+            for r in result["rows"]
+        ]
+        if kinds:
+            facts = [f for f in facts if f.kind in kinds]
+        return facts
+
     # -- Generic query (predicate-based, for backwards compat) -----------
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:

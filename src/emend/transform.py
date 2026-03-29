@@ -5281,11 +5281,107 @@ def _is_test_symbol(selector: str) -> bool:
     return False
 
 
+def _find_impact_via_fact_graph(
+    changed_selectors: list[str],
+    proj_root: str,
+    max_depth: int = 10,
+) -> ImpactResult:
+    """Compute impact using the FactGraph's Datalog transitive closure.
+
+    Builds a fact graph from the project and delegates the BFS to a
+    single CozoScript recursive query — replacing the Python BFS loop
+    with declarative Datalog.
+    """
+    from .fact_graph import FactGraph
+
+    graph = FactGraph.build_from_project(proj_root)
+
+    # Map selectors to qualified names for the Datalog query.
+    changed_qns: set[str] = set()
+    sel_to_qn: dict[str, str] = {}
+    qn_to_sel: dict[str, str] = {}
+    for sel_str in changed_selectors:
+        try:
+            sel = parse_extended_selector(sel_str)
+        except Exception:
+            continue
+        if not sel.symbol_path:
+            continue
+        # Look up the symbol's qualified name in the graph.
+        name = sel.symbol_path[-1]
+        matches = graph.symbols(name=name, file_path=sel.file_path)
+        if matches:
+            qn = matches[0].qualified_name
+            changed_qns.add(qn)
+            sel_to_qn[sel_str] = qn
+            qn_to_sel[qn] = sel_str
+
+    if not changed_qns:
+        return ImpactResult(
+            changed_symbols=changed_selectors,
+            impacted_symbols=[],
+            impacted_tests=[],
+            edges=[],
+        )
+
+    # Datalog transitive reverse-caller closure
+    result = graph.impact_closure(changed_qns, max_depth=max_depth)
+
+    # Map QNs back to selectors for impacted symbols
+    impacted: list[str] = []
+    all_edges: list[ImpactEdge] = []
+    for caller_qn, callee_qn in result["edges"]:
+        # Resolve QN → selector via the symbol fact
+        if caller_qn not in qn_to_sel:
+            caller_syms = graph.symbols(name=caller_qn.rsplit(".", 1)[-1])
+            for s in caller_syms:
+                if s.qualified_name == caller_qn:
+                    qn_to_sel[caller_qn] = f"{s.file_path}::{s.name}"
+                    break
+        caller_sel = qn_to_sel.get(caller_qn, caller_qn)
+        callee_sel = qn_to_sel.get(callee_qn, callee_qn)
+
+        all_edges.append(ImpactEdge(
+            source=callee_sel,
+            target=caller_sel,
+            kind="calls",
+        ))
+
+        if caller_sel not in impacted and caller_sel not in changed_selectors:
+            impacted.append(caller_sel)
+
+    # Identify impacted tests
+    impacted_tests: list[str] = []
+    all_impacted = changed_selectors + impacted
+
+    for sel_str in all_impacted:
+        file_part = sel_str.split('::', 1)[0] if '::' in sel_str else sel_str
+        if _is_test_file(file_part) or _is_test_symbol(sel_str):
+            if sel_str not in impacted_tests:
+                impacted_tests.append(sel_str)
+                for edge in all_edges:
+                    if edge.target == sel_str:
+                        all_edges.append(ImpactEdge(
+                            source=edge.source,
+                            target=sel_str,
+                            kind="test",
+                        ))
+                        break
+
+    return ImpactResult(
+        changed_symbols=changed_selectors,
+        impacted_symbols=impacted,
+        impacted_tests=impacted_tests,
+        edges=all_edges,
+    )
+
+
 def find_impact(
     selectors: list[ExtendedSelector] | None = None,
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
+    use_fact_graph: bool = False,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5297,6 +5393,8 @@ def find_impact(
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
         max_depth: Maximum BFS depth for transitive closure (default 10).
+        use_fact_graph: If True, delegate the transitive closure to a
+            Datalog query on the FactGraph instead of Python BFS.
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -5335,6 +5433,12 @@ def find_impact(
             impacted_symbols=[],
             impacted_tests=[],
             edges=[],
+        )
+
+    # Datalog path: build a fact graph and run a single recursive query
+    if use_fact_graph:
+        return _find_impact_via_fact_graph(
+            changed_selectors, proj_root, max_depth=max_depth,
         )
 
     # Step 2: BFS to compute transitive reverse-caller closure
@@ -5960,6 +6064,7 @@ def safe_delete(
     cascade: bool = False,
     project_path: str | None = None,
     apply: bool = False,
+    use_fact_graph: bool = False,
 ) -> DeletePlan:
     """Delete a symbol and optionally cascade to newly-dead dependents.
 
@@ -5973,6 +6078,8 @@ def safe_delete(
         cascade: If True, transitively delete newly-dead dependents.
         project_path: Project root (auto-detected if None).
         apply: If True, write changes to files.
+        use_fact_graph: If True, use Datalog queries on the FactGraph
+            to compute the cascade set instead of imperative BFS.
 
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.
@@ -6010,7 +6117,29 @@ def safe_delete(
     })
     delete_qns.add(target_qn)
 
-    if cascade:
+    if cascade and use_fact_graph:
+        # Datalog path: build a fact graph and compute cascade via a
+        # single CozoScript query with stratified negation.
+        from .fact_graph import FactGraph
+
+        graph = FactGraph.build_from_project(scan_root)
+        cascade_facts = graph.cascade_dead(delete_qns)
+
+        for sf in cascade_facts:
+            if sf.qualified_name in delete_qns:
+                continue
+            sym_selector = f"{sf.file_path}::{sf.name}"
+            delete_set.append({
+                "selector": sym_selector,
+                "file_path": sf.file_path,
+                "name": sf.name,
+                "kind": sf.kind,
+                "line": sf.line,
+                "reason": "only referenced by deleted symbol(s)",
+            })
+            delete_qns.add(sf.qualified_name)
+
+    elif cascade:
         # BFS: for each symbol in the delete set, find its callees, then
         # check whether each callee has references outside the delete set.
         queue_idx = 0
