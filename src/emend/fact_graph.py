@@ -1073,46 +1073,59 @@ class FactGraph:
         project_root = _find_project_root(project_path)
         source_files = _collect_source_files(project_root, language=language)
 
-        for file_path in source_files:
+        # The scope resolver may fail if pointed at a repo root with
+        # incompatible config.  Use the user-supplied project_path as
+        # the resolver root (typically ``src/pkg``), falling back to
+        # the detected project_root.
+        resolver_root = str(Path(project_path).resolve())
+
+        for abs_file_path in source_files:
             try:
-                content = Path(file_path).read_text(encoding="utf-8")
+                content = Path(abs_file_path).read_text(encoding="utf-8")
             except Exception:
-                logger.debug("Could not read %s", file_path, exc_info=True)
+                logger.debug("Could not read %s", abs_file_path, exc_info=True)
                 continue
 
-            module_name = _file_to_module(file_path, project_root)
+            # Store relative paths in the fact graph so they match
+            # selector paths regardless of working directory.
+            try:
+                rel_path = str(Path(abs_file_path).relative_to(Path(project_root).resolve()))
+            except ValueError:
+                rel_path = abs_file_path
+
+            module_name = _file_to_module(abs_file_path, project_root)
 
             # -- Symbol facts (via Rust symbol collection) ----------------
             try:
-                ext = Path(file_path).suffix.lstrip(".") or "py"
+                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
                 raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
             except Exception:
-                logger.debug("Could not parse %s for symbols", file_path, exc_info=True)
+                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
                 raw_symbols = []
 
             sym_facts: list[SymbolFact] = []
-            _walk_symbols(sym_facts, raw_symbols, file_path, module_name, parent_qn=None)
+            _walk_symbols(sym_facts, raw_symbols, rel_path, module_name, parent_qn=None)
             graph.add_symbols_batch(sym_facts)
 
             # -- Reference and call facts (via scope resolver) ------------
             try:
-                ext = Path(file_path).suffix.lstrip(".") or "py"
-                resolver = _rust.PyScopeResolver(project_root, ext)
-                resolver.index_file(file_path, content)
+                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
+                resolver = _rust.PyScopeResolver(resolver_root, ext)
+                resolver.index_file(abs_file_path, content)
             except Exception:
                 logger.debug(
-                    "Could not build scope resolver for %s", file_path, exc_info=True
+                    "Could not build scope resolver for %s", abs_file_path, exc_info=True
                 )
                 resolver = None
 
             if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, file_path)
+                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
 
                 try:
-                    refs = resolver.references_in_file(file_path)
+                    refs = resolver.references_in_file(abs_file_path)
                 except Exception:
                     logger.debug(
-                        "references_in_file failed for %s", file_path, exc_info=True
+                        "references_in_file failed for %s", abs_file_path, exc_info=True
                     )
                     refs = []
 
@@ -1121,7 +1134,7 @@ class FactGraph:
                 for qn, line, col, _offset, _end_offset, kind in refs:
                     ref_kind = _map_ref_kind(kind)
                     ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=file_path,
+                        symbol_qn=qn, file_path=rel_path,
                         line=line, col=col, ref_kind=ref_kind,
                     ))
 
@@ -1130,14 +1143,14 @@ class FactGraph:
                         if caller is not None:
                             call_facts.append(CallFact(
                                 caller_qn=caller, callee_qn=qn,
-                                file_path=file_path, line=line, col=col,
+                                file_path=rel_path, line=line, col=col,
                             ))
 
                 graph.add_references_batch(ref_facts)
                 graph.add_calls_batch(call_facts)
 
             # -- Import facts (via stdlib ast) ----------------------------
-            import_facts = _extract_imports(file_path, content)
+            import_facts = _extract_imports(rel_path, content)
             graph.add_imports_batch(import_facts)
 
         return graph

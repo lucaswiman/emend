@@ -5308,8 +5308,16 @@ def _find_impact_via_fact_graph(
         if not sel.symbol_path:
             continue
         # Look up the symbol's qualified name in the graph.
+        # The fact graph stores paths relative to the project root,
+        # so try both the selector path and a relative version.
         name = sel.symbol_path[-1]
         matches = graph.symbols(name=name, file_path=sel.file_path)
+        if not matches:
+            try:
+                rel = str(Path(sel.file_path).relative_to(Path(proj_root).resolve()))
+                matches = graph.symbols(name=name, file_path=rel)
+            except ValueError:
+                pass
         if matches:
             qn = matches[0].qualified_name
             changed_qns.add(qn)
@@ -5381,7 +5389,7 @@ def find_impact(
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
-    use_fact_graph: bool = True,
+    use_fact_graph: bool = False,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5393,8 +5401,11 @@ def find_impact(
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
         max_depth: Maximum BFS depth for transitive closure (default 10).
-        use_fact_graph: If True (default), delegate the transitive closure
-            to a Datalog query on the FactGraph instead of Python BFS.
+        use_fact_graph: If True, delegate the transitive closure to a
+            Datalog query on the FactGraph instead of Python BFS.
+            Currently slower than BFS because ``build_from_project``
+            re-parses all files; will become the faster path once the
+            fact graph is persisted as part of the index.
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -6064,7 +6075,7 @@ def safe_delete(
     cascade: bool = False,
     project_path: str | None = None,
     apply: bool = False,
-    use_fact_graph: bool = True,
+    use_fact_graph: bool = False,
 ) -> DeletePlan:
     """Delete a symbol and optionally cascade to newly-dead dependents.
 
@@ -6078,8 +6089,11 @@ def safe_delete(
         cascade: If True, transitively delete newly-dead dependents.
         project_path: Project root (auto-detected if None).
         apply: If True, write changes to files.
-        use_fact_graph: If True (default), use Datalog queries on the
-            FactGraph to compute the cascade set instead of imperative BFS.
+        use_fact_graph: If True, use Datalog queries on the FactGraph
+            to compute the cascade set instead of imperative BFS.
+            Currently slower than BFS because ``build_from_project``
+            re-parses all files; will become the faster path once the
+            fact graph is persisted as part of the index.
 
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.
