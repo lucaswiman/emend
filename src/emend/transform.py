@@ -5285,21 +5285,25 @@ def _find_impact_via_fact_graph(
     changed_selectors: list[str],
     proj_root: str,
     max_depth: int = 10,
-) -> ImpactResult:
-    """Compute impact using the FactGraph's Datalog transitive closure.
+) -> ImpactResult | None:
+    """Compute impact using a Datalog query on the persisted ``facts.db``.
 
-    Builds a fact graph from the project and delegates the BFS to a
-    single CozoScript recursive query — replacing the Python BFS loop
-    with declarative Datalog.
+    Uses the CozoDB ``facts.db`` that is populated by ``emend index``.
+    The query constructs a call graph from ``fact_reference`` (kind == "call")
+    joined with ``fact_symbol`` (to find the enclosing function), then
+    computes the transitive reverse-caller closure via recursive Datalog.
+
+    Returns None if facts.db is unavailable (caller falls back to BFS).
     """
-    from .fact_graph import FactGraph
+    fdb = _get_facts_db(proj_root)
+    if fdb is None:
+        return None
 
-    graph = FactGraph.build_from_project(proj_root)
+    # Resolve selectors to module-qualified names (mqn) in facts.db.
+    changed_mqns: set[str] = set()
+    sel_to_mqn: dict[str, str] = {}
+    mqn_to_sel: dict[str, str] = {}
 
-    # Map selectors to qualified names for the Datalog query.
-    changed_qns: set[str] = set()
-    sel_to_qn: dict[str, str] = {}
-    qn_to_sel: dict[str, str] = {}
     for sel_str in changed_selectors:
         try:
             sel = parse_extended_selector(sel_str)
@@ -5307,24 +5311,27 @@ def _find_impact_via_fact_graph(
             continue
         if not sel.symbol_path:
             continue
-        # Look up the symbol's qualified name in the graph.
-        # The fact graph stores paths relative to the project root,
-        # so try both the selector path and a relative version.
         name = sel.symbol_path[-1]
-        matches = graph.symbols(name=name, file_path=sel.file_path)
-        if not matches:
+        # Try both the raw file_path and a relative version.
+        for fp in (sel.file_path, _try_relative(sel.file_path, proj_root)):
+            if fp is None:
+                continue
             try:
-                rel = str(Path(sel.file_path).relative_to(Path(proj_root).resolve()))
-                matches = graph.symbols(name=name, file_path=rel)
-            except ValueError:
-                pass
-        if matches:
-            qn = matches[0].qualified_name
-            changed_qns.add(qn)
-            sel_to_qn[sel_str] = qn
-            qn_to_sel[qn] = sel_str
+                result = fdb.run(
+                    "?[mqn] := *fact_symbol[fp, mqn, name, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                    "fp == $fp, name == $name",
+                    {"fp": fp, "name": name},
+                )
+                if result["rows"]:
+                    mqn = result["rows"][0][0]
+                    changed_mqns.add(mqn)
+                    sel_to_mqn[sel_str] = mqn
+                    mqn_to_sel[mqn] = sel_str
+                    break
+            except Exception:
+                continue
 
-    if not changed_qns:
+    if not changed_mqns:
         return ImpactResult(
             changed_symbols=changed_selectors,
             impacted_symbols=[],
@@ -5332,22 +5339,85 @@ def _find_impact_via_fact_graph(
             edges=[],
         )
 
-    # Datalog transitive reverse-caller closure
-    result = graph.impact_closure(changed_qns, max_depth=max_depth)
+    # Build a Datalog query against the persisted facts.db schema:
+    #
+    #   fact_symbol: (fp, mqn) => (name, qn, kind, line, end_line, ...)
+    #   fact_reference: (tqn, fp, line, col) => (kind)
+    #
+    # A "call" is a fact_reference where kind == "call".  To find the
+    # caller, we join with fact_symbol to find which function encloses
+    # the reference line.
+    seed_rows = ", ".join(f'["{mqn}"]' for mqn in changed_mqns)
 
-    # Map QNs back to selectors for impacted symbols
+    rules = [f"changed[x] <- [{seed_rows}]\n"]
+
+    # call_edge: derive (caller_mqn, callee_mqn) from references + enclosing symbols
+    rules.append(
+        'call_edge[caller_mqn, callee_mqn] := '
+        '*fact_reference[callee_mqn, fp, ref_line, _, kind], kind == "call", '
+        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+        'caller_kind in ["function", "async_function", "method", "async_method"], '
+        'caller_line <= ref_line, ref_line <= caller_end\n'
+    )
+
+    # Also match references by qn (short qualified name)
+    rules.append(
+        'call_edge[caller_mqn, callee_mqn] := '
+        '*fact_symbol[_, callee_mqn, _, callee_qn, _, _, _, _, _, _, _, _, _, _, _, _], '
+        'callee_qn != "", '
+        '*fact_reference[callee_qn, fp, ref_line, _, kind], kind == "call", '
+        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
+        'caller_kind in ["function", "async_function", "method", "async_method"], '
+        'caller_line <= ref_line, ref_line <= caller_end\n'
+    )
+
+    # Depth-bounded transitive reverse-caller closure
+    rules.append(
+        "layer_0[caller] := call_edge[caller, callee], changed[callee]\n"
+    )
+    for i in range(1, max_depth):
+        rules.append(
+            f"layer_{i}[caller] := call_edge[caller, mid], layer_{i - 1}[mid]\n"
+        )
+    for i in range(max_depth):
+        rules.append(f"impacted[x] := layer_{i}[x]\n")
+
+    # Edges: witness pairs
+    rules.append(
+        "edge[caller, callee] := impacted[caller], call_edge[caller, callee], changed[callee]\n"
+    )
+    if max_depth > 1:
+        for i in range(1, max_depth):
+            rules.append(
+                f"edge[caller, mid] := layer_{i}[caller], call_edge[caller, mid], layer_{i - 1}[mid]\n"
+            )
+
+    # Return impacted symbols with file paths for selector construction
+    rules.append(
+        "?[caller_mqn, caller_fp, caller_name, callee_mqn] := "
+        "edge[caller_mqn, callee_mqn], not changed[caller_mqn], "
+        "*fact_symbol[caller_fp, caller_mqn, caller_name, _, _, _, _, _, _, _, _, _, _, _, _, _]"
+    )
+
+    try:
+        result = fdb.run("".join(rules))
+    except Exception:
+        logger.debug("facts.db impact query failed", exc_info=True)
+        return None
+
+    # Build the result
     impacted: list[str] = []
     all_edges: list[ImpactEdge] = []
-    for caller_qn, callee_qn in result["edges"]:
-        # Resolve QN → selector via the symbol fact
-        if caller_qn not in qn_to_sel:
-            caller_syms = graph.symbols(name=caller_qn.rsplit(".", 1)[-1])
-            for s in caller_syms:
-                if s.qualified_name == caller_qn:
-                    qn_to_sel[caller_qn] = f"{s.file_path}::{s.name}"
-                    break
-        caller_sel = qn_to_sel.get(caller_qn, caller_qn)
-        callee_sel = qn_to_sel.get(callee_qn, callee_qn)
+    seen_impacted: set[str] = set()
+
+    for row in result["rows"]:
+        caller_mqn, caller_fp, caller_name, callee_mqn = row[0], row[1], row[2], row[3]
+
+        # Build selector for the caller
+        if caller_mqn not in mqn_to_sel:
+            mqn_to_sel[caller_mqn] = f"{caller_fp}::{caller_name}"
+        caller_sel = mqn_to_sel[caller_mqn]
+        callee_sel = mqn_to_sel.get(callee_mqn, callee_mqn)
 
         all_edges.append(ImpactEdge(
             source=callee_sel,
@@ -5355,7 +5425,8 @@ def _find_impact_via_fact_graph(
             kind="calls",
         ))
 
-        if caller_sel not in impacted and caller_sel not in changed_selectors:
+        if caller_sel not in seen_impacted and caller_sel not in changed_selectors:
+            seen_impacted.add(caller_sel)
             impacted.append(caller_sel)
 
     # Identify impacted tests
@@ -5384,12 +5455,20 @@ def _find_impact_via_fact_graph(
     )
 
 
+def _try_relative(path: str, root: str) -> str | None:
+    """Try to make *path* relative to *root*; return None on failure."""
+    try:
+        return str(Path(path).relative_to(Path(root).resolve()))
+    except ValueError:
+        return None
+
+
 def find_impact(
     selectors: list[ExtendedSelector] | None = None,
     diff_spec: str | None = None,
     project_path: str | None = None,
     max_depth: int = 10,
-    use_fact_graph: bool = False,
+    use_fact_graph: bool = True,
 ) -> ImpactResult:
     """Compute the transitive set of impacted symbols from changed symbols or a diff.
 
@@ -5401,11 +5480,9 @@ def find_impact(
             Parsed to extract changed symbols automatically.
         project_path: Project root (auto-detected if None).
         max_depth: Maximum BFS depth for transitive closure (default 10).
-        use_fact_graph: If True, delegate the transitive closure to a
-            Datalog query on the FactGraph instead of Python BFS.
-            Currently slower than BFS because ``build_from_project``
-            re-parses all files; will become the faster path once the
-            fact graph is persisted as part of the index.
+        use_fact_graph: If True (default), use a Datalog query on the
+            persisted ``facts.db`` for the transitive closure.  Falls
+            back to Python BFS if ``facts.db`` is unavailable.
 
     Returns:
         ImpactResult with changed symbols, impacted symbols, tests, and edges.
@@ -5447,10 +5524,14 @@ def find_impact(
         )
 
     # Datalog path: build a fact graph and run a single recursive query
+    # Datalog path: query the persisted facts.db if available.
+    # Falls back to BFS if facts.db doesn't exist or the query fails.
     if use_fact_graph:
-        return _find_impact_via_fact_graph(
+        dl_result = _find_impact_via_fact_graph(
             changed_selectors, proj_root, max_depth=max_depth,
         )
+        if dl_result is not None:
+            return dl_result
 
     # Step 2: BFS to compute transitive reverse-caller closure
     from .ast_utils import find_nested_definitions, find_symbol_by_line
