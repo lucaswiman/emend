@@ -340,8 +340,3 @@ Find where regex named groups are defined and used:
    pattern = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})")
    m = pattern.match(text)
    year = m.group("year")
-
-.. code-block:: bash
-
-   # Inspect with dsl-debug (diagnostic)
-   emend dsl-debug src/parsers.py
