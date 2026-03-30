@@ -301,6 +301,92 @@ class TestTryExcept:
             f"Blocks {[b['id'] for b in unreachable]} are unreachable but should not be"
         )
 
+    def test_continue_with_inline_comment_reachable(self):
+        """A comment on the same line as continue must not create a false unreachable block.
+
+        Regression: tree-sitter parses inline comments as named sibling nodes.
+        walk_body treated them as statements, so after `continue` (which
+        terminates), the comment triggered creation of an unreachable block
+        whose byte range overlapped real code.
+        """
+        cfgs = _build("""\
+            def f():
+                for x in items:
+                    if cond:
+                        continue  # skip this
+                    process(x)
+        """)
+        cfg = cfgs[0]
+        blocks = cfg.get_blocks()
+        edges = cfg.get_edges()
+
+        adj: dict[int, list[int]] = {}
+        for e in edges:
+            adj.setdefault(e["from"], []).append(e["to"])
+        reachable: set[int] = set()
+        stack = [cfg.entry]
+        while stack:
+            b = stack.pop()
+            if b in reachable:
+                continue
+            reachable.add(b)
+            for n in adj.get(b, []):
+                stack.append(n)
+
+        unreachable_with_content = [
+            b for b in blocks
+            if b["id"] not in reachable
+            and b["id"] != cfg.exit
+            and (b.get("statements") or b.get("defs") or b.get("uses"))
+        ]
+        assert unreachable_with_content == [], (
+            f"Blocks {[b['id'] for b in unreachable_with_content]} are unreachable but should not be"
+        )
+
+    def test_finally_reachable_when_try_terminates(self):
+        """Finally block must be reachable even when all try paths terminate.
+
+        Regression: when the try body ended with return/raise and there were
+        no except clauses, the finally block had no incoming edges because
+        try_end was None and except_target was None.
+        """
+        cfgs = _build("""\
+            def f():
+                try:
+                    for item in entries:
+                        if item == target:
+                            return item
+                    raise ValueError("not found")
+                finally:
+                    cleanup()
+        """)
+        cfg = cfgs[0]
+        blocks = cfg.get_blocks()
+        edges = cfg.get_edges()
+
+        adj: dict[int, list[int]] = {}
+        for e in edges:
+            adj.setdefault(e["from"], []).append(e["to"])
+        reachable: set[int] = set()
+        stack = [cfg.entry]
+        while stack:
+            b = stack.pop()
+            if b in reachable:
+                continue
+            reachable.add(b)
+            for n in adj.get(b, []):
+                stack.append(n)
+
+        unreachable_with_content = [
+            b for b in blocks
+            if b["id"] not in reachable
+            and b["id"] != cfg.exit
+            and (b.get("statements") or b.get("defs") or b.get("uses"))
+        ]
+        assert unreachable_with_content == [], (
+            f"Blocks {[b['id'] for b in unreachable_with_content]} are unreachable but should not be"
+        )
+
     def test_try_else(self):
         cfgs = _build("""\
             def f():

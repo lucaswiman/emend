@@ -2414,7 +2414,8 @@ class FactGraph:
                         or block.get("defs")
                         or block.get("uses")
                     )
-                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"], has_content))
+                    # Tree-sitter lines are 0-indexed; convert to 1-indexed.
+                    block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
 
                 for edge in cfg.get_edges():
                     cfg_edge_facts.append(CfgEdgeFact(

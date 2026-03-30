@@ -452,7 +452,10 @@ impl<'a> CfgBuilder<'a> {
         // Collect children upfront: tree-sitter cursors can't be shared with
         // recursive walks, and the builder mutates self during iteration.
         let mut cursor = body.walk();
-        let children: Vec<_> = body.children(&mut cursor).filter(|c| c.is_named()).collect();
+        let children: Vec<_> = body.children(&mut cursor)
+            .filter(|c| c.is_named() && c.kind() != "comment" && c.kind() != "line_comment"
+                    && c.kind() != "block_comment")
+            .collect();
         let mut terminated = false;
 
         for child in children {
@@ -1113,6 +1116,20 @@ impl<'a> CfgBuilder<'a> {
                     }
                     if let Some(et) = except_target {
                         self.add_edge(et, fin_block, EdgeKind::Finally);
+                    }
+                    // If both try_end and except_target are None, all paths
+                    // through the try terminated (return/raise/break), but
+                    // finally still executes.  Connect from the try entry
+                    // block so the finally body is reachable.
+                    if try_end.is_none() && except_target.is_none() {
+                        if let Some(body) = try_body {
+                            let te = self.blocks.iter()
+                                .find(|b| b.start_byte == body.start_byte())
+                                .map(|b| b.id);
+                            if let Some(te) = te {
+                                self.add_edge(te, fin_block, EdgeKind::Finally);
+                            }
+                        }
                     }
                     if let Some(end) = self.walk_body(c, fin_block) {
                         self.add_edge(end, join, EdgeKind::Fallthrough);
