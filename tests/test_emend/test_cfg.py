@@ -209,6 +209,98 @@ class TestTryExcept:
         # Should have finally or exception edges
         assert cfg.block_count() >= 4
 
+    def test_try_except_handler_body_reachable(self):
+        """Except handler body blocks must be reachable from the exception edge.
+
+        Regression: the CFG builder created a separate block for the exception
+        edge target and a second block for walking the handler body, but never
+        connected them — leaving the entire handler body unreachable.
+        """
+        cfgs = _build("""\
+            def f():
+                for attempt in range(3):
+                    try:
+                        return risky()
+                    except Exception as e:
+                        error_str = str(e)
+                        if "409" in error_str:
+                            continue
+                        elif "429" in error_str:
+                            continue
+                        elif "timeout" in error_str:
+                            continue
+                        else:
+                            raise
+        """)
+        cfg = cfgs[0]
+        blocks = cfg.get_blocks()
+        edges = cfg.get_edges()
+
+        # Build reachable set via BFS from entry
+        adj: dict[int, list[int]] = {}
+        for e in edges:
+            adj.setdefault(e["from"], []).append(e["to"])
+        reachable: set[int] = set()
+        stack = [cfg.entry]
+        while stack:
+            b = stack.pop()
+            if b in reachable:
+                continue
+            reachable.add(b)
+            for n in adj.get(b, []):
+                stack.append(n)
+
+        # Every non-exit block WITH content (statements, defs, or uses)
+        # should be reachable. Empty structural join blocks may be
+        # unreachable when all paths through a try/except terminate.
+        unreachable_with_content = [
+            b for b in blocks
+            if b["id"] not in reachable
+            and b["id"] != cfg.exit
+            and (b.get("statements") or b.get("defs") or b.get("uses"))
+        ]
+        assert unreachable_with_content == [], (
+            f"Blocks {[b['id'] for b in unreachable_with_content]} are unreachable but should not be"
+        )
+
+    def test_try_except_multiple_handlers_reachable(self):
+        """Multiple except clauses should all be reachable."""
+        cfgs = _build("""\
+            def f():
+                try:
+                    risky()
+                except ValueError:
+                    handle_value()
+                except TypeError:
+                    handle_type()
+                except RuntimeError:
+                    handle_runtime()
+        """)
+        cfg = cfgs[0]
+        blocks = cfg.get_blocks()
+        edges = cfg.get_edges()
+
+        adj: dict[int, list[int]] = {}
+        for e in edges:
+            adj.setdefault(e["from"], []).append(e["to"])
+        reachable: set[int] = set()
+        stack = [cfg.entry]
+        while stack:
+            b = stack.pop()
+            if b in reachable:
+                continue
+            reachable.add(b)
+            for n in adj.get(b, []):
+                stack.append(n)
+
+        unreachable = [
+            b for b in blocks
+            if b["id"] not in reachable and b["id"] != cfg.exit
+        ]
+        assert unreachable == [], (
+            f"Blocks {[b['id'] for b in unreachable]} are unreachable but should not be"
+        )
+
     def test_try_else(self):
         cfgs = _build("""\
             def f():

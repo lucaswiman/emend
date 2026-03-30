@@ -784,7 +784,7 @@ def _populate_facts_db(project_root: str) -> None:
             except Exception:
                 cfgs = []
 
-            block_ranges: list[tuple[str, int, int, int]] = []
+            block_ranges: list[tuple[str, int, int, int, bool]] = []
             for cfg in cfgs:
                 func_name = cfg.func_name
                 func_qn = ""
@@ -801,7 +801,12 @@ def _populate_facts_db(project_root: str) -> None:
                         rel_path, func_qn, bid,
                         bid == cfg.entry, bid == cfg.exit,
                     ])
-                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"]))
+                    has_content = bool(
+                        block.get("statements")
+                        or block.get("defs")
+                        or block.get("uses")
+                    )
+                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"], has_content))
 
                 for edge in cfg.get_edges():
                     all_cfg_edges.append([
@@ -812,8 +817,10 @@ def _populate_facts_db(project_root: str) -> None:
             block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
 
             # -- source_loc entries for blocks (for unreachable block reporting)
-            for func_qn_br, bid_br, start_line_br, end_line_br in block_ranges:
-                if start_line_br > 0:
+            # Only store blocks with real content (statements, defs, or uses)
+            # to avoid reporting empty structural join blocks as unreachable.
+            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
+                if start_line_br > 0 and has_content_br:
                     all_source_locs.append([
                         rel_path, "block", f"{func_qn_br}:{bid_br}",
                         start_line_br, 0, end_line_br, 0,

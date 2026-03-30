@@ -1726,3 +1726,41 @@ class TestDeadCodeUnreachableBlocks:
         results = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = [r.name for r in results if isinstance(r, DeadSymbol)]
         assert "helper" in dead_names
+
+    def test_deadcode_no_false_unreachable_in_except_handler(self, tmp_path):
+        """Except handler bodies (including elif chains) should not be flagged as unreachable.
+
+        Regression: the Rust CFG builder created a separate block for the
+        exception edge target and another for the handler body, but never
+        connected them — causing the entire except body to appear unreachable.
+        """
+        import textwrap
+        from emend.transform import find_dead_code, DeadBlock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def execute_with_retry():
+                for attempt in range(3):
+                    try:
+                        return do_work()
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if "409" in error_str:
+                            continue
+                        elif "429" in error_str:
+                            continue
+                        elif "timeout" in error_str:
+                            continue
+                        else:
+                            raise
+        """))
+        self._build_index(str(project))
+        results = list(find_dead_code(str(project), show_last_reference=False))
+        unreachable = [r for r in results if isinstance(r, DeadBlock)]
+        # The except handler body is fully reachable — no blocks should
+        # be reported as unreachable dead code.
+        assert len(unreachable) == 0, (
+            f"False-positive unreachable blocks: "
+            f"{[(b.func_qn, b.start_line, b.end_line) for b in unreachable]}"
+        )

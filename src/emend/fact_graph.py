@@ -2385,7 +2385,7 @@ class FactGraph:
                 cfgs = []
 
             # Build block line ranges for block-tagging references
-            block_ranges: list[tuple[str, int, int, int]] = []  # (func_qn, block_id, start_line, end_line)
+            block_ranges: list[tuple[str, int, int, int, bool]] = []
             cfg_block_facts: list[CfgBlockFact] = []
             cfg_edge_facts: list[CfgEdgeFact] = []
 
@@ -2409,7 +2409,12 @@ class FactGraph:
                         is_entry=(bid == cfg.entry),
                         is_exit=(bid == cfg.exit),
                     ))
-                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"]))
+                    has_content = bool(
+                        block.get("statements")
+                        or block.get("defs")
+                        or block.get("uses")
+                    )
+                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"], has_content))
 
                 for edge in cfg.get_edges():
                     cfg_edge_facts.append(CfgEdgeFact(
@@ -2428,8 +2433,8 @@ class FactGraph:
             # Store source_loc entries for blocks so unreachable block reporting
             # can look up start/end lines without scanning file content again.
             block_loc_facts: list[SourceLocFact] = []
-            for func_qn_br, bid_br, start_line_br, end_line_br in block_ranges:
-                if start_line_br > 0:
+            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
+                if start_line_br > 0 and has_content_br:
                     block_loc_facts.append(SourceLocFact(
                         file_path=rel_path,
                         loc_kind="block",
@@ -2689,7 +2694,7 @@ def _enclosing_symbol(
 
 
 def _find_containing_block(
-    block_ranges: list[tuple[str, int, int, int]],
+    block_ranges: list[tuple],
     line: int,
 ) -> tuple[str, int]:
     """Find the (func_qn, block_id) containing a given line.
@@ -2700,7 +2705,7 @@ def _find_containing_block(
     best_block_id = -1
     best_span = float("inf")
 
-    for func_qn, block_id, start_line, end_line in block_ranges:
+    for func_qn, block_id, start_line, end_line, *_ in block_ranges:
         if start_line <= line <= end_line:
             span = end_line - start_line
             if span < best_span:

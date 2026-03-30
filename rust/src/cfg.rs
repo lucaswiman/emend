@@ -1036,8 +1036,22 @@ impl<'a> CfgBuilder<'a> {
                 }
             }
 
-            for except in &except_clauses {
-                let handler_block = self.new_block_from_node(*except);
+            let mut prev_handler: Option<BlockId> = None;
+            for (i, except) in except_clauses.iter().enumerate() {
+                // Reuse the pre-created first_except block for the first
+                // clause so the exception edge connects to the handler body.
+                // Subsequent handlers get new blocks chained from the previous
+                // handler (modelling Python's sequential except matching).
+                let handler_block = if i == 0 {
+                    first_except
+                } else {
+                    let hb = self.new_block_from_node(*except);
+                    if let Some(prev) = prev_handler {
+                        self.add_edge(prev, hb, EdgeKind::FalseBranch);
+                    }
+                    hb
+                };
+                prev_handler = Some(handler_block);
                 let mut ec = except.walk();
                 for c in except.children(&mut ec) {
                     if !id_node.is_empty() && c.kind() == id_node.as_str() {
