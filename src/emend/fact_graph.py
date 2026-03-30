@@ -2714,6 +2714,596 @@ def flows_to(sink_pattern: str) -> Callable[[Fact], bool]:
     return _predicate
 
 
+def _parse_effect(effect_str: str) -> tuple[str, str] | None:
+    """Parse an effect predicate like ``writes($OBJ)`` into ``(kind, metavar)``.
+
+    Returns ``None`` if the string is not a recognised effect form.
+    """
+    m = re.match(r"(writes|reads)\(\$(\w+)\)", effect_str)
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+def _compile_sequence_query(
+    check: "SequenceCheck",
+    step_locations: dict[str, list[tuple[str, str, int, int, dict[str, str]]]],
+    blocker_locations: dict[tuple[str, str], dict[str, list[tuple[str, str, int]]]] | None = None,
+) -> str | None:
+    """Compile a sequence rule to a CozoScript query given pre-resolved step locations.
+
+    Args:
+        check: The ``SequenceCheck`` definition.
+        step_locations: Mapping from step bind-name to a list of resolved
+            location tuples ``(file_path, func_qn, block_id, line, bindings)``.
+            For effect-based steps, the list may be empty (resolved in Datalog).
+        blocker_locations: Optional mapping from ``(from_step, to_step)`` to
+            dicts with ``"not_through"`` and ``"not_through_scope"`` keys, each
+            a list of ``(file_path, func_qn, block_id)`` blocker locations.
+
+    Returns:
+        A CozoScript query string, or ``None`` if no step locations were resolved.
+    """
+    from emend.policy import SequenceCheck, SequenceStep
+
+    steps = check.sequence
+    if not steps or len(steps) < 2:
+        return None
+
+    # Build a path-constraint index keyed by (from_step, to_step)
+    path_index: dict[tuple[str, str], Any] = {}
+    for pc in check.path_constraints:
+        path_index[(pc.from_step, pc.to_step)] = pc
+
+    rules: list[str] = []
+
+    # --- Step 0: Build inline relations for resolved step locations ---
+    any_locations = False
+    for step in steps:
+        locs = step_locations.get(step.bind, [])
+        if step.effect:
+            # Effect-based steps are resolved in Datalog; we still need
+            # the earlier step's bindings to know which variable to track.
+            continue
+        if not locs:
+            continue
+        any_locations = True
+        rows = ", ".join(
+            f'["{fp}", "{fq}", {bid}, {line}]'
+            for fp, fq, bid, line, _bindings in locs
+        )
+        rules.append(
+            f'step_{step.bind}[fp, fq, block, line] <- [{rows}]'
+        )
+
+    if not any_locations:
+        return None
+
+    # --- Step 1: Resolve effect-based steps ---
+    # For each effect step, look up the effect kind and the bound metavar
+    # from the preceding step's bindings.
+    # Track which metavar each effect step references (for liveness filtering).
+    effect_bound_vars: dict[int, str] = {}  # step_idx -> bound variable name
+
+    for i, step in enumerate(steps):
+        if not step.effect:
+            continue
+        parsed = _parse_effect(step.effect)
+        if parsed is None:
+            continue
+        effect_kind, metavar_name = parsed
+
+        # Find the binding for this metavar from earlier steps
+        bound_var = None
+        for j in range(i - 1, -1, -1):
+            prev_step = steps[j]
+            prev_locs = step_locations.get(prev_step.bind, [])
+            for _fp, _fq, _bid, _line, bindings in prev_locs:
+                if metavar_name in bindings:
+                    bound_var = bindings[metavar_name]
+                    break
+            if bound_var:
+                break
+
+        if bound_var is None:
+            continue
+
+        effect_bound_vars[i] = bound_var
+
+        # Collect source step blocks to exclude self-triggering.
+        # The preceding step's block should not count as a mutation site.
+        prev_step = steps[i - 1]
+        prev_locs = step_locations.get(prev_step.bind, [])
+        if prev_locs:
+            excl_rows = ", ".join(
+                f'["{fp}", "{fq}", {bid}]'
+                for fp, fq, bid, _line, _bindings in prev_locs
+            )
+            excl_name = f"excl_src_{i}"
+            rules.append(f'{excl_name}[fp, fq, block] <- [{excl_rows}]')
+        else:
+            excl_name = f"excl_src_{i}"
+            rules.append(f'{excl_name}[fp, fq, block] <- []')
+
+        # Generate Datalog rules to resolve writes/reads for the bound variable
+        if effect_kind == "writes":
+            rules.append('mutate_kind[k] <- [["write"], ["aug_write"]]')
+
+            # Variant 1: exact var match (exclude source blocks)
+            rules.append(
+                f'step_{step.bind}[fp, fq, block, line] := '
+                f'*def_use[fp, fq, "{bound_var}", kind, block, _, line, _, _, _], '
+                f'mutate_kind[kind], '
+                f'not {excl_name}[fp, fq, block]'
+            )
+            # Variant 2: dotted attribute match (e.g. obj.name = ...)
+            rules.append(
+                f'step_{step.bind}[fp, fq, block, line] := '
+                f'*def_use[fp, fq, var_name, kind, block, _, line, _, _, _], '
+                f'mutate_kind[kind], '
+                f'starts_with(var_name, "{bound_var}."), '
+                f'not {excl_name}[fp, fq, block]'
+            )
+            # Variant 3: method call on the variable (e.g. obj.append())
+            rules.append(
+                f'step_{step.bind}[fp, fq, block, line] := '
+                f'*method_call[fp, fq, "{bound_var}", _, block, line], '
+                f'not {excl_name}[fp, fq, block]'
+            )
+        elif effect_kind == "reads":
+            rules.append(
+                f'step_{step.bind}[fp, fq, block, line] := '
+                f'*def_use[fp, fq, "{bound_var}", "read", block, _, line, _, _, _], '
+                f'not {excl_name}[fp, fq, block]'
+            )
+
+    # --- Step 2: CFG reachability between consecutive steps ---
+    for i in range(len(steps) - 1):
+        from_step = steps[i]
+        to_step = steps[i + 1]
+        pair_key = (from_step.bind, to_step.bind)
+        reach_name = f"reachable_{i}"
+
+        # Blocker relations for this pair
+        nt_blocks: list[tuple[str, str, int]] = []
+        scope_kills: list[tuple[str, str, int]] = []
+        if blocker_locations and pair_key in blocker_locations:
+            bl = blocker_locations[pair_key]
+            nt_blocks = bl.get("not_through", [])
+            scope_kills = bl.get("not_through_scope", [])
+
+        # Build blocker inline relation
+        blocker_name = f"blocker_{i}"
+        if nt_blocks:
+            b_rows = ", ".join(
+                f'["{fp}", "{fq}", {bid}]' for fp, fq, bid in nt_blocks
+            )
+            rules.append(f'{blocker_name}[fp, fq, block] <- [{b_rows}]')
+        else:
+            rules.append(f'{blocker_name}[fp, fq, block] <- []')
+
+        # Build scope kill inline relation
+        sk_name = f"scope_kill_{i}"
+        if scope_kills:
+            sk_rows = ", ".join(
+                f'["{fp}", "{fq}", {bid}]' for fp, fq, bid in scope_kills
+            )
+            rules.append(f'{sk_name}[fp, fq, block] <- [{sk_rows}]')
+        else:
+            rules.append(f'{sk_name}[fp, fq, block] <- []')
+
+        # Base case: reachable from the "from" step's block
+        rules.append(
+            f'{reach_name}[fp, fq, block] := '
+            f'step_{from_step.bind}[fp, fq, block, _]'
+        )
+
+        # Recursive case: propagate along CFG edges, blocked by not_through and scope_kill
+        rules.append(
+            f'{reach_name}[fp, fq, to_block] := '
+            f'{reach_name}[fp, fq, from_block], '
+            f'*cfg_edge[fp, fq, from_block, to_block, _, _, _], '
+            f'not {blocker_name}[fp, fq, from_block], '
+            f'not {sk_name}[fp, fq, from_block]'
+        )
+
+    # --- Step 3: Def-use liveness for bound variables ---
+    # For each pair of consecutive steps, check liveness ONLY for variables
+    # that are actually referenced in the later step (via effect or shared
+    # metavar in pattern).  This avoids requiring liveness for incidental
+    # captures like model names.
+    #
+    # IMPORTANT: liveness is checked from the ORIGINAL definition site (the
+    # step that first bound the variable) to the current step, not from the
+    # immediately preceding step.  For a 3-step sequence A→B→C where var
+    # is bound at A, we need def_use(A→B) and def_use(A→C).
+    liveness_vars: dict[int, set[str]] = {}  # pair_index -> set of var names
+    # Map variable name → step index where it was first bound
+    var_origin_step: dict[str, int] = {}
+
+    for i in range(len(steps) - 1):
+        from_step = steps[i]
+        to_step = steps[i + 1]
+        from_locs = step_locations.get(from_step.bind, [])
+
+        # Track which step originally defines each variable
+        if from_locs:
+            for _fp, _fq, _bid, _line, bindings in from_locs:
+                for mvar, val in bindings.items():
+                    if val not in var_origin_step:
+                        var_origin_step[val] = i
+
+        vars_for_pair: set[str] = set()
+
+        # If the to_step has an effect, the effect's metavar binding is
+        # the variable that must be live.
+        if to_step.effect and (i + 1) in effect_bound_vars:
+            vars_for_pair.add(effect_bound_vars[i + 1])
+
+        # If the to_step is pattern-based and shares metavar names with
+        # any earlier step, those shared bindings must be live.
+        if to_step.pattern:
+            to_locs = step_locations.get(to_step.bind, [])
+            # Collect all metavar bindings from all previous steps
+            all_prev_metavars: dict[str, str] = {}
+            for j in range(i + 1):
+                for _fp, _fq, _bid, _line, bindings in step_locations.get(steps[j].bind, []):
+                    all_prev_metavars.update(bindings)
+            to_metavars: set[str] = set()
+            for _fp, _fq, _bid, _line, bindings in to_locs:
+                to_metavars.update(bindings.keys())
+            for mvar in all_prev_metavars:
+                if mvar in to_metavars:
+                    vars_for_pair.add(all_prev_metavars[mvar])
+
+        if not vars_for_pair:
+            liveness_vars[i] = set()
+            continue
+
+        liveness_vars[i] = vars_for_pair
+
+        # For each bound variable, generate a liveness check from its
+        # original definition step to the current target step.
+        for var in vars_for_pair:
+            origin_idx = var_origin_step.get(var, i)
+            origin_step = steps[origin_idx]
+            live_name = f"live_{i}_{var}"
+            rules.append(
+                f'{live_name}[fp, fq, origin_block, to_block] := '
+                f'step_{origin_step.bind}[fp, fq, origin_block, _], '
+                f'*def_use[fp, fq, "{var}", _, origin_block, to_block, _, _, _, _]'
+            )
+
+    # --- Step 4: Final violation query ---
+    # Join all step locations with reachability and liveness constraints.
+    join_clauses: list[str] = []
+    output_cols: list[str] = ["fp", "fq"]
+
+    # First step
+    first_step = steps[0]
+    join_clauses.append(f'step_{first_step.bind}[fp, fq, block_0, line_0]')
+    output_cols.append("line_0")
+
+    for i in range(1, len(steps)):
+        step = steps[i]
+        reach_name = f"reachable_{i - 1}"
+        block_var = f"block_{i}"
+        line_var = f"line_{i}"
+
+        # Step location
+        join_clauses.append(f'step_{step.bind}[fp, fq, {block_var}, {line_var}]')
+        output_cols.append(line_var)
+
+        # Reachability from previous step
+        join_clauses.append(f'{reach_name}[fp, fq, {block_var}]')
+
+        # Same-function constraint is implicit: all step relations share fp, fq
+
+        # Liveness constraints for variables referenced in this step
+        pair_idx = i - 1
+        vars_to_check = liveness_vars.get(pair_idx, set())
+        for var in vars_to_check:
+            origin_idx = var_origin_step.get(var, pair_idx)
+            live_name = f"live_{pair_idx}_{var}"
+            join_clauses.append(
+                f'{live_name}[fp, fq, block_{origin_idx}, {block_var}]'
+            )
+
+    # Ensure temporal ordering: each step's line must be >= the previous
+    for i in range(1, len(steps)):
+        join_clauses.append(f'line_{i} >= line_{i - 1}')
+
+    # Rename first_line / last_line for the output
+    first_line = "line_0"
+    last_line = f"line_{len(steps) - 1}"
+
+    # Build the final query
+    all_output = ", ".join(output_cols)
+    # Alias first/last line in the output header
+    query_output = f"fp, fq, {first_line} as first_line, {last_line} as last_line"
+
+    # CozoScript doesn't support "as" aliases in the output — use positional
+    # We'll just output all step lines plus fp and fq
+    rules.append(
+        f'?[fp, fq, first_line, last_line] := '
+        + ", ".join(join_clauses)
+        + f', first_line = {first_line}'
+        + f', last_line = {last_line}'
+    )
+
+    return "\n".join(rules)
+
+
+def compile_sequence_rule(
+    graph: "FactGraph",
+    check: "SequenceCheck",
+    project_path: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Compile a temporal sequence rule to a CozoScript query.
+
+    Resolves each step via pattern matching (Python side), then compiles
+    to a CozoScript Datalog query for CFG-reachability and def-use liveness
+    checks.
+
+    Args:
+        graph: The populated ``FactGraph`` for the project.
+        check: The ``SequenceCheck`` definition.
+        project_path: Project root directory for reading source files.
+            If ``None``, attempts to resolve from the graph.
+
+    Returns:
+        Tuple of ``(cozoscript_query, step_data)`` where *step_data* is
+        metadata about resolved steps, or ``None`` if no matches found.
+    """
+    from emend.policy import SequenceCheck
+
+    steps = check.sequence
+    if not steps or len(steps) < 2:
+        return None
+
+    # Collect all file paths from the graph's symbol table
+    sym_result = graph.run_query(
+        "?[fp] := *symbol[_, fp, _, _, _, _, _]"
+    )
+    file_paths = sorted({r[0] for r in sym_result["rows"]})
+    if not file_paths:
+        return None
+
+    # Resolve the project root for reading files
+    resolve_root: Path | None = None
+    if project_path:
+        resolve_root = Path(project_path).resolve()
+
+    # --- Step resolution: match patterns against project files ---
+    step_locations: dict[str, list[tuple[str, str, int, int, dict[str, str]]]] = {
+        step.bind: [] for step in steps
+    }
+    blocker_locations: dict[tuple[str, str], dict[str, list[tuple[str, str, int]]]] = {}
+
+    # Collect CFG block ranges from the graph for block-id resolution
+    block_ranges_result = graph.run_query(
+        "?[fp, fq, bid, start_line, end_line] := "
+        "*source_loc[fp, lk, lid, start_line, _, end_line, _], "
+        'lk == "symbol", '
+        "*cfg_block[fp2, fq, bid, _, _], "
+        "fp == fp2"
+    )
+
+    # Build block ranges from cfg_block + source_loc for line→block resolution
+    # Fallback: use def_use facts to infer block line ranges
+    _block_line_ranges: dict[tuple[str, str], list[tuple[int, int, int]]] = {}
+    # Gather block info from def_use facts (which have line info)
+    du_result = graph.run_query(
+        "?[fp, fq, bid, line] := *def_use[fp, fq, _, _, bid, _, line, _, _, _]"
+    )
+    for r in du_result["rows"]:
+        key = (r[0], r[1])
+        if key not in _block_line_ranges:
+            _block_line_ranges[key] = []
+        _block_line_ranges[key].append((r[2], r[3], r[3]))
+
+    # Also from cfg_edge (which has from_line/to_line)
+    edge_result = graph.run_query(
+        "?[fp, fq, fb, fl, tb, tl] := *cfg_edge[fp, fq, fb, tb, _, fl, tl]"
+    )
+    for r in edge_result["rows"]:
+        key = (r[0], r[1])
+        if key not in _block_line_ranges:
+            _block_line_ranges[key] = []
+        if r[3] > 0:  # from_line
+            _block_line_ranges[key].append((r[2], r[3], r[3]))
+        if r[5] > 0:  # to_line
+            _block_line_ranges[key].append((r[4], r[5], r[5]))
+
+    # Build func line ranges from symbol facts
+    func_ranges: dict[str, list[tuple[str, str, int, int]]] = {}
+    sym_all = graph.run_query(
+        "?[fp, qn, kind, line, end_line] := "
+        "*symbol[qn, fp, _, kind, line, end_line, _]"
+    )
+    for r in sym_all["rows"]:
+        fp, qn, kind, line, end_line = r
+        if kind in ("function", "method", "async_function"):
+            if fp not in func_ranges:
+                func_ranges[fp] = []
+            func_ranges[fp].append((fp, qn, line, end_line))
+
+    def _find_func_for_line(fp: str, line: int) -> str:
+        """Find the innermost function containing a given line."""
+        candidates = func_ranges.get(fp, [])
+        best_qn = ""
+        best_span = float("inf")
+        for _, qn, start, end in candidates:
+            if start <= line <= end:
+                span = end - start
+                if span < best_span:
+                    best_qn = qn
+                    best_span = span
+        return best_qn
+
+    def _find_block_for_line(fp: str, fq: str, line: int) -> int:
+        """Find the CFG block containing a given line."""
+        key = (fp, fq)
+        ranges = _block_line_ranges.get(key, [])
+        best_bid = -1
+        best_dist = float("inf")
+        for bid, bline, _ in ranges:
+            dist = abs(bline - line)
+            if dist < best_dist:
+                best_dist = dist
+                best_bid = bid
+        return best_bid
+
+    # Track metavar bindings across steps for substitution
+    accumulated_bindings: dict[str, str] = {}
+
+    for step_idx, step in enumerate(steps):
+        if step.effect:
+            # Effect-based steps are resolved in Datalog — skip pattern matching.
+            # But we still need to record which metavar they reference.
+            continue
+
+        if not step.pattern:
+            continue
+
+        # Substitute accumulated bindings into the pattern
+        resolved_pattern = step.pattern
+        for mvar, val in accumulated_bindings.items():
+            resolved_pattern = resolved_pattern.replace(f"${mvar}", val)
+
+        try:
+            from emend.transform import find_pattern
+        except ImportError:
+            logger.debug("Cannot import find_pattern for sequence step resolution")
+            continue
+
+        for fp in file_paths:
+            # Resolve the absolute file path for reading
+            abs_path = fp
+            if resolve_root:
+                candidate = resolve_root / fp
+                if candidate.exists():
+                    abs_path = str(candidate)
+
+            try:
+                source = Path(abs_path).read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            try:
+                matches = find_pattern(
+                    resolved_pattern,
+                    abs_path,
+                    source_override=source,
+                    language="python",
+                )
+            except Exception:
+                logger.debug("Pattern match failed for %s in %s", resolved_pattern, fp, exc_info=True)
+                continue
+
+            for m in matches:
+                if m.line is None:
+                    continue
+                fq = _find_func_for_line(fp, m.line)
+                if not fq:
+                    continue  # Skip module-level matches
+                bid = _find_block_for_line(fp, fq, m.line)
+
+                bindings = dict(m.captures) if m.captures else {}
+                step_locations[step.bind].append(
+                    (fp, fq, bid, m.line, bindings)
+                )
+
+                # Accumulate bindings for later steps
+                for k, v in bindings.items():
+                    if k not in accumulated_bindings:
+                        accumulated_bindings[k] = v
+
+    # --- Blocker resolution ---
+    for pc in check.path_constraints:
+        pair_key = (pc.from_step, pc.to_step)
+        bl: dict[str, list[tuple[str, str, int]]] = {
+            "not_through": [],
+            "not_through_scope": [],
+        }
+
+        for nt_pattern in pc.not_through:
+            # Substitute accumulated bindings
+            resolved = nt_pattern
+            for mvar, val in accumulated_bindings.items():
+                resolved = resolved.replace(f"${mvar}", val)
+
+            try:
+                from emend.transform import find_pattern
+                for fp in file_paths:
+                    abs_path = fp
+                    if resolve_root:
+                        candidate = resolve_root / fp
+                        if candidate.exists():
+                            abs_path = str(candidate)
+                    try:
+                        source = Path(abs_path).read_text(encoding="utf-8")
+                    except Exception:
+                        continue
+                    matches = find_pattern(resolved, abs_path, source_override=source, language="python")
+                    for m in matches:
+                        if m.line is None:
+                            continue
+                        fq = _find_func_for_line(fp, m.line)
+                        if fq:
+                            bid = _find_block_for_line(fp, fq, m.line)
+                            bl["not_through"].append((fp, fq, bid))
+            except Exception:
+                pass
+
+        for nts_pattern in pc.not_through_scope:
+            resolved = nts_pattern
+            for mvar, val in accumulated_bindings.items():
+                resolved = resolved.replace(f"${mvar}", val)
+
+            try:
+                from emend.transform import find_pattern
+                for fp in file_paths:
+                    abs_path = fp
+                    if resolve_root:
+                        candidate = resolve_root / fp
+                        if candidate.exists():
+                            abs_path = str(candidate)
+                    try:
+                        source = Path(abs_path).read_text(encoding="utf-8")
+                    except Exception:
+                        continue
+                    matches = find_pattern(resolved, abs_path, source_override=source, language="python")
+                    for m in matches:
+                        if m.line is None:
+                            continue
+                        fq = _find_func_for_line(fp, m.line)
+                        if fq:
+                            bid = _find_block_for_line(fp, fq, m.line)
+                            bl["not_through_scope"].append((fp, fq, bid))
+            except Exception:
+                pass
+
+        blocker_locations[pair_key] = bl
+
+    # --- Compile to CozoScript ---
+    query = _compile_sequence_query(check, step_locations, blocker_locations)
+    if query is None:
+        return None
+
+    step_data = {
+        "step_locations": {
+            k: [(fp, fq, bid, line) for fp, fq, bid, line, _ in locs]
+            for k, locs in step_locations.items()
+        },
+        "blocker_locations": {
+            f"{k[0]}->{k[1]}": v for k, v in blocker_locations.items()
+        },
+        "bindings": accumulated_bindings,
+    }
+    return query, step_data
+
+
 def symbol_has_type(type_pattern: str) -> Callable[[Fact], bool]:
     """Return a predicate matching TypeFacts whose type_str matches *type_pattern*."""
     compiled = re.compile(type_pattern)
