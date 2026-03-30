@@ -515,6 +515,79 @@ def _populate_facts_db(project_root: str) -> None:
             {"rows": cozo_imp},
         )
 
+        # ------------------------------------------------------------------
+        # Populate FactGraph-style relations so that dead_code_unified() and
+        # other Datalog queries work on the persisted facts.db without
+        # rebuilding from scratch via build_from_project().
+        # ------------------------------------------------------------------
+
+        # symbol[qualified_name => file_path, name, kind, line, end_line, parent]
+        # Use module_qn (r[1]) as qualified_name — the canonical QN format.
+        # Skip variables and references to match build_from_project() behavior.
+        # Derive parent from depth: depth==1 means top-level (module-level),
+        # depth>1 means nested inside another symbol, extract parent from mqn.
+        cozo_fg_sym = []
+        for r in sym_rows:
+            if r[4] in ("variable", "reference"):
+                continue
+            mqn = r[1]
+            depth = r[7]
+            if depth is not None and depth > 1:
+                # Nested symbol — parent QN = mqn minus last segment
+                parent = mqn.rsplit(".", 1)[0] if "." in mqn else ""
+            else:
+                parent = ""  # Top-level symbol
+            cozo_fg_sym.append([mqn, _to_rel(r[0]), r[2], r[4], r[5], r[6], parent])
+        fdb.run(
+            "?[qn, fp, name, kind, line, end_line, parent] <- $rows "
+            ":replace symbol {qn => fp, name, kind, line, end_line, parent}",
+            {"rows": cozo_fg_sym},
+        )
+
+        # reference[symbol_qn, file_path, line, col => ref_kind, func_qn, block_id]
+        # func_qn and block_id are not available from the index — use "" and -1.
+        cozo_fg_ref = [
+            [r[0], _to_rel(r[1]), r[2], r[3], r[4], "", -1]
+            for r in ref_rows
+        ]
+        fdb.run(
+            "?[sq, fp, line, col, kind, fq, bid] <- $rows "
+            ":replace reference {sq, fp, line, col => kind, fq, bid}",
+            {"rows": cozo_fg_ref},
+        )
+
+        # decorator_on[symbol_qn, decorator]
+        # Extracted from fact_symbol.decs (comma-separated decorator names).
+        # Clean decorator strings the same way _walk_symbols() does: strip @
+        # prefix and arguments, also store basename for broad matching.
+        dec_rows_list: list[list[str]] = []
+        for r in sym_rows:
+            mqn = r[1]  # module-qualified name
+            decs_str = r[12] or ""
+            if decs_str:
+                for dec in decs_str.split(","):
+                    cleaned = dec.strip()
+                    if not cleaned:
+                        continue
+                    if cleaned.startswith("@"):
+                        cleaned = cleaned[1:]
+                    if "(" in cleaned:
+                        cleaned = cleaned[:cleaned.index("(")]
+                    cleaned = cleaned.strip()
+                    if cleaned:
+                        dec_rows_list.append([mqn, cleaned])
+                        # Also store basename for broader matching
+                        if "." in cleaned:
+                            basename = cleaned.rsplit(".", 1)[-1]
+                            if basename and basename != cleaned:
+                                dec_rows_list.append([mqn, basename])
+        if dec_rows_list:
+            fdb.run(
+                "?[qn, dec] <- $rows "
+                ":replace decorator_on {qn, dec}",
+                {"rows": dec_rows_list},
+            )
+
         conn.close()
     except BaseException:
         logger.debug("facts db population failed", exc_info=True)
@@ -4182,15 +4255,31 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     project_root = _find_project_root(project_path)
     emend_dir = Path(project_root) / ".emend" / "cache"
-    facts_db = emend_dir / "facts_graph.db"
+    facts_db = emend_dir / "facts.db"
 
+    if facts_db.exists():
+        try:
+            graph = FactGraph(db_path=str(facts_db))
+            # Verify the index populated FactGraph-style relations.
+            count = graph._client.run(
+                "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
+            )["rows"][0][0]
+            if count > 0:
+                return graph
+            logger.debug("facts.db has no symbol data, rebuilding")
+        except Exception:
+            logger.debug("Failed to load facts.db, rebuilding", exc_info=True)
+
+    # No usable facts.db — run indexing to create it, then load.
+    logger.info("Building index for %s (first run may be slow)", project_path)
+    warm_caches(project_path)
     if facts_db.exists():
         try:
             return FactGraph(db_path=str(facts_db))
         except Exception:
-            logger.debug("Failed to load facts_graph.db, rebuilding", exc_info=True)
+            logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Build from scratch
+    # Final fallback: build in-memory (mainly for tests)
     graph = FactGraph.build_from_project(project_path)
     return graph
 
