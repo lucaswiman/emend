@@ -16,7 +16,7 @@
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
 | `trace.py` | Trace analysis engine: `TraceConfig`, `TraceSource`, `TraceSink` (with optional `effect` key for `writes($X)`/`reads($X)` predicates), `TraceSanitizer` (with `quantifier` field: `all_paths`/`some_path`), `TraceScopeSanitizer` (kills ALL taint for a label within a scope boundary, e.g. `session.commit()`; known limitation: nested scopes kill all taint for the label, not per-session), `TraceViolation`; path-sensitive sanitization via CFG dominance in Python fallback; scope sanitizer support in both Datalog (`scope_kill` inline relation) and Python fallback paths; intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_trace_analysis()` with fixed-point iteration; field-sensitive tracking (`_extract_qualified_identifiers`), container-aware propagation (`_find_container_mutations`, `_find_for_loops`), augmented assignment detection (`_AUG_ASSIGN_RE`), YAML `presets:` key for auto-loading framework rules |
 | `trace_presets.py` | Framework-specific trace rule presets: `get_preset()` for Flask, Django, SQLAlchemy, FastAPI; `merge_configs()` to compose multiple configs (including `scope_sanitizers`); loaded via `emend trace --preset` or YAML `presets:` key |
-| `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink`, `DslMatch`, `RegexNamedGroup` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `find_in_dsl()` (pattern matching with `$METAVAR` in DSL regions); `extract_regex_named_groups()` / `find_regex_group_references()` (regex `(?P<name>)` ↔ `.group("name")`); `find_dsl_impact()` (ORM model changes → affected SQL queries) |
+| `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink`, `DslMatch`, `RegexNamedGroup` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `find_in_dsl()` (pattern matching with `$METAVAR` in DSL regions); `extract_regex_named_groups()` / `find_regex_group_references()` (regex `(?P<name>)` ↔ `.group("name")`); `find_dsl_impact()` (ORM model changes → affected SQL queries); `emend dsl-debug` hidden CLI command |
 | `cfg.py` | Per-function CFG module: `build_cfgs_for_source()`, `build_cfgs_for_file()`, `find_unreachable_blocks()`, text/JSON/DOT formatters; wraps Rust `emend_core.PyCfg` and `build_cfgs()` |
 | `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TraceFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact` (with `kind`: read/write/aug_write/del), `MethodCallFact`, `CfgBlockFact`, `DecoratorOnFact`, `SourceLocFact`, `FuncSummaryFact`, `EntryPointDecoratorFact`, `EntryPointNameFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()` (populates CFG blocks, decorators, source locations, block-tagged references, method calls), JSON serialization; `TraceDatalogConfig` dataclass for Datalog query configuration; Datalog query methods: `refs_datalog()`, `callers_datalog()`, `callees_datalog()`, `graph_datalog()`, `dead_code_unified()`, `unreachable_blocks_datalog()`, `trace_propagation_datalog()` (with `effect_sinks` for writes/reads predicates, `scope_kills` for scope boundary sanitization via `scope_kill` inline relation), `interprocedural_trace_datalog()`, `flow_rule_check_datalog()` |
 | `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `CustomCheck`; `load_policies()`, `run_policy_checks()`, `validate_policies()`; loads from `.emend/policies.yaml` |
@@ -42,7 +42,7 @@
 
 | Test File | Tests For |
 |-----------|-----------|
-| `test_add_parameter.py` | `add` command (parameters, decorators, bases) |
+| `test_component_operations.py` | `add`, `edit`, `remove` commands (list component operations, parameters, decorators, bases) |
 | `test_ast_migration.py` | Tree-sitter migration regression tests (ast_utils, query, search --output summary) |
 | `test_batch.py` | `batch` command (YAML/JSON operations) |
 | `test_callers.py` | `callers` command |
@@ -51,7 +51,6 @@
 | `test_cli_transform.py` | CLI integration for transform operations |
 | `test_component_selector.py` | Extended selector parsing |
 | `test_copy_to.py` | `copy-to` command |
-| `test_edit.py` | `edit` command |
 | `test_file_glob_selectors.py` | File glob selectors, `--matching`, `--output selector`, `--in` selectors, `resolve_files` |
 | `test_find.py` | `find` command (pattern matching) |
 | `test_find_references_context.py` | `find-references --writes-only` / `--reads-only` |
@@ -108,7 +107,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`, `--include-map`. Also available as: `grep`, `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
+| `grep` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`, `--include-map`. Also available as hidden aliases: `search`, `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |
@@ -167,7 +166,9 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 
 ### Trace Analysis
 
-`trace.py` provides intraprocedural trace analysis:
+`trace.py` provides both intraprocedural and interprocedural trace analysis:
+- **Intraprocedural analysis**: per-function tracking via `_analyze_function()`, `run_trace_analysis()`, and `format_violations()`
+- **Interprocedural analysis**: cross-function tracking via `run_interprocedural_trace_analysis()` with fixed-point iteration over function summaries
 - Configuration via `trace` section in `.emend/patterns.yaml`: `labels`, `sources`, `sinks`, `sanitizers`
 - `_analyze_function()` — per-function analysis: finds sources, propagates taint through assignments, applies sanitizers, checks sinks
 - `run_trace_analysis()` — iterates files, collects function definitions, analyzes each + module-level code
@@ -211,7 +212,7 @@ Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the sha
 
 `transform.py` contains `find_dead_code()`:
 - Single-pass O(files) analysis using `PyScopeResolver`
-- `_find_python_source_root()` detects `src/` layout via `pyproject.toml`
+- `_find_source_root()` detects `src/` layout via `pyproject.toml`
 - Entry point heuristics skip decorated symbols, dunders, tests, `__all__` members
 - Configurable `entry-point-decorators`, `entry-point-names`, and `exclude-paths` (with glob support) via `.emend/patterns.yaml` or CLI flags
 - String literal scanning for dynamic references (getattr, serialization)
