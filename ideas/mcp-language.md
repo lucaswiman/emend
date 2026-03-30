@@ -2,10 +2,21 @@
 
 ## Overview
 
-The emend MCP server exposes code analysis and transformation as tool calls.
-Every operation is a JSON object with a `"type"` field that selects the
-operation, plus flat, named parameters. Code patterns (e.g. `print($X)`) are
-always passed as plain string values — never parsed by the transport layer.
+The emend MCP server exposes code analysis and transformation as MCP tools.
+Each tool is named `emend_<verb>` (e.g. `emend_find`, `emend_replace`).
+Parameters are flat JSON objects. Code patterns (e.g. `print($X)`) are always
+passed as plain string values — never parsed by the transport layer.
+
+### Conventions
+
+- **`files`** parameters accept Unix glob syntax. `**` matches zero or more
+  directory levels (e.g. `"src/**/*.py"`).
+- **`symbol`** parameters accept dotted qualified names (e.g. `"MyClass.method"`).
+  If ambiguous, results for all matches are returned.
+- **`inside`** and **`not_inside`** parameters accept the same pattern syntax
+  as `pattern` (with `$METAVAR` captures), not glob wildcards.
+- All responses are JSON objects. On error: `{"error": "message"}`.
+- Tools that modify code default to dry-run mode (`"apply": false`).
 
 ## Pattern Syntax (Quick Reference)
 
@@ -16,45 +27,62 @@ Patterns are code-shaped templates with metavariable captures:
 | `$X` | Capture any single AST node | `print($X)` |
 | `$_` | Wildcard (match but don't capture) | `$_.method()` |
 | `$...ARGS` | Capture zero or more nodes | `func($...ARGS)` |
-| `$X:type` | Type-constrained capture | `$X:identifier`, `$X:str` |
-| `$X:!type` | Negated type constraint | `$X:!int` |
-| `$X:type[T]` | Oracle type constraint | `$X:type[Connection]` |
-| `$F:returns[T]` | Return type constraint | `$F:returns[str]` |
+| `$X:identifier` | AST node kind constraint | `$X:identifier` (name nodes only) |
+| `$X:!int` | Negated AST kind constraint | `$X:!int` (anything except int literals) |
+| `$X:type[T]` | Inferred type constraint (oracle) | `$X:type[Connection]` |
+| `$F:returns[T]` | Return type constraint (oracle) | `$F:returns[str]` |
 
-Available simple types: `expr`, `stmt`, `identifier`, `int`, `str`, `float`,
-`call`, `attr`, `any`.
+AST node kinds for simple constraints: `expr`, `stmt`, `identifier`, `int`,
+`str`, `float`, `call`, `attr`, `any`.
+
+**Note:** `$X:identifier` constrains by AST node kind (syntax).
+`$X:type[Connection]` constrains by inferred type (semantics, requires a type
+engine). The bracket `[T]` is the disambiguator.
 
 ## Tools
 
 ### `emend_find` — Structural Pattern Search
 
-Find code matching a pattern.
+Find code matching a pattern. Returns matches with file, line, and captured
+metavariable bindings.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `pattern` | string | yes | Code pattern with `$METAVAR` captures |
-| `files` | string | no | File glob to scope the search (e.g. `"src/**/*.py"`) |
-| `inside` | string | no | Only match inside code matching this pattern |
+| `files` | string | no | File glob scope (e.g. `"src/**/*.py"`) |
+| `inside` | string | no | Only match inside code matching this pattern (uses pattern syntax, not globs) |
 | `not_inside` | string | no | Exclude matches inside code matching this pattern |
-| `kind` | string | no | Filter by AST node kind. One of: `call`, `assignment`, `function_definition`, `class_definition` |
-| `output` | string | no | Output format. One of: `code`, `location`, `selector`, `json`, `count`. Default: `code` |
-| `limit` | integer | no | Maximum number of results. Default: 100 |
+| `kind` | string | no | Filter by tree-sitter AST node type. Examples: `call`, `assignment`, `function_definition`, `class_definition`. Accepts any valid tree-sitter node type name. |
+| `output` | string | no | One of: `code`, `location`, `selector`, `json`, `count`. Default: `json` |
+| `limit` | integer | no | Maximum results. Default: 100 |
 
-**Example:**
+**Note on `kind`:** This filters by raw tree-sitter node type (e.g.
+`function_definition`), not semantic symbol kind. For symbol-kind filtering,
+use `emend_lookup` with its `kind` parameter (`function`, `class`, etc.).
+
+**Examples:**
 
 ```json
 {
   "type": "find",
   "pattern": "print($X)",
   "files": "src/**/*.py",
-  "not_inside": "def test_*",
-  "output": "location"
+  "not_inside": "def test_$_($...ARGS): $...BODY",
+  "output": "json"
 }
 ```
 
-**Returns:** List of matches with file, line, captured metavariable bindings.
+```json
+{
+  "type": "find",
+  "pattern": "if $COND:\n    $...BODY",
+  "files": "src/**/*.py",
+  "inside": "def $FUNC($...ARGS): $...BODY",
+  "output": "location"
+}
+```
 
 ---
 
@@ -66,21 +94,36 @@ Look up a symbol by name and optionally drill into its components.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `name` | string | yes | Symbol name, optionally dotted (`MyClass.method`) |
-| `file` | string | no | Restrict to a specific file |
-| `kind` | string | no | Symbol kind filter. One of: `function`, `class`, `method`, `variable`, `module` |
-| `component` | string | no | Component to extract. One of: `params`, `returns`, `decorators`, `bases`, `body`, `imports` |
-| `index` | integer | no | Index into the component list (e.g. `0` for first parameter) |
-| `output` | string | no | Output format. One of: `code`, `summary`, `metadata`, `json`. Default: `code` |
+| `symbol` | string | yes | Symbol name, optionally dotted (e.g. `"MyClass.method"`) |
+| `files` | string | no | File glob or specific file path to restrict search |
+| `kind` | string | no | Semantic symbol kind. One of: `function`, `class`, `method`, `variable`, `module` |
+| `component` | string | no | Component to extract. One of: `params`, `returns`, `decorators`, `bases`, `body` |
+| `index` | integer | no | 0-based index into the component list. Only valid when `component` is set. Negative indices count from end (`-1` = last). |
+| `output` | string | no | One of: `code`, `summary`, `metadata`, `json`. Default: `json` |
 
-**Example:**
+**Note on `kind`:** This uses semantic symbol kinds (`function`, `class`),
+not tree-sitter node types. Compare with `emend_find`'s `kind` which uses
+raw AST node types (`function_definition`, `class_definition`).
+
+**Examples:**
 
 ```json
 {
   "type": "lookup",
-  "name": "MyClass.method",
-  "file": "src/app.py",
+  "symbol": "MyClass.method",
+  "files": "src/app.py",
   "component": "params"
+}
+```
+
+```json
+{
+  "type": "lookup",
+  "symbol": "MyClass.method",
+  "files": "src/app.py",
+  "component": "params",
+  "index": 0,
+  "output": "json"
 }
 ```
 
@@ -90,18 +133,20 @@ Look up a symbol by name and optionally drill into its components.
 
 ### `emend_replace` — Pattern-Based Code Replacement
 
-Replace code matching a pattern with a replacement template.
+Replace code matching a pattern with a replacement template. **Dry run by
+default** — you must pass `"apply": true` to write changes.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `pattern` | string | yes | Code pattern to match |
-| `replacement` | string | yes | Replacement template (can reference `$METAVAR` captures) |
+| `replacement` | string | yes | Replacement template. `$METAVAR` references are substituted with their captured text. No template logic or conditionals — just literal substitution. |
 | `files` | string | no | File glob scope |
 | `inside` | string | no | Only replace inside code matching this pattern |
 | `not_inside` | string | no | Exclude replacements inside this pattern |
 | `apply` | boolean | no | If `true`, write changes to disk. Default: `false` (dry run) |
+| `limit` | integer | no | Maximum replacements. Default: unlimited. Recommend using dry run first. |
 
 **Example:**
 
@@ -128,10 +173,10 @@ Find all references to a symbol across the project.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `symbol` | string | yes | Qualified symbol name (e.g. `MyClass.method`) |
-| `filter` | string | no | Reference kind filter. One of: `writes_only`, `reads_only`, `calls_only` |
+| `symbol` | string | yes | Qualified symbol name (e.g. `"MyClass.method"`) |
+| `ref_kind` | string | no | Filter references by kind. One of: `writes_only`, `reads_only`, `calls_only` |
 | `files` | string | no | File glob scope |
-| `output` | string | no | Output format. One of: `code`, `location`, `json`. Default: `location` |
+| `output` | string | no | One of: `code`, `location`, `json`. Default: `json` |
 
 **Example:**
 
@@ -139,7 +184,7 @@ Find all references to a symbol across the project.
 {
   "type": "refs",
   "symbol": "db.execute",
-  "filter": "calls_only"
+  "ref_kind": "calls_only"
 }
 ```
 
@@ -156,19 +201,25 @@ for sanitizer patterns along the path.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `from_pattern` | string | yes | Source pattern — where tainted data originates |
-| `to_pattern` | string | yes | Sink pattern — where tainted data must not reach |
-| `not_through` | string | no | Sanitizer pattern — if data flows through this, it's safe |
-| `quantifier` | string | no | Sanitizer quantifier. `"all_paths"`: sanitizer must appear on every path (default). `"some_path"`: sanitizer on any path suffices. |
-| `scope_boundary` | string | no | Scope sanitizer pattern — kills all taint for the label within its scope (e.g. `"session.commit()"`) |
-| `effect` | string | no | Effect-based sink (e.g. `"writes($OBJ)"` to detect mutations on tainted objects) |
+| `from_pattern` | string | yes* | Source pattern — where tainted data originates |
+| `to_pattern` | string | yes* | Sink pattern — where tainted data must not reach. *Can be omitted if `effect` is provided.* |
+| `not_through` | string | no | Sanitizer pattern (path-sensitive). Data flowing through code matching this pattern is considered safe. |
+| `quantifier` | string | no | How sanitizers are evaluated. `"all_paths"` (default): **every** CFG path from source to sink must pass through the sanitizer to suppress the violation — use this for security checks. `"some_path"`: a sanitizer on **any** path suppresses — only for exploratory queries. |
+| `scope_boundary` | string | no | Scope-level sanitizer (path-insensitive). Kills **all** taint within its enclosing scope. Use for framework boundaries like `"session.commit()"` or `"db.flush()"`. Can be combined with `not_through`. |
+| `effect` | string | no | Effect-based sink — alternative to `to_pattern`. Detects when a tainted variable is mutated. Syntax: `"writes($VAR)"` or `"reads($VAR)"`. `$VAR` matches any tainted variable or its attributes. |
 | `files` | string | no | File glob scope |
-| `interprocedural` | boolean | no | Enable cross-function analysis. Default: `false` |
-| `label` | string | no | Taint label name for grouping related sources/sinks |
-| `preset` | string | no | Load framework-specific rules. One of: `flask`, `django`, `sqlalchemy`, `fastapi` |
+| `interprocedural` | boolean | no | Enable cross-function analysis with fixed-point iteration. Default: `false` |
+| `label` | string | no | Taint label name. Tags output for grouping. Optional for single-query use; required when composing multiple flow rules in batch. |
+| `preset` | string | no | Load framework-specific source/sink/sanitizer definitions. One of: `flask`, `django`, `sqlalchemy`, `fastapi`. Preset rules are **merged** with any explicitly provided patterns — you can use both. |
 
-**Example:**
+**Metavariable scoping:** Metavar names (e.g. `$X`) in `from_pattern`,
+`to_pattern`, `not_through`, and `effect` are **independent** — `$X` in
+`not_through` does not need to match `$X` captured by `from_pattern`.
+Each pattern is matched separately against code.
 
+**Examples:**
+
+Basic flow (SQL injection):
 ```json
 {
   "type": "flow",
@@ -180,9 +231,30 @@ for sanitizer patterns along the path.
 }
 ```
 
-**Returns:** List of violations with source location, sink location,
-and optionally the propagation path (variable assignments connecting
-source to sink).
+Effect-based sink (TOCTOU — detect mutation of tainted object):
+```json
+{
+  "type": "flow",
+  "from_pattern": "$Q.first()",
+  "effect": "writes($OBJ)",
+  "scope_boundary": "session.commit()",
+  "files": "src/**/*.py"
+}
+```
+
+Using a preset:
+```json
+{
+  "type": "flow",
+  "preset": "flask",
+  "not_through": "sanitize($X)",
+  "files": "src/**/*.py"
+}
+```
+
+**Returns:** List of violations, each with source location, sink location,
+and the propagation trace (chain of variable assignments connecting source
+to sink).
 
 ---
 
@@ -194,11 +266,11 @@ Compute callers, callees, or full call graph for a symbol.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `symbol` | string | yes | Symbol to analyze |
+| `symbol` | string | yes | Symbol to analyze (e.g. `"MyClass.method"`) |
 | `direction` | string | no | `"callers"`, `"callees"`, or `"both"`. Default: `"both"` |
-| `depth` | integer | no | Maximum traversal depth for transitive queries. Default: unlimited |
-| `transitive` | boolean | no | Follow edges transitively. Default: `false` |
-| `output` | string | no | Output format. One of: `text`, `json`, `dot`. Default: `text` |
+| `transitive` | boolean | no | When `true`, follow call chains recursively to find all reachable callers/callees. When `false` (default), return only direct callers/callees. |
+| `depth` | integer | no | Maximum traversal depth. Only applies when `transitive` is `true`; ignored otherwise. Default: unlimited. **Caution:** `direction: "both"` with `transitive: true` and no depth limit can return the entire call graph. |
+| `output` | string | no | One of: `text`, `json`, `dot`. Default: `json` |
 
 **Example:**
 
@@ -253,22 +325,24 @@ Find symbols that appear to be unreferenced.
 ### `emend_impact` — Impact Analysis
 
 Given a changed symbol or diff, compute the transitive set of affected symbols.
+**At least one of `symbol` or `diff_ref` must be provided.** If both are given,
+the impacted sets are unioned.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `symbol` | string | no | Symbol that changed |
-| `diff` | string | no | Git diff text or ref (e.g. `"HEAD~1"`) to parse for changed symbols |
-| `output` | string | no | What to return. `"symbols"`: all impacted symbols. `"tests"`: only impacted tests. `"graph"`: full impact graph with edges. Default: `"symbols"` |
-| `max_depth` | integer | no | Maximum reverse-caller depth. Default: unlimited |
+| `diff_ref` | string | no | Git ref to diff against (e.g. `"HEAD~1"`, `"main"`). emend runs `git diff` internally to identify changed symbols. |
+| `output` | string | no | `"symbols"`: all impacted symbols. `"tests"`: only impacted tests. `"graph"`: full impact graph with witness edges. Default: `"json"` |
+| `max_depth` | integer | no | Maximum reverse-caller traversal depth. Default: unlimited |
 
 **Example:**
 
 ```json
 {
   "type": "impact",
-  "diff": "HEAD~1",
+  "diff_ref": "HEAD~1",
   "output": "tests"
 }
 ```
@@ -300,11 +374,54 @@ queries not expressible through the other tools.
 }
 ```
 
-**Returns:** Query result rows.
+**Returns:** `{"rows": [[...], ...], "headers": ["col1", ...]}`.
 
-**Available relations:** `symbol`, `call`, `reference`, `def_use`, `cfg_edge`,
-`cfg_block`, `import`, `type_binding`, `method_call`, `decorator_on`,
-`source_loc`, `func_summary`, `entry_point_decorator`, `entry_point_name`.
+### Relation Schemas
+
+Core relations (column order matters for positional queries):
+
+```
+symbol[qualified_name, file_path, name, kind, line, end_line, parent]
+  kind: "function" | "class" | "method" | "variable"
+
+call[caller_qn, callee_qn, file_path, line, col, func_qn, block_id]
+
+reference[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id]
+  ref_kind: "read" | "write" | "call" | "import" | "definition"
+
+def_use[file_path, func_qn, var_name, kind, def_block, use_block,
+        def_line, def_col, use_line, use_col]
+  kind: "read" | "write" | "aug_write" | "del"
+
+cfg_edge[file_path, func_qn, from_block, to_block, edge_kind,
+         from_line, to_line]
+
+import[importing_file, imported_module, imported_name, line, alias]
+
+type_binding[symbol_qn, file_path, line, binding_kind, type_str]
+  binding_kind: "annotation" | "inferred" | "return"
+```
+
+Additional: `cfg_block`, `method_call`, `decorator_on`, `source_loc`,
+`func_summary`, `entry_point_decorator`, `entry_point_name`.
+
+### More Examples
+
+```
+-- All functions in a file
+?[name, line] := *symbol[_, fp, name, "function", line, _, _], fp == $f
+
+-- Join: calls from one function to another
+?[callee, line] := *call[caller, callee, _, line, _, _, _], caller == $fn
+
+-- Dead code: unreferenced functions
+?[name, fp, line] := *symbol[qn, fp, name, "function", line, _, _],
+                     not *reference[qn, _, _, _, _, _, _]
+
+-- Negation: functions without type annotations
+?[name, fp] := *symbol[qn, fp, name, "function", _, _, _],
+               not *type_binding[qn, _, _, "return", _]
+```
 
 ---
 
@@ -341,7 +458,10 @@ Execute multiple operations in sequence.
 }
 ```
 
-**Returns:** Array of results, one per operation.
+**Returns:** Array of results, one per operation. If an operation fails, its
+entry contains `{"error": "message"}` and subsequent operations **continue**
+(fail-safe, not fail-fast). Each `replace` in a batch operates on the
+original file content, not the output of previous replacements.
 
 ---
 
@@ -356,17 +476,19 @@ Execute multiple operations in sequence.
 ### "What does this function do?"
 
 ```json
-{"type": "lookup", "name": "process_request", "file": "src/handlers.py", "output": "code"}
+{"type": "lookup", "symbol": "process_request", "files": "src/handlers.py", "output": "code"}
 ```
 
-### "Rename a function across the project"
+### "Replace all calls to old_name with new_name"
 
 ```json
 {"type": "replace", "pattern": "old_name($...ARGS)", "replacement": "new_name($...ARGS)", "apply": true}
 ```
 
-Note: For full rename (including imports, string references, docs), prefer
-the `emend rename` CLI command. The MCP `replace` tool does syntactic replacement only.
+**Caveat:** This only replaces call-site syntax. It does not rename the
+function definition, update imports, or fix string references. For full
+project-wide rename, use the `emend rename` CLI command (not yet exposed
+as an MCP tool — see "Not Yet Exposed" below).
 
 ### "Is there dead code in this module?"
 
@@ -398,6 +520,38 @@ the `emend rename` CLI command. The MCP `replace` tool does syntactic replacemen
 {"type": "refs", "symbol": "config.DEBUG", "filter": "writes_only"}
 ```
 
+## Output Format Reference
+
+Not all tools support all formats. Default is `json` for all tools.
+
+| Format | Meaning | Supported by |
+|--------|---------|-------------|
+| `json` | Structured JSON | all tools |
+| `code` | Source text with file:line header | find, lookup, refs |
+| `location` | `file.py:line:col` only | find, refs |
+| `selector` | emend selector (e.g. `src/app.py::MyClass.method`) | find |
+| `summary` | Symbol tree with signatures | lookup |
+| `metadata` | Per-symbol details (lines, kind, decorators) | lookup |
+| `count` | Integer count of matches | find |
+| `text` | Human-readable text | graph, deadcode |
+| `dot` | Graphviz DOT format | graph |
+| `tests` | Impacted test symbols only | impact |
+| `symbols` | Impacted symbol list | impact |
+| `graph` | Impact graph with witness edges | impact |
+
+## Not Yet Exposed
+
+These emend CLI capabilities are not yet available as MCP tools:
+
+- **`rename`** — full project-wide rename (definition + imports + references + docs)
+- **`edit`** / **`add`** — modify symbol components (parameters, decorators, bases)
+- **`move`** / **`copy-to`** — move symbols between files with import updates
+- **`delete`** — safe delete with cascading removal of dead dependents
+- **`lint`** / **`check`** — run pattern-based lint rules from config
+- **`cfg`** — per-function control flow graphs
+- **`types`** — query inferred types for symbols
+- **`dsl`** — embedded DSL analysis (SQL, regex, etc.)
+
 ## Design Principles
 
 1. **One tool per concept.** `find` searches, `replace` transforms, `flow`
@@ -414,6 +568,6 @@ the `emend rename` CLI command. The MCP `replace` tool does syntactic replacemen
 4. **Flat parameters.** No deeply nested objects. The deepest nesting is one
    level (e.g. `entry_point_decorators` as a string array).
 
-5. **Consistent output control.** Every tool accepts `"output"` to control
-   format. The default is always the most useful for an agent (structured,
-   not pretty-printed).
+5. **Consistent naming.** The same concept uses the same parameter name across
+   tools: `symbol` for symbol identifiers, `files` for file globs, `output`
+   for format control.
