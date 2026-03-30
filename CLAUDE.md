@@ -42,7 +42,7 @@
 
 | Test File | Tests For |
 |-----------|-----------|
-| `test_add_parameter.py` | `add` command (parameters, decorators, bases) |
+| `test_component_operations.py` | `add`, `edit`, `remove` commands (list component operations, parameters, decorators, bases) |
 | `test_ast_migration.py` | Tree-sitter migration regression tests (ast_utils, query, search --output summary) |
 | `test_batch.py` | `batch` command (YAML/JSON operations) |
 | `test_callers.py` | `callers` command |
@@ -51,7 +51,6 @@
 | `test_cli_transform.py` | CLI integration for transform operations |
 | `test_component_selector.py` | Extended selector parsing |
 | `test_copy_to.py` | `copy-to` command |
-| `test_edit.py` | `edit` command |
 | `test_file_glob_selectors.py` | File glob selectors, `--matching`, `--output selector`, `--in` selectors, `resolve_files` |
 | `test_find.py` | `find` command (pattern matching) |
 | `test_find_references_context.py` | `find-references --writes-only` / `--reads-only` |
@@ -108,7 +107,7 @@
 
 | Command | Description |
 |---------|-------------|
-| `search` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`, `--include-map`. Also available as: `grep`, `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
+| `grep` | Unified search: auto-detects pattern mode (if `$` in query) vs symbol lookup mode vs summary mode (bare file/dir). `--output=code\|location\|selector\|summary\|metadata`, `--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`, `--type-engine`, `--include-map`. Also available as hidden aliases: `search`, `query`, `show`, `get`, `lookup`, `find` for intuitive workflows |
 | `replace` | Replace code patterns (dry-run by default). `--in` supports selectors |
 | `edit` | Modify or remove existing symbol components. File globs in selectors |
 | `add` | Insert new items into list components. File globs in selectors |
@@ -167,7 +166,9 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 
 ### Trace Analysis
 
-`trace.py` provides intraprocedural trace analysis:
+`trace.py` provides both intraprocedural and interprocedural trace analysis:
+- **Intraprocedural analysis**: per-function tracking via `_analyze_function()`, `run_trace_analysis()`, and `format_violations()`
+- **Interprocedural analysis**: cross-function tracking via `run_interprocedural_trace_analysis()` with fixed-point iteration over function summaries
 - Configuration via `trace` section in `.emend/patterns.yaml`: `labels`, `sources`, `sinks`, `sanitizers`
 - `_analyze_function()` — per-function analysis: finds sources, propagates taint through assignments, applies sanitizers, checks sinks
 - `run_trace_analysis()` — iterates files, collects function definitions, analyzes each + module-level code
@@ -211,7 +212,7 @@ Results are cached via a two-tier cache (in-memory LRU + disk SQLite) in the sha
 
 `transform.py` contains `find_dead_code()`:
 - Single-pass O(files) analysis using `PyScopeResolver`
-- `_find_python_source_root()` detects `src/` layout via `pyproject.toml`
+- `_find_source_root()` detects `src/` layout via `pyproject.toml`
 - Entry point heuristics skip decorated symbols, dunders, tests, `__all__` members
 - Configurable `entry-point-decorators`, `entry-point-names`, and `exclude-paths` (with glob support) via `.emend/patterns.yaml` or CLI flags
 - String literal scanning for dynamic references (getattr, serialization)

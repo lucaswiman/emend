@@ -1027,9 +1027,8 @@ transitively affected via reverse-caller closure.
 When ORM model classes are among the changed symbols, ``impact`` also detects
 embedded SQL queries that reference the corresponding database tables. These
 appear as ``DSL impacts:`` in the default output, ``dsl_impacts`` in JSON, and
-``--[dsl]-->`` edges in graph mode. Detection uses the same ORM link resolution
-as the ``dsl-debug`` command (singularize+PascalCase convention and
-``__tablename__`` matching).
+``--[dsl]-->`` edges in graph mode. Detection uses ORM link resolution via
+singularize+PascalCase convention and ``__tablename__`` matching.
 
 **Examples:**
 
@@ -1333,65 +1332,6 @@ DOT output.
 
    # JSON for programmatic use
    emend cfg src/ --format json
-
----
-
-dsl-debug
----------
-
-Diagnostic command for inspecting embedded DSL detection and symbol extraction.
-Hidden from normal command help. For production use, DSL support is
-transparently integrated into ``search``, ``refs``, ``lint``, and ``impact``.
-
-.. code-block:: text
-
-   emend dsl-debug PATH [OPTIONS]
-
-**Arguments:**
-
-- ``PATH`` -- File or directory to analyze
-
-**Options:**
-
-+-----------------------------+-----------------------------------------------+
-| Option                      | Description                                   |
-+=============================+===============================================+
-| ``--type TEXT``             | DSL type to detect: ``sql``, ``css``,         |
-|                             | ``html``, ``graphql``, ``jinja``              |
-+-----------------------------+-----------------------------------------------+
-| ``--orm TEXT``              | ORM framework: ``sqlalchemy`` (default),      |
-|                             | ``django``                                    |
-+-----------------------------+-----------------------------------------------+
-| ``--resolve``               | Resolve cross-language links to host          |
-|                             | definitions                                   |
-+-----------------------------+-----------------------------------------------+
-| ``--json``                  | Output as JSON                                |
-+-----------------------------+-----------------------------------------------+
-| ``--project``, ``-p``      | Project root for link resolution              |
-+-----------------------------+-----------------------------------------------+
-
-**What it detects:**
-
-- SQL regions in string literals (``SELECT``, ``INSERT``, ``UPDATE``, ``DELETE``,
-  ``CREATE TABLE``, etc.) and magic comments (``# language=sql``)
-- Table and column names extracted from SQL statements
-- ORM links: table names resolved to model class definitions via
-  ``__tablename__`` matching and singularize+PascalCase convention
-
-**Examples:**
-
-.. code-block:: bash
-
-   # Detect SQL in a file
-   emend dsl-debug src/queries.py
-
-   # Detect and resolve to ORM models
-   emend dsl-debug src/ --type sql --resolve --project .
-
-   # JSON output for tooling
-   emend dsl-debug app.py --json
-
-Also available via the hidden alias ``emend dsl``.
 
 ---
 
