@@ -1,14 +1,18 @@
-"""Intraprocedural taint analysis engine for emend.
+"""Intraprocedural trace (data-flow) analysis engine for emend.
 
-Tracks value flow from sources to sinks within individual functions,
-with sanitizers and path traces.  Supports Datalog-based propagation
-via :class:`~emend.fact_graph.FactGraph` when ``use_datalog=True``
-(the default), falling back to the regex-based Python simulation
-when fact graph construction fails or is unavailable.
+Tracks labeled value flow from sources to sinks within individual
+functions, with sanitizers and path traces.  Supports Datalog-based
+propagation via :class:`~emend.fact_graph.FactGraph` when
+``use_datalog=True`` (the default), falling back to the regex-based
+Python simulation when fact graph construction fails or is unavailable.
+
+Formerly named "taint analysis"; renamed to "trace" because the engine
+is a general labeled data-flow tracer — not only for security taint.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -31,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TaintSource:
+class TraceSource:
     """A pattern that introduces taint."""
     pattern: str  # emend pattern string
     label: str  # taint label name
@@ -39,12 +43,12 @@ class TaintSource:
 
 
 @dataclass
-class TaintSink:
+class TraceSink:
     """A pattern that should not receive tainted values.
 
     Either ``pattern`` or ``effect`` (or both) must be set.  An ``effect``
     key like ``"writes($OBJ)"`` resolves via the fact graph instead of
-    pattern matching — see :meth:`FactGraph.taint_propagation_datalog`.
+    pattern matching — see :meth:`FactGraph.trace_propagation_datalog`.
     """
     pattern: str  # emend pattern string (may be "" when effect is set)
     label: str  # taint label name (which labels are forbidden)
@@ -54,7 +58,7 @@ class TaintSink:
 
 
 @dataclass
-class TaintSanitizer:
+class TraceSanitizer:
     """A pattern that removes taint."""
     pattern: str  # emend pattern string
     label: str  # which label is sanitized
@@ -63,7 +67,7 @@ class TaintSanitizer:
 
 
 @dataclass
-class TaintScopeSanitizer:
+class TraceScopeSanitizer:
     """A pattern that kills ALL taint for a label within a scope.
 
     Unlike regular sanitizers which kill taint for a specific matched
@@ -81,17 +85,17 @@ class TaintScopeSanitizer:
 
 
 @dataclass
-class TaintConfig:
+class TraceConfig:
     """Configuration for taint analysis from patterns.yaml."""
     labels: list[str] = field(default_factory=list)
-    sources: list[TaintSource] = field(default_factory=list)
-    sinks: list[TaintSink] = field(default_factory=list)
-    sanitizers: list[TaintSanitizer] = field(default_factory=list)
-    scope_sanitizers: list[TaintScopeSanitizer] = field(default_factory=list)
+    sources: list[TraceSource] = field(default_factory=list)
+    sinks: list[TraceSink] = field(default_factory=list)
+    sanitizers: list[TraceSanitizer] = field(default_factory=list)
+    scope_sanitizers: list[TraceScopeSanitizer] = field(default_factory=list)
 
 
 @dataclass
-class TaintTraceStep:
+class TraceStep:
     """A step in a taint propagation trace."""
     file_path: str
     line: int
@@ -101,7 +105,7 @@ class TaintTraceStep:
 
 
 @dataclass
-class TaintViolation:
+class TraceViolation:
     """A taint violation: tainted value reached a sink."""
     file_path: str
     line: int
@@ -109,7 +113,7 @@ class TaintViolation:
     label: str
     sink_pattern: str
     message: str
-    trace: list[TaintTraceStep] = field(default_factory=list)
+    trace: list[TraceStep] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -133,43 +137,62 @@ def evaluate_type_constraint(constraint: str, type_name: str) -> bool:
     Returns ``True`` if the type satisfies the constraint, ``False`` otherwise.
     An empty constraint always returns ``True``.
     """
+    parsed = _parse_type_constraint(constraint)
+    if parsed is None:
+        return True
+    return any(
+        all(_eval_atom(atom, type_name) for atom in and_group)
+        for and_group in parsed
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _parse_type_constraint(constraint: str) -> tuple[tuple[tuple[str, bool], ...], ...] | None:
+    """Parse a type constraint string into a cached tuple of OR-groups.
+
+    Returns ``None`` for empty constraints.  Each OR-group is a tuple of
+    ``(name, negated)`` atoms.
+    """
     constraint = constraint.strip()
     if not constraint:
-        return True
-
-    # Split on | (OR) — lowest precedence
+        return None
     or_parts = [p.strip() for p in constraint.split("|")]
-    return any(_eval_and_expr(part, type_name) for part in or_parts)
+    return tuple(
+        tuple(_parse_atom(a.strip()) for a in part.split("&"))
+        for part in or_parts
+    )
 
 
-def _eval_and_expr(expr: str, type_name: str) -> bool:
-    """Evaluate an AND-separated type constraint expression."""
-    and_parts = [p.strip() for p in expr.split("&")]
-    return all(_eval_atom(part, type_name) for part in and_parts)
-
-
-def _eval_atom(atom: str, type_name: str) -> bool:
-    """Evaluate a single type constraint atom (possibly negated)."""
+def _parse_atom(atom: str) -> tuple[str, bool]:
+    """Parse a single atom into (name, negated)."""
     atom = atom.strip()
     if atom.startswith("!"):
-        return type_name != atom[1:].strip()
-    return type_name == atom
+        return (atom[1:].strip(), True)
+    return (atom, False)
+
+
+def _eval_atom(atom: tuple[str, bool], type_name: str) -> bool:
+    """Evaluate a parsed type constraint atom."""
+    name, negated = atom
+    if negated:
+        return type_name != name
+    return type_name == name
 
 
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 
-def load_taint_config(config_path: str) -> TaintConfig:
-    """Load taint analysis configuration from a YAML file.
+def load_trace_config(config_path: str) -> TraceConfig:
+    """Load trace analysis configuration from a YAML file.
 
-    Reads the ``taint`` section from the given YAML config file.
+    Reads the ``trace`` section from the given YAML config file.
 
     Args:
         config_path: Path to the YAML config file (typically .emend/patterns.yaml).
 
     Returns:
-        A TaintConfig with sources, sinks, sanitizers, and labels.
+        A TraceConfig with sources, sinks, sanitizers, and labels.
 
     Raises:
         FileNotFoundError: If the config file does not exist.
@@ -181,32 +204,32 @@ def load_taint_config(config_path: str) -> TaintConfig:
     with open(path) as f:
         config = yaml.safe_load(f)
 
-    raw = config.get("taint")
+    raw = config.get("trace")
     if raw is None:
-        return TaintConfig()
+        return TraceConfig()
 
     labels = raw.get("labels", []) or []
 
     sources = []
     for s in raw.get("sources", []) or []:
-        sources.append(TaintSource(
+        sources.append(TraceSource(
             pattern=s["pattern"], label=s["label"],
             type_constraint=s.get("type_constraint", ""),
         ))
 
     sinks = []
     for s in raw.get("sinks", []) or []:
-        sinks.append(TaintSink(
+        sinks.append(TraceSink(
             pattern=s.get("pattern", ""),
             label=s["label"],
-            message=s.get("message", "Tainted value reaches sink"),
+            message=s.get("message", "Traced value reaches sink"),
             effect=s.get("effect", ""),
             type_constraint=s.get("type_constraint", ""),
         ))
 
     sanitizers = []
     for s in raw.get("sanitizers", []) or []:
-        sanitizers.append(TaintSanitizer(
+        sanitizers.append(TraceSanitizer(
             pattern=s["pattern"], label=s["label"],
             quantifier=s.get("quantifier", "all_paths"),
             type_constraint=s.get("type_constraint", ""),
@@ -214,11 +237,11 @@ def load_taint_config(config_path: str) -> TaintConfig:
 
     scope_sanitizers = []
     for s in raw.get("scope_sanitizers", []) or []:
-        scope_sanitizers.append(TaintScopeSanitizer(
+        scope_sanitizers.append(TraceScopeSanitizer(
             pattern=s["pattern"], label=s["label"],
         ))
 
-    explicit_config = TaintConfig(
+    explicit_config = TraceConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
@@ -229,7 +252,7 @@ def load_taint_config(config_path: str) -> TaintConfig:
     # Support a ``presets`` key that merges named framework presets
     preset_names = raw.get("presets", []) or []
     if preset_names:
-        from emend.taint_presets import get_preset, merge_configs
+        from emend.trace_presets import get_preset, merge_configs
         preset_configs = [get_preset(name) for name in preset_names]
         return merge_configs(*preset_configs, explicit_config)
 
@@ -386,7 +409,7 @@ def _find_for_loops(source: str) -> list[tuple[int, str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def _has_type_constraints(config: TaintConfig) -> bool:
+def _has_type_constraints(config: TraceConfig) -> bool:
     """Check if any source/sink/sanitizer has a type_constraint."""
     for s in config.sources:
         if s.type_constraint:
@@ -400,7 +423,7 @@ def _has_type_constraints(config: TaintConfig) -> bool:
     return False
 
 
-def _maybe_create_type_oracle(config: TaintConfig) -> Any | None:
+def _maybe_create_type_oracle(config: TraceConfig) -> Any | None:
     """Create a type oracle if any rule has a type_constraint."""
     if not _has_type_constraints(config):
         return None
@@ -462,8 +485,48 @@ def _filter_vars_by_type(
     return kept
 
 
+def _filter_by_receiver_type(
+    matches: list[tuple[str, str, str, int, str]],
+    type_constraint: str,
+    graph: "FactGraph",
+) -> list[tuple[str, str, str, int, str]]:
+    """Filter source/sink locations by receiver type via object-sensitive dispatch.
+
+    For method-call patterns (``obj.method($X)``), resolves ``obj``'s type
+    using the ``type_binding`` relation in the fact graph and filters by the
+    ``type_constraint`` on the source/sink definition.
+
+    Non-method-call matches and matches with unknown receiver types are kept
+    (conservative).
+    """
+    if not type_constraint:
+        return matches
+
+    try:
+        resolved_types = graph.method_call_types()
+    except Exception:
+        return matches
+
+    # Build a lookup: (file_path, func_qn, receiver) -> type_str
+    receiver_types: dict[tuple[str, str, str], str] = {}
+    for fp, fq, rcv, _meth, ts in resolved_types:
+        receiver_types[(fp, fq, rcv)] = ts
+
+    kept = []
+    for fp, fq, var, bid, lbl in matches:
+        # Check if var looks like a receiver (has a dot — e.g., "obj" for "obj.method()")
+        rtype = receiver_types.get((fp, fq, var))
+        if rtype is None:
+            # Unknown receiver type — conservatively keep
+            kept.append((fp, fq, var, bid, lbl))
+            continue
+        if evaluate_type_constraint(type_constraint, rtype):
+            kept.append((fp, fq, var, bid, lbl))
+    return kept
+
+
 # ---------------------------------------------------------------------------
-# Core taint analysis
+# Core trace analysis
 # ---------------------------------------------------------------------------
 
 def _analyze_function(
@@ -471,11 +534,11 @@ def _analyze_function(
     source: str,
     func_start: int,
     func_end: int,
-    config: TaintConfig,
+    config: TraceConfig,
     label_filter: str | None = None,
     language: str = "python",
     type_oracle: Any | None = None,
-) -> list[TaintViolation]:
+) -> list[TraceViolation]:
     """Analyze a single function body for taint violations.
 
     Args:
@@ -483,7 +546,7 @@ def _analyze_function(
         source: Full file source text.
         func_start: 1-based start line of the function.
         func_end: 1-based end line of the function.
-        config: Taint configuration with sources, sinks, sanitizers.
+        config: Trace configuration with sources, sinks, sanitizers.
         label_filter: If set, only check this specific taint label.
         language: Source language.
 
@@ -510,8 +573,8 @@ def _analyze_function(
         """Check if a match line falls within this function."""
         return func_start <= match_line <= func_end
 
-    # Taint state: variable_name -> {label: TaintTraceStep (where it was tainted)}
-    taint_state: dict[str, dict[str, TaintTraceStep]] = {}
+    # Taint state: variable_name -> {label: TraceStep (where it was tainted)}
+    taint_state: dict[str, dict[str, TraceStep]] = {}
 
     # Step 1: Find source pattern matches and establish initial taint
     for src_def in config.sources:
@@ -570,7 +633,7 @@ def _analyze_function(
                 if not tainted_vars:
                     continue
 
-            step = TaintTraceStep(
+            step = TraceStep(
                 file_path=file_path,
                 line=match_line,
                 col=match_col,
@@ -608,13 +671,13 @@ def _analyze_function(
             target, rhs = op_payload
             rhs_idents = _extract_qualified_identifiers(rhs)
 
-            propagated_labels: dict[str, TaintTraceStep] = {}
+            propagated_labels: dict[str, TraceStep] = {}
             for ident in rhs_idents:
                 if ident in taint_state:
                     for label, origin_step in taint_state[ident].items():
                         if label_filter and label != label_filter:
                             continue
-                        propagated_labels[label] = TaintTraceStep(
+                        propagated_labels[label] = TraceStep(
                             file_path=file_path,
                             line=op_line_abs,
                             col=0,
@@ -627,7 +690,7 @@ def _analyze_function(
                         for label, origin_step in taint_state[base].items():
                             if label_filter and label != label_filter:
                                 continue
-                            propagated_labels[label] = TaintTraceStep(
+                            propagated_labels[label] = TraceStep(
                                 file_path=file_path,
                                 line=op_line_abs,
                                 col=0,
@@ -645,7 +708,7 @@ def _analyze_function(
                         if label_filter and label != label_filter:
                             continue
                         if label not in propagated_labels:
-                            propagated_labels[label] = TaintTraceStep(
+                            propagated_labels[label] = TraceStep(
                                 file_path=file_path,
                                 line=op_line_abs,
                                 col=0,
@@ -671,7 +734,7 @@ def _analyze_function(
                         if container not in taint_state:
                             taint_state[container] = {}
                         if label not in taint_state[container]:
-                            taint_state[container][label] = TaintTraceStep(
+                            taint_state[container][label] = TraceStep(
                                 file_path=file_path,
                                 line=op_line_abs,
                                 col=0,
@@ -690,7 +753,7 @@ def _analyze_function(
                         if loop_var not in taint_state:
                             taint_state[loop_var] = {}
                         if label not in taint_state[loop_var]:
-                            taint_state[loop_var][label] = TaintTraceStep(
+                            taint_state[loop_var][label] = TraceStep(
                                 file_path=file_path,
                                 line=op_line_abs,
                                 col=0,
@@ -864,7 +927,7 @@ def _analyze_function(
                 if not taint_state[var]:
                     del taint_state[var]
 
-    violations: list[TaintViolation] = []
+    violations: list[TraceViolation] = []
 
     # Step 4: Check sinks for tainted values
     for sink_def in config.sinks:
@@ -905,14 +968,14 @@ def _analyze_function(
             for ident in sink_idents:
                 if ident in taint_state and sink_def.label in taint_state[ident]:
                     # Build trace
-                    trace: list[TaintTraceStep] = []
+                    trace: list[TraceStep] = []
                     origin = taint_state[ident].get(sink_def.label)
                     if origin:
                         trace.append(origin)
 
                     # Add propagation steps by walking the chain
                     # (simplified: just show origin and sink)
-                    trace.append(TaintTraceStep(
+                    trace.append(TraceStep(
                         file_path=file_path,
                         line=match_line,
                         col=match_col,
@@ -920,7 +983,7 @@ def _analyze_function(
                         variable=ident,
                     ))
 
-                    violations.append(TaintViolation(
+                    violations.append(TraceViolation(
                         file_path=file_path,
                         line=match_line,
                         col=match_col,
@@ -939,13 +1002,13 @@ def _analyze_function(
 # Public API
 # ---------------------------------------------------------------------------
 
-def run_taint_analysis(
+def run_trace_analysis(
     paths: list[str],
-    config: TaintConfig,
+    config: TraceConfig,
     label_filter: str | None = None,
     language: str = "python",
     project_path: str | None = None,
-) -> list[TaintViolation]:
+) -> list[TraceViolation]:
     """Run taint analysis on the given files.
 
     Tries Datalog-based propagation over the FactGraph first (pattern matching
@@ -955,13 +1018,13 @@ def run_taint_analysis(
 
     Args:
         paths: List of source file paths to analyze.
-        config: Taint configuration (sources, sinks, sanitizers, labels).
+        config: Trace configuration (sources, sinks, sanitizers, labels).
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
         project_path: Project root for FactGraph construction (optional).
 
     Returns:
-        List of TaintViolation objects.
+        List of TraceViolation objects.
     """
     if not config.sources or not config.sinks:
         return []
@@ -969,7 +1032,7 @@ def run_taint_analysis(
     # Try Datalog path: pattern-match sources/sinks, propagate via FactGraph
     if project_path:
         try:
-            datalog_result = _run_taint_datalog(
+            datalog_result = _run_trace_datalog(
                 paths, config, label_filter, language, project_path,
             )
             if datalog_result is not None:
@@ -983,7 +1046,7 @@ def run_taint_analysis(
     # Create type oracle if any rule has a type_constraint
     type_oracle = _maybe_create_type_oracle(config)
 
-    violations: list[TaintViolation] = []
+    violations: list[TraceViolation] = []
 
     for file_path in paths:
         path_obj = Path(file_path)
@@ -1025,13 +1088,13 @@ def run_taint_analysis(
     return _deduplicate_violations(violations)
 
 
-def _run_taint_datalog(
+def _run_trace_datalog(
     paths: list[str],
-    config: TaintConfig,
+    config: TraceConfig,
     label_filter: str | None,
     language: str,
     project_path: str,
-) -> list[TaintViolation] | None:
+) -> list[TraceViolation] | None:
     """Datalog-based taint: pattern-match sources/sinks, propagate via FactGraph.
 
     Returns None if the FactGraph is unavailable or the Datalog query fails,
@@ -1114,17 +1177,28 @@ def _run_taint_datalog(
     if not sources or not sinks:
         return []
 
-    taint_facts = graph.taint_propagation_datalog(
+    # Object-sensitive dispatch: filter by receiver type when type_constraint is set
+    for src_def in config.sources:
+        if src_def.type_constraint:
+            sources = _filter_by_receiver_type(sources, src_def.type_constraint, graph)
+    for sink_def in config.sinks:
+        if sink_def.type_constraint:
+            sinks = _filter_by_receiver_type(sinks, sink_def.type_constraint, graph)
+
+    if not sources or not sinks:
+        return []
+
+    taint_facts = graph.trace_propagation_datalog(
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers if sanitizers else None,
         scope_kills=scope_kills if scope_kills else None,
     )
 
-    # Convert TaintFlowFact -> TaintViolation
-    violations: list[TaintViolation] = []
+    # Convert TraceFlowFact -> TraceViolation
+    violations: list[TraceViolation] = []
     for tf in taint_facts:
-        violations.append(TaintViolation(
+        violations.append(TraceViolation(
             file_path=tf.file_path,
             line=tf.sink_line,
             source_line=tf.source_line,
@@ -1136,10 +1210,10 @@ def _run_taint_datalog(
     return _deduplicate_violations(violations)
 
 
-def _deduplicate_violations(violations: list[TaintViolation]) -> list[TaintViolation]:
+def _deduplicate_violations(violations: list[TraceViolation]) -> list[TraceViolation]:
     """Remove duplicate violations keyed by (file, line, label, sink_pattern)."""
     seen: set[tuple[str, int, str, str]] = set()
-    unique: list[TaintViolation] = []
+    unique: list[TraceViolation] = []
     for v in violations:
         key = (v.file_path, v.line, v.label, v.sink_pattern)
         if key not in seen:
@@ -1162,7 +1236,7 @@ def _collect_functions(
 
 
 def format_violations(
-    violations: list[TaintViolation],
+    violations: list[TraceViolation],
     show_trace: bool = False,
     json_output: bool = False,
 ) -> str:
@@ -1203,7 +1277,7 @@ def format_violations(
 
     lines: list[str] = []
     for v in violations:
-        lines.append(f"{v.file_path}:{v.line}:{v.col}: [taint:{v.label}] {v.message}")
+        lines.append(f"{v.file_path}:{v.line}:{v.col}: [trace:{v.label}] {v.message}")
         if show_trace and v.trace:
             for step in v.trace:
                 lines.append(
@@ -1237,7 +1311,7 @@ class FunctionSummary:
 
 @dataclass
 class InterproceduralResult:
-    violations: list[TaintViolation]
+    violations: list[TraceViolation]
     summaries: dict[str, FunctionSummary]  # qn -> summary
     iterations: int  # how many fixed-point iterations
 
@@ -1309,7 +1383,7 @@ def _compute_function_summary(
     source: str,
     func_start: int,
     func_end: int,
-    config: TaintConfig,
+    config: TraceConfig,
     func_qn: str,
     param_names: list[str],
     language: str = "python",
@@ -1325,7 +1399,7 @@ def _compute_function_summary(
         source: Full file source text.
         func_start: 1-based start line of the function.
         func_end: 1-based end line of the function.
-        config: Taint configuration.
+        config: Trace configuration.
         func_qn: Qualified name of the function.
         param_names: Names of the function's parameters.
         language: Source language.
@@ -1440,9 +1514,9 @@ def _snapshot_summary(s: FunctionSummary) -> tuple:
     )
 
 
-def run_interprocedural_taint_analysis(
+def run_interprocedural_trace_analysis(
     paths: list[str],
-    config: TaintConfig,
+    config: TraceConfig,
     label_filter: str | None = None,
     language: str = "python",
     max_iterations: int = 10,
@@ -1456,7 +1530,7 @@ def run_interprocedural_taint_analysis(
 
     Args:
         paths: List of source file paths to analyze.
-        config: Taint configuration (sources, sinks, sanitizers, labels).
+        config: Trace configuration (sources, sinks, sanitizers, labels).
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
         max_iterations: Maximum number of fixed-point iterations.
@@ -1473,12 +1547,12 @@ def run_interprocedural_taint_analysis(
         try:
             from emend.transform import _get_or_build_fact_graph
             graph = _get_or_build_fact_graph(project_path)
-            taint_facts = graph.interprocedural_taint_datalog(
+            taint_facts = graph.interprocedural_trace_datalog(
                 max_iterations=max_iterations,
             )
             if taint_facts:
                 violations = [
-                    TaintViolation(
+                    TraceViolation(
                         file_path=tf.file_path or "",
                         line=tf.sink_line,
                         source_line=tf.source_line,
@@ -1693,7 +1767,7 @@ def run_interprocedural_taint_analysis(
     # ------------------------------------------------------------------
     # Phase 3: Use final summaries to find cross-function violations
     # ------------------------------------------------------------------
-    violations: list[TaintViolation] = []
+    violations: list[TraceViolation] = []
 
     # First, collect intraprocedural violations (existing behavior)
     for file_path in paths:
@@ -1732,7 +1806,7 @@ def run_interprocedural_taint_analysis(
 
         # Run intraprocedural taint to know which variables are tainted
         # at each point (reuse the source-finding logic)
-        taint_state: dict[str, dict[str, TaintTraceStep]] = {}
+        taint_state: dict[str, dict[str, TraceStep]] = {}
 
         # Find sources in this function
         for src_def in config.sources:
@@ -1764,7 +1838,7 @@ def run_interprocedural_taint_analysis(
                     for ident in _extract_identifiers(match.matched_text):
                         tainted_vars.add(ident)
 
-                step = TaintTraceStep(
+                step = TraceStep(
                     file_path=fp,
                     line=match_line,
                     col=match_col,
@@ -1785,13 +1859,13 @@ def run_interprocedural_taint_analysis(
         for stmt_line_rel, target, rhs in body_assignments:
             stmt_line_abs = stmt_line_rel + body_start - 1
             rhs_idents = _extract_identifiers(rhs)
-            propagated: dict[str, TaintTraceStep] = {}
+            propagated: dict[str, TraceStep] = {}
             for ident in rhs_idents:
                 if ident in taint_state:
                     for lbl, origin_step in taint_state[ident].items():
                         if label_filter and lbl != label_filter:
                             continue
-                        propagated[lbl] = TaintTraceStep(
+                        propagated[lbl] = TraceStep(
                             file_path=fp,
                             line=stmt_line_abs,
                             col=0,
@@ -1876,14 +1950,14 @@ def run_interprocedural_taint_analysis(
                                         # Build interprocedural trace
                                         trace = [
                                             origin_step,
-                                            TaintTraceStep(
+                                            TraceStep(
                                                 file_path=fp,
                                                 line=line_idx,
                                                 col=call_match.start(),
                                                 description=f"call: {callee_name}({arg_str}) passes tainted '{ai}' as param '{callee_param}'",
                                                 variable=ai,
                                             ),
-                                            TaintTraceStep(
+                                            TraceStep(
                                                 file_path=callee_summary.file_path,
                                                 line=sink_line,
                                                 col=0,
@@ -1893,13 +1967,13 @@ def run_interprocedural_taint_analysis(
                                         ]
 
                                         # Find the sink message
-                                        sink_msg = "Tainted value reaches sink via function call"
+                                        sink_msg = "Traced value reaches sink via function call"
                                         for sd in config.sinks:
                                             if sd.pattern == sink_pat and sd.label == sink_label:
                                                 sink_msg = sd.message + f" (via {callee_name})"
                                                 break
 
-                                        violations.append(TaintViolation(
+                                        violations.append(TraceViolation(
                                             file_path=fp,
                                             line=line_idx,
                                             col=call_match.start(),

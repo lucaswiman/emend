@@ -1,19 +1,19 @@
-"""Tests for intraprocedural taint analysis."""
+"""Tests for intraprocedural trace analysis."""
 
 import json
 
 import pytest
 import yaml
 
-from emend.taint import (
-    TaintConfig,
-    TaintSanitizer,
-    TaintSink,
-    TaintSource,
-    TaintViolation,
+from emend.trace import (
+    TraceConfig,
+    TraceSanitizer,
+    TraceSink,
+    TraceSource,
+    TraceViolation,
     format_violations,
-    load_taint_config,
-    run_taint_analysis,
+    load_trace_config,
+    run_trace_analysis,
 )
 
 
@@ -26,33 +26,33 @@ def _write_config(tmp_path, config_dict):
 
 
 def _make_sql_injection_config():
-    """Return a TaintConfig for SQL injection detection."""
-    return TaintConfig(
+    """Return a TraceConfig for SQL injection detection."""
+    return TraceConfig(
         labels=["user_input"],
         sources=[
-            TaintSource(pattern="request.args.get($X)", label="user_input"),
-            TaintSource(pattern="request.form[$X]", label="user_input"),
+            TraceSource(pattern="request.args.get($X)", label="user_input"),
+            TraceSource(pattern="request.form[$X]", label="user_input"),
         ],
         sinks=[
-            TaintSink(
+            TraceSink(
                 pattern="cursor.execute($X)",
                 label="user_input",
                 message="Potential SQL injection: user input reaches cursor.execute()",
             ),
-            TaintSink(
+            TraceSink(
                 pattern="eval($X)",
                 label="user_input",
                 message="Potential code injection: user input reaches eval()",
             ),
         ],
         sanitizers=[
-            TaintSanitizer(pattern="escape($X)", label="user_input"),
-            TaintSanitizer(pattern="sanitize($X)", label="user_input"),
+            TraceSanitizer(pattern="escape($X)", label="user_input"),
+            TraceSanitizer(pattern="sanitize($X)", label="user_input"),
         ],
     )
 
 
-def test_taint_basic_source_to_sink(tmp_path):
+def test_trace_basic_source_to_sink(tmp_path):
     """Detects tainted value flowing from source to sink."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -62,7 +62,7 @@ def test_taint_basic_source_to_sink(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) >= 1
     v = violations[0]
@@ -71,7 +71,7 @@ def test_taint_basic_source_to_sink(tmp_path):
     assert v.file_path == str(test_file)
 
 
-def test_taint_sanitizer_removes_taint(tmp_path):
+def test_trace_sanitizer_removes_taint(tmp_path):
     """Sanitizer pattern removes taint so no violation is reported."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -82,12 +82,12 @@ def test_taint_sanitizer_removes_taint(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) == 0
 
 
-def test_taint_propagation_through_assignments(tmp_path):
+def test_trace_propagation_through_assignments(tmp_path):
     """Taint propagates through variable assignments."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -98,13 +98,13 @@ def test_taint_propagation_through_assignments(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) >= 1
     assert violations[0].label == "user_input"
 
 
-def test_taint_no_false_positive_clean_value(tmp_path):
+def test_trace_no_false_positive_clean_value(tmp_path):
     """No violation when a clean (non-tainted) value reaches a sink."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -114,12 +114,12 @@ def test_taint_no_false_positive_clean_value(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) == 0
 
 
-def test_taint_trace_output(tmp_path):
+def test_trace_trace_output(tmp_path):
     """Trace includes source and sink steps."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -129,7 +129,7 @@ def test_taint_trace_output(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) >= 1
     v = violations[0]
@@ -140,7 +140,7 @@ def test_taint_trace_output(tmp_path):
     assert any("sink" in d for d in descriptions)
 
 
-def test_taint_label_filtering(tmp_path):
+def test_trace_label_filtering(tmp_path):
     """--label filters to only check a specific taint label."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -152,15 +152,15 @@ def test_taint_label_filtering(tmp_path):
     config = _make_sql_injection_config()
 
     # With matching label: should find violations
-    violations = run_taint_analysis([str(test_file)], config, label_filter="user_input")
+    violations = run_trace_analysis([str(test_file)], config, label_filter="user_input")
     assert len(violations) >= 1
 
     # With non-matching label: should find no violations
-    violations = run_taint_analysis([str(test_file)], config, label_filter="other_label")
+    violations = run_trace_analysis([str(test_file)], config, label_filter="other_label")
     assert len(violations) == 0
 
 
-def test_taint_json_output(tmp_path):
+def test_trace_json_output(tmp_path):
     """JSON output format is valid and contains expected fields."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -170,7 +170,7 @@ def test_taint_json_output(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     output = format_violations(violations, json_output=True)
     data = json.loads(output)
@@ -182,7 +182,7 @@ def test_taint_json_output(tmp_path):
     assert "message" in data[0]
 
 
-def test_taint_json_output_with_trace(tmp_path):
+def test_trace_json_output_with_trace(tmp_path):
     """JSON output includes trace when requested."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -192,7 +192,7 @@ def test_taint_json_output_with_trace(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     output = format_violations(violations, show_trace=True, json_output=True)
     data = json.loads(output)
@@ -201,7 +201,7 @@ def test_taint_json_output_with_trace(tmp_path):
     assert isinstance(data[0]["trace"], list)
 
 
-def test_taint_text_output_format(tmp_path):
+def test_trace_text_output_format(tmp_path):
     """Text output uses standard file:line:col format."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -211,14 +211,14 @@ def test_taint_text_output_format(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     output = format_violations(violations)
-    assert "[taint:user_input]" in output
+    assert "[trace:user_input]" in output
     assert "SQL injection" in output
 
 
-def test_taint_text_output_with_trace(tmp_path):
+def test_trace_text_output_with_trace(tmp_path):
     """Text output includes indented trace lines."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -228,7 +228,7 @@ def test_taint_text_output_with_trace(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     output = format_violations(violations, show_trace=True)
     # Trace lines are indented with two spaces
@@ -236,10 +236,10 @@ def test_taint_text_output_with_trace(tmp_path):
     assert len(trace_lines) >= 1
 
 
-def test_taint_load_config(tmp_path):
-    """load_taint_config parses YAML taint section correctly."""
+def test_trace_load_config(tmp_path):
+    """load_trace_config parses YAML trace section correctly."""
     config_file = _write_config(tmp_path, {
-        "taint": {
+        "trace": {
             "labels": ["user_input", "sensitive_data"],
             "sources": [
                 {"pattern": "request.args.get($X)", "label": "user_input"},
@@ -257,7 +257,7 @@ def test_taint_load_config(tmp_path):
         }
     })
 
-    config = load_taint_config(str(config_file))
+    config = load_trace_config(str(config_file))
     assert config.labels == ["user_input", "sensitive_data"]
     assert len(config.sources) == 1
     assert config.sources[0].pattern == "request.args.get($X)"
@@ -266,26 +266,26 @@ def test_taint_load_config(tmp_path):
     assert len(config.sanitizers) == 1
 
 
-def test_taint_load_config_missing_taint_section(tmp_path):
-    """load_taint_config returns empty config when no taint section."""
+def test_trace_load_config_missing_trace_section(tmp_path):
+    """load_trace_config returns empty config when no trace section."""
     config_file = _write_config(tmp_path, {
         "rules": {"no-print": {"find": "print($X)", "message": "No print"}}
     })
 
-    config = load_taint_config(str(config_file))
+    config = load_trace_config(str(config_file))
     assert config.labels == []
     assert config.sources == []
     assert config.sinks == []
     assert config.sanitizers == []
 
 
-def test_taint_load_config_file_not_found(tmp_path):
-    """load_taint_config raises FileNotFoundError for missing file."""
+def test_trace_load_config_file_not_found(tmp_path):
+    """load_trace_config raises FileNotFoundError for missing file."""
     with pytest.raises(FileNotFoundError):
-        load_taint_config(str(tmp_path / "nonexistent.yaml"))
+        load_trace_config(str(tmp_path / "nonexistent.yaml"))
 
 
-def test_taint_eval_sink(tmp_path):
+def test_trace_eval_sink(tmp_path):
     """Detects tainted value reaching eval()."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -295,13 +295,13 @@ def test_taint_eval_sink(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) >= 1
     assert any("code injection" in v.message for v in violations)
 
 
-def test_taint_multiple_functions(tmp_path):
+def test_trace_multiple_functions(tmp_path):
     """Each function is analyzed independently."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -315,14 +315,14 @@ def test_taint_multiple_functions(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     # Only the unsafe handler should produce violations
     assert len(violations) >= 1
     assert all(v.line >= 5 for v in violations)
 
 
-def test_taint_empty_config_no_violations(tmp_path):
+def test_trace_empty_config_no_violations(tmp_path):
     """No violations when config has no sources or sinks."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -331,19 +331,19 @@ def test_taint_empty_config_no_violations(tmp_path):
         "    cursor.execute(name)\n"
     )
 
-    config = TaintConfig()
-    violations = run_taint_analysis([str(test_file)], config)
+    config = TraceConfig()
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) == 0
 
 
-def test_taint_nonexistent_file():
+def test_trace_nonexistent_file():
     """Nonexistent files are silently skipped."""
     config = _make_sql_injection_config()
-    violations = run_taint_analysis(["/nonexistent/file.py"], config)
+    violations = run_trace_analysis(["/nonexistent/file.py"], config)
     assert len(violations) == 0
 
 
-def test_taint_propagation_through_string_concat(tmp_path):
+def test_trace_propagation_through_string_concat(tmp_path):
     """Taint propagates through string operations."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -354,12 +354,12 @@ def test_taint_propagation_through_string_concat(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) >= 1
 
 
-def test_taint_sanitize_then_use(tmp_path):
+def test_trace_sanitize_then_use(tmp_path):
     """After sanitization, using the variable in a sink is safe."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -370,12 +370,12 @@ def test_taint_sanitize_then_use(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
 
     assert len(violations) == 0
 
 
-def test_taint_field_sensitivity_distinct_fields(tmp_path):
+def test_trace_field_sensitivity_distinct_fields(tmp_path):
     """Different fields on the same object are tracked independently."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -388,12 +388,12 @@ def test_taint_field_sensitivity_distinct_fields(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     # obj.dirty should trigger a violation
     assert len(violations) >= 1
 
 
-def test_taint_field_sensitivity_clean_field_no_violation(tmp_path):
+def test_trace_field_sensitivity_clean_field_no_violation(tmp_path):
     """A clean field on a partially-tainted object does not trigger."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -406,12 +406,12 @@ def test_taint_field_sensitivity_clean_field_no_violation(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     # obj.clean should NOT trigger a violation
     assert len(violations) == 0
 
 
-def test_taint_field_sensitivity_propagation(tmp_path):
+def test_trace_field_sensitivity_propagation(tmp_path):
     """Taint propagates through dotted attribute assignments."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -422,11 +422,11 @@ def test_taint_field_sensitivity_propagation(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1
 
 
-def test_taint_field_sanitizer_only_cleans_field(tmp_path):
+def test_trace_field_sanitizer_only_cleans_field(tmp_path):
     """Sanitizing obj.field does not clean obj.other_field."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -438,12 +438,12 @@ def test_taint_field_sanitizer_only_cleans_field(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     # b is still tainted (escape only cleaned a)
     assert len(violations) >= 1
 
 
-def test_taint_container_append(tmp_path):
+def test_trace_container_append(tmp_path):
     """Taint propagates through list.append()."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -455,11 +455,11 @@ def test_taint_container_append(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1
 
 
-def test_taint_container_dict_subscript(tmp_path):
+def test_trace_container_dict_subscript(tmp_path):
     """Taint propagates through dict subscript assignment."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -472,11 +472,11 @@ def test_taint_container_dict_subscript(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1
 
 
-def test_taint_container_iteration(tmp_path):
+def test_trace_container_iteration(tmp_path):
     """Taint propagates through for-loop iteration."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -488,11 +488,11 @@ def test_taint_container_iteration(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1
 
 
-def test_taint_container_clean_list_no_violation(tmp_path):
+def test_trace_container_clean_list_no_violation(tmp_path):
     """Clean list elements do not produce false positives."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -503,11 +503,11 @@ def test_taint_container_clean_list_no_violation(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) == 0
 
 
-def test_taint_container_extend(tmp_path):
+def test_trace_container_extend(tmp_path):
     """Taint propagates through list.extend()."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -520,5 +520,5 @@ def test_taint_container_extend(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_taint_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
-from emend.taint import _extract_identifiers
+from emend.trace import _extract_identifiers
 
 
 @dataclass

@@ -1440,41 +1440,20 @@ def lint_cmd(
         raise typer.Exit(1)
 
 
-@app.command("taint")
-def taint_cmd(
-    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
-    config: Annotated[Optional[str], typer.Option("--config", help="Path to patterns.yaml")] = None,
-    label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific taint label")] = None,
-    trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
-    interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function taint tracking")] = False,
-    max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
-    preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific rules (django, flask, sqlalchemy, fastapi, all)")] = None,
-):
-    """Run taint analysis to detect unsafe data flows.
-
-    Tracks value flow from sources (e.g. user input) to sinks
-    (e.g. SQL queries, eval) within individual functions, reporting
-    violations when tainted data reaches a sink without sanitization.
-
-    With --interprocedural, tracks taint across function boundaries using
-    function summaries and fixed-point iteration.
-
-    Configuration is read from the ``taint`` section of .emend/patterns.yaml
-    (or the file specified by --config).  Use --preset to load built-in rules
-    for a specific framework (django, flask, sqlalchemy, fastapi, all).
-
-    Examples:
-        emend taint src/
-        emend taint app.py --label user_input
-        emend taint src/ --trace
-        emend taint src/ --json
-        emend taint src/ --interprocedural
-        emend taint app.py --preset flask
-    """
+def _trace_cmd_impl(
+    path: str,
+    config: str | None,
+    label: str | None,
+    trace: bool,
+    json_output: bool,
+    project: str | None,
+    interprocedural: bool,
+    max_iterations: int,
+    preset: str | None,
+) -> None:
+    """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
-        from emend.taint import load_taint_config, run_taint_analysis, format_violations
+        from emend.trace import load_trace_config, run_trace_analysis, format_violations
 
         # Find config file
         if config is None:
@@ -1485,20 +1464,20 @@ def taint_cmd(
             raise typer.Exit(2)
 
         if config_path.exists():
-            taint_config = load_taint_config(str(config_path))
+            trace_config = load_trace_config(str(config_path))
         else:
-            from emend.taint import TaintConfig as _TaintConfig
-            taint_config = _TaintConfig()
+            from emend.trace import TraceConfig as _TraceConfig
+            trace_config = _TraceConfig()
 
         if preset:
-            from emend.taint_presets import get_preset, merge_configs
+            from emend.trace_presets import get_preset, merge_configs
             preset_config = get_preset(preset)
-            taint_config = merge_configs(taint_config, preset_config)
-        if not taint_config.sources:
-            print("No taint sources configured.", file=sys.stderr)
+            trace_config = merge_configs(trace_config, preset_config)
+        if not trace_config.sources:
+            print("No trace sources configured.", file=sys.stderr)
             raise typer.Exit(0)
-        if not taint_config.sinks:
-            print("No taint sinks configured.", file=sys.stderr)
+        if not trace_config.sinks:
+            print("No trace sinks configured.", file=sys.stderr)
             raise typer.Exit(0)
 
         _lang = _state["language"]
@@ -1508,9 +1487,9 @@ def taint_cmd(
         _proj_root = project or str(Path(path).resolve())
 
         if interprocedural:
-            from emend.taint import run_interprocedural_taint_analysis
-            result = run_interprocedural_taint_analysis(
-                files, taint_config,
+            from emend.trace import run_interprocedural_trace_analysis
+            result = run_interprocedural_trace_analysis(
+                files, trace_config,
                 label_filter=label,
                 language=_lang,
                 max_iterations=max_iterations,
@@ -1524,8 +1503,8 @@ def taint_cmd(
                     file=sys.stderr,
                 )
         else:
-            violations = run_taint_analysis(
-                files, taint_config,
+            violations = run_trace_analysis(
+                files, trace_config,
                 label_filter=label,
                 language=_lang,
                 project_path=_proj_root,
@@ -1545,6 +1524,44 @@ def taint_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+@app.command("trace")
+def trace_cmd(
+    path: Annotated[str, typer.Argument(help="File or directory to analyze")],
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to patterns.yaml")] = None,
+    label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific trace label")] = None,
+    trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+    interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
+    max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
+    preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
+):
+    """Run trace analysis to detect unsafe data flows.
+
+    Tracks labeled value flow from sources (e.g. user input) to sinks
+    (e.g. SQL queries, eval) within individual functions, reporting
+    violations when traced data reaches a sink without sanitization.
+
+    With --interprocedural, tracks values across function boundaries using
+    function summaries and fixed-point iteration.
+
+    Configuration is read from the ``trace`` (or ``taint``) section of
+    .emend/patterns.yaml (or the file specified by --config).  Use --preset
+    to load built-in rules for a specific framework (django, flask,
+    sqlalchemy, fastapi, all).
+
+    Examples:
+        emend trace src/
+        emend trace app.py --label user_input
+        emend trace src/ --trace
+        emend trace src/ --json
+        emend trace src/ --interprocedural
+        emend trace app.py --preset flask
+    """
+    _trace_cmd_impl(path, config, label, trace, json_output, project,
+                    interprocedural, max_iterations, preset)
 
 
 @app.command("dsl-debug", hidden=True)
@@ -3146,12 +3163,12 @@ def map_resolve_cmd(
 @app.command("facts")
 def facts_cmd(
     project: Annotated[str, typer.Argument(help="Project root directory")] = ".",
-    fact_type: Annotated[str, typer.Option("--type", "-t", help="Fact type: symbols, calls, references, taint_flows, types, imports")] = "symbols",
+    fact_type: Annotated[str, typer.Option("--type", "-t", help="Fact type: symbols, calls, references, trace_flows (or taint_flows), types, imports")] = "symbols",
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by name (symbols)")] = None,
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by kind (symbols)")] = None,
     file: Annotated[Optional[str], typer.Option("--file", "-f", help="Filter by file path")] = None,
     symbol: Annotated[Optional[str], typer.Option("--symbol", "-s", help="Symbol qualified name (calls/references/types)")] = None,
-    label: Annotated[Optional[str], typer.Option("--label", help="Taint label filter (taint_flows)")] = None,
+    label: Annotated[Optional[str], typer.Option("--label", help="Trace label filter (trace_flows)")] = None,
     transitive: Annotated[bool, typer.Option("--transitive", help="Compute transitive closure (calls)")] = False,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max depth for transitive queries")] = 10,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
@@ -3161,14 +3178,14 @@ def facts_cmd(
 
     Builds and queries a unified graph of code facts extracted from
     the project. Supports symbols, call relationships, references,
-    taint flows, type information, and imports.
+    trace flows, type information, and imports.
 
     Examples:
         emend facts .                                   # list all symbols
         emend facts . --type calls --symbol mod.func    # call graph for func
         emend facts . --type calls --symbol mod.func --transitive
         emend facts . --type references --symbol mod.Class
-        emend facts . --type taint_flows --label user_input
+        emend facts . --type trace_flows --label user_input
         emend facts . --type imports --file src/app.py
     """
     import json as json_mod
@@ -3203,8 +3220,8 @@ def facts_cmd(
                 print("Error: --symbol required for reference queries", file=sys.stderr)
                 raise typer.Exit(2)
             results = graph.references_to(symbol)
-        elif fact_type == "taint_flows":
-            results = graph.taint_flows(label=label, file_path=file)
+        elif fact_type == "trace_flows":
+            results = graph.trace_flows(label=label, file_path=file)
         elif fact_type == "types":
             if not symbol:
                 print("Error: --symbol required for type queries", file=sys.stderr)

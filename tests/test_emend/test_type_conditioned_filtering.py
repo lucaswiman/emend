@@ -1,10 +1,10 @@
 """Tests for Phase 4: Type-Conditioned Filtering (Taint-CFG Precision).
 
 Tests cover:
-- type_constraint field on TaintSource/TaintSink/TaintSanitizer dataclasses
+- type_constraint field on TraceSource/TraceSink/TraceSanitizer dataclasses
 - evaluate_type_constraint() boolean expression parser
 - YAML config loading with type_constraint
-- Datalog scalar_types parameter on taint_propagation_datalog()
+- Datalog scalar_types parameter on trace_propagation_datalog()
 - Python fallback type filtering via _filter_vars_by_type()
 - build_from_project() type_binding population (via add_types_batch)
 """
@@ -22,13 +22,13 @@ from emend.fact_graph import (
     SymbolFact,
     TypeFact,
 )
-from emend.taint import (
-    TaintConfig,
-    TaintSanitizer,
-    TaintSink,
-    TaintSource,
+from emend.trace import (
+    TraceConfig,
+    TraceSanitizer,
+    TraceSink,
+    TraceSource,
     evaluate_type_constraint,
-    load_taint_config,
+    load_trace_config,
     _filter_vars_by_type,
     _has_type_constraints,
 )
@@ -125,7 +125,7 @@ class TestEvaluateTypeConstraint:
 
 
 # ---------------------------------------------------------------------------
-# Test: TaintSource/TaintSink/TaintSanitizer type_constraint field
+# Test: TraceSource/TraceSink/TraceSanitizer type_constraint field
 # ---------------------------------------------------------------------------
 
 
@@ -133,11 +133,11 @@ class TestTypeConstraintField:
     """Tests for the type_constraint field on taint dataclasses."""
 
     def test_source_default_empty(self):
-        src = TaintSource(pattern="foo($X)", label="lbl")
+        src = TraceSource(pattern="foo($X)", label="lbl")
         assert src.type_constraint == ""
 
     def test_source_with_constraint(self):
-        src = TaintSource(
+        src = TraceSource(
             pattern="session.query($MODEL)",
             label="unlocked_read",
             type_constraint="!int & !float & !bool & !str",
@@ -145,22 +145,22 @@ class TestTypeConstraintField:
         assert src.type_constraint == "!int & !float & !bool & !str"
 
     def test_sink_default_empty(self):
-        sink = TaintSink(pattern="foo($X)", label="lbl", message="msg")
+        sink = TraceSink(pattern="foo($X)", label="lbl", message="msg")
         assert sink.type_constraint == ""
 
     def test_sink_with_constraint(self):
-        sink = TaintSink(
+        sink = TraceSink(
             pattern="foo($X)", label="lbl", message="msg",
             type_constraint="!int",
         )
         assert sink.type_constraint == "!int"
 
     def test_sanitizer_default_empty(self):
-        san = TaintSanitizer(pattern="sanitize($X)", label="lbl")
+        san = TraceSanitizer(pattern="sanitize($X)", label="lbl")
         assert san.type_constraint == ""
 
     def test_sanitizer_with_constraint(self):
-        san = TaintSanitizer(
+        san = TraceSanitizer(
             pattern="sanitize($X)", label="lbl",
             type_constraint="str",
         )
@@ -175,29 +175,29 @@ class TestTypeConstraintField:
 class TestHasTypeConstraints:
 
     def test_no_constraints(self):
-        config = TaintConfig(
-            sources=[TaintSource(pattern="x", label="l")],
-            sinks=[TaintSink(pattern="y", label="l", message="m")],
+        config = TraceConfig(
+            sources=[TraceSource(pattern="x", label="l")],
+            sinks=[TraceSink(pattern="y", label="l", message="m")],
         )
         assert _has_type_constraints(config) is False
 
     def test_source_has_constraint(self):
-        config = TaintConfig(
-            sources=[TaintSource(pattern="x", label="l", type_constraint="!int")],
-            sinks=[TaintSink(pattern="y", label="l", message="m")],
+        config = TraceConfig(
+            sources=[TraceSource(pattern="x", label="l", type_constraint="!int")],
+            sinks=[TraceSink(pattern="y", label="l", message="m")],
         )
         assert _has_type_constraints(config) is True
 
     def test_sink_has_constraint(self):
-        config = TaintConfig(
-            sources=[TaintSource(pattern="x", label="l")],
-            sinks=[TaintSink(pattern="y", label="l", message="m", type_constraint="!int")],
+        config = TraceConfig(
+            sources=[TraceSource(pattern="x", label="l")],
+            sinks=[TraceSink(pattern="y", label="l", message="m", type_constraint="!int")],
         )
         assert _has_type_constraints(config) is True
 
     def test_sanitizer_has_constraint(self):
-        config = TaintConfig(
-            sanitizers=[TaintSanitizer(pattern="x", label="l", type_constraint="str")],
+        config = TraceConfig(
+            sanitizers=[TraceSanitizer(pattern="x", label="l", type_constraint="str")],
         )
         assert _has_type_constraints(config) is True
 
@@ -212,7 +212,7 @@ class TestYamlTypeConstraintLoading:
     def test_load_source_type_constraint(self, tmp_path):
         config_file = tmp_path / "patterns.yaml"
         config_file.write_text(yaml.dump({
-            "taint": {
+            "trace": {
                 "labels": ["unlocked_read"],
                 "sources": [{
                     "pattern": "session.query($MODEL)",
@@ -226,14 +226,14 @@ class TestYamlTypeConstraintLoading:
                 }],
             }
         }))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         assert len(config.sources) == 1
         assert config.sources[0].type_constraint == "!int & !float & !bool & !str"
 
     def test_load_sink_type_constraint(self, tmp_path):
         config_file = tmp_path / "patterns.yaml"
         config_file.write_text(yaml.dump({
-            "taint": {
+            "trace": {
                 "labels": ["lbl"],
                 "sources": [{"pattern": "src($X)", "label": "lbl"}],
                 "sinks": [{
@@ -244,13 +244,13 @@ class TestYamlTypeConstraintLoading:
                 }],
             }
         }))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         assert config.sinks[0].type_constraint == "!int"
 
     def test_load_sanitizer_type_constraint(self, tmp_path):
         config_file = tmp_path / "patterns.yaml"
         config_file.write_text(yaml.dump({
-            "taint": {
+            "trace": {
                 "labels": ["lbl"],
                 "sources": [{"pattern": "src($X)", "label": "lbl"}],
                 "sinks": [{"pattern": "sink($X)", "label": "lbl", "message": "m"}],
@@ -261,19 +261,19 @@ class TestYamlTypeConstraintLoading:
                 }],
             }
         }))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         assert config.sanitizers[0].type_constraint == "str"
 
     def test_missing_type_constraint_defaults_empty(self, tmp_path):
         config_file = tmp_path / "patterns.yaml"
         config_file.write_text(yaml.dump({
-            "taint": {
+            "trace": {
                 "labels": ["lbl"],
                 "sources": [{"pattern": "src($X)", "label": "lbl"}],
                 "sinks": [{"pattern": "sink($X)", "label": "lbl", "message": "m"}],
             }
         }))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         assert config.sources[0].type_constraint == ""
         assert config.sinks[0].type_constraint == ""
 
@@ -284,7 +284,7 @@ class TestYamlTypeConstraintLoading:
 
 
 class TestDatalogScalarTypes:
-    """Tests for the scalar_types parameter on taint_propagation_datalog()."""
+    """Tests for the scalar_types parameter on trace_propagation_datalog()."""
 
     def test_scalar_type_filters_source(self):
         """Source with scalar type should not propagate taint."""
@@ -315,11 +315,11 @@ class TestDatalogScalarTypes:
         sinks = [("test.py", "mod.f", "x", 2, "lbl")]
 
         # Without scalar_types: should find violation
-        violations = g.taint_propagation_datalog(sources=sources, sinks=sinks)
+        violations = g.trace_propagation_datalog(sources=sources, sinks=sinks)
         assert len(violations) == 1
 
         # With scalar_types including "int": should filter out the source
-        violations = g.taint_propagation_datalog(
+        violations = g.trace_propagation_datalog(
             sources=sources, sinks=sinks,
             scalar_types=["int", "float", "bool", "str"],
         )
@@ -351,7 +351,7 @@ class TestDatalogScalarTypes:
         sinks = [("test.py", "mod.f", "result", 2, "lbl")]
 
         # With scalar_types: Query is NOT a scalar, should still find violation
-        violations = g.taint_propagation_datalog(
+        violations = g.trace_propagation_datalog(
             sources=sources, sinks=sinks,
             scalar_types=["int", "float", "bool", "str"],
         )
@@ -379,7 +379,7 @@ class TestDatalogScalarTypes:
         sinks = [("test.py", "mod.f", "x", 2, "lbl")]
 
         # With scalar_types but no type binding: should still find violation
-        violations = g.taint_propagation_datalog(
+        violations = g.trace_propagation_datalog(
             sources=sources, sinks=sinks,
             scalar_types=["int", "float", "bool", "str"],
         )
@@ -418,7 +418,7 @@ class TestDatalogScalarTypes:
         sources = [("test.py", "mod.f", "x", 0, "toctou")]
 
         # With scalar_types and effect sinks: scalar should be filtered
-        violations = g.taint_propagation_datalog(
+        violations = g.trace_propagation_datalog(
             sources=sources,
             effect_sinks=[("toctou", "writes")],
             scalar_types=["int", "float", "bool", "str"],

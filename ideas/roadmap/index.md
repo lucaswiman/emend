@@ -30,48 +30,48 @@ better describes the core action: *follow labeled values through code*.
 
 #### CLI and command renaming
 
-- [ ] Rename `emend taint` → `emend trace` (keep `taint` as hidden alias for backwards compat)
-- [ ] Rename `--interprocedural` flag (already applies to `trace`)
-- [ ] Rename `emend facts --type taint_flows` → `emend facts --type trace_flows` (alias old name)
-- [ ] Update `--preset` help text: "framework-specific trace rules" instead of "taint rules"
+- [x] Rename `emend taint` → `emend trace` (keep `taint` as hidden alias for backwards compat)
+- [x] Rename `--interprocedural` flag (already applies to `trace`)
+- [x] Rename `emend facts --type taint_flows` → `emend facts --type trace_flows` (alias old name)
+- [x] Update `--preset` help text: "framework-specific trace rules" instead of "taint rules"
 - [ ] Update TOCTOU example in `commands.rst` with sequence rule form (existing Phase 5 TODO)
 
 #### Config and YAML renaming
 
-- [ ] Rename `taint:` section in `.emend/patterns.yaml` → `trace:` (accept both, prefer new)
-- [ ] Rename `TaintSource` → `TraceSource`, `TaintSink` → `TraceSink`, `TaintSanitizer` → `TraceSanitizer`, `TaintScopeSanitizer` → `TraceScopeSanitizer` in config model
-- [ ] Rename `TaintConfig` → `TraceConfig`, `TaintViolation` → `TraceViolation`
-- [ ] Keep YAML key aliases: `sources`/`sinks`/`sanitizers` stay the same (only the section name changes)
+- [x] Rename `taint:` section in `.emend/patterns.yaml` → `trace:` (accept both, prefer new)
+- [x] Rename `TaintSource` → `TraceSource`, `TaintSink` → `TraceSink`, `TaintSanitizer` → `TraceSanitizer`, `TaintScopeSanitizer` → `TraceScopeSanitizer` in config model
+- [x] Rename `TaintConfig` → `TraceConfig`, `TaintViolation` → `TraceViolation`
+- [x] Keep YAML key aliases: `sources`/`sinks`/`sanitizers` stay the same (only the section name changes)
 
 #### Source file renaming
 
-- [ ] Rename `taint.py` → `trace.py` (update all imports)
-- [ ] Rename `taint_presets.py` → `trace_presets.py`
-- [ ] Rename `TaintFlowFact` → `TraceFlowFact` in `fact_graph.py`
-- [ ] Rename Datalog relations: `taint_flow` → `trace_flow` in CozoDB schema
-- [ ] Rename test files: `test_taint.py` → `test_trace.py`, `test_interprocedural_taint.py` → `test_interprocedural_trace.py`, etc.
+- [x] Rename `taint.py` → `trace.py` (update all imports)
+- [x] Rename `taint_presets.py` → `trace_presets.py`
+- [x] Rename `TaintFlowFact` → `TraceFlowFact` in `fact_graph.py`
+- [x] Rename Datalog relations: `taint_flow` → `trace_flow` in CozoDB schema
+- [x] Rename test files: `test_taint.py` → `test_trace.py`, `test_interprocedural_taint.py` → `test_interprocedural_trace.py`, etc.
 
 #### Object-sensitive dispatch
 
 Resolve `obj.method()` by receiver type using the `type_binding` relation
 (Phase 4) and `type_constraint` field already on sources/sinks/sanitizers.
 
-- [ ] Join `method_call` with `type_binding` in Datalog to resolve receiver types
-- [ ] Filter source/sink/sanitizer pattern matches by receiver `type_constraint`
-- [ ] Add `receiver_type` parameter to `MethodCallFact` (or resolve via join at query time)
+- [x] Join `method_call` with `type_binding` in Datalog to resolve receiver types
+- [x] Filter source/sink/sanitizer pattern matches by receiver `type_constraint`
+- [x] Add `receiver_type` parameter to `MethodCallFact` (or resolve via join at query time)
 
 #### Simplification from code review
 
-- [ ] Extract `_inline_relation(name, cols, rows)` helper for CozoScript query building (used in `taint_propagation_datalog`, `flow_rule_check_datalog`, `_compile_sequence_query`)
-- [ ] Introduce `TraceDatalogConfig` dataclass to reduce `taint_propagation_datalog()` from 9 params to 3 (`sources`, `sinks`, `config`)
-- [ ] Deduplicate blocker resolution loops in `compile_sequence_rule()` (`not_through` / `not_through_scope` share 55 identical lines)
-- [ ] Cache `evaluate_type_constraint()` parsed constraint expressions (currently re-parses on every call)
+- [x] Extract `_inline_relation(name, cols, rows)` helper for CozoScript query building (used in `trace_propagation_datalog`, `flow_rule_check_datalog`, `_compile_sequence_query`)
+- [x] Introduce `TraceDatalogConfig` dataclass to reduce `trace_propagation_datalog()` from 9 params to 3 (`sources`, `sinks`, `config`)
+- [x] Deduplicate blocker resolution loops in `compile_sequence_rule()` (`not_through` / `not_through_scope` share 55 identical lines)
+- [x] Cache `evaluate_type_constraint()` parsed constraint expressions (currently re-parses on every call)
 
 #### Documentation
 
-- [ ] Update CLAUDE.md file/command tables
-- [ ] Update `commands.rst` references
-- [ ] Add migration note in CHANGELOG explaining `taint` → `trace` rename with alias support
+- [x] Update CLAUDE.md file/command tables
+- [x] Update `commands.rst` references
+- [x] Add migration note in CHANGELOG explaining `taint` → `trace` rename
 
 ---
 

@@ -168,7 +168,7 @@ The MCP server exposes emend functionality to Claude Code and other LLM clients 
 9. **`lint`** — Run linting rules
 10. **`impact`** — Compute transitive set of impacted symbols from a change
 11. **`semantic_context`** — Check a symbol for hidden dangers before editing it
-12. **`taint`** — Run taint analysis to detect unsafe data flows
+12. **`trace`** — Run trace analysis to detect unsafe data flows
 13. **`datalog_query`** — Query the project fact graph via CozoScript or structured params
 14. **`check_policies`** — Run policy checks against source code
 15. **`map_read`** — Read from the mapping store

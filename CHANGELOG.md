@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Trace Analysis (renamed from `taint`)
+
+- **Renamed `taint` → `trace`**: The taint analysis engine is now called "trace" to reflect that it is a general labeled data-flow tracer, not only for security taint analysis. All classes (`TraceConfig`, `TraceSource`, `TraceSink`, `TraceSanitizer`, `TraceViolation`), source files (`trace.py`, `trace_presets.py`), CLI commands (`emend trace`), Datalog relations (`trace_flow`, `trace_source`, `trace_sink`), and YAML config sections (`trace:`) have been renamed.
+- **Object-sensitive dispatch**: `method_call_types()` on `FactGraph` joins `method_call` with `type_binding` to resolve receiver types, enabling `type_constraint` filtering on method-call patterns.
+- **`TraceDatalogConfig` dataclass**: Groups the 9 parameters of `trace_propagation_datalog()` into a single config object for cleaner call sites.
+- **`_inline_relation()` helper**: Extracted common CozoScript inline-relation building pattern used across 12+ sites in `fact_graph.py`.
+- **Deduplicated blocker resolution**: `compile_sequence_rule()` blocker loops (`not_through` / `not_through_scope`) consolidated into a shared `_resolve_blockers()` helper.
+- **Cached type constraint parsing**: `evaluate_type_constraint()` now caches parsed constraint expressions via `functools.lru_cache`.
+
 ## 0.3.0
 
 ### Features
@@ -14,13 +23,13 @@
   - `--output symbols` (default), `tests`, or `graph` for witness edges
   - `--json` for structured output, `--max-depth` to limit traversal
 
-#### Taint Analysis (`taint` command)
+#### Trace Analysis (`trace` command, formerly `taint`)
 
-- **New `taint` command**: Intraprocedural taint analysis tracking value flow from sources to sinks within individual functions
-  - Configurable via `taint` section in `.emend/patterns.yaml` with `sources`, `sinks`, `sanitizers`, and `labels`
-  - Propagates taint through variable assignments; sanitizers remove taint before sink checks
+- **New `trace` command**: Intraprocedural trace analysis tracking value flow from sources to sinks within individual functions
+  - Configurable via `trace` section in `.emend/patterns.yaml` with `sources`, `sinks`, `sanitizers`, and `labels`
+  - Propagates traced labels through variable assignments; sanitizers remove labels before sink checks
   - `--trace` shows full propagation path from source to sink
-  - `--label` filters to a specific taint label; `--json` for structured output
+  - `--label` filters to a specific trace label; `--json` for structured output
 
 #### Flow-Based Lint Rules
 
