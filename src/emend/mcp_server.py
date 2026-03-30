@@ -89,7 +89,7 @@ def search(
         "Symbol mode: selector (file.py::sym) or bare symbol name. "
         "Summary mode: optional selector filter when files is set."
     ))] = "",
-    files: Annotated[str | None, Field(description="File scope: file path, glob, or directory.")] = None,
+    files: Annotated[list[str] | None, Field(description="File scope(s): file paths, globs, or directories.")] = None,
     within: Annotated[str | None, Field(description="Structural containment pattern for code mode.")] = None,
     not_within: Annotated[str | None, Field(description="Inverse containment pattern for code mode.")] = None,
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, method, class, async_function, async_method.")] = None,
@@ -106,7 +106,7 @@ def search(
 ) -> str:
     """Search for code or symbols with explicit modes."""
     import re as _re
-    from emend.cli import resolve_files, parse_where_clause, detect_query_shape
+    from emend.cli import resolve_files, resolve_file_scopes, parse_where_clause, detect_query_shape
 
     mode = (mode or "code").lower()
     if mode not in {"code", "symbol", "summary", "auto"}:
@@ -132,9 +132,9 @@ def search(
     has_selector = False
     is_line_selector = bool(_re.search(r":\d+(-\d+)?$", query))
     if mode == "auto":
-        _shape = detect_query_shape(query, files)
+        _shape = detect_query_shape(query, files[0] if files else None)
         query = _shape.query
-        files = _shape.path
+        files = [str(_shape.path)] if _shape.path else files
         is_pattern_mode = _shape.is_pattern_mode
         has_selector = _shape.has_selector
         is_line_selector = _shape.is_line_selector
@@ -186,7 +186,7 @@ def search(
     # --- Summary mode ---
     if mode == "summary" or (effective_output == "summary" and not is_pattern_mode):
         tree_depth = int(depth) if depth else None
-        file_for_summary = files or query
+        file_for_summary = files[0] if files else query
         selector_for_summary = None
         if "::" in query and not files:
             parts = query.split("::", 1)
@@ -233,13 +233,13 @@ def search(
     # --- Code pattern mode ---
     if is_pattern_mode or mode == "code":
         if mode == "code" and "::" in query and not files:
-            _shape = detect_query_shape(query, files)
+            _shape = detect_query_shape(query, None)
             if _shape.is_pattern_mode:
                 query = _shape.query
-                files = _shape.path
-        target_path = files or "."
+                files = [str(_shape.path)] if _shape.path else None
+        target_paths = files or ["."]
 
-        resolved_files, is_multi_file = resolve_files(target_path)
+        resolved_files, is_multi_file = resolve_file_scopes(target_paths)
         all_matches: list[tuple[str, Any]] = []
         for file_path in resolved_files:
             file_path_str = str(file_path)
@@ -283,7 +283,10 @@ def search(
             return "\n".join(lines)
 
     # --- Symbol lookup mode ---
-    file_or_pattern = files or query or "**"
+    if files and len(files) > 1:
+        return json.dumps({"error": "symbol mode accepts at most one file scope"})
+
+    file_or_pattern = files[0] if files else (query or "**")
     selector_str = None
     if has_selector or is_line_selector or ("::" in query and not is_line_selector):
         selector_str = query
@@ -1388,41 +1391,29 @@ def transform(
 @mcp_app.tool()
 def references(
     selector: Annotated[str, Field(description="Symbol selector to inspect.")],
-    mode: Annotated[str, Field(description="Reference mode: refs, callers, or callees.")] = "refs",
+    kind: Annotated[str, Field(description="Reference kind: all, reads, writes, or calls.")] = "all",
     exclude_definition: Annotated[bool, Field(description="Exclude definition row (refs mode).")] = False,
     exclude_imports: Annotated[bool, Field(description="Exclude import rows (refs mode).")] = False,
-    writes_only: Annotated[bool, Field(description="Only write references (refs mode).")] = False,
-    reads_only: Annotated[bool, Field(description="Only read references (refs mode).")] = False,
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Find references/callers/callees via one discriminated endpoint."""
-    query_mode = (mode or "refs").lower()
-    if query_mode == "refs":
-        return refs(
-            selector=selector,
-            exclude_definition=exclude_definition,
-            exclude_imports=exclude_imports,
-            writes_only=writes_only,
-            reads_only=reads_only,
-            calls_only=False,
-            project=project,
-        )
-
-    parsed = parse_extended_selector(selector)
-    if query_mode == "callers":
-        callers = find_callers(parsed, project_path=project)
-        data = [{"file_path": r.file_path, "line": r.line, "column": r.column} for r in callers]
-        return json.dumps(data, indent=2)
-    if query_mode == "callees":
-        callees = find_callees(parsed, project_path=project)
-        data = [{"name": c.name, "kind": c.kind, "line": c.line, "file_path": c.file_path} for c in callees]
-        return json.dumps(data, indent=2)
-    return json.dumps({"error": f"Unknown mode {mode!r}. Use: refs, callers, callees."})
+    """Find references through a focused endpoint."""
+    query_kind = (kind or "all").lower()
+    if query_kind not in {"all", "reads", "writes", "calls"}:
+        return json.dumps({"error": f"Unknown kind {kind!r}. Use: all, reads, writes, calls."})
+    return refs(
+        selector=selector,
+        exclude_definition=exclude_definition,
+        exclude_imports=exclude_imports,
+        writes_only=query_kind == "writes",
+        reads_only=query_kind == "reads",
+        calls_only=query_kind == "calls",
+        project=project,
+    )
 
 
 @mcp_app.tool()
 def analyze(
-    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, or trace.")] = "graph",
+    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, or flow.")] = "graph",
     path: Annotated[str | None, Field(description="Path scope for deadcode/trace/check-style modes.")] = None,
     selector: Annotated[str | None, Field(description="Selector input for semantic_context/impact modes.")] = None,
     symbol: Annotated[str | None, Field(description="Symbol selector for graph mode.")] = None,
@@ -1442,13 +1433,13 @@ def analyze(
     output: Annotated[str, Field(description="Impact output mode.")] = "symbols",
     max_depth: Annotated[int, Field(description="Impact BFS max depth.")] = 10,
     interface_decorators: Annotated[list[str] | None, Field(description="Extra interface decorators for semantic_context mode.")] = None,
-    from_pattern: Annotated[str | None, Field(description="Trace source pattern for inline trace mode.")] = None,
-    to_pattern: Annotated[str | None, Field(description="Trace sink pattern for inline trace mode.")] = None,
-    not_through: Annotated[str | None, Field(description="Trace sanitizer pattern for inline trace mode.")] = None,
-    preset: Annotated[str | None, Field(description="Trace preset (flask/django/sqlalchemy/fastapi).")] = None,
-    label: Annotated[str | None, Field(description="Trace label filter.")] = None,
-    trace: Annotated[bool, Field(description="Include trace steps in trace mode.")] = False,
-    interprocedural: Annotated[bool, Field(description="Enable interprocedural trace mode.")] = False,
+    from_pattern: Annotated[str | None, Field(description="Flow source pattern for inline flow mode.")] = None,
+    to_pattern: Annotated[str | None, Field(description="Flow sink pattern for inline flow mode.")] = None,
+    not_through: Annotated[str | None, Field(description="Flow sanitizer pattern for inline flow mode.")] = None,
+    preset: Annotated[str | None, Field(description="Flow preset (flask/django/sqlalchemy/fastapi).")] = None,
+    label: Annotated[str | None, Field(description="Flow label filter.")] = None,
+    trace: Annotated[bool, Field(description="Include propagation steps in flow mode.")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable interprocedural flow analysis.")] = False,
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
     """Run analysis operations through one discriminated endpoint."""
@@ -1490,9 +1481,9 @@ def analyze(
             project=project,
             interface_decorators=interface_decorators,
         )
-    if analysis_mode == "trace":
+    if analysis_mode in {"flow", "trace"}:
         if not path:
-            return json.dumps({"error": "trace mode requires path"})
+            return json.dumps({"error": "flow mode requires path"})
         return trace_analysis(
             path=path,
             from_pattern=from_pattern,
@@ -1504,56 +1495,60 @@ def analyze(
             trace=trace,
             interprocedural=interprocedural,
         )
-    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, trace."})
+    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow."})
 
 
 @mcp_app.tool()
 def check(
-    path: Annotated[str, Field(description="File or directory path to check.")],
-    mode: Annotated[str, Field(description="Check mode: lint or policy.")] = "lint",
-    config: Annotated[str | None, Field(description="Config file path.")] = None,
-    rule: Annotated[str | None, Field(description="Single lint rule filter (lint mode).")] = None,
-    fix: Annotated[bool, Field(description="Auto-apply lint fixes (lint mode).")] = False,
-    policy_name: Annotated[str | None, Field(description="Single policy filter (policy mode).")] = None,
+    paths: Annotated[list[str] | None, Field(description="File or directory scope(s) to check.")] = None,
+    config: Annotated[str | None, Field(description="Rules config path. Defaults to .emend/rules.yaml with legacy fallback.")] = None,
+    rule: Annotated[str | None, Field(description="Run only one named rule.")] = None,
+    kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type, datalog.")] = None,
+    fix: Annotated[bool, Field(description="Apply auto-fixes for match rules when available.")] = False,
 ) -> str:
-    """Run lint/policy checks through one discriminated endpoint."""
-    check_mode = (mode or "lint").lower()
-    if check_mode == "lint":
-        return lint(path=path, config=config, fix=fix, rule=rule)
-    if check_mode == "policy":
-        return check_policies(path=path, config=config, policy_name=policy_name)
-    return json.dumps({"error": f"Unknown mode {mode!r}. Use: lint, policy."})
+    """Run unified project rules from ``rules.yaml``."""
+    from emend.checks import run_checks
+    from emend.cli import resolve_file_scopes
+
+    resolved, _ = resolve_file_scopes(paths or ["."], language="python")
+    file_paths = [str(f) for f in resolved]
+    project_path = paths[0] if paths else "."
+    violations = run_checks(
+        file_paths,
+        config=config,
+        rule_name=rule,
+        kind=kind,
+        fix=fix,
+        language="python",
+        project_path=project_path,
+    )
+    return json.dumps([
+        {
+            "rule": violation.rule_name,
+            "kind": violation.kind,
+            "severity": violation.severity,
+            "message": violation.message,
+            "file": violation.file_path,
+            "line": violation.line,
+            "col": violation.col,
+            "witness": violation.witness or [],
+        }
+        for violation in violations
+    ], indent=2)
 
 
 @mcp_app.tool()
 def datalog(
-    mode: Annotated[str, Field(description="Datalog mode: raw or guided.")] = "raw",
-    query: Annotated[str | None, Field(description="Raw CozoScript query (raw mode).")] = None,
+    query: Annotated[str | None, Field(description="Raw CozoScript query.")] = None,
     project: Annotated[str, Field(description="Project root directory.")] = ".",
     limit: Annotated[int, Field(description="Maximum rows to return.")] = 200,
-    fact_type: Annotated[str | None, Field(description="Guided mode fact type.")] = None,
-    name: Annotated[str | None, Field(description="Guided mode name filter.")] = None,
-    kind: Annotated[str | None, Field(description="Guided mode kind filter.")] = None,
-    file_path: Annotated[str | None, Field(description="Guided mode file path filter.")] = None,
-    symbol: Annotated[str | None, Field(description="Guided mode symbol filter.")] = None,
-    label: Annotated[str | None, Field(description="Guided mode trace label filter.")] = None,
-    transitive: Annotated[bool, Field(description="Guided mode transitive closure option.")] = False,
-    max_depth: Annotated[int, Field(description="Guided mode max transitive depth.")] = 10,
 ) -> str:
-    """Query fact graph data through one discriminated endpoint."""
+    """Run raw CozoScript against the fact graph."""
     return datalog_query(
         query=query,
         project=project,
         limit=limit,
-        mode=mode,
-        fact_type=fact_type,
-        name=name,
-        kind=kind,
-        file_path=file_path,
-        symbol=symbol,
-        label=label,
-        transitive=transitive,
-        max_depth=max_depth,
+        mode="raw",
     )
 
 
@@ -1837,13 +1832,14 @@ _CORE_TOOLS: set[str] = {
     "references",
     "analyze",
     "check",
+    "datalog",
     "grammar_and_cookbook",
 }
 
 PROFILES: dict[str, set[str]] = {
     "core": set(_CORE_TOOLS),
-    "refactor": set(_CORE_TOOLS) | {"datalog"},
-    "expert": set(_CORE_TOOLS) | {"datalog", "mappings"},
+    "refactor": set(_CORE_TOOLS),
+    "expert": set(_CORE_TOOLS) | {"mappings"},
 }
 
 # Snapshot all registered tools (including legacy endpoints) so profiles can

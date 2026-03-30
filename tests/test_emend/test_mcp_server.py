@@ -41,6 +41,7 @@ def test_all_tools_registered_core():
         "references",
         "analyze",
         "check",
+        "datalog",
         "grammar_and_cookbook",
     }
 
@@ -64,6 +65,7 @@ def test_dump_schema():
         "references",
         "analyze",
         "check",
+        "datalog",
         "grammar_and_cookbook",
     }
     for tool in data["tools"]:
@@ -108,7 +110,7 @@ def test_search_code_pattern(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("print('hello')\nprint('world')\n")
 
-    result = search(mode="code", query="print($X)", files=str(p), output="json")
+    result = search(mode="code", query="print($X)", files=[str(p)], output="json")
     data = json.loads(result)
     assert data["count"] == 2
     assert len(data["matches"]) == 2
@@ -126,7 +128,7 @@ def test_search_summary(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
 
-    result = search(mode="summary", files=str(p), output="summary")
+    result = search(mode="summary", files=[str(p)], output="summary")
     assert "greet" in result
 
 
@@ -162,16 +164,16 @@ def test_references_refs_mode(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet():\n    pass\n\ngreet()\n")
 
-    result = references(mode="refs", selector=f"{p}::greet")
+    result = references(kind="all", selector=f"{p}::greet")
     data = json.loads(result)
     assert len(data) >= 2
 
 
-def test_references_callers_mode(tmp_path):
+def test_references_calls_mode(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("def greet():\n    pass\n\ndef caller():\n    greet()\n")
 
-    result = references(mode="callers", selector=f"{p}::greet")
+    result = references(kind="calls", selector=f"{p}::greet")
     data = json.loads(result)
     assert isinstance(data, list)
 
@@ -198,12 +200,21 @@ def test_analyze_deadcode_mode(tmp_path):
     assert isinstance(data, list)
 
 
-def test_check_lint_missing_config(tmp_path):
+def test_check_unified_rules(tmp_path):
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    (config_dir / "rules.yaml").write_text(
+        "rules:\n"
+        "  no-print:\n"
+        "    match: \"print($X)\"\n"
+        "    message: \"Use logging\"\n"
+    )
     p = tmp_path / "example.py"
     p.write_text("print('x')\n")
 
-    result = check(mode="lint", path=str(tmp_path))
-    assert "Error: Config file not found" in result
+    result = check(paths=[str(tmp_path)], config=str(config_dir / "rules.yaml"))
+    data = json.loads(result)
+    assert data[0]["rule"] == "no-print"
 
 
 def test_datalog_raw_query(tmp_path):
@@ -212,7 +223,6 @@ def test_datalog_raw_query(tmp_path):
     p.write_text("def foo():\n    pass\n\ndef bar():\n    foo()\n")
 
     result = datalog(
-        mode="raw",
         query='?[name, kind] := *symbol[_, _, name, kind, _, _, _]',
         project=str(tmp_path),
     )
@@ -222,14 +232,11 @@ def test_datalog_raw_query(tmp_path):
     assert "count" in data
 
 
-def test_datalog_guided_symbols(tmp_path):
+def test_datalog_missing_query(tmp_path):
     configure_profile(profile="expert")
-    p = tmp_path / "example.py"
-    p.write_text("def foo():\n    pass\n")
-
-    result = datalog(mode="guided", fact_type="symbols", project=str(tmp_path))
+    result = datalog(project=str(tmp_path))
     data = json.loads(result)
-    assert isinstance(data, list)
+    assert "error" in data
 
 
 def test_mappings_read_write(monkeypatch, tmp_path):

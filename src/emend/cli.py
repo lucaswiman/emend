@@ -9,6 +9,7 @@ from typing import Optional
 
 import typer
 from typing import Annotated
+import click
 
 from emend.component_selector import parse_extended_selector
 from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
@@ -211,11 +212,31 @@ def parse_where_clause(values: list[str]) -> dict:
     return result
 
 # Create app with emend commands
+class _LegacyEditGroup(typer.core.TyperGroup):
+    """Route unknown `edit` forms to `edit set` for legacy compatibility."""
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            return super().resolve_command(ctx, ["set", *args])
+
+
 app = typer.Typer(
     help="Python refactoring CLI",
     no_args_is_help=True,
     add_completion=False,
 )
+
+edit_app = typer.Typer(
+    help="Code changes and refactors.",
+    cls=_LegacyEditGroup,
+)
+analyze_app = typer.Typer(help="Read-only code analysis commands.")
+tool_app = typer.Typer(help="Infrastructure and debugging commands.")
+app.add_typer(edit_app, name="edit")
+app.add_typer(analyze_app, name="analyze")
+app.add_typer(tool_app, name="tool")
 
 
 def _version_callback(value: bool) -> None:
@@ -1025,9 +1046,8 @@ app.command("search", hidden=True)(search)
 app.command("ls", hidden=True)(search)
 
 
-
-@app.command("edit")
-def edit(
+@app.command("set", hidden=True)
+def edit_set_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol[component])")],
     value: Annotated[
         Optional[str],
@@ -1098,7 +1118,7 @@ def edit(
         raise typer.Exit(1)
 
 
-@app.command("rm")
+@app.command("rm", hidden=True)
 def remove_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol or file.py::Symbol[component])")],
     apply: Annotated[
@@ -1138,10 +1158,9 @@ def remove_cmd(
 
 
 app.command("remove", hidden=True)(remove_cmd)
-app.command("set", hidden=True)(edit)
 
 
-@app.command("delete")
+@app.command("delete", hidden=True)
 def delete_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol)")],
     cascade: Annotated[
@@ -1229,7 +1248,7 @@ def delete_cmd(
         raise typer.Exit(1)
 
 
-@app.command("add")
+@app.command("add", hidden=True)
 def add(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol[component])")],
     value: Annotated[str, typer.Argument(help="Value to add")],
@@ -1321,7 +1340,7 @@ app.command("insert", hidden=True)(add)
 
 
 
-@app.command("replace")
+@app.command("replace", hidden=True)
 def replace_cmd(
     pattern: Annotated[str, typer.Argument(help="Pattern to find (e.g., 'print($X)')")],
     replacement: Annotated[str, typer.Argument(help="Replacement pattern (e.g., 'logger.info($X)')")],
@@ -1604,7 +1623,7 @@ def _trace_cmd_impl(
         raise typer.Exit(1)
 
 
-@app.command("trace")
+@app.command("trace", hidden=True)
 def trace_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml")] = None,
@@ -1722,7 +1741,7 @@ def dsl_debug_cmd(
 app.command("dsl", hidden=True)(dsl_debug_cmd)
 
 
-@app.command("cp")
+@app.command("cp", hidden=True)
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
     destination: Annotated[str, typer.Argument(help="Destination file path")],
@@ -1744,7 +1763,7 @@ app.command("copy", hidden=True)(copy_to_cmd)
 app.command("copy-to", hidden=True)(copy_to_cmd)
 
 
-@app.command("refs")
+@app.command("refs", hidden=True)
 def refs_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
     exclude_definition: Annotated[bool, typer.Option("--exclude-definition", help="Exclude the definition itself")] = False,
@@ -1900,7 +1919,7 @@ app.command("references", hidden=True)(refs_cmd)
 app.command("find-references", hidden=True)(refs_cmd)
 
 
-@app.command("rename")
+@app.command("rename", hidden=True)
 def rename_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol rename, or file.py for module rename)")],
     new_name: Annotated[str, typer.Option("--to", help="New name")],
@@ -1971,7 +1990,7 @@ def rename_cmd(
         raise typer.Exit(1)
 
 
-@app.command("mv")
+@app.command("mv", hidden=True)
 def move_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol move, or file.py for module move)")],
     destination: Annotated[str, typer.Argument(help="Destination file or package")],
@@ -2050,7 +2069,7 @@ def move_cmd(
 app.command("move", hidden=True)(move_cmd)
 
 
-@app.command("batch")
+@app.command("batch", hidden=True)
 def batch_cmd(
     ops_file: Annotated[str, typer.Argument(help="YAML or JSON file with operations")],
     apply: Annotated[
@@ -2241,7 +2260,7 @@ def batch_cmd(
         raise typer.Exit(1)
 
 
-@app.command("graph")
+@app.command("graph", hidden=True)
 def graph_cmd(
     file: Annotated[str, typer.Argument(help="Python file to analyze")],
     format: Annotated[str, typer.Option("--format", "-f", help="Output format: plain, json, dot")] = "plain",
@@ -2273,7 +2292,7 @@ def graph_cmd(
         raise typer.Exit(1)
 
 
-@app.command("deadcode")
+@app.command("deadcode", hidden=True)
 def dead_code_cmd(
     path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
@@ -2409,7 +2428,7 @@ app.command("dead-code", hidden=True)(dead_code_cmd)
 app.command("dead_code", hidden=True)(dead_code_cmd)
 
 
-@app.command("impact")
+@app.command("impact", hidden=True)
 def impact_cmd(
     selector: Annotated[Optional[str], typer.Argument(help="Selector (file.py::Symbol)")] = None,
     diff: Annotated[Optional[str], typer.Option("--diff", help="Git diff spec (e.g. HEAD, abc..def)")] = None,
@@ -2531,7 +2550,7 @@ def impact_cmd(
 # Type Inference Commands
 # ============================================================================
 
-@app.command("types")
+@app.command("types", hidden=True)
 def types_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
@@ -2629,7 +2648,7 @@ def types_cmd(
         raise typer.Exit(2)
 
 
-@app.command("index")
+@app.command("index", hidden=True)
 def index_cmd(
     path: Annotated[
         str,
@@ -2777,7 +2796,7 @@ def index_cmd(
     )
 
 
-@app.command("editor-search")
+@app.command("editor-search", hidden=True)
 def editor_search_cmd(
     query: Annotated[str, typer.Argument(help="Search query (symbol name, pattern with $, or selector with ::)")],
     path: Annotated[
@@ -2840,7 +2859,7 @@ def editor_search_cmd(
         engine.close()
 
 
-@app.command("editor-server")
+@app.command("editor-server", hidden=True)
 def editor_server_cmd(
     path: Annotated[
         str,
@@ -3252,7 +3271,7 @@ def map_resolve_cmd(
 # ============================================================================
 
 
-@app.command("facts")
+@app.command("facts", hidden=True)
 def facts_cmd(
     project: Annotated[str, typer.Argument(help="Project root directory")] = ".",
     fact_type: Annotated[str, typer.Option("--type", "-t", help="Fact type: symbols, calls, references, trace_flows (or taint_flows), types, imports")] = "symbols",
@@ -3363,7 +3382,7 @@ def facts_cmd(
 # ============================================================================
 
 
-@app.command("query")
+@app.command("query", hidden=True)
 def query_cmd(
     cozoscript: Annotated[str, typer.Argument(help="CozoScript query to execute against the fact graph")],
     project: Annotated[str, typer.Option("--project", "-p", help="Project root directory")] = ".",
@@ -3559,7 +3578,7 @@ def check_cmd(
 # ============================================================================
 
 
-@app.command("saturate")
+@app.command("saturate", hidden=True)
 def saturate_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to rewrite")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rewrites.yaml")] = None,
@@ -3723,7 +3742,7 @@ def mcp_cmd(
     run_server(transport=transport, port=port, profile=profile, tools=tools_list)
 
 
-@app.command("cfg")
+@app.command("cfg", hidden=True)
 def cfg_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     function: Annotated[
@@ -3862,6 +3881,43 @@ def cfg_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+# Grouped conceptual surfaces
+edit_app.command("set")(edit_set_cmd)
+edit_app.command("rm")(remove_cmd)
+edit_app.command("delete")(delete_cmd)
+edit_app.command("add")(add)
+edit_app.command("replace")(replace_cmd)
+edit_app.command("cp")(copy_to_cmd)
+edit_app.command("rename")(rename_cmd)
+edit_app.command("mv")(move_cmd)
+edit_app.command("batch")(batch_cmd)
+edit_app.command("saturate")(saturate_cmd)
+edit_app.command("remove", hidden=True)(remove_cmd)
+edit_app.command("copy", hidden=True)(copy_to_cmd)
+edit_app.command("copy-to", hidden=True)(copy_to_cmd)
+edit_app.command("move", hidden=True)(move_cmd)
+
+analyze_app.command("refs")(refs_cmd)
+analyze_app.command("graph")(graph_cmd)
+analyze_app.command("deadcode")(dead_code_cmd)
+analyze_app.command("impact")(impact_cmd)
+analyze_app.command("types")(types_cmd)
+analyze_app.command("trace")(trace_cmd)
+analyze_app.command("facts")(facts_cmd)
+analyze_app.command("cfg")(cfg_cmd)
+analyze_app.command("dsl")(dsl_debug_cmd)
+analyze_app.command("references", hidden=True)(refs_cmd)
+analyze_app.command("dead-code", hidden=True)(dead_code_cmd)
+analyze_app.command("dead_code", hidden=True)(dead_code_cmd)
+
+tool_app.command("index")(index_cmd)
+tool_app.command("editor-search")(editor_search_cmd)
+tool_app.command("editor-server")(editor_server_cmd)
+tool_app.command("query")(query_cmd)
+tool_app.command("datalog", hidden=True)(query_cmd)
+tool_app.command("mcp", hidden=True)(mcp_cmd)
 
 
 def main():

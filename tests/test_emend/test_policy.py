@@ -4,7 +4,9 @@ import json
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
+from emend.cli import app
 from emend.policy import (
     FlowCheck,
     Policy,
@@ -18,6 +20,8 @@ from emend.policy import (
     run_policy_checks,
     validate_policies,
 )
+
+runner = CliRunner()
 
 
 def _write_policies(tmp_path, policies_dict):
@@ -270,3 +274,24 @@ class TestFormatViolations:
         ]
         output = format_policy_violations(violations)
         assert "source L1: x" in output
+
+
+def test_check_cli_uses_rules_yaml(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    (config_dir / "rules.yaml").write_text(yaml.dump({
+        "rules": {
+            "no-print": {
+                "match": "print($X)",
+                "message": "Use logging",
+            }
+        }
+    }))
+    test_file = tmp_path / "app.py"
+    test_file.write_text("print('hello')\n")
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "no-print" in result.stdout
