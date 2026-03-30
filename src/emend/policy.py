@@ -14,6 +14,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from emend.rules_config import (
+    LEGACY_POLICIES_PATH,
+    LEGACY_PATTERNS_PATH,
+    load_rules_document,
+    expand_macros,
+    yaml_key,
+    as_list,
+)
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -137,15 +146,104 @@ _VALID_CHECK_TYPES = {"flow", "structural", "type", "deadcode", "custom", "datal
 _VALID_TYPE_KINDS = {"has_type", "returns"}
 
 
-def _yaml_key(raw: dict[str, Any], *keys: str) -> Any:
-    """Look up a value by trying multiple key variants (underscore and hyphen)."""
-    for key in keys:
-        if key in raw:
-            return raw[key]
-        alt = key.replace("_", "-")
-        if alt in raw:
-            return raw[alt]
-    return None
+def _build_unified_policy(
+    name: str,
+    rule_def: dict[str, Any],
+    macros: dict[str, str],
+) -> Policy | None:
+    severity = rule_def.get("severity", "warning")
+    message = rule_def.get("message", "") or rule_def.get("description", "") or name
+    checks: list[PolicyCheck] = []
+
+    if "match" in rule_def or "find" in rule_def:
+        pattern = rule_def.get("match", rule_def.get("find", ""))
+        checks.append(StructuralCheck(
+            pattern=expand_macros(pattern, macros),
+            inside=rule_def.get("within", rule_def.get("inside")),
+            not_inside=rule_def.get("not-within", rule_def.get("not-inside")),
+            where=rule_def.get("where"),
+        ))
+
+    flow_def = rule_def.get("flow")
+    if isinstance(flow_def, dict):
+        flow_from = yaml_key(flow_def, "from", "flows_from")
+        flow_to = yaml_key(flow_def, "to", "flows_to")
+        if flow_from and flow_to:
+            not_through_val = yaml_key(flow_def, "not_through")
+            not_through = None
+            if isinstance(not_through_val, list):
+                expanded = [expand_macros(str(v), macros) for v in not_through_val]
+                not_through = " | ".join(v for v in expanded if v)
+            elif not_through_val:
+                not_through = expand_macros(str(not_through_val), macros)
+            checks.append(FlowCheck(
+                flows_from=expand_macros(str(flow_from), macros),
+                flows_to=expand_macros(str(flow_to), macros),
+                not_through=not_through,
+                label=flow_def.get("label", name),
+            ))
+
+    deadcode_def = rule_def.get("deadcode")
+    if isinstance(deadcode_def, bool):
+        if deadcode_def:
+            checks.append(DeadCodeCheck())
+    elif isinstance(deadcode_def, dict):
+        entry_points = deadcode_def.get("entry-points", {})
+        checks.append(DeadCodeCheck(
+            entry_point_decorators=[str(v) for v in as_list(
+                yaml_key(deadcode_def, "entry_point_decorators") or (
+                    entry_points.get("decorators") if isinstance(entry_points, dict) else None
+                )
+            )],
+            entry_point_names=[str(v) for v in as_list(
+                yaml_key(deadcode_def, "entry_point_names") or (
+                    entry_points.get("names") if isinstance(entry_points, dict) else None
+                )
+            )],
+            exclude_paths=[str(v) for v in as_list(yaml_key(deadcode_def, "exclude_paths"))],
+        ))
+
+    type_def = rule_def.get("type-check")
+    if type_def is None:
+        type_def = rule_def.get("type_check")
+    if isinstance(type_def, dict):
+        symbol_pattern = type_def.get("selector") or yaml_key(type_def, "symbol_pattern")
+        expected_type = type_def.get("expected") or yaml_key(type_def, "expected_type")
+        if symbol_pattern and expected_type:
+            checks.append(TypeCheck(
+                symbol_pattern=str(symbol_pattern),
+                expected_type=str(expected_type),
+                kind=type_def.get("kind", "has_type"),
+            ))
+
+    if "datalog" in rule_def:
+        datalog_def = rule_def["datalog"]
+        if isinstance(datalog_def, str):
+            checks.append(DatalogCheck(cozoscript=datalog_def))
+        elif isinstance(datalog_def, dict):
+            query = datalog_def.get("query") or datalog_def.get("cozoscript")
+            if query:
+                checks.append(DatalogCheck(cozoscript=str(query)))
+
+    if isinstance(rule_def.get("flow"), dict) and not checks:
+        flow_def = rule_def["flow"]
+        # Keep compatibility with older partial flow rules by skipping empty checks.
+        if flow_def.get("from") and flow_def.get("to"):
+            checks.append(FlowCheck(
+                flows_from=expand_macros(str(flow_def["from"]), macros),
+                flows_to=expand_macros(str(flow_def["to"]), macros),
+                not_through=expand_macros(str(flow_def.get("not-through")), macros) if flow_def.get("not-through") else None,
+                label=flow_def.get("label", name),
+            ))
+
+    if not checks:
+        return None
+    return Policy(
+        name=name,
+        description=message,
+        severity=severity,
+        checks=checks,
+    )
 
 
 def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
@@ -156,15 +254,15 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
     """
     check_type = raw.get("type", "")
     if check_type == "flow":
-        flows_from = _yaml_key(raw, "flows_from")
-        flows_to = _yaml_key(raw, "flows_to")
+        flows_from = yaml_key(raw, "flows_from")
+        flows_to = yaml_key(raw, "flows_to")
         if not flows_from or not flows_to:
             raise ValueError("FlowCheck requires 'flows_from' and 'flows_to'")
         return FlowCheck(
             flows_from=flows_from,
             flows_to=flows_to,
-            not_through=_yaml_key(raw, "not_through"),
-            label=_yaml_key(raw, "label") or "",
+            not_through=yaml_key(raw, "not_through"),
+            label=yaml_key(raw, "label") or "",
         )
     elif check_type == "structural":
         pattern = raw.get("pattern")
@@ -173,13 +271,13 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
         return StructuralCheck(
             pattern=pattern,
             inside=raw.get("inside"),
-            not_inside=_yaml_key(raw, "not_inside"),
+            not_inside=yaml_key(raw, "not_inside"),
             where=raw.get("where"),
         )
     elif check_type == "type":
         kind = raw.get("kind", "has_type")
-        symbol_pattern = _yaml_key(raw, "symbol_pattern")
-        expected_type = _yaml_key(raw, "expected_type")
+        symbol_pattern = yaml_key(raw, "symbol_pattern")
+        expected_type = yaml_key(raw, "expected_type")
         if not symbol_pattern or not expected_type:
             raise ValueError(
                 "TypeCheck requires 'symbol_pattern' and 'expected_type'"
@@ -191,17 +289,17 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
         )
     elif check_type == "deadcode":
         return DeadCodeCheck(
-            entry_point_decorators=_as_list(_yaml_key(raw, "entry_point_decorators")),
-            entry_point_names=_as_list(_yaml_key(raw, "entry_point_names")),
-            exclude_paths=_as_list(_yaml_key(raw, "exclude_paths")),
+            entry_point_decorators=_as_list(yaml_key(raw, "entry_point_decorators")),
+            entry_point_names=_as_list(yaml_key(raw, "entry_point_names")),
+            exclude_paths=_as_list(yaml_key(raw, "exclude_paths")),
         )
     elif check_type == "custom":
-        query_source = _yaml_key(raw, "query_source")
+        query_source = yaml_key(raw, "query_source")
         if not query_source:
             raise ValueError("CustomCheck requires 'query_source'")
         return CustomCheck(query_source=query_source)
     elif check_type == "datalog":
-        cozoscript = raw.get("cozoscript") or _yaml_key(raw, "query")
+        cozoscript = raw.get("cozoscript") or yaml_key(raw, "query")
         if not cozoscript:
             raise ValueError("DatalogCheck requires 'cozoscript' or 'query'")
         return DatalogCheck(cozoscript=cozoscript)
@@ -219,7 +317,7 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
                 bind=step_raw.get("bind", ""),
                 pattern=step_raw.get("pattern"),
                 effect=step_raw.get("effect"),
-                type_constraint=_yaml_key(step_raw, "type_constraint"),
+                type_constraint=yaml_key(step_raw, "type_constraint"),
             ))
         # Parse path constraints
         path_constraints = []
@@ -236,7 +334,7 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
                 else:
                     nt_patterns.append(item)
             nts_patterns = []
-            for item in _as_list(_yaml_key(path_val, "not_through_scope") or []):
+            for item in _as_list(yaml_key(path_val, "not_through_scope") or []):
                 if isinstance(item, dict):
                     nts_patterns.append(item.get("pattern", ""))
                 else:
@@ -281,31 +379,52 @@ def load_policies(config_path: str | Path | None = None) -> list[Policy]:
         FileNotFoundError: If the config file does not exist.
         ValueError: If the config file is malformed.
     """
-    import yaml
+    data, path = load_rules_document(
+        config_path,
+        fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
+    )
 
-    if config_path is None:
-        config_path = Path(".emend/policies.yaml")
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Policy config not found: {path}")
-
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
-    if not isinstance(data, dict) or "policies" not in data:
+    if "policies" not in data and "rules" not in data:
         raise ValueError(
-            "Policy config must be a YAML mapping with a top-level 'policies' key"
+            "Policy config must be a YAML mapping with a top-level 'policies' or 'rules' key"
         )
 
     policies: list[Policy] = []
-    for raw_policy in data["policies"]:
-        checks = [_parse_check(c) for c in raw_policy.get("checks", [])]
-        policies.append(Policy(
-            name=raw_policy["name"],
-            description=raw_policy.get("description", ""),
-            severity=raw_policy.get("severity", "warning"),
-            checks=checks,
-        ))
+    if "policies" in data:
+        for raw_policy in data["policies"]:
+            checks = [_parse_check(c) for c in raw_policy.get("checks", [])]
+            policies.append(Policy(
+                name=raw_policy["name"],
+                description=raw_policy.get("description", ""),
+                severity=raw_policy.get("severity", "warning"),
+                checks=checks,
+            ))
+        return policies
+
+    macros = data.get("macros", {}) or {}
+    for name, rule_def in (data.get("rules", {}) or {}).items():
+        if not isinstance(rule_def, dict):
+            continue
+        if rule_def.get("enabled") is False:
+            continue
+        policy = _build_unified_policy(name, rule_def, macros)
+        if policy is not None:
+            policies.append(policy)
+
+    # Top-level deadcode block in rules.yaml acts as a default deadcode policy.
+    top_level_deadcode = data.get("deadcode")
+    if top_level_deadcode is not None and all(p.name != "deadcode" for p in policies):
+        deadcode_policy = _build_unified_policy(
+            "deadcode",
+            {
+                "deadcode": top_level_deadcode,
+                "message": "Dead code check",
+                "severity": "warning",
+            },
+            macros,
+        )
+        if deadcode_policy is not None:
+            policies.append(deadcode_policy)
     return policies
 
 

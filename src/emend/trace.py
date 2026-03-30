@@ -20,9 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
 from emend.transform import find_pattern, PatternMatch
+from emend.rules_config import (
+    LEGACY_PATTERNS_PATH,
+    as_list,
+    expand_macros,
+    load_rules_document,
+    yaml_key,
+)
 
 if TYPE_CHECKING:
     from emend.fact_graph import FactGraph
@@ -183,6 +188,161 @@ def _eval_atom(atom: tuple[str, bool], type_name: str) -> bool:
 # Config loading
 # ---------------------------------------------------------------------------
 
+_EFFECT_PREDICATE_RE = re.compile(r"^\s*(writes|reads)\s*\(.*\)\s*$")
+
+
+def _trace_config_from_trace_section(raw: dict[str, Any] | None) -> TraceConfig:
+    """Parse legacy ``trace:``/``taint:`` section format."""
+    if raw is None:
+        return TraceConfig()
+    if not isinstance(raw, dict):
+        return TraceConfig()
+
+    labels = [str(v) for v in as_list(raw.get("labels"))]
+
+    sources = []
+    for s in raw.get("sources", []) or []:
+        if not isinstance(s, dict):
+            continue
+        if "pattern" not in s or "label" not in s:
+            continue
+        sources.append(TraceSource(
+            pattern=str(s["pattern"]),
+            label=str(s["label"]),
+            type_constraint=str(s.get("type_constraint", "")),
+        ))
+
+    sinks = []
+    for s in raw.get("sinks", []) or []:
+        if not isinstance(s, dict):
+            continue
+        if "label" not in s:
+            continue
+        sinks.append(TraceSink(
+            pattern=str(s.get("pattern", "")),
+            label=str(s["label"]),
+            message=str(s.get("message", "Traced value reaches sink")),
+            effect=str(s.get("effect", "")),
+            type_constraint=str(s.get("type_constraint", "")),
+        ))
+
+    sanitizers = []
+    for s in raw.get("sanitizers", []) or []:
+        if not isinstance(s, dict):
+            continue
+        if "pattern" not in s or "label" not in s:
+            continue
+        sanitizers.append(TraceSanitizer(
+            pattern=str(s["pattern"]),
+            label=str(s["label"]),
+            quantifier=str(s.get("quantifier", "all_paths")),
+            type_constraint=str(s.get("type_constraint", "")),
+        ))
+
+    scope_sanitizers = []
+    for s in raw.get("scope_sanitizers", []) or []:
+        if not isinstance(s, dict):
+            continue
+        if "pattern" not in s or "label" not in s:
+            continue
+        scope_sanitizers.append(TraceScopeSanitizer(
+            pattern=str(s["pattern"]),
+            label=str(s["label"]),
+        ))
+
+    return TraceConfig(
+        labels=labels,
+        sources=sources,
+        sinks=sinks,
+        sanitizers=sanitizers,
+        scope_sanitizers=scope_sanitizers,
+    )
+
+
+def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
+    """Parse unified ``rules: {name: {flow: ...}}`` entries into TraceConfig."""
+    raw_rules = config.get("rules", {}) or {}
+    if not isinstance(raw_rules, dict):
+        return TraceConfig()
+
+    macros = config.get("macros", {}) or {}
+    labels: list[str] = []
+    sources: list[TraceSource] = []
+    sinks: list[TraceSink] = []
+    sanitizers: list[TraceSanitizer] = []
+    scope_sanitizers: list[TraceScopeSanitizer] = []
+
+    for name, rule_def in raw_rules.items():
+        if not isinstance(rule_def, dict):
+            continue
+        if rule_def.get("enabled") is False:
+            continue
+
+        flow_def = rule_def.get("flow")
+        if not isinstance(flow_def, dict):
+            continue
+
+        flow_from = yaml_key(flow_def, "from", "flows_from")
+        flow_to = yaml_key(flow_def, "to", "flows_to")
+        if not flow_from or not flow_to:
+            continue
+
+        label = str(flow_def.get("label") or rule_def.get("label") or name)
+        labels.append(label)
+
+        source_pattern = expand_macros(str(flow_from), macros)
+        sink_pattern = expand_macros(str(flow_to), macros)
+        sources.append(TraceSource(
+            pattern=source_pattern,
+            label=label,
+            type_constraint=str(flow_def.get("type_constraint", "")),
+        ))
+
+        sink_message = str(rule_def.get("message", "Traced value reaches sink"))
+        if _EFFECT_PREDICATE_RE.match(sink_pattern):
+            sinks.append(TraceSink(
+                pattern="",
+                label=label,
+                message=sink_message,
+                effect=sink_pattern,
+                type_constraint=str(flow_def.get("type_constraint", "")),
+            ))
+        else:
+            sinks.append(TraceSink(
+                pattern=sink_pattern,
+                label=label,
+                message=sink_message,
+                effect=str(flow_def.get("effect", "")),
+                type_constraint=str(flow_def.get("type_constraint", "")),
+            ))
+
+        for sanitizer in as_list(yaml_key(flow_def, "not_through")):
+            sanitizer_pattern = expand_macros(str(sanitizer), macros)
+            if sanitizer_pattern:
+                sanitizers.append(TraceSanitizer(
+                    pattern=sanitizer_pattern,
+                    label=label,
+                    quantifier=str(flow_def.get("quantifier", "all_paths")),
+                    type_constraint=str(flow_def.get("type_constraint", "")),
+                ))
+
+        for scope_def in as_list(yaml_key(flow_def, "not_through_scope")):
+            scope_pattern = expand_macros(str(scope_def), macros)
+            if scope_pattern:
+                scope_sanitizers.append(TraceScopeSanitizer(
+                    pattern=scope_pattern,
+                    label=label,
+                ))
+
+    return TraceConfig(
+        labels=labels,
+        sources=sources,
+        sinks=sinks,
+        sanitizers=sanitizers,
+        scope_sanitizers=scope_sanitizers,
+    )
+
+
 def load_trace_config(config_path: str) -> TraceConfig:
     """Load trace analysis configuration from a YAML file.
 
@@ -197,66 +357,53 @@ def load_trace_config(config_path: str) -> TraceConfig:
     Raises:
         FileNotFoundError: If the config file does not exist.
     """
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(path) as f:
-        config = yaml.safe_load(f)
-
-    raw = config.get("trace")
-    if raw is None:
-        return TraceConfig()
-
-    labels = raw.get("labels", []) or []
-
-    sources = []
-    for s in raw.get("sources", []) or []:
-        sources.append(TraceSource(
-            pattern=s["pattern"], label=s["label"],
-            type_constraint=s.get("type_constraint", ""),
-        ))
-
-    sinks = []
-    for s in raw.get("sinks", []) or []:
-        sinks.append(TraceSink(
-            pattern=s.get("pattern", ""),
-            label=s["label"],
-            message=s.get("message", "Traced value reaches sink"),
-            effect=s.get("effect", ""),
-            type_constraint=s.get("type_constraint", ""),
-        ))
-
-    sanitizers = []
-    for s in raw.get("sanitizers", []) or []:
-        sanitizers.append(TraceSanitizer(
-            pattern=s["pattern"], label=s["label"],
-            quantifier=s.get("quantifier", "all_paths"),
-            type_constraint=s.get("type_constraint", ""),
-        ))
-
-    scope_sanitizers = []
-    for s in raw.get("scope_sanitizers", []) or []:
-        scope_sanitizers.append(TraceScopeSanitizer(
-            pattern=s["pattern"], label=s["label"],
-        ))
-
-    explicit_config = TraceConfig(
-        labels=labels,
-        sources=sources,
-        sinks=sinks,
-        sanitizers=sanitizers,
-        scope_sanitizers=scope_sanitizers,
+    config, _path = load_rules_document(
+        config_path,
+        fallbacks=(LEGACY_PATTERNS_PATH,),
     )
 
-    # Support a ``presets`` key that merges named framework presets
-    preset_names = raw.get("presets", []) or []
-    if preset_names:
-        from emend.trace_presets import get_preset, merge_configs
-        preset_configs = [get_preset(name) for name in preset_names]
-        return merge_configs(*preset_configs, explicit_config)
+    raw_section = config.get("trace")
+    if raw_section is None:
+        raw_section = config.get("taint")
 
-    return explicit_config
+    explicit_config = _trace_config_from_trace_section(raw_section)
+    rules_flow_config = _trace_config_from_unified_rules(config)
+
+    # Support presets in both old trace-section and unified top-level forms.
+    preset_names: list[str] = []
+    preset_names.extend(str(v) for v in as_list(config.get("presets")))
+    if isinstance(raw_section, dict):
+        preset_names.extend(str(v) for v in as_list(raw_section.get("presets")))
+    if preset_names:
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique_preset_names: list[str] = []
+        for name in preset_names:
+            if name not in seen:
+                seen.add(name)
+                unique_preset_names.append(name)
+
+        from emend.trace_presets import get_preset, merge_configs
+
+        preset_configs = [get_preset(name) for name in unique_preset_names]
+        return merge_configs(*preset_configs, explicit_config, rules_flow_config)
+
+    if (
+        explicit_config.labels
+        or explicit_config.sources
+        or explicit_config.sinks
+        or explicit_config.sanitizers
+        or explicit_config.scope_sanitizers
+        or rules_flow_config.labels
+        or rules_flow_config.sources
+        or rules_flow_config.sinks
+        or rules_flow_config.sanitizers
+        or rules_flow_config.scope_sanitizers
+    ):
+        from emend.trace_presets import merge_configs
+        return merge_configs(explicit_config, rules_flow_config)
+
+    return TraceConfig()
 
 
 # ---------------------------------------------------------------------------
