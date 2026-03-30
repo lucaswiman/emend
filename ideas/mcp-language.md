@@ -511,13 +511,13 @@ as an MCP tool — see "Not Yet Exposed" below).
 ### "What tests are affected by my change?"
 
 ```json
-{"type": "impact", "diff": "HEAD~1", "output": "tests"}
+{"type": "impact", "diff_ref": "HEAD~1", "output": "tests"}
 ```
 
 ### "Find all assignments to a variable"
 
 ```json
-{"type": "refs", "symbol": "config.DEBUG", "filter": "writes_only"}
+{"type": "refs", "symbol": "config.DEBUG", "ref_kind": "writes_only"}
 ```
 
 ## Output Format Reference
