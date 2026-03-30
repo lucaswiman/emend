@@ -60,12 +60,31 @@ class TaintSanitizer:
 
 
 @dataclass
+class TaintScopeSanitizer:
+    """A pattern that kills ALL taint for a label within a scope.
+
+    Unlike regular sanitizers which kill taint for a specific matched
+    variable, scope sanitizers kill all taint carrying the given label
+    when the pattern is matched. This models scope/context boundaries
+    like transaction commits or session closes.
+
+    Known limitation: nested scopes (e.g., ``with db.begin(): with
+    db.begin():``) kill all taint for the label, not tracking
+    per-session. This is acceptable for the TOCTOU use case but means
+    inner scope kills will also clear outer scope's taint (false negatives).
+    """
+    pattern: str  # emend pattern string
+    label: str    # which label is killed
+
+
+@dataclass
 class TaintConfig:
     """Configuration for taint analysis from patterns.yaml."""
     labels: list[str] = field(default_factory=list)
     sources: list[TaintSource] = field(default_factory=list)
     sinks: list[TaintSink] = field(default_factory=list)
     sanitizers: list[TaintSanitizer] = field(default_factory=list)
+    scope_sanitizers: list[TaintScopeSanitizer] = field(default_factory=list)
 
 
 @dataclass
@@ -141,11 +160,18 @@ def load_taint_config(config_path: str) -> TaintConfig:
             quantifier=s.get("quantifier", "all_paths"),
         ))
 
+    scope_sanitizers = []
+    for s in raw.get("scope_sanitizers", []) or []:
+        scope_sanitizers.append(TaintScopeSanitizer(
+            pattern=s["pattern"], label=s["label"],
+        ))
+
     explicit_config = TaintConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
+        scope_sanitizers=scope_sanitizers,
     )
 
     # Support a ``presets`` key that merges named framework presets
@@ -664,6 +690,36 @@ def _analyze_function(
             if not taint_state[var]:
                 del taint_state[var]
 
+    # Step 3b: Apply scope sanitizers — kill ALL taint for a label.
+    # Scope sanitizers (e.g. session.commit()) clear every variable's taint
+    # for the given label, not just variables captured by the pattern.
+    for scope_san in config.scope_sanitizers:
+        if label_filter and scope_san.label != label_filter:
+            continue
+        try:
+            matches = find_pattern(
+                scope_san.pattern, file_path,
+                source_override=source,
+                language=language,
+            )
+        except Exception:
+            logger.debug("find_pattern failed for scope sanitizer %s", scope_san.pattern, exc_info=True)
+            continue
+
+        for match in matches:
+            match_line = match.line or 1
+            if not _in_range(match_line):
+                continue
+            # Kill ALL taint for this label across all variables
+            vars_to_clean = [
+                var for var, labels in taint_state.items()
+                if scope_san.label in labels
+            ]
+            for var in vars_to_clean:
+                del taint_state[var][scope_san.label]
+                if not taint_state[var]:
+                    del taint_state[var]
+
     violations: list[TaintViolation] = []
 
     # Step 4: Check sinks for tainted values
@@ -834,6 +890,7 @@ def _run_taint_datalog(
     sources: list[tuple[str, str, str, int, str]] = []
     sinks: list[tuple[str, str, str, int, str]] = []
     sanitizers: list[tuple[str, str, str, int, str]] = []
+    scope_kills: list[tuple[str, str, str, int]] = []
 
     for file_path in paths:
         path_obj = Path(file_path)
@@ -881,6 +938,15 @@ def _run_taint_datalog(
                     for var in var_names:
                         sanitizers.append((file_path, "", var, -1, san_def.label))
 
+        # Scope sanitizers: match patterns and record (fp, fq, lbl, block_id)
+        for scope_san in config.scope_sanitizers:
+            if label_filter and scope_san.label != label_filter:
+                continue
+            matches = find_pattern(scope_san.pattern, file_path, source_override=source_text, language=language)
+            for m in matches:
+                if m.line is not None:
+                    scope_kills.append((file_path, "", scope_san.label, -1))
+
     if not sources or not sinks:
         return []
 
@@ -888,6 +954,7 @@ def _run_taint_datalog(
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers if sanitizers else None,
+        scope_kills=scope_kills if scope_kills else None,
     )
 
     # Convert TaintFlowFact -> TaintViolation

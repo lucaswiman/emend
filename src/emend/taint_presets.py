@@ -7,7 +7,7 @@ path traversal, SSRF).
 
 from __future__ import annotations
 
-from emend.taint import TaintConfig, TaintSanitizer, TaintSink, TaintSource
+from emend.taint import TaintConfig, TaintSanitizer, TaintScopeSanitizer, TaintSink, TaintSource
 
 
 def _flask_preset() -> TaintConfig:
@@ -335,6 +335,7 @@ def merge_configs(*configs: TaintConfig) -> TaintConfig:
     sources: list[TaintSource] = []
     sinks: list[TaintSink] = []
     sanitizers: list[TaintSanitizer] = []
+    scope_sanitizers: list[TaintScopeSanitizer] = []
 
     for cfg in configs:
         for lbl in cfg.labels:
@@ -344,10 +345,12 @@ def merge_configs(*configs: TaintConfig) -> TaintConfig:
         sources.extend(cfg.sources)
         sinks.extend(cfg.sinks)
         sanitizers.extend(cfg.sanitizers)
+        scope_sanitizers.extend(cfg.scope_sanitizers)
 
     return TaintConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
+        scope_sanitizers=scope_sanitizers,
     )

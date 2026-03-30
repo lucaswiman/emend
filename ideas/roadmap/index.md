@@ -164,9 +164,9 @@ replace `attribute_mutation_sinks` and other bespoke features.
 
 ### Phase 3: Scope Boundaries
 
-- [ ] Add `scope_sanitizers` config key — `taint.py`
-- [ ] Add `scope_kill` inline relation to Datalog propagation — `fact_graph.py`
-- [ ] Document nested-session limitation (kills all taint for label, not per-session)
+- [x] Add `scope_sanitizers` config key — `taint.py` (`TaintScopeSanitizer` dataclass, `TaintConfig.scope_sanitizers`, YAML loading)
+- [x] Add `scope_kill` inline relation to Datalog propagation — `fact_graph.py` (`taint_propagation_datalog(scope_kills=)`, `not scope_kill` in `unsanitized` rules)
+- [x] Document nested-session limitation (kills all taint for label, not per-session) — `taint.py` docstring, `taint-cfg-precision.md` spec
 
 ### Phase 4: Type-Conditioned Filtering
 
