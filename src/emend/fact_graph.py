@@ -490,6 +490,20 @@ class FactGraph:
             },
         )
 
+    def add_types_batch(self, facts: list[TypeFact]) -> None:
+        """Bulk-insert type binding facts."""
+        if not facts:
+            return
+        rows = [
+            [f.symbol_qn, f.file_path, f.line, f.binding_kind, f.type_str]
+            for f in facts
+        ]
+        self._client.run(
+            "?[symbol_qn, file_path, line, binding_kind, type_str] <- $rows "
+            ":put type_binding {symbol_qn, file_path, line, binding_kind => type_str}",
+            {"rows": rows},
+        )
+
     def add_import(self, fact: ImportFact) -> None:
         """Add an import fact."""
         self._client.run(
@@ -1537,6 +1551,7 @@ class FactGraph:
         sanitizer_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
+        scalar_types: list[str] | None = None,  # type names to filter out from sources (e.g. ["int", "float"])
     ) -> list[TaintFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
 
@@ -1630,6 +1645,31 @@ class FactGraph:
         else:
             scope_kill_rule = "scope_kill[fp, fq, lbl, bid] <- []\n"
 
+        # -- Phase 4: type-conditioned filtering --
+        # When scalar_types is provided, add scalar_type inline relation and
+        # effective_source rule that filters out scalar-typed sources.
+        if scalar_types:
+            st_rows = ", ".join(f'["{t}"]' for t in scalar_types)
+            type_filter_rules = (
+                f"scalar_type[t] <- [{st_rows}]\n"
+
+                # A source is scalar-typed if its variable has a matching type binding
+                "scalar_typed[fp, fq, var, block] := "
+                "taint_source[fp, fq, var, block, _], "
+                "*type_binding[_, fp, line, _, type_str], "
+                "*def_use[fp, fq, var, _, block, _, line, _, _, _], "
+                "scalar_type[type_str]\n"
+
+                # effective_source: only taint if type is not scalar
+                "effective_source[fp, fq, var, block, lbl] := "
+                "taint_source[fp, fq, var, block, lbl], "
+                "not scalar_typed[fp, fq, var, block]\n"
+            )
+            source_relation = "effective_source"
+        else:
+            type_filter_rules = ""
+            source_relation = "taint_source"
+
         # -- Build the Datalog query --
 
         if sanitizer_quantifier == "some_path":
@@ -1644,6 +1684,7 @@ class FactGraph:
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
                 f"{scope_kill_rule}"
+                f"{type_filter_rules}"
 
                 # CFG reachability (for some_path sanitizer check)
                 "cfg_reaches[fp, fq, block, block] := "
@@ -1655,14 +1696,14 @@ class FactGraph:
 
                 # A sink block is sanitized if source→sanitizer→sink via CFG
                 "sink_sanitized[fp, fq, lbl, sink_block] := "
-                "taint_source[fp, fq, _, src_block, lbl], "
+                f"{source_relation}[fp, fq, _, src_block, lbl], "
                 "sanitizer_block[fp, fq, lbl, san_block], "
                 "cfg_reaches[fp, fq, src_block, san_block], "
                 "cfg_reaches[fp, fq, san_block, sink_block]\n"
 
                 # Taint sources are tainted
                 "tainted[fp, fq, var, block, lbl] := "
-                "taint_source[fp, fq, var, block, lbl]\n"
+                f"{source_relation}[fp, fq, var, block, lbl]\n"
 
                 # Propagation through def-use chains (no blocking — sanitizer
                 # suppression happens at violation level for some_path)
@@ -1675,7 +1716,7 @@ class FactGraph:
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
                 "taint_sink[fp, fq, sink_var, sink_block, lbl], "
-                "taint_source[fp, fq, src_var, src_block, lbl], "
+                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
                 "not sink_sanitized[fp, fq, lbl, sink_block]\n"
             )
         else:
@@ -1690,15 +1731,16 @@ class FactGraph:
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
                 f"{scope_kill_rule}"
+                f"{type_filter_rules}"
 
                 # Check if any CFG edges exist for functions with taint sources
                 "has_cfg[fp, fq] := "
-                "taint_source[fp, fq, _, _, _], "
+                f"{source_relation}[fp, fq, _, _, _], "
                 "*cfg_edge[fp, fq, _, _, _, _, _]\n"
 
                 # Base case: source block is unsanitized-reachable
                 "unsanitized[fp, fq, lbl, block] := "
-                "taint_source[fp, fq, _, block, lbl]\n"
+                f"{source_relation}[fp, fq, _, block, lbl]\n"
 
                 # With CFG: propagate along CFG edges, blocked by sanitizer blocks
                 "unsanitized[fp, fq, lbl, to_block] := "
@@ -1722,7 +1764,7 @@ class FactGraph:
                 #   (a) it's a source in that block, OR
                 #   (b) taint propagates via def-use AND block is unsanitized-reachable
                 "tainted[fp, fq, var, block, lbl] := "
-                "taint_source[fp, fq, var, block, lbl]\n"
+                f"{source_relation}[fp, fq, var, block, lbl]\n"
 
                 "tainted[fp, fq, var, use_block, lbl] := "
                 "tainted[fp, fq, var, def_block, lbl], "
@@ -1733,7 +1775,7 @@ class FactGraph:
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
                 "taint_sink[fp, fq, sink_var, sink_block, lbl], "
-                "taint_source[fp, fq, src_var, src_block, lbl]\n"
+                f"{source_relation}[fp, fq, src_var, src_block, lbl]\n"
             )
 
         # Effect-based violations: tainted var is written/mutated
@@ -1748,7 +1790,7 @@ class FactGraph:
                 "effect_sink_label[lbl], "
                 "*def_use[fp, fq, sink_var, kind, sink_block, _, _, _, _, _], "
                 "mutate_kind[kind], "
-                "taint_source[fp, fq, src_var, src_block, lbl], "
+                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
                 "sink_block != src_block\n"
             )
             # Variant 2: dotted attribute — write to sink_var.field
@@ -1759,7 +1801,7 @@ class FactGraph:
                 "*def_use[fp, fq, var_name, kind, sink_block, _, _, _, _, _], "
                 "mutate_kind[kind], "
                 'starts_with(var_name, concat(sink_var, ".")), '
-                "taint_source[fp, fq, src_var, src_block, lbl], "
+                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
                 "sink_block != src_block\n"
             )
             # Variant 3: method call on tainted var (e.g. sink_var.append())
@@ -1768,7 +1810,7 @@ class FactGraph:
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
                 "effect_sink_label[lbl], "
                 "*method_call[fp, fq, sink_var, _, sink_block, _], "
-                "taint_source[fp, fq, src_var, src_block, lbl], "
+                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
                 "sink_block != src_block\n"
             )
 
@@ -2460,6 +2502,40 @@ class FactGraph:
             # -- Import facts (via stdlib ast) ----------------------------
             import_facts = _extract_imports(rel_path, content)
             graph.add_imports_batch(import_facts)
+
+        # -- Type binding facts (via type oracle) ----------------------
+        # Populate after all files are processed so the type oracle can
+        # see the full project.  Gracefully skips when no type checker is
+        # available.
+        try:
+            from emend.type_oracle import create_type_oracle, parse_type_string
+
+            oracle = create_type_oracle(engine="auto")
+            if oracle.is_available():
+                project_root_path = Path(project_root).resolve()
+                for abs_file_path in source_files:
+                    try:
+                        rel_path = str(Path(abs_file_path).relative_to(project_root_path))
+                    except ValueError:
+                        rel_path = abs_file_path
+                    try:
+                        file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
+                    except Exception:
+                        logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
+                        continue
+                    type_facts: list[TypeFact] = []
+                    for binding in file_types.bindings:
+                        td = parse_type_string(binding.raw_type)
+                        type_facts.append(TypeFact(
+                            symbol_qn=binding.name,
+                            type_str=td.name,  # top-level constructor
+                            file_path=rel_path,
+                            line=binding.line,
+                            binding_kind=binding.binding_kind,
+                        ))
+                    graph.add_types_batch(type_facts)
+        except Exception:
+            logger.debug("Could not populate type bindings", exc_info=True)
 
         return graph
 
