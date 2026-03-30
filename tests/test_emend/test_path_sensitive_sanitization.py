@@ -1,9 +1,9 @@
 """Tests for Phase 2: Path-Sensitive Sanitization (Taint-CFG Precision).
 
 Tests cover:
-- CFG-edge unsanitized reachability in taint_propagation_datalog()
+- CFG-edge unsanitized reachability in trace_propagation_datalog()
 - Intra-block line-ordering guard for same-block sanitizer+sink
-- `quantifier` field (`all_paths`/`some_path`) on TaintSanitizer
+- `quantifier` field (`all_paths`/`some_path`) on TraceSanitizer
 - `through` parameter in flow_rule_check_datalog()
 - Python fallback per-block taint state
 """
@@ -18,12 +18,12 @@ from emend.fact_graph import (
     MethodCallFact,
     SymbolFact,
 )
-from emend.taint import (
-    TaintConfig,
-    TaintSanitizer,
-    TaintSink,
-    TaintSource,
-    load_taint_config,
+from emend.trace import (
+    TraceConfig,
+    TraceSanitizer,
+    TraceSink,
+    TraceSource,
+    load_trace_config,
 )
 
 
@@ -81,7 +81,7 @@ def _build_diamond_cfg():
 
 
 class TestUnsanitizedReachability:
-    """taint_propagation_datalog() uses CFG-edge reachability to block
+    """trace_propagation_datalog() uses CFG-edge reachability to block
     taint only when sanitizer dominates the sink."""
 
     def test_sanitizer_on_all_paths_suppresses_violation(self):
@@ -104,7 +104,7 @@ class TestUnsanitizedReachability:
             def_block=0, use_block=2, def_line=1, use_line=3,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 2, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
@@ -117,7 +117,7 @@ class TestUnsanitizedReachability:
         g = _build_diamond_cfg()
 
         # Sanitizer only on block 2 (true branch), not block 3 (false branch)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 2, "lbl")],
@@ -131,7 +131,7 @@ class TestUnsanitizedReachability:
         g = _build_diamond_cfg()
 
         # Sanitizer on both branches (blocks 2 and 3)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             sanitizers=[
@@ -161,7 +161,7 @@ class TestUnsanitizedReachability:
         ))
 
         # Sink in block 1, sanitizer in block 2 (after sink)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 2, "lbl")],
@@ -179,7 +179,7 @@ class TestUnsanitizedReachability:
         ))
 
         # Sanitizer only on block 2
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             effect_sinks=[("lbl", "writes")],
             sanitizers=[("app.py", "app.f", "x", 2, "lbl")],
@@ -196,7 +196,7 @@ class TestUnsanitizedReachability:
             def_block=4, use_block=5, def_line=9, use_line=10,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             effect_sinks=[("lbl", "writes")],
             sanitizers=[
@@ -210,7 +210,7 @@ class TestUnsanitizedReachability:
         """Without sanitizers, taint reaches sink normally."""
         g = _build_diamond_cfg()
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
         )
@@ -241,7 +241,7 @@ class TestUnsanitizedReachability:
             def_block=0, use_block=3, def_line=1, use_line=4,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 3, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
@@ -276,7 +276,7 @@ class TestIntraBlockLineOrdering:
         ))
 
         # Source in block 0, sanitizer in block 1 (line 5), sink in block 1 (line 8)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
@@ -303,7 +303,7 @@ class TestIntraBlockLineOrdering:
         ))
 
         # Source in block 0, sanitizer in block 1 (line 8), sink in block 1 (line 5)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
@@ -336,7 +336,7 @@ class TestIntraBlockLineOrdering:
         ))
 
         # Sanitizer at line 5 (before mutation at line 8) → suppressed
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             effect_sinks=[("lbl", "writes")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
@@ -346,16 +346,16 @@ class TestIntraBlockLineOrdering:
 
 
 # ---------------------------------------------------------------------------
-# Quantifier field on TaintSanitizer
+# Quantifier field on TraceSanitizer
 # ---------------------------------------------------------------------------
 
 
 class TestSanitizerQuantifier:
-    """TaintSanitizer supports a `quantifier` field."""
+    """TraceSanitizer supports a `quantifier` field."""
 
     def test_sanitizer_has_quantifier_field(self):
-        """TaintSanitizer accepts a `quantifier` keyword argument."""
-        san = TaintSanitizer(
+        """TraceSanitizer accepts a `quantifier` keyword argument."""
+        san = TraceSanitizer(
             pattern="validate($X)", label="user_input",
             quantifier="all_paths",
         )
@@ -363,7 +363,7 @@ class TestSanitizerQuantifier:
 
     def test_sanitizer_quantifier_defaults_to_all_paths(self):
         """Default quantifier is 'all_paths'."""
-        san = TaintSanitizer(pattern="validate($X)", label="user_input")
+        san = TraceSanitizer(pattern="validate($X)", label="user_input")
         assert san.quantifier == "all_paths"
 
     def test_some_path_quantifier_suppresses_with_any_path(self):
@@ -371,7 +371,7 @@ class TestSanitizerQuantifier:
         g = _build_diamond_cfg()
 
         # With some_path, sanitizer on block 2 alone is enough
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 2, "lbl")],
@@ -384,7 +384,7 @@ class TestSanitizerQuantifier:
         g = _build_diamond_cfg()
 
         # With all_paths (default), sanitizer on block 2 alone doesn't suppress
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 2, "lbl")],
@@ -392,11 +392,11 @@ class TestSanitizerQuantifier:
         )
         assert len(flows) >= 1
 
-    def test_load_taint_config_quantifier(self, tmp_path):
-        """load_taint_config() reads the `quantifier` field from YAML."""
+    def test_load_trace_config_quantifier(self, tmp_path):
+        """load_trace_config() reads the `quantifier` field from YAML."""
         cfg_file = tmp_path / "patterns.yaml"
         cfg_file.write_text("""\
-taint:
+trace:
   labels: [user_input]
   sources:
     - pattern: "request.args.get($KEY)"
@@ -410,14 +410,14 @@ taint:
       label: user_input
       quantifier: some_path
 """)
-        config = load_taint_config(str(cfg_file))
+        config = load_trace_config(str(cfg_file))
         assert config.sanitizers[0].quantifier == "some_path"
 
-    def test_load_taint_config_quantifier_default(self, tmp_path):
+    def test_load_trace_config_quantifier_default(self, tmp_path):
         """Omitted quantifier defaults to 'all_paths'."""
         cfg_file = tmp_path / "patterns.yaml"
         cfg_file.write_text("""\
-taint:
+trace:
   labels: [user_input]
   sources:
     - pattern: "request.args.get($KEY)"
@@ -430,7 +430,7 @@ taint:
     - pattern: "validate($X)"
       label: user_input
 """)
-        config = load_taint_config(str(cfg_file))
+        config = load_trace_config(str(cfg_file))
         assert config.sanitizers[0].quantifier == "all_paths"
 
 
@@ -528,19 +528,19 @@ def handler():
         x = validate(x)
     sink(x)
 """)
-        config = TaintConfig(
+        config = TraceConfig(
             labels=["sqli"],
-            sources=[TaintSource(pattern="get_user_input()", label="sqli")],
-            sinks=[TaintSink(
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
                 pattern="sink($X)", label="sqli",
                 message="SQL injection",
             )],
-            sanitizers=[TaintSanitizer(
+            sanitizers=[TraceSanitizer(
                 pattern="validate($X)", label="sqli",
             )],
         )
-        from emend.taint import run_taint_analysis
-        violations = run_taint_analysis(
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         # The sanitizer only covers the true branch; taint persists on the
@@ -569,19 +569,19 @@ def handler():
         x = validate(x)
     sink(x)
 """)
-        config = TaintConfig(
+        config = TraceConfig(
             labels=["sqli"],
-            sources=[TaintSource(pattern="get_user_input()", label="sqli")],
-            sinks=[TaintSink(
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
                 pattern="sink($X)", label="sqli",
                 message="SQL injection",
             )],
-            sanitizers=[TaintSanitizer(
+            sanitizers=[TraceSanitizer(
                 pattern="validate($X)", label="sqli",
             )],
         )
-        from emend.taint import run_taint_analysis
-        violations = run_taint_analysis(
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         assert len(violations) == 0

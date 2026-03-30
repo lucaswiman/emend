@@ -1,7 +1,7 @@
 """Relational fact model for code invariants, backed by CozoDB.
 
 Provides a unified, queryable graph of code facts (symbols, calls,
-references, taint flows, types, imports) extracted from a project's
+references, trace flows, types, imports) extracted from a project's
 source tree using emend's existing analysis infrastructure.
 
 The backing store is CozoDB with the SQLite engine, giving us:
@@ -17,7 +17,7 @@ import json
 import logging
 import re
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Union
 
@@ -27,6 +27,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Fact types (stable dataclass API)
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class TraceDatalogConfig:
+    """Grouped parameters for :meth:`FactGraph.trace_propagation_datalog`.
+
+    Collects sources, sinks, and analysis options into a single config
+    object to reduce the method's parameter count.
+    """
+    sources: list[tuple[str, str, str, int, str]]  # (file_path, func_qn, var_name, block_id, label)
+    sinks: list[tuple[str, str, str, int, str]] = field(default_factory=list)
+    effect_sinks: list[tuple[str, str]] = field(default_factory=list)  # (label, effect_kind)
+    sanitizers: list[tuple[str, str, str, int, str]] = field(default_factory=list)
+    sanitizer_quantifier: str = "all_paths"  # "all_paths" or "some_path"
+    sanitizer_lines: list[tuple[str, str, str, int, int]] = field(default_factory=list)
+    sink_lines: list[tuple[str, str, str, int, int]] = field(default_factory=list)
+    scope_kills: list[tuple[str, str, str, int]] = field(default_factory=list)
+    scalar_types: list[str] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class SymbolFact:
@@ -65,8 +83,8 @@ class ReferenceFact:
 
 
 @dataclass(frozen=True)
-class TaintFlowFact:
-    """A taint flow edge from source to sink within a function."""
+class TraceFlowFact:
+    """A trace flow edge from source to sink within a function."""
     source_var: str
     sink_var: str
     label: str
@@ -187,7 +205,7 @@ class EntryPointNameFact:
 
 # Union of all fact types for generic queries.
 Fact = Union[
-    SymbolFact, CallFact, ReferenceFact, TaintFlowFact, TypeFact,
+    SymbolFact, CallFact, ReferenceFact, TraceFlowFact, TypeFact,
     ImportFact, CfgEdgeFact, DefUseFact, MethodCallFact, CfgBlockFact,
     DecoratorOnFact, SourceLocFact, FuncSummaryFact,
     EntryPointDecoratorFact, EntryPointNameFact,
@@ -256,7 +274,7 @@ _SCHEMA_INIT = """\
     block_id: Int default -1
 }}
 
-{:create taint_flow {
+{:create trace_flow {
     source_var: String,
     sink_var: String,
     label: String,
@@ -458,12 +476,12 @@ class FactGraph:
             },
         )
 
-    def add_taint_flow(self, fact: TaintFlowFact) -> None:
+    def add_trace_flow(self, fact: TraceFlowFact) -> None:
         """Add a taint flow fact."""
         self._client.run(
             "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] <- "
             "[[$sv, $skv, $lbl, $fp, $fq, $sl, $skl]] "
-            ":put taint_flow {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
+            ":put trace_flow {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
             {
                 "sv": fact.source_var,
                 "skv": fact.sink_var,
@@ -859,13 +877,13 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def taint_flows(
+    def trace_flows(
         self,
         label: str | None = None,
         file_path: str | None = None,
-    ) -> list[TaintFlowFact]:
+    ) -> list[TraceFlowFact]:
         """Query taint flow facts with optional filters."""
-        clauses = ["*taint_flow[sv, skv, lbl, fp, fq, sl, skl]"]
+        clauses = ["*trace_flow[sv, skv, lbl, fp, fq, sl, skl]"]
         params: dict[str, Any] = {}
 
         if label is not None:
@@ -881,7 +899,7 @@ class FactGraph:
         )
         result = self._client.run(query, params)
         return [
-            TaintFlowFact(
+            TraceFlowFact(
                 source_var=r[0], sink_var=r[1], label=r[2],
                 file_path=r[3], func_qn=r[4], source_line=r[5], sink_line=r[6],
             )
@@ -994,6 +1012,35 @@ class FactGraph:
             )
             for r in result["rows"]
         ]
+
+    def method_call_types(
+        self,
+        file_path: str | None = None,
+        func_qn: str | None = None,
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Resolve receiver types for method calls via type_binding join.
+
+        Returns (file_path, func_qn, receiver, method, receiver_type) tuples
+        for method calls where the receiver has a known type binding.
+        """
+        clauses = [
+            "*method_call[fp, fq, rcv, meth, bid, ln]",
+            "*type_binding[_, fp, def_line, _, type_str]",
+            "*def_use[fp, fq, rcv, _, _, bid, def_line, _, _, _]",
+        ]
+        params: dict[str, Any] = {}
+        if file_path is not None:
+            clauses.append("fp == $fp")
+            params["fp"] = file_path
+        if func_qn is not None:
+            clauses.append("fq == $fq")
+            params["fq"] = func_qn
+        query = "?[fp, fq, rcv, meth, type_str] := " + ", ".join(clauses)
+        try:
+            result = self._client.run(query, params)
+            return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
+        except Exception:
+            return []
 
     def cfg_blocks(self, func_qn: str | None = None, file_path: str | None = None) -> list[CfgBlockFact]:
         """Query CFG block facts."""
@@ -1539,9 +1586,31 @@ class FactGraph:
             )
         return [(r[0], r[1]) for r in result["rows"]]
 
-    # -- Phase 5: Taint analysis via Datalog --------------------------------
+    # -- Phase 5: Trace (data-flow) analysis via Datalog --------------------------------
 
-    def taint_propagation_datalog(
+    @staticmethod
+    def _inline_relation(
+        name: str,
+        cols: list[str],
+        rows: list[tuple[str | int, ...]],
+    ) -> str:
+        """Build a CozoScript inline-relation rule.
+
+        Returns a string like ``name[c1, c2] <- [[v1, v2], [v3, v4]]\\n``
+        or ``name[c1, c2] <- []\\n`` when *rows* is empty.
+        """
+        col_str = ", ".join(cols)
+        if not rows:
+            return f"{name}[{col_str}] <- []\n"
+        formatted = ", ".join(
+            "[" + ", ".join(
+                f'"{v}"' if isinstance(v, str) else str(v) for v in row
+            ) + "]"
+            for row in rows
+        )
+        return f"{name}[{col_str}] <- [{formatted}]\n"
+
+    def trace_propagation_datalog(
         self,
         sources: list[tuple[str, str, str, int, str]],  # (file_path, func_qn, var_name, block_id, label)
         sinks: list[tuple[str, str, str, int, str]] | None = None,  # (file_path, func_qn, var_name, block_id, label)
@@ -1552,7 +1621,7 @@ class FactGraph:
         sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
         scalar_types: list[str] | None = None,  # type names to filter out from sources (e.g. ["int", "float"])
-    ) -> list[TaintFlowFact]:
+    ) -> list[TraceFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
 
         Pattern matching (identifying sources/sinks/sanitizers) stays in Python.
@@ -1574,101 +1643,57 @@ class FactGraph:
         tainted variable (or its attributes) is written/mutated in a reachable
         block.  This replaces the old ``attribute_mutation_sinks`` mechanism.
 
-        Returns TaintFlowFact entries for each source-to-sink violation found.
+        Returns TraceFlowFact entries for each source-to-sink violation found.
         """
         if not sources:
             return []
         if not sinks and not effect_sinks:
             return []
 
-        # Insert source matches as temporary inline relations
-        src_rows = ", ".join(
-            f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
-            for fp, fq, var, bid, lbl in sources
+        _ir = self._inline_relation
+        _5cols = ["fp", "fq", "var", "bid", "lbl"]
+
+        # Insert source/sink/sanitizer matches as inline relations
+        src_rule = _ir("trace_source", _5cols, sources)
+        sink_rule = _ir("trace_sink", _5cols, sinks or [])
+        sanitizer_block_rule = _ir(
+            "sanitizer_block", ["fp", "fq", "lbl", "bid"],
+            [(fp, fq, lbl, bid) for fp, fq, _var, bid, lbl in (sanitizers or [])],
         )
 
-        if sinks:
-            sink_rows = ", ".join(
-                f'["{fp}", "{fq}", "{var}", {bid}, "{lbl}"]'
-                for fp, fq, var, bid, lbl in sinks
-            )
-            sink_rule = f"taint_sink[fp, fq, var, bid, lbl] <- [{sink_rows}]\n"
-        else:
-            sink_rule = "taint_sink[fp, fq, var, bid, lbl] <- []\n"
-
-        # Build sanitizer block relation from sanitizer tuples
-        if sanitizers:
-            san_block_rows = ", ".join(
-                f'["{fp}", "{fq}", "{lbl}", {bid}]'
-                for fp, fq, _var, bid, lbl in sanitizers
-            )
-            sanitizer_block_rule = f"sanitizer_block[fp, fq, lbl, bid] <- [{san_block_rows}]\n"
-        else:
-            sanitizer_block_rule = "sanitizer_block[fp, fq, lbl, bid] <- []\n"
-
-        # Build effect sink rules if provided
+        # Effect sink rules
         effect_rules = ""
         if effect_sinks:
-            # Build inline relation for effect sink labels
-            esl_rows = ", ".join(f'["{lbl}"]' for lbl, _ in effect_sinks)
-            effect_rules += f"effect_sink_label[lbl] <- [{esl_rows}]\n"
-
-            # Mutation kinds (excludes "del" — unbinding is not mutation)
+            effect_rules += _ir("effect_sink_label", ["lbl"],
+                                [(lbl,) for lbl, _ in effect_sinks])
             effect_rules += 'mutate_kind[k] <- [["write"], ["aug_write"]]\n'
 
-        # Intra-block line-ordering: sanitizer_in_block and sink_in_block
-        if sanitizer_lines:
-            sl_rows = ", ".join(
-                f'["{fp}", "{fq}", "{lbl}", {bid}, {line}]'
-                for fp, fq, lbl, bid, line in sanitizer_lines
-            )
-            san_line_rule = f"sanitizer_in_block[fp, fq, lbl, bid, line] <- [{sl_rows}]\n"
-        else:
-            san_line_rule = "sanitizer_in_block[fp, fq, lbl, bid, line] <- []\n"
+        # Intra-block line-ordering
+        _5line = ["fp", "fq", "lbl", "bid", "line"]
+        san_line_rule = _ir("sanitizer_in_block", _5line, sanitizer_lines or [])
+        sink_line_rule = _ir("sink_in_block", _5line, sink_lines or [])
 
-        if sink_lines:
-            skl_rows = ", ".join(
-                f'["{fp}", "{fq}", "{lbl}", {bid}, {line}]'
-                for fp, fq, lbl, bid, line in sink_lines
-            )
-            sink_line_rule = f"sink_in_block[fp, fq, lbl, bid, line] <- [{skl_rows}]\n"
-        else:
-            sink_line_rule = "sink_in_block[fp, fq, lbl, bid, line] <- []\n"
-
-        # Build scope_kill relation from scope sanitizer tuples
-        if scope_kills:
-            sk_rows = ", ".join(
-                f'["{fp}", "{fq}", "{lbl}", {bid}]'
-                for fp, fq, lbl, bid in scope_kills
-            )
-            scope_kill_rule = f"scope_kill[fp, fq, lbl, bid] <- [{sk_rows}]\n"
-        else:
-            scope_kill_rule = "scope_kill[fp, fq, lbl, bid] <- []\n"
+        # Scope kills
+        scope_kill_rule = _ir("scope_kill", ["fp", "fq", "lbl", "bid"],
+                              scope_kills or [])
 
         # -- Phase 4: type-conditioned filtering --
-        # When scalar_types is provided, add scalar_type inline relation and
-        # effective_source rule that filters out scalar-typed sources.
         if scalar_types:
-            st_rows = ", ".join(f'["{t}"]' for t in scalar_types)
             type_filter_rules = (
-                f"scalar_type[t] <- [{st_rows}]\n"
-
-                # A source is scalar-typed if its variable has a matching type binding
-                "scalar_typed[fp, fq, var, block] := "
-                "taint_source[fp, fq, var, block, _], "
+                _ir("scalar_type", ["t"], [(t,) for t in scalar_types])
+                + "scalar_typed[fp, fq, var, block] := "
+                "trace_source[fp, fq, var, block, _], "
                 "*type_binding[_, fp, line, _, type_str], "
                 "*def_use[fp, fq, var, _, block, _, line, _, _, _], "
                 "scalar_type[type_str]\n"
-
-                # effective_source: only taint if type is not scalar
                 "effective_source[fp, fq, var, block, lbl] := "
-                "taint_source[fp, fq, var, block, lbl], "
+                "trace_source[fp, fq, var, block, lbl], "
                 "not scalar_typed[fp, fq, var, block]\n"
             )
             source_relation = "effective_source"
         else:
             type_filter_rules = ""
-            source_relation = "taint_source"
+            source_relation = "trace_source"
 
         # -- Build the Datalog query --
 
@@ -1677,7 +1702,7 @@ class FactGraph:
             # If source can reach a sanitizer block, and that sanitizer block
             # can reach the sink, the violation is suppressed.
             query = (
-                f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
+                f"{src_rule}"
                 f"{sink_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
@@ -1715,7 +1740,7 @@ class FactGraph:
                 # Pattern-based violations: taint reaches sink, not sanitized
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "taint_sink[fp, fq, sink_var, sink_block, lbl], "
+                "trace_sink[fp, fq, sink_var, sink_block, lbl], "
                 f"{source_relation}[fp, fq, src_var, src_block, lbl], "
                 "not sink_sanitized[fp, fq, lbl, sink_block]\n"
             )
@@ -1724,7 +1749,7 @@ class FactGraph:
             # Use CFG-edge reachability: taint only reaches blocks that are
             # unsanitized-reachable from the source.
             query = (
-                f"taint_source[fp, fq, var, bid, lbl] <- [{src_rows}]\n"
+                f"{src_rule}"
                 f"{sink_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
@@ -1774,7 +1799,7 @@ class FactGraph:
                 # Pattern-based violations: taint reaches sink
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "taint_sink[fp, fq, sink_var, sink_block, lbl], "
+                "trace_sink[fp, fq, sink_var, sink_block, lbl], "
                 f"{source_relation}[fp, fq, src_var, src_block, lbl]\n"
             )
 
@@ -1843,7 +1868,7 @@ class FactGraph:
 
         result = self._client.run(query)
         return [
-            TaintFlowFact(
+            TraceFlowFact(
                 source_var=r[2], sink_var=r[3], label=r[4],
                 file_path=r[0], func_qn=r[1],
                 source_line=r[5], sink_line=r[6],
@@ -1851,10 +1876,10 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def interprocedural_taint_datalog(
+    def interprocedural_trace_datalog(
         self,
         max_iterations: int = 10,
-    ) -> list[TaintFlowFact]:
+    ) -> list[TraceFlowFact]:
         """Interprocedural taint analysis via recursive Datalog.
 
         Replaces the Python fixed-point loop in run_interprocedural_taint_analysis().
@@ -1886,7 +1911,7 @@ class FactGraph:
 
         result = self._client.run(query)
         return [
-            TaintFlowFact(
+            TraceFlowFact(
                 source_var=r[2], sink_var=r[2], label=r[3],
                 file_path="", func_qn=r[0],
                 source_line=0, sink_line=0,
@@ -1917,31 +1942,15 @@ class FactGraph:
         if not sources or not sinks:
             return []
 
-        src_rows = ", ".join(
-            f'["{fp}", "{fq}", "{var}", {bid}]'
-            for fp, fq, var, bid in sources
-        )
-        sink_rows = ", ".join(
-            f'["{fp}", "{fq}", "{var}", {bid}]'
-            for fp, fq, var, bid in sinks
-        )
-
-        if not_through:
-            nt_rows = ", ".join(
-                f'["{fp}", "{fq}", "{var}", {bid}]'
-                for fp, fq, var, bid in not_through
-            )
-            not_through_rule = f"blocked[fp, fq, var, bid] <- [{nt_rows}]\n"
-        else:
-            not_through_rule = "blocked[fp, fq, var, bid] <- []\n"
+        _ir = self._inline_relation
+        _4cols = ["fp", "fq", "var", "bid"]
+        src_rule = _ir("flow_source", _4cols, sources)
+        sink_ir = _ir("flow_sink", _4cols, sinks)
+        not_through_rule = _ir("blocked", _4cols, not_through or [])
 
         if through:
-            # Build required-point relation for CFG-edge avoidance check
-            req_rows = ", ".join(
-                f'["{fp}", "{fq}", {bid}]'
-                for fp, fq, _var, bid in through
-            )
-            required_rule = f"required[fp, fq, bid] <- [{req_rows}]\n"
+            required_rule = _ir("required", ["fp", "fq", "bid"],
+                                [(fp, fq, bid) for fp, fq, _var, bid in through])
 
             # CFG-edge reachability that avoids required points
             through_rules = (
@@ -1972,8 +1981,8 @@ class FactGraph:
 
         # Standard def-use reachability (for not_through and basic flow)
         query = (
-            f"flow_source[fp, fq, var, bid] <- [{src_rows}]\n"
-            f"flow_sink[fp, fq, var, bid] <- [{sink_rows}]\n"
+            f"{src_rule}"
+            f"{sink_ir}"
             f"{not_through_rule}"
             f"{through_rules}"
 
@@ -2025,7 +2034,7 @@ class FactGraph:
         for fact in self._all_references():
             if predicate(fact):
                 results.append(fact)
-        for fact in self.taint_flows():
+        for fact in self.trace_flows():
             if predicate(fact):
                 results.append(fact)
         for fact in self._all_types():
@@ -2203,7 +2212,7 @@ class FactGraph:
             data.append(_tag(fact))
         for fact in self._all_references():
             data.append(_tag(fact))
-        for fact in self.taint_flows():
+        for fact in self.trace_flows():
             data.append(_tag(fact))
         for fact in self._all_types():
             data.append(_tag(fact))
@@ -2237,7 +2246,7 @@ class FactGraph:
             "SymbolFact": (SymbolFact, graph.add_symbol),
             "CallFact": (CallFact, graph.add_call),
             "ReferenceFact": (ReferenceFact, graph.add_reference),
-            "TaintFlowFact": (TaintFlowFact, graph.add_taint_flow),
+            "TraceFlowFact": (TraceFlowFact, graph.add_trace_flow),
             "TypeFact": (TypeFact, graph.add_type),
             "ImportFact": (ImportFact, graph.add_import),
             "CfgEdgeFact": (CfgEdgeFact, graph.add_cfg_edge),
@@ -2699,7 +2708,7 @@ def flows_from(source_pattern: str) -> Callable[[Fact], bool]:
     compiled = re.compile(source_pattern)
 
     def _predicate(fact: Fact) -> bool:
-        return isinstance(fact, TaintFlowFact) and compiled.search(fact.source_var) is not None
+        return isinstance(fact, TraceFlowFact) and compiled.search(fact.source_var) is not None
 
     return _predicate
 
@@ -2709,7 +2718,7 @@ def flows_to(sink_pattern: str) -> Callable[[Fact], bool]:
     compiled = re.compile(sink_pattern)
 
     def _predicate(fact: Fact) -> bool:
-        return isinstance(fact, TaintFlowFact) and compiled.search(fact.sink_var) is not None
+        return isinstance(fact, TraceFlowFact) and compiled.search(fact.sink_var) is not None
 
     return _predicate
 
@@ -2768,13 +2777,10 @@ def _compile_sequence_query(
         if not locs:
             continue
         any_locations = True
-        rows = ", ".join(
-            f'["{fp}", "{fq}", {bid}, {line}]'
-            for fp, fq, bid, line, _bindings in locs
-        )
-        rules.append(
-            f'step_{step.bind}[fp, fq, block, line] <- [{rows}]'
-        )
+        rules.append(FactGraph._inline_relation(
+            f'step_{step.bind}', ["fp", "fq", "block", "line"],
+            [(fp, fq, bid, line) for fp, fq, bid, line, _bindings in locs],
+        ).rstrip("\n"))
 
     if not any_locations:
         return None
@@ -2814,16 +2820,11 @@ def _compile_sequence_query(
         # The preceding step's block should not count as a mutation site.
         prev_step = steps[i - 1]
         prev_locs = step_locations.get(prev_step.bind, [])
-        if prev_locs:
-            excl_rows = ", ".join(
-                f'["{fp}", "{fq}", {bid}]'
-                for fp, fq, bid, _line, _bindings in prev_locs
-            )
-            excl_name = f"excl_src_{i}"
-            rules.append(f'{excl_name}[fp, fq, block] <- [{excl_rows}]')
-        else:
-            excl_name = f"excl_src_{i}"
-            rules.append(f'{excl_name}[fp, fq, block] <- []')
+        excl_name = f"excl_src_{i}"
+        rules.append(FactGraph._inline_relation(
+            excl_name, ["fp", "fq", "block"],
+            [(fp, fq, bid) for fp, fq, bid, _line, _bindings in prev_locs],
+        ).rstrip("\n"))
 
         # Generate Datalog rules to resolve writes/reads for the bound variable
         if effect_kind == "writes":
@@ -2872,25 +2873,12 @@ def _compile_sequence_query(
             nt_blocks = bl.get("not_through", [])
             scope_kills = bl.get("not_through_scope", [])
 
-        # Build blocker inline relation
+        # Build blocker and scope kill inline relations
         blocker_name = f"blocker_{i}"
-        if nt_blocks:
-            b_rows = ", ".join(
-                f'["{fp}", "{fq}", {bid}]' for fp, fq, bid in nt_blocks
-            )
-            rules.append(f'{blocker_name}[fp, fq, block] <- [{b_rows}]')
-        else:
-            rules.append(f'{blocker_name}[fp, fq, block] <- []')
-
-        # Build scope kill inline relation
         sk_name = f"scope_kill_{i}"
-        if scope_kills:
-            sk_rows = ", ".join(
-                f'["{fp}", "{fq}", {bid}]' for fp, fq, bid in scope_kills
-            )
-            rules.append(f'{sk_name}[fp, fq, block] <- [{sk_rows}]')
-        else:
-            rules.append(f'{sk_name}[fp, fq, block] <- []')
+        _3cols = ["fp", "fq", "block"]
+        rules.append(FactGraph._inline_relation(blocker_name, _3cols, nt_blocks).rstrip("\n"))
+        rules.append(FactGraph._inline_relation(sk_name, _3cols, scope_kills).rstrip("\n"))
 
         # Base case: reachable from the "from" step's block
         rules.append(
@@ -3220,70 +3208,46 @@ def compile_sequence_rule(
                         accumulated_bindings[k] = v
 
     # --- Blocker resolution ---
+    def _resolve_blockers(
+        patterns: list[str],
+        target: list[tuple[str, str, int]],
+    ) -> None:
+        """Resolve blocker patterns to (file, func, block) locations."""
+        from emend.transform import find_pattern
+        for pattern in patterns:
+            resolved = pattern
+            for mvar, val in accumulated_bindings.items():
+                resolved = resolved.replace(f"${mvar}", val)
+            try:
+                for fp in file_paths:
+                    abs_path = fp
+                    if resolve_root:
+                        candidate = resolve_root / fp
+                        if candidate.exists():
+                            abs_path = str(candidate)
+                    try:
+                        source = Path(abs_path).read_text(encoding="utf-8")
+                    except Exception:
+                        continue
+                    matches = find_pattern(resolved, abs_path, source_override=source, language="python")
+                    for m in matches:
+                        if m.line is None:
+                            continue
+                        fq = _find_func_for_line(fp, m.line)
+                        if fq:
+                            bid = _find_block_for_line(fp, fq, m.line)
+                            target.append((fp, fq, bid))
+            except Exception:
+                pass
+
     for pc in check.path_constraints:
         pair_key = (pc.from_step, pc.to_step)
         bl: dict[str, list[tuple[str, str, int]]] = {
             "not_through": [],
             "not_through_scope": [],
         }
-
-        for nt_pattern in pc.not_through:
-            # Substitute accumulated bindings
-            resolved = nt_pattern
-            for mvar, val in accumulated_bindings.items():
-                resolved = resolved.replace(f"${mvar}", val)
-
-            try:
-                from emend.transform import find_pattern
-                for fp in file_paths:
-                    abs_path = fp
-                    if resolve_root:
-                        candidate = resolve_root / fp
-                        if candidate.exists():
-                            abs_path = str(candidate)
-                    try:
-                        source = Path(abs_path).read_text(encoding="utf-8")
-                    except Exception:
-                        continue
-                    matches = find_pattern(resolved, abs_path, source_override=source, language="python")
-                    for m in matches:
-                        if m.line is None:
-                            continue
-                        fq = _find_func_for_line(fp, m.line)
-                        if fq:
-                            bid = _find_block_for_line(fp, fq, m.line)
-                            bl["not_through"].append((fp, fq, bid))
-            except Exception:
-                pass
-
-        for nts_pattern in pc.not_through_scope:
-            resolved = nts_pattern
-            for mvar, val in accumulated_bindings.items():
-                resolved = resolved.replace(f"${mvar}", val)
-
-            try:
-                from emend.transform import find_pattern
-                for fp in file_paths:
-                    abs_path = fp
-                    if resolve_root:
-                        candidate = resolve_root / fp
-                        if candidate.exists():
-                            abs_path = str(candidate)
-                    try:
-                        source = Path(abs_path).read_text(encoding="utf-8")
-                    except Exception:
-                        continue
-                    matches = find_pattern(resolved, abs_path, source_override=source, language="python")
-                    for m in matches:
-                        if m.line is None:
-                            continue
-                        fq = _find_func_for_line(fp, m.line)
-                        if fq:
-                            bid = _find_block_for_line(fp, fq, m.line)
-                            bl["not_through_scope"].append((fp, fq, bid))
-            except Exception:
-                pass
-
+        _resolve_blockers(pc.not_through, bl["not_through"])
+        _resolve_blockers(pc.not_through_scope, bl["not_through_scope"])
         blocker_locations[pair_key] = bl
 
     # --- Compile to CozoScript ---

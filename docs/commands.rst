@@ -906,9 +906,9 @@ See also: `raw MCP schema JSON <_static/mcp_schema.json>`_.
 +---------------+-------------------------------------------------------------------+
 | impact        | Compute transitively impacted symbols from a change               |
 +---------------+-------------------------------------------------------------------+
-| taint         | Taint analysis: detect unsafe source-to-sink flows                |
+| trace         | Trace analysis: detect unsafe source-to-sink flows                |
 +---------------+-------------------------------------------------------------------+
-| query_facts   | Query the fact graph (symbols, calls, references, taint flows)    |
+| query_facts   | Query the fact graph (symbols, calls, references, trace flows)    |
 +---------------+-------------------------------------------------------------------+
 | datalog_query | Execute a CozoScript query against the fact graph                 |
 +---------------+-------------------------------------------------------------------+
@@ -1053,19 +1053,19 @@ as the ``dsl-debug`` command (singularize+PascalCase convention and
 
 ---
 
-taint
+trace
 -----
 
-Run intraprocedural taint analysis to detect unsafe data flows. Tracks value
+Run intraprocedural trace analysis to detect unsafe data flows. Tracks value
 flow from sources (e.g. user input) to sinks (e.g. SQL queries, ``eval``)
-within individual functions, reporting violations when tainted data reaches a
+within individual functions, reporting violations when traced data reaches a
 sink without sanitization.
 
-Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
+Configuration is read from the ``trace`` section of ``.emend/patterns.yaml``.
 
 .. code-block:: text
 
-   emend taint PATH [OPTIONS]
+   emend trace PATH [OPTIONS]
 
 **Arguments:**
 
@@ -1079,7 +1079,7 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
 | ``--config FILE``            | Path to config file                           |
 |                              | (default: ``.emend/patterns.yaml``)           |
 +------------------------------+-----------------------------------------------+
-| ``--label TEXT``             | Only check a specific taint label             |
+| ``--label TEXT``             | Only check a specific trace label             |
 +------------------------------+-----------------------------------------------+
 | ``--trace``                  | Show full propagation traces                  |
 +------------------------------+-----------------------------------------------+
@@ -1087,7 +1087,7 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
 +------------------------------+-----------------------------------------------+
 | ``--project``, ``-p``        | Project root directory                        |
 +------------------------------+-----------------------------------------------+
-| ``--interprocedural``        | Track taint across function boundaries using  |
+| ``--interprocedural``        | Track values across function boundaries using |
 |                              | function summaries and fixed-point iteration  |
 +------------------------------+-----------------------------------------------+
 | ``--max-iterations INT``     | Max fixed-point iterations (default: 10)      |
@@ -1097,7 +1097,7 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
 
 .. code-block:: yaml
 
-   taint:
+   trace:
      labels:
        - user_input
        - sensitive_data
@@ -1122,12 +1122,12 @@ Configuration is read from the ``taint`` section of ``.emend/patterns.yaml``.
        - pattern: "escape($X)"
          label: user_input
 
-     # Optional: flag any write/mutation on a tainted object via effect sinks.
+     # Optional: flag any write/mutation on a traced object via effect sinks.
      # The effect key resolves via the fact graph -- no explicit pattern needed.
      # sinks:
      #   - effect: "writes($OBJ)"
      #     label: user_input
-     #     message: "Tainted object mutated"
+     #     message: "Traced object mutated"
 
 **SQLAlchemy TOCTOU example:**
 
@@ -1144,7 +1144,7 @@ in addition to the explicit ``setattr(obj, …)`` call form.
 .. code-block:: yaml
 
    # .emend/patterns.yaml
-   taint:
+   trace:
      labels:
        - unlocked_read
 
@@ -1193,7 +1193,7 @@ This config flags the vulnerable pattern::
 
 And accepts the safe form::
 
-   # OK -- with_for_update() sanitises the taint
+   # OK -- with_for_update() sanitises the trace label
    obj = session.query(Account).with_for_update().filter_by(id=account_id).first()
    obj.balance = obj.balance - amount   # safe
 
@@ -1207,20 +1207,20 @@ handled correctly.
 .. code-block:: bash
 
    # Analyze a directory
-   emend taint src/
+   emend trace src/
 
    # Filter to a specific label
-   emend taint app.py --label user_input
+   emend trace app.py --label user_input
 
    # Show propagation traces
-   emend taint src/ --trace
+   emend trace src/ --trace
 
    # JSON output
-   emend taint src/ --json
+   emend trace src/ --json
 
-   # Cross-function taint tracking
-   emend taint src/ --interprocedural
-   emend taint src/ --interprocedural --max-iterations 20
+   # Cross-function trace tracking
+   emend trace src/ --interprocedural
+   emend trace src/ --interprocedural --max-iterations 20
 
 ---
 
@@ -1400,7 +1400,7 @@ facts
 
 Query the relational fact graph for code invariants.  Builds a unified graph
 from project source and supports structured queries over symbols, calls,
-references, taint flows, type information, and imports.
+references, trace flows, type information, and imports.
 
 .. code-block:: text
 
@@ -1416,7 +1416,7 @@ references, taint flows, type information, and imports.
 | Option                        | Description                                   |
 +===============================+===============================================+
 | ``--type``, ``-t``            | Fact type: ``symbols`` (default), ``calls``,  |
-|                               | ``references``, ``taint_flows``, ``types``,   |
+|                               | ``references``, ``trace_flows``, ``types``,   |
 |                               | ``imports``                                   |
 +-------------------------------+-----------------------------------------------+
 | ``--name``, ``-n``            | Filter by name (symbols)                      |
@@ -1427,7 +1427,7 @@ references, taint flows, type information, and imports.
 +-------------------------------+-----------------------------------------------+
 | ``--symbol``, ``-s``          | Qualified symbol name (calls/refs/types)      |
 +-------------------------------+-----------------------------------------------+
-| ``--label``                   | Taint label filter (taint_flows)              |
+| ``--label``                   | Trace label filter (trace_flows)              |
 +-------------------------------+-----------------------------------------------+
 | ``--transitive``              | Compute transitive closure (calls)            |
 +-------------------------------+-----------------------------------------------+
@@ -1454,8 +1454,8 @@ references, taint flows, type information, and imports.
    # All references to a class
    emend facts . --type references --symbol mymod.MyClass
 
-   # Taint flows for a specific label
-   emend facts . --type taint_flows --label user_input
+   # Trace flows for a specific label
+   emend facts . --type trace_flows --label user_input
 
    # Imports in a file
    emend facts . --type imports --file src/app.py
@@ -1476,7 +1476,7 @@ The fact graph is stored in CozoDB with the following relations:
    symbol      {qn, file_path, name, kind, line, end_line, parent}
    call        {caller_qn, callee_qn, file_path, line, col}
    reference   {symbol_qn, file_path, line, col, ref_kind}
-   taint_flow  {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
+   trace_flow  {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}
    type_binding {symbol_qn, file_path, line, binding_kind, type_str}
    import      {importing_file, imported_module, imported_name, line, alias}
 

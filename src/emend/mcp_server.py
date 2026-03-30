@@ -792,42 +792,42 @@ def semantic_context(
 
 
 # ---------------------------------------------------------------------------
-# taint
+# trace (data-flow analysis)
 # ---------------------------------------------------------------------------
 
 
 @mcp_app.tool()
-def taint(
+def trace_analysis(
     path: Annotated[str, Field(description="File or directory to analyze.")],
     config: Annotated[str | None, Field(description="Path to patterns.yaml (default: .emend/patterns.yaml).")] = None,
-    label: Annotated[str | None, Field(description="Only check a specific taint label.")] = None,
+    label: Annotated[str | None, Field(description="Only check a specific trace label.")] = None,
     trace: Annotated[bool, Field(description="Include propagation traces.")] = False,
-    interprocedural: Annotated[bool, Field(description="Enable interprocedural analysis (cross-function taint tracking).")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable interprocedural analysis (cross-function trace tracking).")] = False,
 ) -> str:
-    """Run taint analysis to detect unsafe data flows.
+    """Run trace analysis to detect unsafe data flows.
 
-    Tracks value flow from sources to sinks within functions.
+    Tracks labeled value flow from sources to sinks within functions.
     Set interprocedural=True for cross-function analysis.
     """
     from pathlib import Path as _Path
-    from emend.taint import load_taint_config, run_taint_analysis, format_violations
+    from emend.trace import load_trace_config, run_trace_analysis, format_violations
     from emend.cli import resolve_files
 
     config_path = _Path(config or ".emend/patterns.yaml")
     if not config_path.exists():
         return json.dumps({"error": f"Config file not found: {config_path}"})
 
-    taint_config = load_taint_config(str(config_path))
-    if not taint_config.sources or not taint_config.sinks:
-        return json.dumps({"error": "No taint sources or sinks configured."})
+    trace_config = load_trace_config(str(config_path))
+    if not trace_config.sources or not trace_config.sinks:
+        return json.dumps({"error": "No trace sources or sinks configured."})
 
     resolved, _ = resolve_files(path)
     files = [str(f) for f in resolved]
 
     if interprocedural:
-        from emend.taint import run_interprocedural_taint_analysis
-        result = run_interprocedural_taint_analysis(
-            files, taint_config, label_filter=label,
+        from emend.trace import run_interprocedural_trace_analysis
+        result = run_interprocedural_trace_analysis(
+            files, trace_config, label_filter=label,
         )
         violations = result.violations
         # Build violation dicts directly to avoid serialize-deserialize-reserialize
@@ -851,7 +851,7 @@ def taint(
         }
         return json.dumps(data, indent=2)
 
-    violations = run_taint_analysis(files, taint_config, label_filter=label)
+    violations = run_trace_analysis(files, trace_config, label_filter=label)
     return format_violations(violations, show_trace=trace, json_output=True)
 
 
@@ -866,12 +866,12 @@ def datalog_query(
     project: Annotated[str, Field(description="Project root directory.")] = ".",
     limit: Annotated[int, Field(description="Maximum number of result rows to return.")] = 200,
     mode: Annotated[str, Field(description="Query mode: 'raw' for CozoScript, 'guided' for structured queries.")] = "raw",
-    fact_type: Annotated[str | None, Field(description="Guided mode: fact type (symbols, calls, references, taint_flows, types, imports).")] = None,
+    fact_type: Annotated[str | None, Field(description="Guided mode: fact type (symbols, calls, references, trace_flows, types, imports).")] = None,
     name: Annotated[str | None, Field(description="Guided mode: filter by name.")] = None,
     kind: Annotated[str | None, Field(description="Guided mode: filter by kind.")] = None,
     file_path: Annotated[str | None, Field(description="Guided mode: filter by file path.")] = None,
     symbol: Annotated[str | None, Field(description="Guided mode: symbol qualified name.")] = None,
-    label: Annotated[str | None, Field(description="Guided mode: taint label filter.")] = None,
+    label: Annotated[str | None, Field(description="Guided mode: trace label filter.")] = None,
     transitive: Annotated[bool, Field(description="Guided mode: compute transitive closure.")] = False,
     max_depth: Annotated[int, Field(description="Guided mode: max depth for transitive queries.")] = 10,
 ) -> str:
@@ -907,8 +907,8 @@ def datalog_query(
             refs = graph.references_to(symbol)
             return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
 
-        elif _fact_type == "taint_flows":
-            flows = graph.taint_flows(label=label, file_path=file_path)
+        elif _fact_type == "trace_flows":
+            flows = graph.trace_flows(label=label, file_path=file_path)
             return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
 
         elif _fact_type == "types":

@@ -2,8 +2,8 @@
 
 import pytest
 
-from emend.taint import TaintConfig, run_taint_analysis
-from emend.taint_presets import get_preset, list_presets, merge_configs
+from emend.trace import TraceConfig, run_trace_analysis
+from emend.trace_presets import get_preset, list_presets, merge_configs
 
 
 class TestPresetLoading:
@@ -38,8 +38,8 @@ class TestPresetLoading:
             get_preset("nonexistent")
 
     def test_merge_configs(self):
-        c1 = TaintConfig(labels=["a"], sources=[], sinks=[], sanitizers=[])
-        c2 = TaintConfig(labels=["b", "a"], sources=[], sinks=[], sanitizers=[])
+        c1 = TraceConfig(labels=["a"], sources=[], sinks=[], sanitizers=[])
+        c2 = TraceConfig(labels=["b", "a"], sources=[], sinks=[], sanitizers=[])
         merged = merge_configs(c1, c2)
         assert sorted(merged.labels) == ["a", "b"]
 
@@ -71,13 +71,13 @@ class TestPresetLoading:
         assert flask_sink_patterns.issubset(merged_patterns)
 
     def test_merge_configs_sanitizers_combined(self):
-        c1 = TaintConfig(
+        c1 = TraceConfig(
             labels=["x"],
             sources=[],
             sinks=[],
             sanitizers=[],
         )
-        c2 = TaintConfig(
+        c2 = TraceConfig(
             labels=["x"],
             sources=[],
             sinks=[],
@@ -114,7 +114,7 @@ class TestPresetIntegration:
             "    cursor.execute(name)\n"
         )
         config = get_preset("flask")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
     def test_django_mark_safe_xss(self, tmp_path):
@@ -126,7 +126,7 @@ class TestPresetIntegration:
             "    html = mark_safe(name)\n"
         )
         config = get_preset("django")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
     def test_sqlalchemy_text_injection(self, tmp_path):
@@ -138,7 +138,7 @@ class TestPresetIntegration:
             "    stmt = text(name)\n"
         )
         config = merge_configs(get_preset("flask"), get_preset("sqlalchemy"))
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
     def test_flask_sanitizer_blocks(self, tmp_path):
@@ -151,7 +151,7 @@ class TestPresetIntegration:
             "    cursor.execute(name)\n"
         )
         config = get_preset("flask")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) == 0
 
     def test_flask_command_injection(self, tmp_path):
@@ -164,7 +164,7 @@ class TestPresetIntegration:
             "    os.system(cmd)\n"
         )
         config = get_preset("flask")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
     def test_django_cursor_sql_injection(self, tmp_path):
@@ -176,7 +176,7 @@ class TestPresetIntegration:
             "    cursor.execute(q)\n"
         )
         config = get_preset("django")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
     def test_no_violations_when_sanitized(self, tmp_path):
@@ -189,5 +189,5 @@ class TestPresetIntegration:
             "    cursor.execute(user_id)\n"
         )
         config = get_preset("django")
-        violations = run_taint_analysis([str(test_file)], config)
+        violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) == 0

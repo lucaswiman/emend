@@ -3,7 +3,7 @@
 Tests cover:
 - `kind` field on DefUseFact and CozoDB def_use schema
 - MethodCallFact dataclass and method_call CozoDB relation
-- Effect-based sinks in taint_propagation_datalog()
+- Effect-based sinks in trace_propagation_datalog()
 - Augmented assignment detection in _find_assignments_in_source()
 - is_var_or_attr Datalog pattern (dotted-name prefix matching)
 - Effect sinks replace the old attribute_mutation_sinks mechanism
@@ -20,13 +20,13 @@ from emend.fact_graph import (
     MethodCallFact,
     SymbolFact,
 )
-from emend.taint import (
-    TaintConfig,
-    TaintSink,
-    TaintSource,
+from emend.trace import (
+    TraceConfig,
+    TraceSink,
+    TraceSource,
     _find_assignments_in_source,
-    load_taint_config,
-    run_taint_analysis,
+    load_trace_config,
+    run_trace_analysis,
 )
 
 
@@ -180,7 +180,7 @@ class TestMethodCallFact:
 
 
 class TestEffectBasedSinks:
-    """taint_propagation_datalog() supports effect_sinks parameter."""
+    """trace_propagation_datalog() supports effect_sinks parameter."""
 
     def _make_graph_with_mutation(self):
         """Build a graph where tainted var is mutated via attribute write."""
@@ -201,7 +201,7 @@ class TestEffectBasedSinks:
     def test_effect_sink_writes_detects_mutation(self):
         """writes($X) effect sink fires when tainted var's attr is written."""
         g = self._make_graph_with_mutation()
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],  # no pattern sinks
             effect_sinks=[("toctou", "writes")],
@@ -221,7 +221,7 @@ class TestEffectBasedSinks:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],
             effect_sinks=[("toctou", "writes")],
@@ -238,7 +238,7 @@ class TestEffectBasedSinks:
         g.add_method_call(MethodCallFact(
             "app.py", "app.main", "x", "append", block_id=1, line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],
             effect_sinks=[("toctou", "writes")],
@@ -258,7 +258,7 @@ class TestEffectBasedSinks:
             def_block=0, use_block=1,
             use_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],
             effect_sinks=[("toctou", "writes")],
@@ -277,7 +277,7 @@ class TestEffectBasedSinks:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],
             effect_sinks=[("toctou", "writes")],
@@ -298,7 +298,7 @@ class TestEffectBasedSinks:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "sqli")],
             sinks=[("app.py", "app.main", "x", 1, "sqli")],
             effect_sinks=[("sqli", "writes")],
@@ -317,7 +317,7 @@ class TestEffectBasedSinks:
             "app.py", "app.main", "x.dirty", kind="write",
             def_block=1, use_block=1,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "toctou")],
             sinks=[],
             effect_sinks=[("toctou", "writes")],
@@ -362,16 +362,16 @@ class TestAugmentedAssignment:
 
 
 # ---------------------------------------------------------------------------
-# Effect key on TaintSink config
+# Effect key on TraceSink config
 # ---------------------------------------------------------------------------
 
 
 class TestEffectSinkConfig:
-    """TaintSink supports an `effect` key as alternative to `pattern`."""
+    """TraceSink supports an `effect` key as alternative to `pattern`."""
 
     def test_taint_sink_with_effect(self):
-        """TaintSink can be created with effect instead of pattern."""
-        sink = TaintSink(
+        """TraceSink can be created with effect instead of pattern."""
+        sink = TraceSink(
             pattern="",
             label="toctou",
             message="Mutation on unlocked object",
@@ -380,9 +380,9 @@ class TestEffectSinkConfig:
         assert sink.effect == "writes($OBJ)"
 
     def test_load_config_effect_sinks(self, tmp_path):
-        """load_taint_config parses sinks with `effect` key."""
+        """load_trace_config parses sinks with `effect` key."""
         config_dict = {
-            "taint": {
+            "trace": {
                 "labels": ["toctou"],
                 "sources": [{"pattern": "$Q.first()", "label": "toctou"}],
                 "sinks": [
@@ -397,7 +397,7 @@ class TestEffectSinkConfig:
         config_file = tmp_path / ".emend" / "patterns.yaml"
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(yaml.dump(config_dict))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         effect_sinks = [s for s in config.sinks if s.effect]
         assert len(effect_sinks) == 1
         assert effect_sinks[0].effect == "writes($OBJ)"
@@ -405,7 +405,7 @@ class TestEffectSinkConfig:
     def test_effect_sinks_in_config(self, tmp_path):
         """Effect sinks are loaded from YAML config."""
         config_dict = {
-            "taint": {
+            "trace": {
                 "labels": ["unlocked_read"],
                 "sources": [{"pattern": "$Q.first()", "label": "unlocked_read"}],
                 "sinks": [
@@ -420,7 +420,7 @@ class TestEffectSinkConfig:
         config_file = tmp_path / ".emend" / "patterns.yaml"
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(yaml.dump(config_dict))
-        config = load_taint_config(str(config_file))
+        config = load_trace_config(str(config_file))
         assert len(config.sinks) == 1
         assert config.sinks[0].effect == "writes($OBJ)"
 
@@ -446,7 +446,7 @@ class TestDottedNameMatching:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("a.py", "a.f", "obj", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -465,7 +465,7 @@ class TestDottedNameMatching:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("a.py", "a.f", "obj", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -485,7 +485,7 @@ class TestDottedNameMatching:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("a.py", "a.f", "obj", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -505,7 +505,7 @@ class TestDottedNameMatching:
             def_block=1, use_block=1,
             def_line=5,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("a.py", "a.f", "obj", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -519,7 +519,7 @@ class TestDottedNameMatching:
 
 
 class TestTaintPropagationWithKind:
-    """Existing taint_propagation_datalog works with new kind column."""
+    """Existing trace_propagation_datalog works with new kind column."""
 
     def test_basic_propagation_still_works(self):
         """Standard taint propagation through def-use chains still works."""
@@ -528,7 +528,7 @@ class TestTaintPropagationWithKind:
             "app.py", "app.main", "x", kind="write",
             def_block=0, use_block=1,
         ))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "sqli")],
             sinks=[("app.py", "app.main", "x", 1, "sqli")],
         )
@@ -548,7 +548,7 @@ class TestTaintPropagationWithKind:
         assert len(violations) >= 1
 
     def test_interprocedural_taint_still_works(self):
-        """interprocedural_taint_datalog works with new kind column."""
+        """interprocedural_trace_datalog works with new kind column."""
         from emend.fact_graph import CallFact, FuncSummaryFact
         g = FactGraph()
         g.add_symbol(SymbolFact("a.py", "foo", "a.foo", "function", 1, 5, None))
@@ -558,5 +558,5 @@ class TestTaintPropagationWithKind:
             "a.py", "a.foo", "x", kind="write", def_block=0, use_block=1,
         ))
         g.add_func_summary(FuncSummaryFact("b.bar", "x", flows_to_sink=True, sink_label="sqli"))
-        violations = g.interprocedural_taint_datalog()
+        violations = g.interprocedural_trace_datalog()
         assert len(violations) >= 1

@@ -393,8 +393,8 @@ Example output
 Flow rules integrate with ``# noqa`` suppression and ``--rule`` filtering just
 like regular pattern rules.
 
-For standalone taint analysis with more configuration options (labels, multiple
-source/sink/sanitizer groups, full traces), see the ``taint`` command in
+For standalone trace analysis with more configuration options (labels, multiple
+source/sink/sanitizer groups, full traces), see the ``trace`` command in
 :doc:`commands`.
 
 

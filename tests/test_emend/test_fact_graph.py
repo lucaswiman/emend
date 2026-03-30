@@ -18,7 +18,7 @@ from emend.fact_graph import (
     ReferenceFact,
     SourceLocFact,
     SymbolFact,
-    TaintFlowFact,
+    TraceFlowFact,
     TypeFact,
     flows_from,
     flows_to,
@@ -43,7 +43,7 @@ def _make_graph() -> FactGraph:
     g.add_reference(ReferenceFact("lib.compute", "app.py", 8, 4, "call"))
     g.add_reference(ReferenceFact("lib.MyClass", "app.py", 2, 0, "import"))
 
-    g.add_taint_flow(TaintFlowFact("user_input", "query", "sqli", "app.py", "app.main", 3, 5))
+    g.add_trace_flow(TraceFlowFact("user_input", "query", "sqli", "app.py", "app.main", 3, 5))
     g.add_type(TypeFact("app.main", "() -> None", "app.py", 1, "annotation"))
     g.add_type(TypeFact("lib.compute", "(int) -> int", "lib.py", 1, "inferred"))
 
@@ -123,26 +123,26 @@ class TestReferenceQueries:
         assert refs[0].ref_kind == "import"
 
 
-class TestTaintFlowQueries:
-    def test_taint_flows_all(self):
+class TestTraceFlowQueries:
+    def test_trace_flows_all(self):
         g = _make_graph()
-        flows = g.taint_flows()
+        flows = g.trace_flows()
         assert len(flows) == 1
 
-    def test_taint_flows_by_label(self):
+    def test_trace_flows_by_label(self):
         g = _make_graph()
-        flows = g.taint_flows(label="sqli")
+        flows = g.trace_flows(label="sqli")
         assert len(flows) == 1
         assert flows[0].source_var == "user_input"
 
-    def test_taint_flows_by_file(self):
+    def test_trace_flows_by_file(self):
         g = _make_graph()
-        flows = g.taint_flows(file_path="app.py")
+        flows = g.trace_flows(file_path="app.py")
         assert len(flows) == 1
 
-    def test_taint_flows_no_match(self):
+    def test_trace_flows_no_match(self):
         g = _make_graph()
-        assert g.taint_flows(label="nonexistent") == []
+        assert g.trace_flows(label="nonexistent") == []
 
 
 class TestTypeQueries:
@@ -173,7 +173,7 @@ class TestSerialization:
         assert len(g2.symbols()) == len(g.symbols())
         assert len(g2.calls_from("app.main")) == len(g.calls_from("app.main"))
         assert len(g2.references_to("lib.compute")) == len(g.references_to("lib.compute"))
-        assert len(g2.taint_flows()) == len(g.taint_flows())
+        assert len(g2.trace_flows()) == len(g.trace_flows())
         assert len(g2.types_for("app.main")) == len(g.types_for("app.main"))
         assert len(g2.imports_in("app.py")) == len(g.imports_in("app.py"))
 
@@ -838,14 +838,14 @@ class TestUnreachableBlocksDatalog:
 # ---------------------------------------------------------------------------
 
 
-class TestTaintPropagationDatalog:
-    """Test taint_propagation_datalog() Datalog method."""
+class TestTracePropagationDatalog:
+    """Test trace_propagation_datalog() Datalog method."""
 
     def test_basic_propagation(self):
         g = FactGraph()
         # Setup: function with source -> def-use -> sink
         g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "sqli")],
             sinks=[("app.py", "app.main", "x", 1, "sqli")],
         )
@@ -854,7 +854,7 @@ class TestTaintPropagationDatalog:
     def test_no_flow_with_sanitizer(self):
         g = FactGraph()
         g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=1))
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.main", "x", 0, "sqli")],
             sinks=[("app.py", "app.main", "x", 1, "sqli")],
             sanitizers=[("app.py", "app.main", "x", 0, "sqli")],
@@ -863,12 +863,12 @@ class TestTaintPropagationDatalog:
 
     def test_empty_sources(self):
         g = FactGraph()
-        flows = g.taint_propagation_datalog(sources=[], sinks=[("a.py", "f", "x", 0, "l")])
+        flows = g.trace_propagation_datalog(sources=[], sinks=[("a.py", "f", "x", 0, "l")])
         assert flows == []
 
 
-class TestInterproceduralTaintDatalog:
-    """Test interprocedural_taint_datalog() Datalog method."""
+class TestInterproceduralTraceDatalog:
+    """Test interprocedural_trace_datalog() Datalog method."""
 
     def test_basic_interprocedural(self):
         g = FactGraph()
@@ -876,13 +876,13 @@ class TestInterproceduralTaintDatalog:
         g.add_symbol(SymbolFact("b.py", "bar", "b.bar", "function", 1, 5, None))
         g.add_call(CallFact("a.foo", "b.bar", "a.py", 2, 0))
         g.add_func_summary(FuncSummaryFact("b.bar", "x", flows_to_sink=True, sink_label="sqli"))
-        violations = g.interprocedural_taint_datalog()
+        violations = g.interprocedural_trace_datalog()
         assert len(violations) >= 1
 
     def test_no_summary_no_violation(self):
         g = FactGraph()
         g.add_call(CallFact("a.foo", "b.bar", "a.py", 2, 0))
-        violations = g.interprocedural_taint_datalog()
+        violations = g.interprocedural_trace_datalog()
         assert violations == []
 
 

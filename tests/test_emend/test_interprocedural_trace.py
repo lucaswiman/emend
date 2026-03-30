@@ -2,35 +2,35 @@
 
 import pytest
 
-from emend.taint import (
+from emend.trace import (
     FunctionSummary,
     InterproceduralResult,
-    TaintConfig,
-    TaintSanitizer,
-    TaintSink,
-    TaintSource,
+    TraceConfig,
+    TraceSanitizer,
+    TraceSink,
+    TraceSource,
     _collect_function_params,
     _compute_function_summary,
-    run_interprocedural_taint_analysis,
+    run_interprocedural_trace_analysis,
 )
 
 
 def _make_sql_config():
     """Reusable SQL injection taint config."""
-    return TaintConfig(
+    return TraceConfig(
         labels=["user_input"],
         sources=[
-            TaintSource(pattern="request.args.get($X)", label="user_input"),
+            TraceSource(pattern="request.args.get($X)", label="user_input"),
         ],
         sinks=[
-            TaintSink(
+            TraceSink(
                 pattern="cursor.execute($X)",
                 label="user_input",
                 message="SQL injection: user input reaches cursor.execute()",
             ),
         ],
         sanitizers=[
-            TaintSanitizer(pattern="escape($X)", label="user_input"),
+            TraceSanitizer(pattern="escape($X)", label="user_input"),
         ],
     )
 
@@ -149,7 +149,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis(
+        result = run_interprocedural_trace_analysis(
             [str(test_file)], config,
         )
 
@@ -173,7 +173,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis(
+        result = run_interprocedural_trace_analysis(
             [str(test_file)], config,
         )
 
@@ -194,7 +194,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis(
+        result = run_interprocedural_trace_analysis(
             [str(test_file)], config,
         )
 
@@ -217,7 +217,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis(
+        result = run_interprocedural_trace_analysis(
             [str(test_file)], config, max_iterations=5,
         )
 
@@ -226,7 +226,7 @@ class TestInterproceduralAnalysis:
     def test_empty_files(self, tmp_path):
         """Handles empty file list gracefully."""
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis([], config)
+        result = run_interprocedural_trace_analysis([], config)
         assert result.violations == []
         assert result.summaries == {}
         # With no functions to iterate over, converges immediately (1 iteration)
@@ -234,10 +234,10 @@ class TestInterproceduralAnalysis:
 
     def test_no_sources(self, tmp_path):
         """Returns empty result when no sources configured."""
-        config = TaintConfig(labels=["x"], sources=[], sinks=[
-            TaintSink(pattern="sink($X)", label="x", message="test"),
+        config = TraceConfig(labels=["x"], sources=[], sinks=[
+            TraceSink(pattern="sink($X)", label="x", message="test"),
         ])
-        result = run_interprocedural_taint_analysis(["/nonexistent"], config)
+        result = run_interprocedural_trace_analysis(["/nonexistent"], config)
         assert result.violations == []
 
     def test_label_filter(self, tmp_path):
@@ -250,12 +250,12 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_taint_analysis(
+        result = run_interprocedural_trace_analysis(
             [str(test_file)], config, label_filter="user_input",
         )
         assert len(result.violations) >= 1
 
-        result_no_match = run_interprocedural_taint_analysis(
+        result_no_match = run_interprocedural_trace_analysis(
             [str(test_file)], config, label_filter="nonexistent",
         )
         assert len(result_no_match.violations) == 0

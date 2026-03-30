@@ -14,11 +14,11 @@
 | `ast_utils.py` | AST traversal utilities (uses Rust `emend_core.collect_symbols_from_str()`) |
 | `query.py` | Symbol collection and filtering for `lookup` (uses Rust scope resolver) |
 | `lint.py` | Lint engine: loads `.emend/patterns.yaml` rules, runs pattern-based linting, flow rules, dead code detection config |
-| `taint.py` | Taint analysis engine: `TaintConfig`, `TaintSource`, `TaintSink` (with optional `effect` key for `writes($X)`/`reads($X)` predicates), `TaintSanitizer` (with `quantifier` field: `all_paths`/`some_path`), `TaintScopeSanitizer` (kills ALL taint for a label within a scope boundary, e.g. `session.commit()`; known limitation: nested scopes kill all taint for the label, not per-session), `TaintViolation`; path-sensitive sanitization via CFG dominance in Python fallback; scope sanitizer support in both Datalog (`scope_kill` inline relation) and Python fallback paths; intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_taint_analysis()` with fixed-point iteration; field-sensitive tracking (`_extract_qualified_identifiers`), container-aware propagation (`_find_container_mutations`, `_find_for_loops`), augmented assignment detection (`_AUG_ASSIGN_RE`), YAML `presets:` key for auto-loading framework rules |
-| `taint_presets.py` | Framework-specific taint rule presets: `get_preset()` for Flask, Django, SQLAlchemy, FastAPI; `merge_configs()` to compose multiple configs (including `scope_sanitizers`); loaded via `emend taint --preset` or YAML `presets:` key |
+| `trace.py` | Trace analysis engine: `TraceConfig`, `TraceSource`, `TraceSink` (with optional `effect` key for `writes($X)`/`reads($X)` predicates), `TraceSanitizer` (with `quantifier` field: `all_paths`/`some_path`), `TraceScopeSanitizer` (kills ALL taint for a label within a scope boundary, e.g. `session.commit()`; known limitation: nested scopes kill all taint for the label, not per-session), `TraceViolation`; path-sensitive sanitization via CFG dominance in Python fallback; scope sanitizer support in both Datalog (`scope_kill` inline relation) and Python fallback paths; intraprocedural source-to-sink tracking with sanitizer support; interprocedural analysis via `FunctionSummary`, `run_interprocedural_trace_analysis()` with fixed-point iteration; field-sensitive tracking (`_extract_qualified_identifiers`), container-aware propagation (`_find_container_mutations`, `_find_for_loops`), augmented assignment detection (`_AUG_ASSIGN_RE`), YAML `presets:` key for auto-loading framework rules |
+| `trace_presets.py` | Framework-specific trace rule presets: `get_preset()` for Flask, Django, SQLAlchemy, FastAPI; `merge_configs()` to compose multiple configs (including `scope_sanitizers`); loaded via `emend trace --preset` or YAML `presets:` key |
 | `dsl.py` | DSL support for embedded languages: `DslRegion`, `DslSymbol`, `DslLink`, `DslMatch`, `RegexNamedGroup` data model; `detect_dsl_regions()` (SQL keyword heuristics, magic comments); `extract_sql_symbols()` (table/column extraction); `resolve_orm_links()` (singularize+PascalCase, `__tablename__` matching); `find_in_dsl()` (pattern matching with `$METAVAR` in DSL regions); `extract_regex_named_groups()` / `find_regex_group_references()` (regex `(?P<name>)` ↔ `.group("name")`); `find_dsl_impact()` (ORM model changes → affected SQL queries); `emend dsl-debug` hidden CLI command |
 | `cfg.py` | Per-function CFG module: `build_cfgs_for_source()`, `build_cfgs_for_file()`, `find_unreachable_blocks()`, text/JSON/DOT formatters; wraps Rust `emend_core.PyCfg` and `build_cfgs()` |
-| `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TaintFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact` (with `kind`: read/write/aug_write/del), `MethodCallFact`, `CfgBlockFact`, `DecoratorOnFact`, `SourceLocFact`, `FuncSummaryFact`, `EntryPointDecoratorFact`, `EntryPointNameFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()` (populates CFG blocks, decorators, source locations, block-tagged references, method calls), JSON serialization; Datalog query methods: `refs_datalog()`, `callers_datalog()`, `callees_datalog()`, `graph_datalog()`, `dead_code_unified()`, `unreachable_blocks_datalog()`, `taint_propagation_datalog()` (with `effect_sinks` for writes/reads predicates, `scope_kills` for scope boundary sanitization via `scope_kill` inline relation), `interprocedural_taint_datalog()`, `flow_rule_check_datalog()` |
+| `fact_graph.py` | Relational fact model: `SymbolFact`, `CallFact`, `ReferenceFact`, `TraceFlowFact`, `TypeFact`, `ImportFact`, `CfgEdgeFact`, `DefUseFact` (with `kind`: read/write/aug_write/del), `MethodCallFact`, `CfgBlockFact`, `DecoratorOnFact`, `SourceLocFact`, `FuncSummaryFact`, `EntryPointDecoratorFact`, `EntryPointNameFact`; `FactGraph` with indexed queries, transitive closures, `build_from_project()` (populates CFG blocks, decorators, source locations, block-tagged references, method calls), JSON serialization; `TraceDatalogConfig` dataclass for Datalog query configuration; Datalog query methods: `refs_datalog()`, `callers_datalog()`, `callees_datalog()`, `graph_datalog()`, `dead_code_unified()`, `unreachable_blocks_datalog()`, `trace_propagation_datalog()` (with `effect_sinks` for writes/reads predicates, `scope_kills` for scope boundary sanitization via `scope_kill` inline relation), `interprocedural_trace_datalog()`, `flow_rule_check_datalog()` |
 | `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `CustomCheck`; `load_policies()`, `run_policy_checks()`, `validate_policies()`; loads from `.emend/policies.yaml` |
 | `rewrite_engine.py` | Experimental equality saturation: `EGraph`, `ENode`, `UnionFind`, `RewriteRule`, `SaturationResult`; `run_saturation()`, `load_rewrite_rules()`; loads from `.emend/rewrites.yaml` |
 | `type_oracle.py` | Type inference adapter: `TypeOracle` ABC + `PyreflyAdapter`, `PyrightAdapter`, `TyAdapter`; `parse_type_string`, `TypeDescriptor`, `FileTypes`, `TypeBinding`, `create_type_oracle`, `detect_type_engine`; results cached in `parse.db` (`type_cache` table) |
@@ -87,16 +87,16 @@
 | `test_map_unified.py` | Integration tests for `map resolve` command |
 | `test_vim_rpc.py` | Vim plugin JSON-RPC protocol tests: dispatch, search, selector, file_symbols, status, reindex, error handling, serialization |
 | `test_impact.py` | `impact` command (transitive reverse-caller closure, diff parsing, test detection) |
-| `test_taint.py` | `taint` command (source-to-sink detection, sanitizers, propagation, config loading, traces) |
-| `test_interprocedural_taint.py` | Interprocedural taint: function summaries, param-to-return/sink flow, fixed-point convergence, cross-function violations |
-| `test_fact_graph.py` | `FactGraph`: symbol/call/reference/taint/type/import queries, transitive closures, JSON serialization, predicate helpers; Phase 1-5 Datalog tests: CFG blocks, decorators, source locations, block-tagged refs, refs/callers/callees/graph Datalog queries, unified dead code, unreachable blocks, taint propagation, interprocedural taint, flow rule checks |
+| `test_trace.py` | `trace` command (source-to-sink detection, sanitizers, propagation, config loading, traces) |
+| `test_interprocedural_trace.py` | Interprocedural trace: function summaries, param-to-return/sink flow, fixed-point convergence, cross-function violations |
+| `test_fact_graph.py` | `FactGraph`: symbol/call/reference/trace/type/import queries, transitive closures, JSON serialization, predicate helpers; Phase 1-5 Datalog tests: CFG blocks, decorators, source locations, block-tagged refs, refs/callers/callees/graph Datalog queries, unified dead code, unreachable blocks, trace propagation, interprocedural trace, flow rule checks |
 | `test_policy.py` | Policy engine: YAML loading, validation, structural checks, flow checks, formatting |
 | `test_rewrite_engine.py` | Rewrite engine: union-find, e-graph, expression parsing, rule loading, saturation |
-| `test_effect_predicates.py` | Phase 1 Taint-CFG: `DefUseFact.kind`, `MethodCallFact`, effect-based sinks (`writes($X)`), augmented assignment, `is_var_or_attr` dotted-name matching, `TaintSink.effect` config |
-| `test_path_sensitive_sanitization.py` | Phase 2 Taint-CFG: CFG-edge unsanitized reachability, intra-block line-ordering guard, `TaintSanitizer.quantifier` (`all_paths`/`some_path`), `flow_rule_check_datalog()` `through` parameter, Python fallback per-block taint state |
-| `test_scope_boundaries.py` | Phase 3 Taint-CFG: `TaintScopeSanitizer` dataclass, `scope_sanitizers` config key, `scope_kill` inline Datalog relation, YAML loading, `merge_configs()` scope sanitizer support, Python fallback scope sanitizer application, nested-session limitation (kills all taint for label) |
+| `test_effect_predicates.py` | Phase 1 Trace-CFG: `DefUseFact.kind`, `MethodCallFact`, effect-based sinks (`writes($X)`), augmented assignment, `is_var_or_attr` dotted-name matching, `TraceSink.effect` config |
+| `test_path_sensitive_sanitization.py` | Phase 2 Trace-CFG: CFG-edge unsanitized reachability, intra-block line-ordering guard, `TraceSanitizer.quantifier` (`all_paths`/`some_path`), `flow_rule_check_datalog()` `through` parameter, Python fallback per-block taint state |
+| `test_scope_boundaries.py` | Phase 3 Trace-CFG: `TraceScopeSanitizer` dataclass, `scope_sanitizers` config key, `scope_kill` inline Datalog relation, YAML loading, `merge_configs()` scope sanitizer support, Python fallback scope sanitizer application, nested-session limitation (kills all taint for label) |
 | `test_flow_rules.py` | Flow-based lint rules (`flows-from` / `flows-to` / `not-through`) |
-| `test_taint_presets.py` | Framework-specific taint presets: preset loading, merge, Flask/Django/SQLAlchemy integration |
+| `test_trace_presets.py` | Framework-specific trace presets: preset loading, merge, Flask/Django/SQLAlchemy integration |
 | `test_dsl.py` | DSL support: SQL detection, symbol extraction, ORM link resolution, formatting, find in DSL regions, DSL lint rules, regex named groups, DSL impact analysis, `--dsl` search flag, `dsl_symbols`/`dsl_links` tables |
 | `test_visit_project.py` | `visit_project_ts()` helper |
 | `test_cfg.py` | `cfg` command (basic blocks, edges, branching, loops, try/except, return/raise, dominators, unreachable detection, fact graph integration) |
@@ -122,10 +122,10 @@
 | `lint` | Lint files using pattern rules from `.emend/patterns.yaml` (includes `deadcode` section and flow rules with `flows-from`/`flows-to`/`not-through`) |
 | `delete` | Safe delete a symbol with optional cascading removal of newly-dead dependents (`--cascade`, `--apply`, `--json`, `--project`). Without `--cascade`, acts like `rm`. With it, transitively identifies and removes symbols whose only callers are in the delete set. |
 | `deadcode` | Find potentially dead (unreferenced) code (`--kind`, `--include-private`, `--json`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`) |
-| `taint` | Taint analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`, `--preset` for framework-specific rules) |
+| `trace` | Trace analysis: tracks value flow from sources to sinks (`--config`, `--label`, `--trace`, `--json`, `--project`, `--interprocedural` for cross-function tracking with fixed-point iteration, `--max-iterations`, `--preset` for framework-specific rules) |
 | `dsl` | Detect and analyze embedded DSL regions (`--type sql`, `--orm sqlalchemy\|django`, `--resolve` for cross-language links, `--json`, `--project`) |
 | `impact` | Compute transitive set of impacted symbols from a change via reverse-caller closure (`--diff`, `--output symbols\|tests\|graph`, `--json`, `--max-depth`) |
-| `facts` | Query the relational fact graph for code invariants (`--type symbols\|calls\|references\|taint_flows\|types\|imports`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`, `--json`) |
+| `facts` | Query the relational fact graph for code invariants (`--type symbols\|calls\|references\|trace_flows\|types\|imports`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`, `--json`) |
 | `policy` | Run declarative policy checks from `.emend/policies.yaml` (`--config`, `--policy`, `--json`; supports flow, structural, type, deadcode, and custom checks) |
 | `saturate` | Experimental equality saturation rewrites from `.emend/rewrites.yaml` (`--config`, `--apply`, `--max-iterations`, `--json`) |
 | `cfg` | Build and display per-function control flow graphs (`--function`, `--format text\|json\|dot`, `--unreachable`). Basic blocks, edges (fallthrough, true/false branch, exception, finally, back-edge, jump), dominators, post-dominators |
@@ -161,16 +161,16 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 `lint.py` loads rules from `.emend/patterns.yaml`:
 - `macros` section: named reusable pattern fragments
 - `rules` section: `find` + optional `not-inside` + `message` + optional `replace`
-- Flow rules: `flows-from` + `flows-to` + optional `not-through` for intraprocedural taint-based linting (checked by `_check_flow_rule()`)
+- Flow rules: `flows-from` + `flows-to` + optional `not-through` for intraprocedural trace-based linting (checked by `_check_flow_rule()`)
 - `deadcode` section: enables dead code detection via `DeadCodeConfig` dataclass (supports `entry-point-decorators`, `entry-point-names`, `exclude-paths` with glob patterns)
 - `--fix` flag auto-applies associated `replace` patterns
 
-### Taint Analysis
+### Trace Analysis
 
-`taint.py` provides intraprocedural taint analysis:
-- Configuration via `taint` section in `.emend/patterns.yaml`: `labels`, `sources`, `sinks`, `sanitizers`
+`trace.py` provides intraprocedural trace analysis:
+- Configuration via `trace` section in `.emend/patterns.yaml`: `labels`, `sources`, `sinks`, `sanitizers`
 - `_analyze_function()` — per-function analysis: finds sources, propagates taint through assignments, applies sanitizers, checks sinks
-- `run_taint_analysis()` — iterates files, collects function definitions, analyzes each + module-level code
+- `run_trace_analysis()` — iterates files, collects function definitions, analyzes each + module-level code
 - `format_violations()` — text and JSON output with optional propagation traces
 
 ### Impact Analysis

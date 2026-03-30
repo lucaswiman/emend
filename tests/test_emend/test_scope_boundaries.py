@@ -1,9 +1,9 @@
 """Tests for Phase 3: Scope Boundaries (Taint-CFG Precision).
 
 Tests cover:
-- TaintScopeSanitizer dataclass: construction and config integration
+- TraceScopeSanitizer dataclass: construction and config integration
 - YAML config loading for scope_sanitizers section
-- Datalog scope_kill parameter on taint_propagation_datalog()
+- Datalog scope_kill parameter on trace_propagation_datalog()
 - Effect-sink + scope_kill interaction
 - Python fallback scope sanitizer behavior
 - Nested scope limitation documentation
@@ -20,13 +20,13 @@ from emend.fact_graph import (
     FactGraph,
     SymbolFact,
 )
-from emend.taint import (
-    TaintConfig,
-    TaintSanitizer,
-    TaintScopeSanitizer,
-    TaintSink,
-    TaintSource,
-    load_taint_config,
+from emend.trace import (
+    TraceConfig,
+    TraceSanitizer,
+    TraceScopeSanitizer,
+    TraceSink,
+    TraceSource,
+    load_trace_config,
 )
 
 
@@ -81,36 +81,36 @@ def _build_diamond_cfg() -> FactGraph:
 
 
 # ---------------------------------------------------------------------------
-# TaintScopeSanitizer dataclass tests
+# TraceScopeSanitizer dataclass tests
 # ---------------------------------------------------------------------------
 
 
-class TestTaintScopeSanitizerDataclass:
-    """TaintScopeSanitizer has pattern and label fields."""
+class TestTraceScopeSanitizerDataclass:
+    """TraceScopeSanitizer has pattern and label fields."""
 
     def test_scope_sanitizer_dataclass(self):
         """Basic construction with pattern and label."""
-        ss = TaintScopeSanitizer(pattern="session.commit()", label="unlocked_read")
+        ss = TraceScopeSanitizer(pattern="session.commit()", label="unlocked_read")
         assert ss.pattern == "session.commit()"
         assert ss.label == "unlocked_read"
 
     def test_scope_sanitizer_in_config(self):
-        """TaintConfig accepts a scope_sanitizers list."""
-        ss1 = TaintScopeSanitizer(pattern="session.commit()", label="unlocked_read")
-        ss2 = TaintScopeSanitizer(pattern="db.flush()", label="unlocked_read")
-        cfg = TaintConfig(scope_sanitizers=[ss1, ss2])
+        """TraceConfig accepts a scope_sanitizers list."""
+        ss1 = TraceScopeSanitizer(pattern="session.commit()", label="unlocked_read")
+        ss2 = TraceScopeSanitizer(pattern="db.flush()", label="unlocked_read")
+        cfg = TraceConfig(scope_sanitizers=[ss1, ss2])
         assert len(cfg.scope_sanitizers) == 2
         assert cfg.scope_sanitizers[0].pattern == "session.commit()"
         assert cfg.scope_sanitizers[1].pattern == "db.flush()"
 
     def test_scope_sanitizer_config_default_empty(self):
-        """TaintConfig.scope_sanitizers defaults to empty list."""
-        cfg = TaintConfig()
+        """TraceConfig.scope_sanitizers defaults to empty list."""
+        cfg = TraceConfig()
         assert cfg.scope_sanitizers == []
 
     def test_scope_sanitizer_no_quantifier(self):
-        """TaintScopeSanitizer has no quantifier — always kills all taint."""
-        ss = TaintScopeSanitizer(pattern="session.commit()", label="lbl")
+        """TraceScopeSanitizer has no quantifier — always kills all taint."""
+        ss = TraceScopeSanitizer(pattern="session.commit()", label="lbl")
         # No quantifier field expected; access should raise AttributeError
         assert not hasattr(ss, "quantifier")
 
@@ -121,13 +121,13 @@ class TestTaintScopeSanitizerDataclass:
 
 
 class TestLoadScopesSanitizersFromYaml:
-    """load_taint_config() parses scope_sanitizers from YAML."""
+    """load_trace_config() parses scope_sanitizers from YAML."""
 
     def test_load_scope_sanitizers_from_yaml(self, tmp_path):
         """YAML file with scope_sanitizers section is loaded correctly."""
         cfg_file = tmp_path / "patterns.yaml"
         cfg_file.write_text("""\
-taint:
+trace:
   labels: [unlocked_read]
   sources:
     - pattern: "$Q.first()"
@@ -142,7 +142,7 @@ taint:
     - pattern: "db.flush()"
       label: unlocked_read
 """)
-        config = load_taint_config(str(cfg_file))
+        config = load_trace_config(str(cfg_file))
         assert len(config.scope_sanitizers) == 2
         patterns = {s.pattern for s in config.scope_sanitizers}
         assert "session.commit()" in patterns
@@ -154,7 +154,7 @@ taint:
         """YAML with no scope_sanitizers key still results in empty list."""
         cfg_file = tmp_path / "patterns.yaml"
         cfg_file.write_text("""\
-taint:
+trace:
   labels: [sqli]
   sources:
     - pattern: "request.args.get($KEY)"
@@ -164,14 +164,14 @@ taint:
       label: sqli
       message: "SQL injection"
 """)
-        config = load_taint_config(str(cfg_file))
+        config = load_trace_config(str(cfg_file))
         assert config.scope_sanitizers == []
 
     def test_load_scope_sanitizer_with_different_label(self, tmp_path):
         """Scope sanitizers can target labels different from other config labels."""
         cfg_file = tmp_path / "patterns.yaml"
         cfg_file.write_text("""\
-taint:
+trace:
   labels: [lbl_a, lbl_b]
   sources:
     - pattern: "source_a()"
@@ -189,7 +189,7 @@ taint:
     - pattern: "commit()"
       label: lbl_a
 """)
-        config = load_taint_config(str(cfg_file))
+        config = load_trace_config(str(cfg_file))
         assert len(config.scope_sanitizers) == 1
         assert config.scope_sanitizers[0].label == "lbl_a"
 
@@ -200,7 +200,7 @@ taint:
 
 
 class TestScopeKillDatalog:
-    """taint_propagation_datalog() scope_kills parameter kills all taint for a label."""
+    """trace_propagation_datalog() scope_kills parameter kills all taint for a label."""
 
     def test_scope_kill_blocks_all_taint_for_label(self):
         """scope_kill blocks taint for ALL variables carrying the label."""
@@ -217,7 +217,7 @@ class TestScopeKillDatalog:
         ))
 
         # scope_kill in block 1 kills ALL "lbl" taint
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[
                 ("app.py", "app.f", "x", 0, "lbl"),
                 ("app.py", "app.f", "y", 0, "lbl"),
@@ -241,7 +241,7 @@ class TestScopeKillDatalog:
         ))
 
         # scope_kill only kills lbl_a; lbl_b taint should still reach sink
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[
                 ("app.py", "app.f", "x", 0, "lbl_a"),
                 ("app.py", "app.f", "x", 0, "lbl_b"),
@@ -268,7 +268,7 @@ class TestScopeKillDatalog:
         ))
 
         # scope_kill only on block 2 (true branch), not block 3 (false branch)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             scope_kills=[("app.py", "app.f", "lbl", 2)],
@@ -287,7 +287,7 @@ class TestScopeKillDatalog:
         ))
 
         # scope_kill on both branches (blocks 2 and 3)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 4, "lbl")],
             scope_kills=[
@@ -312,7 +312,7 @@ class TestScopeKillDatalog:
         ))
 
         # scope_kill for x's label in block 1; regular sanitizer for y in block 2
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[
                 ("app.py", "app.f", "x", 0, "lbl"),
                 ("app.py", "app.f", "y", 0, "lbl"),
@@ -337,7 +337,7 @@ class TestScopeKillDatalog:
             def_block=0, use_block=1, def_line=1, use_line=2,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             scope_kills=[("app.py", "app.f", "lbl", 2)],
@@ -354,7 +354,7 @@ class TestScopeKillDatalog:
             def_block=0, use_block=2, def_line=1, use_line=3,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[],
             sinks=[("app.py", "app.f", "x", 2, "lbl")],
             scope_kills=[("app.py", "app.f", "lbl", 1)],
@@ -370,7 +370,7 @@ class TestScopeKillDatalog:
             def_block=0, use_block=2, def_line=1, use_line=3,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 2, "lbl")],
         )
@@ -400,7 +400,7 @@ class TestScopeKillWithEffectSinks:
             def_block=2, use_block=3, def_line=3, use_line=4,
         ))
 
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -425,7 +425,7 @@ class TestScopeKillWithEffectSinks:
         ))
 
         # scope_kill on both branches
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -452,7 +452,7 @@ class TestScopeKillWithEffectSinks:
         ))
 
         # scope_kill only on block 2 (true branch)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[],
             effect_sinks=[("lbl", "writes")],
@@ -492,19 +492,19 @@ def process():
     use(x)
     use(y)
 """)
-        config = TaintConfig(
+        config = TraceConfig(
             labels=["lbl"],
-            sources=[TaintSource(pattern="tainted()", label="lbl")],
-            sinks=[TaintSink(
+            sources=[TraceSource(pattern="tainted()", label="lbl")],
+            sinks=[TraceSink(
                 pattern="use($X)", label="lbl",
                 message="tainted value used",
             )],
             scope_sanitizers=[
-                TaintScopeSanitizer(pattern="session.commit()", label="lbl"),
+                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
             ],
         )
-        from emend.taint import run_taint_analysis
-        violations = run_taint_analysis(
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         assert len(violations) == 0
@@ -529,22 +529,22 @@ def process():
     sink(x)
     sink(y)
 """)
-        config = TaintConfig(
+        config = TraceConfig(
             labels=["lbl_a", "lbl_b"],
             sources=[
-                TaintSource(pattern="source_a()", label="lbl_a"),
-                TaintSource(pattern="source_b()", label="lbl_b"),
+                TraceSource(pattern="source_a()", label="lbl_a"),
+                TraceSource(pattern="source_b()", label="lbl_b"),
             ],
             sinks=[
-                TaintSink(pattern="sink($X)", label="lbl_a", message="lbl_a reached sink"),
-                TaintSink(pattern="sink($X)", label="lbl_b", message="lbl_b reached sink"),
+                TraceSink(pattern="sink($X)", label="lbl_a", message="lbl_a reached sink"),
+                TraceSink(pattern="sink($X)", label="lbl_b", message="lbl_b reached sink"),
             ],
             scope_sanitizers=[
-                TaintScopeSanitizer(pattern="scope_kill()", label="lbl_a"),
+                TraceScopeSanitizer(pattern="scope_kill()", label="lbl_a"),
             ],
         )
-        from emend.taint import run_taint_analysis
-        violations = run_taint_analysis(
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         # Only lbl_b should fire; lbl_a is killed by scope sanitizer
@@ -560,19 +560,19 @@ def process():
     x = tainted()
     use(x)
 """)
-        config = TaintConfig(
+        config = TraceConfig(
             labels=["lbl"],
-            sources=[TaintSource(pattern="tainted()", label="lbl")],
-            sinks=[TaintSink(
+            sources=[TraceSource(pattern="tainted()", label="lbl")],
+            sinks=[TraceSink(
                 pattern="use($X)", label="lbl",
                 message="tainted value used",
             )],
             scope_sanitizers=[
-                TaintScopeSanitizer(pattern="session.commit()", label="lbl"),
+                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
             ],
         )
-        from emend.taint import run_taint_analysis
-        violations = run_taint_analysis(
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         # No scope kill occurs; violation should still fire
@@ -613,7 +613,7 @@ class TestNestedScopeKillBehavior:
         ))
 
         # scope_kill in block 2 kills ALL "lbl" taint (including x from block 0)
-        flows = g.taint_propagation_datalog(
+        flows = g.trace_propagation_datalog(
             sources=[
                 ("app.py", "app.f", "x", 0, "lbl"),
                 ("app.py", "app.f", "y", 1, "lbl"),
@@ -641,10 +641,10 @@ class TestMergeConfigsWithScopeSanitizers:
 
     def test_merge_configs_includes_scope_sanitizers(self):
         """merge_configs concatenates scope_sanitizers from all configs."""
-        from emend.taint_presets import merge_configs
+        from emend.trace_presets import merge_configs
 
-        c1 = TaintConfig(scope_sanitizers=[TaintScopeSanitizer("a()", "lbl1")])
-        c2 = TaintConfig(scope_sanitizers=[TaintScopeSanitizer("b()", "lbl2")])
+        c1 = TraceConfig(scope_sanitizers=[TraceScopeSanitizer("a()", "lbl1")])
+        c2 = TraceConfig(scope_sanitizers=[TraceScopeSanitizer("b()", "lbl2")])
         merged = merge_configs(c1, c2)
         assert len(merged.scope_sanitizers) == 2
         patterns = {s.pattern for s in merged.scope_sanitizers}
@@ -653,14 +653,14 @@ class TestMergeConfigsWithScopeSanitizers:
 
     def test_merge_configs_empty_scope_sanitizers(self):
         """merge_configs handles configs with no scope_sanitizers."""
-        from emend.taint_presets import merge_configs
+        from emend.trace_presets import merge_configs
 
-        c1 = TaintConfig(
+        c1 = TraceConfig(
             labels=["lbl"],
-            sources=[TaintSource("src()", "lbl")],
+            sources=[TraceSource("src()", "lbl")],
         )
-        c2 = TaintConfig(
-            scope_sanitizers=[TaintScopeSanitizer("kill()", "lbl")],
+        c2 = TraceConfig(
+            scope_sanitizers=[TraceScopeSanitizer("kill()", "lbl")],
         )
         merged = merge_configs(c1, c2)
         assert len(merged.scope_sanitizers) == 1
@@ -668,11 +668,11 @@ class TestMergeConfigsWithScopeSanitizers:
 
     def test_merge_configs_multiple_scope_sanitizers(self):
         """merge_configs accumulates scope_sanitizers from multiple configs."""
-        from emend.taint_presets import merge_configs
+        from emend.trace_presets import merge_configs
 
         configs = [
-            TaintConfig(scope_sanitizers=[
-                TaintScopeSanitizer(f"fn_{i}()", f"lbl_{i}"),
+            TraceConfig(scope_sanitizers=[
+                TraceScopeSanitizer(f"fn_{i}()", f"lbl_{i}"),
             ])
             for i in range(5)
         ]
@@ -684,17 +684,17 @@ class TestMergeConfigsWithScopeSanitizers:
 
     def test_merge_configs_preserves_other_fields(self):
         """merge_configs with scope_sanitizers still merges sources/sinks/sanitizers."""
-        from emend.taint_presets import merge_configs
+        from emend.trace_presets import merge_configs
 
-        c1 = TaintConfig(
+        c1 = TraceConfig(
             labels=["lbl"],
-            sources=[TaintSource("src()", "lbl")],
-            scope_sanitizers=[TaintScopeSanitizer("kill_a()", "lbl")],
+            sources=[TraceSource("src()", "lbl")],
+            scope_sanitizers=[TraceScopeSanitizer("kill_a()", "lbl")],
         )
-        c2 = TaintConfig(
+        c2 = TraceConfig(
             labels=["lbl"],
-            sinks=[TaintSink("sink($X)", "lbl", "reached sink")],
-            scope_sanitizers=[TaintScopeSanitizer("kill_b()", "lbl")],
+            sinks=[TraceSink("sink($X)", "lbl", "reached sink")],
+            scope_sanitizers=[TraceScopeSanitizer("kill_b()", "lbl")],
         )
         merged = merge_configs(c1, c2)
         # Labels deduplicated

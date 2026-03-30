@@ -1,78 +1,78 @@
-"""Framework-specific taint analysis presets.
+"""Framework-specific trace analysis presets.
 
-Provides predefined TaintConfig instances for popular Python frameworks,
+Provides predefined TraceConfig instances for popular Python frameworks,
 covering common vulnerability patterns (SQL injection, XSS, command injection,
 path traversal, SSRF).
 """
 
 from __future__ import annotations
 
-from emend.taint import TaintConfig, TaintSanitizer, TaintScopeSanitizer, TaintSink, TaintSource
+from emend.trace import TraceConfig, TraceSanitizer, TraceScopeSanitizer, TraceSink, TraceSource
 
 
-def _flask_preset() -> TaintConfig:
-    """Return the Flask taint preset."""
+def _flask_preset() -> TraceConfig:
+    """Return the Flask trace preset."""
     labels = ["user_input", "file_path", "html_output"]
 
     sources = [
-        TaintSource(pattern="request.args.get($X)", label="user_input"),
-        TaintSource(pattern="request.args[$X]", label="user_input"),
-        TaintSource(pattern="request.form.get($X)", label="user_input"),
-        TaintSource(pattern="request.form[$X]", label="user_input"),
-        TaintSource(pattern="request.json.get($X)", label="user_input"),
-        TaintSource(pattern="request.data", label="user_input"),
-        TaintSource(pattern="request.cookies.get($X)", label="user_input"),
-        TaintSource(pattern="request.headers.get($X)", label="user_input"),
-        TaintSource(pattern="request.files[$X]", label="file_path"),
+        TraceSource(pattern="request.args.get($X)", label="user_input"),
+        TraceSource(pattern="request.args[$X]", label="user_input"),
+        TraceSource(pattern="request.form.get($X)", label="user_input"),
+        TraceSource(pattern="request.form[$X]", label="user_input"),
+        TraceSource(pattern="request.json.get($X)", label="user_input"),
+        TraceSource(pattern="request.data", label="user_input"),
+        TraceSource(pattern="request.cookies.get($X)", label="user_input"),
+        TraceSource(pattern="request.headers.get($X)", label="user_input"),
+        TraceSource(pattern="request.files[$X]", label="file_path"),
     ]
 
     sinks = [
-        TaintSink(
+        TraceSink(
             pattern="cursor.execute($X)",
             label="user_input",
             message="SQL injection: user input in cursor.execute()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="db.engine.execute($X)",
             label="user_input",
             message="SQL injection: user input in engine.execute()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="eval($X)",
             label="user_input",
             message="Code injection: user input in eval()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="exec($X)",
             label="user_input",
             message="Code injection: user input in exec()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="os.system($X)",
             label="user_input",
             message="Command injection: user input in os.system()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="subprocess.call($X)",
             label="user_input",
             message="Command injection: user input in subprocess.call()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="subprocess.run($X)",
             label="user_input",
             message="Command injection: user input in subprocess.run()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="open($X)",
             label="file_path",
             message="Path traversal: file path in open()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="send_file($X)",
             label="file_path",
             message="Path traversal: file path in send_file()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="Markup($X)",
             label="html_output",
             message="XSS: unescaped user input in Markup()",
@@ -80,74 +80,74 @@ def _flask_preset() -> TaintConfig:
     ]
 
     sanitizers = [
-        TaintSanitizer(pattern="escape($X)", label="user_input"),
-        TaintSanitizer(pattern="bleach.clean($X)", label="html_output"),
-        TaintSanitizer(pattern="secure_filename($X)", label="file_path"),
-        TaintSanitizer(pattern="int($X)", label="user_input"),
-        TaintSanitizer(pattern="float($X)", label="user_input"),
+        TraceSanitizer(pattern="escape($X)", label="user_input"),
+        TraceSanitizer(pattern="bleach.clean($X)", label="html_output"),
+        TraceSanitizer(pattern="secure_filename($X)", label="file_path"),
+        TraceSanitizer(pattern="int($X)", label="user_input"),
+        TraceSanitizer(pattern="float($X)", label="user_input"),
     ]
 
-    return TaintConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
+    return TraceConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
 
 
-def _django_preset() -> TaintConfig:
-    """Return the Django taint preset."""
+def _django_preset() -> TraceConfig:
+    """Return the Django trace preset."""
     labels = ["user_input", "file_path", "html_output"]
 
     sources = [
-        TaintSource(pattern="request.GET.get($X)", label="user_input"),
-        TaintSource(pattern="request.GET[$X]", label="user_input"),
-        TaintSource(pattern="request.POST.get($X)", label="user_input"),
-        TaintSource(pattern="request.POST[$X]", label="user_input"),
-        TaintSource(pattern="request.body", label="user_input"),
-        TaintSource(pattern="request.META.get($X)", label="user_input"),
-        TaintSource(pattern="request.COOKIES.get($X)", label="user_input"),
-        TaintSource(pattern="request.FILES.get($X)", label="file_path"),
-        TaintSource(pattern="request.FILES[$X]", label="file_path"),
+        TraceSource(pattern="request.GET.get($X)", label="user_input"),
+        TraceSource(pattern="request.GET[$X]", label="user_input"),
+        TraceSource(pattern="request.POST.get($X)", label="user_input"),
+        TraceSource(pattern="request.POST[$X]", label="user_input"),
+        TraceSource(pattern="request.body", label="user_input"),
+        TraceSource(pattern="request.META.get($X)", label="user_input"),
+        TraceSource(pattern="request.COOKIES.get($X)", label="user_input"),
+        TraceSource(pattern="request.FILES.get($X)", label="file_path"),
+        TraceSource(pattern="request.FILES[$X]", label="file_path"),
     ]
 
     sinks = [
-        TaintSink(
+        TraceSink(
             pattern="cursor.execute($X)",
             label="user_input",
             message="SQL injection: user input in raw SQL",
         ),
-        TaintSink(
+        TraceSink(
             pattern="RawSQL($X)",
             label="user_input",
             message="SQL injection: user input in RawSQL()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="extra(where=[$X])",
             label="user_input",
             message="SQL injection: user input in extra(where=)",
         ),
-        TaintSink(
+        TraceSink(
             pattern="eval($X)",
             label="user_input",
             message="Code injection",
         ),
-        TaintSink(
+        TraceSink(
             pattern="exec($X)",
             label="user_input",
             message="Code injection",
         ),
-        TaintSink(
+        TraceSink(
             pattern="os.system($X)",
             label="user_input",
             message="Command injection",
         ),
-        TaintSink(
+        TraceSink(
             pattern="subprocess.call($X)",
             label="user_input",
             message="Command injection",
         ),
-        TaintSink(
+        TraceSink(
             pattern="mark_safe($X)",
             label="user_input",
             message="XSS: user input in mark_safe()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="format_html($X)",
             label="user_input",
             message="XSS: check format_html() arguments",
@@ -155,48 +155,48 @@ def _django_preset() -> TaintConfig:
     ]
 
     sanitizers = [
-        TaintSanitizer(pattern="escape($X)", label="user_input"),
-        TaintSanitizer(pattern="conditional_escape($X)", label="user_input"),
-        TaintSanitizer(pattern="int($X)", label="user_input"),
-        TaintSanitizer(pattern="float($X)", label="user_input"),
-        TaintSanitizer(pattern="slugify($X)", label="user_input"),
+        TraceSanitizer(pattern="escape($X)", label="user_input"),
+        TraceSanitizer(pattern="conditional_escape($X)", label="user_input"),
+        TraceSanitizer(pattern="int($X)", label="user_input"),
+        TraceSanitizer(pattern="float($X)", label="user_input"),
+        TraceSanitizer(pattern="slugify($X)", label="user_input"),
     ]
 
-    return TaintConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
+    return TraceConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
 
 
-def _sqlalchemy_preset() -> TaintConfig:
-    """Return the SQLAlchemy taint preset.
+def _sqlalchemy_preset() -> TraceConfig:
+    """Return the SQLAlchemy trace preset.
 
     This preset has no sources — it is meant to be composed with a
     framework preset (e.g. Flask or Django) that provides user-input sources.
     """
     labels = ["user_input"]
 
-    sources: list[TaintSource] = []
+    sources: list[TraceSource] = []
 
     sinks = [
-        TaintSink(
+        TraceSink(
             pattern="text($X)",
             label="user_input",
             message="SQL injection: user input in text()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="TextClause($X)",
             label="user_input",
             message="SQL injection: user input in TextClause()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="session.execute($X)",
             label="user_input",
             message="SQL injection: user input in session.execute()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="engine.execute($X)",
             label="user_input",
             message="SQL injection: user input in engine.execute()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="connection.execute($X)",
             label="user_input",
             message="SQL injection: user input in connection.execute()",
@@ -204,14 +204,14 @@ def _sqlalchemy_preset() -> TaintConfig:
     ]
 
     sanitizers = [
-        TaintSanitizer(pattern="bindparam($X)", label="user_input"),
+        TraceSanitizer(pattern="bindparam($X)", label="user_input"),
     ]
 
-    return TaintConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
+    return TraceConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
 
 
-def _fastapi_preset() -> TaintConfig:
-    """Return the FastAPI taint preset.
+def _fastapi_preset() -> TraceConfig:
+    """Return the FastAPI trace preset.
 
     FastAPI's dependency injection system means sources are function parameters
     annotated with Query/Path/Body etc. This preset covers common sinks and
@@ -222,51 +222,51 @@ def _fastapi_preset() -> TaintConfig:
     # FastAPI sources: common parameter patterns accessible as variables
     # from dependency-injected parameters
     sources = [
-        TaintSource(pattern="Query(default=$X)", label="user_input"),
-        TaintSource(pattern="Body(default=$X)", label="user_input"),
-        TaintSource(pattern="Form(default=$X)", label="user_input"),
-        TaintSource(pattern="Header(default=$X)", label="user_input"),
-        TaintSource(pattern="Cookie(default=$X)", label="user_input"),
-        TaintSource(pattern="File(default=$X)", label="file_path"),
+        TraceSource(pattern="Query(default=$X)", label="user_input"),
+        TraceSource(pattern="Body(default=$X)", label="user_input"),
+        TraceSource(pattern="Form(default=$X)", label="user_input"),
+        TraceSource(pattern="Header(default=$X)", label="user_input"),
+        TraceSource(pattern="Cookie(default=$X)", label="user_input"),
+        TraceSource(pattern="File(default=$X)", label="file_path"),
     ]
 
     sinks = [
-        TaintSink(
+        TraceSink(
             pattern="cursor.execute($X)",
             label="user_input",
             message="SQL injection: user input in cursor.execute()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="eval($X)",
             label="user_input",
             message="Code injection: user input in eval()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="exec($X)",
             label="user_input",
             message="Code injection: user input in exec()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="os.system($X)",
             label="user_input",
             message="Command injection: user input in os.system()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="subprocess.call($X)",
             label="user_input",
             message="Command injection: user input in subprocess.call()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="subprocess.run($X)",
             label="user_input",
             message="Command injection: user input in subprocess.run()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="open($X)",
             label="file_path",
             message="Path traversal: file path in open()",
         ),
-        TaintSink(
+        TraceSink(
             pattern="send_file($X)",
             label="file_path",
             message="Path traversal: file path in send_file()",
@@ -274,14 +274,14 @@ def _fastapi_preset() -> TaintConfig:
     ]
 
     sanitizers = [
-        TaintSanitizer(pattern="escape($X)", label="user_input"),
-        TaintSanitizer(pattern="bleach.clean($X)", label="user_input"),
-        TaintSanitizer(pattern="secure_filename($X)", label="file_path"),
-        TaintSanitizer(pattern="int($X)", label="user_input"),
-        TaintSanitizer(pattern="float($X)", label="user_input"),
+        TraceSanitizer(pattern="escape($X)", label="user_input"),
+        TraceSanitizer(pattern="bleach.clean($X)", label="user_input"),
+        TraceSanitizer(pattern="secure_filename($X)", label="file_path"),
+        TraceSanitizer(pattern="int($X)", label="user_input"),
+        TraceSanitizer(pattern="float($X)", label="user_input"),
     ]
 
-    return TaintConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
+    return TraceConfig(labels=labels, sources=sources, sinks=sinks, sanitizers=sanitizers)
 
 
 # Registry of available presets
@@ -298,14 +298,14 @@ def list_presets() -> list[str]:
     return ["django", "flask", "sqlalchemy", "fastapi", "all"]
 
 
-def get_preset(name: str) -> TaintConfig:
-    """Return a predefined TaintConfig for the named framework.
+def get_preset(name: str) -> TraceConfig:
+    """Return a predefined TraceConfig for the named framework.
 
     Args:
         name: Preset name ("django", "flask", "sqlalchemy", "fastapi", "all").
 
     Returns:
-        A TaintConfig with framework-specific rules.
+        A TraceConfig with framework-specific rules.
 
     Raises:
         ValueError: If the preset name is unknown.
@@ -324,18 +324,18 @@ def get_preset(name: str) -> TaintConfig:
     return factory()  # type: ignore[operator]
 
 
-def merge_configs(*configs: TaintConfig) -> TaintConfig:
-    """Merge multiple TaintConfigs, deduplicating labels.
+def merge_configs(*configs: TraceConfig) -> TraceConfig:
+    """Merge multiple TraceConfigs, deduplicating labels.
 
     Sources, sinks, and sanitizers are concatenated;
     labels are deduplicated while preserving first-seen order.
     """
     seen_labels: set[str] = set()
     labels: list[str] = []
-    sources: list[TaintSource] = []
-    sinks: list[TaintSink] = []
-    sanitizers: list[TaintSanitizer] = []
-    scope_sanitizers: list[TaintScopeSanitizer] = []
+    sources: list[TraceSource] = []
+    sinks: list[TraceSink] = []
+    sanitizers: list[TraceSanitizer] = []
+    scope_sanitizers: list[TraceScopeSanitizer] = []
 
     for cfg in configs:
         for lbl in cfg.labels:
@@ -347,7 +347,7 @@ def merge_configs(*configs: TaintConfig) -> TaintConfig:
         sanitizers.extend(cfg.sanitizers)
         scope_sanitizers.extend(cfg.scope_sanitizers)
 
-    return TaintConfig(
+    return TraceConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
