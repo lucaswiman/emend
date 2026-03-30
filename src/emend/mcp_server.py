@@ -36,6 +36,7 @@ from emend.transform import (
     cmd_edit,
     cmd_add,
     find_callers,
+    find_callees,
     generate_graph,
     find_dead_code,
     find_impact,
@@ -51,11 +52,6 @@ emend is a Python refactoring tool. All write operations default to dry-run
 
 Call the grammar_and_cookbook tool for full syntax reference.
 
-## Mappings
-
-emend includes cross-service identifier mappings and module-to-repo mappings.
-Use map_read to query and map_write to add/update/delete entries.
-
 ## Quick reference
 
 Selectors: file.py::func, file.py::Class.method, file.py::func[params][x],
@@ -64,6 +60,21 @@ Selectors: file.py::func, file.py::Class.method, file.py::func[params][x],
 Patterns: print($X), func($...ARGS), $A + $B, return $X ($ prefix = metavar)
 Where: 'def', 'class', 'def test_*', 'not class', '@decorator'
 Output: code, location, selector, summary, metadata, json, count
+
+## Data-flow analysis
+
+trace_analysis supports inline mode: pass from_pattern + to_pattern directly
+without a config file. Use preset= for framework rules (flask, django, etc.).
+
+## Call graph
+
+graph supports symbol-level queries: pass symbol= with direction/transitive/depth.
+Or pass file_path= for a full file-level call graph.
+
+## Mappings
+
+emend includes cross-service identifier mappings and module-to-repo mappings.
+Use map_read to query and map_write to add/update/delete entries.
 """,
 )
 
@@ -551,14 +562,113 @@ def move(
 # ---------------------------------------------------------------------------
 
 
+def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | None, format: str, project: str | None) -> str:
+    """Symbol-level call graph query."""
+    from emend.component_selector import parse_extended_selector
+    from emend.transform import _find_project_root, _file_to_module, _get_or_build_fact_graph
+
+    sel = parse_extended_selector(symbol)
+    sym_name = sel.symbol_path[-1] if sel.symbol_path else None
+    if not sym_name:
+        return json.dumps({"error": "Could not parse symbol from selector."})
+
+    # Build qualified name for Datalog queries
+    module_root = _find_project_root(sel.file_path) if sel.file_path else (project or ".")
+    scan_root = project or module_root
+    fg = _get_or_build_fact_graph(scan_root)
+
+    if sel.file_path:
+        target_module = _file_to_module(sel.file_path, module_root)
+        qn = ".".join([target_module] + sel.symbol_path) if target_module else ".".join(sel.symbol_path)
+    else:
+        qn = ".".join(sel.symbol_path)
+
+    edges: list[tuple[str, str]] = []
+
+    if direction in ("callers", "both"):
+        caller_facts = fg.callers_datalog(qn)
+        if not caller_facts:
+            caller_facts = fg.callers_datalog(sym_name)
+        for c in caller_facts:
+            edges.append((c.caller_qn, qn))
+        if transitive:
+            visited = {qn}
+            frontier = [c.caller_qn for c in caller_facts]
+            current_depth = 1
+            while frontier and (depth is None or current_depth < depth):
+                next_level: list[str] = []
+                for caller_qn in frontier:
+                    if caller_qn in visited:
+                        continue
+                    visited.add(caller_qn)
+                    upstream = fg.callers_datalog(caller_qn)
+                    for u in upstream:
+                        edges.append((u.caller_qn, caller_qn))
+                        if u.caller_qn not in visited:
+                            next_level.append(u.caller_qn)
+                current_depth += 1
+                frontier = next_level
+
+    if direction in ("callees", "both"):
+        callee_facts = fg.callees_datalog(qn)
+        if not callee_facts:
+            callee_facts = fg.callees_datalog(sym_name)
+        for c in callee_facts:
+            edges.append((qn, c.callee_qn))
+        if transitive:
+            visited_callees = {qn}
+            frontier_callees = [c.callee_qn for c in callee_facts]
+            current_depth = 1
+            while frontier_callees and (depth is None or current_depth < depth):
+                next_level_c: list[str] = []
+                for callee_qn in frontier_callees:
+                    if callee_qn in visited_callees:
+                        continue
+                    visited_callees.add(callee_qn)
+                    downstream = fg.callees_datalog(callee_qn)
+                    for d in downstream:
+                        edges.append((callee_qn, d.callee_qn))
+                        if d.callee_qn not in visited_callees:
+                            next_level_c.append(d.callee_qn)
+                current_depth += 1
+                frontier_callees = next_level_c
+
+    # Deduplicate edges
+    edges = list(dict.fromkeys(edges))
+
+    if format == "json":
+        return json.dumps({"symbol": sym_name, "direction": direction, "transitive": transitive, "edges": [{"caller": c, "callee": e} for c, e in edges]}, indent=2)
+    elif format == "dot":
+        lines = ["digraph callgraph {"]
+        for caller, callee in edges:
+            lines.append(f'  "{caller}" -> "{callee}";')
+        lines.append("}")
+        return "\n".join(lines)
+    else:
+        return "\n".join(f"{c} -> {e}" for c, e in edges) or "(no edges found)"
+
+
 @mcp_app.tool()
 def graph(
-    file_path: Annotated[str, Field(description="Python file to analyze.")],
+    file_path: Annotated[str | None, Field(description="Source file to analyze. Produces a full call graph for all functions in the file.")] = None,
+    symbol: Annotated[str | None, Field(description="Symbol selector (e.g. 'file.py::func' or 'Class.method'). When given, direction/transitive/depth apply.")] = None,
+    direction: Annotated[str, Field(description="'callers', 'callees', or 'both'. Only used with symbol.")] = "both",
+    transitive: Annotated[bool, Field(description="Follow call chains recursively. Only used with symbol.")] = False,
+    depth: Annotated[int | None, Field(description="Max traversal depth when transitive=true. Default: unlimited.")] = None,
     format: Annotated[str, Field(description="Output format: plain, json, or dot (Graphviz).")] = "json",
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Generate a call graph for functions in a Python file."""
-    return generate_graph(file_path, project_path=project, format=format)
+    """Generate a call graph.
+
+    Two modes:
+    - file_path: full call graph for all functions in a file.
+    - symbol: callers/callees for a specific symbol (with direction, transitive, depth).
+    """
+    if symbol:
+        return _graph_symbol(symbol, direction, transitive, depth, format, project)
+    if file_path:
+        return generate_graph(file_path, project_path=project, format=format)
+    return json.dumps({"error": "Provide file_path or symbol."})
 
 
 # ---------------------------------------------------------------------------
@@ -568,52 +678,56 @@ def graph(
 
 @mcp_app.tool()
 def deadcode(
-    path: Annotated[str, Field(description="Project directory to scan.")] = ".",
-    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class.")] = None,
+    path: Annotated[str, Field(description="File glob or directory to scan (e.g. 'src/**/*.py').")] = ".",
+    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class, method, variable.")] = None,
     include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
-    config: Annotated[str | None, Field(description="Path to patterns.yaml config (default: .emend/patterns.yaml). Configure entry points, exclusions, and other settings there.")] = None,
+    entry_point_decorators: Annotated[list[str] | None, Field(description="Decorators that mark entry points (not dead even if unreferenced). E.g. ['app.route', 'celery.task'].")] = None,
+    entry_point_names: Annotated[list[str] | None, Field(description="Function names that are entry points. E.g. ['main', 'cli'].")] = None,
+    exclude_paths: Annotated[list[str] | None, Field(description="Glob patterns for paths to exclude. E.g. ['tests/**', 'migrations/**'].")] = None,
+    config: Annotated[str | None, Field(description="Path to patterns.yaml config (default: .emend/patterns.yaml). Direct params above override config values.")] = None,
 ) -> str:
     """Find potentially dead (unreferenced) code. Returns JSON.
 
     Skips dunder methods, test functions, decorated entry points,
     __all__ members, and conventional entry points.
 
-    Use a .emend/patterns.yaml config file (or --config) to set
-    entry_point_decorators, entry_point_names, exclude_paths,
-    exclude_references_from, and other advanced options.
+    Entry points and exclusions can be set via parameters directly
+    or via .emend/patterns.yaml config file. Direct parameters
+    override config file values.
     """
     from pathlib import Path as _Path
     from emend.lint import load_rules
 
     # Load deadcode settings from config file if present
-    exclude_references_from = None
-    strings_count_as_references = True
-    entry_point_decorators = None
-    entry_point_names = None
-    exclude_paths = None
+    cfg_exclude_refs_from = None
+    cfg_strings_as_refs = True
+    cfg_ep_decorators = None
+    cfg_ep_names = None
+    cfg_excl_paths = None
 
     config_path = _Path(config or ".emend/patterns.yaml")
     if config_path.exists():
         _, _, deadcode_config = load_rules(str(config_path))
         if deadcode_config is not None:
-            exclude_references_from = deadcode_config.exclude_references_from
-            strings_count_as_references = deadcode_config.strings_count_as_references
-            entry_point_decorators = deadcode_config.entry_point_decorators
-            entry_point_names = deadcode_config.entry_point_names
-            exclude_paths = deadcode_config.exclude_paths
+            cfg_exclude_refs_from = deadcode_config.exclude_references_from
+            cfg_strings_as_refs = deadcode_config.strings_count_as_references
+            cfg_ep_decorators = deadcode_config.entry_point_decorators
+            cfg_ep_names = deadcode_config.entry_point_names
+            cfg_excl_paths = deadcode_config.exclude_paths
 
+    # Direct params override config file values
     results = find_dead_code(
         project_path=path,
         kind=kind,
         include_private=include_private,
-        exclude_references_from=exclude_references_from,
-        strings_count_as_references=strings_count_as_references,
+        exclude_references_from=cfg_exclude_refs_from,
+        strings_count_as_references=cfg_strings_as_refs,
         show_last_reference=not no_last_reference,
         all_files=False,
-        entry_point_decorators=entry_point_decorators,
-        entry_point_names=entry_point_names,
-        exclude_paths=exclude_paths,
+        entry_point_decorators=entry_point_decorators or cfg_ep_decorators,
+        entry_point_names=entry_point_names or cfg_ep_names,
+        exclude_paths=exclude_paths or cfg_excl_paths,
     )
     data = []
     for d in results:
@@ -799,27 +913,69 @@ def semantic_context(
 @mcp_app.tool()
 def trace_analysis(
     path: Annotated[str, Field(description="File or directory to analyze.")],
-    config: Annotated[str | None, Field(description="Path to patterns.yaml (default: .emend/patterns.yaml).")] = None,
+    from_pattern: Annotated[str | None, Field(description=(
+        "Inline mode: source pattern where tainted data originates "
+        "(e.g. 'request.args.get($X)'). When provided, config file is not needed."
+    ))] = None,
+    to_pattern: Annotated[str | None, Field(description=(
+        "Inline mode: sink pattern where tainted data must not reach "
+        "(e.g. 'cursor.execute($Q)')."
+    ))] = None,
+    not_through: Annotated[str | None, Field(description=(
+        "Inline mode: sanitizer pattern. Data flowing through this is safe "
+        "(e.g. 'escape($X)')."
+    ))] = None,
+    preset: Annotated[str | None, Field(description="Load framework-specific rules: flask, django, sqlalchemy, fastapi. Can combine with inline patterns.")] = None,
+    config: Annotated[str | None, Field(description="Path to patterns.yaml (default: .emend/patterns.yaml). Not needed if using inline mode or preset.")] = None,
     label: Annotated[str | None, Field(description="Only check a specific trace label.")] = None,
-    trace: Annotated[bool, Field(description="Include propagation traces.")] = False,
-    interprocedural: Annotated[bool, Field(description="Enable interprocedural analysis (cross-function trace tracking).")] = False,
+    trace: Annotated[bool, Field(description="Include propagation traces in output.")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable cross-function analysis with fixed-point iteration.")] = False,
 ) -> str:
-    """Run trace analysis to detect unsafe data flows.
+    """Run trace analysis to detect unsafe data flows. Returns JSON.
 
-    Tracks labeled value flow from sources to sinks within functions.
+    Two modes:
+    - Inline: pass from_pattern + to_pattern directly (no config file needed).
+    - Config: reads sources/sinks/sanitizers from .emend/patterns.yaml.
+
+    Can also use preset= to load framework-specific rules (flask, django, etc.).
     Set interprocedural=True for cross-function analysis.
     """
     from pathlib import Path as _Path
-    from emend.trace import load_trace_config, run_trace_analysis, format_violations
+    from emend.trace import (
+        load_trace_config, run_trace_analysis, format_violations,
+        TraceConfig, TraceSource, TraceSink, TraceSanitizer,
+    )
     from emend.cli import resolve_files
 
-    config_path = _Path(config or ".emend/patterns.yaml")
-    if not config_path.exists():
-        return json.dumps({"error": f"Config file not found: {config_path}"})
+    # Build config from inline params, preset, or config file
+    if from_pattern and to_pattern:
+        # Inline mode: build config from params
+        inline_label = label or "inline"
+        trace_config = TraceConfig(
+            labels=[inline_label],
+            sources=[TraceSource(pattern=from_pattern, label=inline_label)],
+            sinks=[TraceSink(pattern=to_pattern, label=inline_label, message=f"Tainted data flows to {to_pattern}")],
+            sanitizers=[TraceSanitizer(pattern=not_through, label=inline_label)] if not_through else [],
+            scope_sanitizers=[],
+        )
+        if preset:
+            from emend.trace_presets import get_preset, merge_configs
+            preset_config = get_preset(preset)
+            if preset_config:
+                trace_config = merge_configs(trace_config, preset_config)
+    elif preset:
+        from emend.trace_presets import get_preset
+        trace_config = get_preset(preset)
+        if not trace_config:
+            return json.dumps({"error": f"Unknown preset: {preset}"})
+    else:
+        config_path = _Path(config or ".emend/patterns.yaml")
+        if not config_path.exists():
+            return json.dumps({"error": f"Config file not found: {config_path}. Provide from_pattern + to_pattern for inline mode, or use preset=."})
+        trace_config = load_trace_config(str(config_path))
 
-    trace_config = load_trace_config(str(config_path))
     if not trace_config.sources or not trace_config.sinks:
-        return json.dumps({"error": "No trace sources or sinks configured."})
+        return json.dumps({"error": "No trace sources or sinks configured. Provide from_pattern + to_pattern, a preset, or a config file."})
 
     resolved, _ = resolve_files(path)
     files = [str(f) for f in resolved]
