@@ -69,8 +69,41 @@ class DatalogCheck:
     cozoscript: str
 
 
+@dataclass
+class SequenceStep:
+    """A single step in a temporal sequence rule."""
+    bind: str  # step label (e.g. "load", "mutate")
+    pattern: str | None = None  # pattern to match (e.g. "$OBJ = session.query($MODEL)")
+    effect: str | None = None  # effect predicate (e.g. "writes($OBJ)")
+    type_constraint: str | None = None  # optional type constraint
+
+
+@dataclass
+class SequencePathConstraint:
+    """Path constraint between two consecutive sequence steps."""
+    from_step: str  # step label (e.g. "load")
+    to_step: str  # step label (e.g. "mutate")
+    not_through: list[str] = field(default_factory=list)  # patterns that must not appear on any path
+    not_through_scope: list[str] = field(default_factory=list)  # scope boundary patterns
+
+
+@dataclass
+class SequenceCheck:
+    """Multi-step temporal sequence check.
+
+    Each rule defines an ordered list of steps (matched by pattern or effect)
+    with binding constraints across steps and CFG-path constraints between them.
+    Examples: TOCTOU, double-free, use-after-close.
+    """
+    name: str
+    message: str
+    sequence: list[SequenceStep]
+    path_constraints: list[SequencePathConstraint] = field(default_factory=list)
+    severity: str = "error"
+
+
 # Union of all check types
-PolicyCheck = FlowCheck | StructuralCheck | TypeCheck | DeadCodeCheck | CustomCheck | DatalogCheck
+PolicyCheck = FlowCheck | StructuralCheck | TypeCheck | DeadCodeCheck | CustomCheck | DatalogCheck | SequenceCheck
 
 
 @dataclass
@@ -100,7 +133,7 @@ class PolicyViolation:
 # ---------------------------------------------------------------------------
 
 _VALID_SEVERITIES = {"error", "warning", "info"}
-_VALID_CHECK_TYPES = {"flow", "structural", "type", "deadcode", "custom", "datalog"}
+_VALID_CHECK_TYPES = {"flow", "structural", "type", "deadcode", "custom", "datalog", "sequence"}
 _VALID_TYPE_KINDS = {"has_type", "returns"}
 
 
@@ -172,6 +205,55 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
         if not cozoscript:
             raise ValueError("DatalogCheck requires 'cozoscript' or 'query'")
         return DatalogCheck(cozoscript=cozoscript)
+    elif check_type == "sequence":
+        name = raw.get("name", "")
+        message = raw.get("message", "")
+        if not name:
+            raise ValueError("SequenceCheck requires 'name'")
+        raw_sequence = raw.get("sequence", [])
+        if not raw_sequence or len(raw_sequence) < 2:
+            raise ValueError("SequenceCheck requires at least 2 steps in 'sequence'")
+        steps = []
+        for step_raw in raw_sequence:
+            steps.append(SequenceStep(
+                bind=step_raw.get("bind", ""),
+                pattern=step_raw.get("pattern"),
+                effect=step_raw.get("effect"),
+                type_constraint=_yaml_key(step_raw, "type_constraint"),
+            ))
+        # Parse path constraints
+        path_constraints = []
+        raw_path = raw.get("path", {})
+        for path_key, path_val in raw_path.items():
+            # path_key is like "load -> mutate"
+            parts = [p.strip() for p in path_key.split("->")]
+            if len(parts) != 2:
+                raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
+            nt_patterns = []
+            for item in _as_list(path_val.get("not_through", [])):
+                if isinstance(item, dict):
+                    nt_patterns.append(item.get("pattern", ""))
+                else:
+                    nt_patterns.append(item)
+            nts_patterns = []
+            for item in _as_list(_yaml_key(path_val, "not_through_scope") or []):
+                if isinstance(item, dict):
+                    nts_patterns.append(item.get("pattern", ""))
+                else:
+                    nts_patterns.append(item)
+            path_constraints.append(SequencePathConstraint(
+                from_step=parts[0],
+                to_step=parts[1],
+                not_through=nt_patterns,
+                not_through_scope=nts_patterns,
+            ))
+        return SequenceCheck(
+            name=name,
+            message=message,
+            sequence=steps,
+            path_constraints=path_constraints,
+            severity=raw.get("severity", "error"),
+        )
     else:
         raise ValueError(f"Unknown check type: {check_type!r}")
 
@@ -288,6 +370,25 @@ def validate_policies(policies: list[Policy]) -> list[str]:
             elif isinstance(check, DatalogCheck):
                 if not check.cozoscript:
                     errors.append(f"{cprefix}: cozoscript is required")
+            elif isinstance(check, SequenceCheck):
+                if not check.name:
+                    errors.append(f"{cprefix}: name is required")
+                if len(check.sequence) < 2:
+                    errors.append(f"{cprefix}: sequence must have at least 2 steps")
+                step_names = set()
+                for s, step in enumerate(check.sequence):
+                    if not step.bind:
+                        errors.append(f"{cprefix}: step #{s + 1} must have a 'bind' name")
+                    if step.bind in step_names:
+                        errors.append(f"{cprefix}: duplicate step bind name {step.bind!r}")
+                    step_names.add(step.bind)
+                    if not step.pattern and not step.effect:
+                        errors.append(f"{cprefix}: step {step.bind!r} must have 'pattern' or 'effect'")
+                for pc in check.path_constraints:
+                    if pc.from_step not in step_names:
+                        errors.append(f"{cprefix}: path references unknown step {pc.from_step!r}")
+                    if pc.to_step not in step_names:
+                        errors.append(f"{cprefix}: path references unknown step {pc.to_step!r}")
 
     return errors
 
@@ -586,6 +687,78 @@ def _run_datalog_check(
     return violations
 
 
+def _run_sequence_check(
+    check: SequenceCheck,
+    policy: Policy,
+    project_path: str,
+) -> list[PolicyViolation]:
+    """Run a temporal sequence check against the project's fact graph.
+
+    Resolves each step via pattern matching (Python), then compiles to
+    a CozoScript Datalog query for CFG-reachability and def-use liveness
+    checks via ``compile_sequence_rule()`` in ``fact_graph.py``.
+    """
+    from emend.fact_graph import FactGraph, compile_sequence_rule
+
+    violations: list[PolicyViolation] = []
+    try:
+        graph = FactGraph.build_from_project(project_path)
+    except Exception as exc:
+        return [PolicyViolation(
+            file_path="<project>",
+            line=0, col=0,
+            policy_name=policy.name,
+            check_name=f"sequence:{check.name}:error",
+            severity=policy.severity,
+            message=f"Sequence check setup failed: {exc}",
+        )]
+
+    try:
+        result = compile_sequence_rule(graph, check)
+        if result is None:
+            return []
+        query_str, step_data = result
+        query_result = graph.run_query(query_str)
+    except Exception as exc:
+        return [PolicyViolation(
+            file_path="<project>",
+            line=0, col=0,
+            policy_name=policy.name,
+            check_name=f"sequence:{check.name}:error",
+            severity=policy.severity,
+            message=f"Sequence check failed: {exc}",
+        )]
+
+    headers = query_result.get("headers", [])
+    rows = query_result.get("rows", [])
+
+    for row in rows:
+        row_dict = dict(zip(headers, row))
+        fp = row_dict.get("fp", "<unknown>")
+        fq = row_dict.get("fq", "")
+        first_line = row_dict.get("first_line", 0)
+        last_line = row_dict.get("last_line", 0)
+
+        witness = []
+        # Include step lines in witness
+        for h, v in zip(headers, row):
+            if h not in ("fp", "fq"):
+                witness.append(f"{h}={v}")
+
+        violations.append(PolicyViolation(
+            file_path=str(fp),
+            line=int(first_line),
+            col=0,
+            policy_name=policy.name,
+            check_name=f"sequence:{check.name}",
+            severity=check.severity,
+            message=check.message,
+            witness=witness,
+        ))
+
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------------
@@ -616,6 +789,7 @@ def run_policy_checks(
     # Separate project-level policies from per-file policies
     deadcode_policies: list[tuple[Policy, DeadCodeCheck]] = []
     datalog_policies: list[tuple[Policy, DatalogCheck]] = []
+    sequence_policies: list[tuple[Policy, SequenceCheck]] = []
     file_policies: list[tuple[Policy, PolicyCheck]] = []
 
     for policy in policies:
@@ -624,6 +798,8 @@ def run_policy_checks(
                 deadcode_policies.append((policy, check))
             elif isinstance(check, DatalogCheck):
                 datalog_policies.append((policy, check))
+            elif isinstance(check, SequenceCheck):
+                sequence_policies.append((policy, check))
             else:
                 file_policies.append((policy, check))
 
@@ -635,6 +811,10 @@ def run_policy_checks(
     if datalog_policies and project_path:
         for policy, check in datalog_policies:
             violations.extend(_run_datalog_check(check, policy, project_path))
+
+    if sequence_policies and project_path:
+        for policy, check in sequence_policies:
+            violations.extend(_run_sequence_check(check, policy, project_path))
 
     # Run per-file checks
     if file_policies:
