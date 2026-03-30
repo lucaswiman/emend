@@ -177,11 +177,11 @@ replace `attribute_mutation_sinks` and other bespoke features.
 
 ### Phase 5: Temporal Sequence Patterns
 
-- [ ] Design `sequence` + `path` config schema — `taint.py` or `policy.py`
-- [ ] Implement `compile_sequence_rule()` — sequence-to-CozoScript compiler — `fact_graph.py`
-- [ ] Compose CFG reachability with def-use liveness for binding propagation
-- [ ] Support dual-mode compilation: `data_flow` steps → `tainted` rules, temporal steps → `reachable` rules
-- [ ] Add `SequenceCheck` to policy engine — `policy.py`
+- [x] Design `sequence` + `path` config schema — `taint.py` or `policy.py`
+- [x] Implement `compile_sequence_rule()` — sequence-to-CozoScript compiler — `fact_graph.py`
+- [x] Compose CFG reachability with def-use liveness for binding propagation
+- [x] Support dual-mode compilation: `data_flow` steps → `tainted` rules, temporal steps → `reachable` rules
+- [x] Add `SequenceCheck` to policy engine — `policy.py`
 - [ ] Update TOCTOU example in `commands.rst` with sequence rule form
 
 ---
