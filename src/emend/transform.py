@@ -341,6 +341,106 @@ _FACTS_SCHEMA = """\
     fp: String,
     mod: String
 }}
+
+{:ensure symbol {
+    qualified_name: String
+    =>
+    file_path: String,
+    name: String,
+    kind: String,
+    line: Int,
+    end_line: Int,
+    parent: String default ""
+}}
+
+{:ensure reference {
+    symbol_qn: String,
+    file_path: String,
+    line: Int,
+    col: Int
+    =>
+    ref_kind: String,
+    func_qn: String default "",
+    block_id: Int default -1
+}}
+
+{:ensure call {
+    caller_qn: String,
+    callee_qn: String,
+    file_path: String,
+    line: Int,
+    col: Int
+    =>
+    func_qn: String default "",
+    block_id: Int default -1
+}}
+
+{:ensure cfg_block {
+    file_path: String,
+    func_qn: String,
+    block_id: Int
+    =>
+    is_entry: Bool default false,
+    is_exit: Bool default false
+}}
+
+{:ensure cfg_edge {
+    file_path: String,
+    func_qn: String,
+    from_block: Int,
+    to_block: Int,
+    edge_kind: String,
+    from_line: Int,
+    to_line: Int
+}}
+
+{:ensure def_use {
+    file_path: String,
+    func_qn: String,
+    var_name: String,
+    kind: String default "write",
+    def_block: Int,
+    use_block: Int
+    =>
+    def_line: Int default 0,
+    def_col: Int default 0,
+    use_line: Int default 0,
+    use_col: Int default 0
+}}
+
+{:ensure method_call {
+    file_path: String,
+    func_qn: String,
+    receiver: String,
+    method: String,
+    block_id: Int,
+    line: Int
+}}
+
+{:ensure source_loc {
+    file_path: String,
+    loc_kind: String,
+    loc_id: String
+    =>
+    line: Int,
+    col: Int default 0,
+    end_line: Int default 0,
+    rel_line: Int default 0
+}}
+
+{:ensure import {
+    importing_file: String,
+    imported_module: String,
+    imported_name: String default "",
+    line: Int
+    =>
+    alias: String default ""
+}}
+
+{:ensure decorator_on {
+    symbol_qn: String,
+    decorator: String
+}}
 """
 
 
@@ -403,7 +503,7 @@ def _get_facts_db(project_root: str | None = None):
 
 
 def _delete_facts_for_file(fdb, file_path: str) -> None:
-    """Delete all facts (symbol, reference, import) for a given file path."""
+    """Delete all facts for a given file path from all relations."""
     for query in (
         "?[fp, mqn] := *fact_symbol[fp, mqn, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
         "fp == $fp  :rm fact_symbol {fp => }",
@@ -411,6 +511,23 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm fact_reference {tqn, fp, line, col => }",
         "?[fp, mod] := *fact_import[fp, mod], "
         "fp == $fp  :rm fact_import {fp, mod}",
+        # FactGraph-style relations
+        "?[sq, fp, line, col] := *reference[sq, fp, line, col, _, _, _], "
+        "fp == $fp  :rm reference {sq, fp, line, col => }",
+        "?[cqn, eqn, fp, line, col] := *call[cqn, eqn, fp, line, col, _, _], "
+        "fp == $fp  :rm call {cqn, eqn, fp, line, col => }",
+        "?[fp, fq, bid] := *cfg_block[fp, fq, bid, _, _], "
+        "fp == $fp  :rm cfg_block {fp, fq, bid => }",
+        "?[fp, fq, fb, tb, ek, fl, tl] := *cfg_edge[fp, fq, fb, tb, ek, fl, tl], "
+        "fp == $fp  :rm cfg_edge {fp, fq, fb, tb, ek, fl, tl}",
+        "?[fp, fq, vn, k, db, ub] := *def_use[fp, fq, vn, k, db, ub, _, _, _, _], "
+        "fp == $fp  :rm def_use {fp, fq, vn, k, db, ub => }",
+        "?[fp, fq, r, m, bid, line] := *method_call[fp, fq, r, m, bid, line], "
+        "fp == $fp  :rm method_call {fp, fq, r, m, bid, line}",
+        "?[fp, lk, lid] := *source_loc[fp, lk, lid, _, _, _, _], "
+        "fp == $fp  :rm source_loc {fp, lk, lid => }",
+        "?[fp, im, iname, line] := *import[fp, im, iname, line, _], "
+        "fp == $fp  :rm import {fp, im, iname, line => }",
     ):
         try:
             fdb.run(query, {"fp": file_path})
@@ -520,12 +637,19 @@ def _populate_facts_db(project_root: str) -> None:
         # other Datalog queries work on the persisted facts.db without
         # rebuilding from scratch via build_from_project().
         # ------------------------------------------------------------------
+        from emend.cfg import build_cfgs_for_source
+        from emend.fact_graph import (
+            _find_containing_block,
+            _enclosing_symbol,
+            _extract_imports,
+            _build_symbol_line_index,
+            _map_ref_kind,
+            _walk_symbols,
+            SymbolFact,
+        )
+        from emend import emend_core as _rust
 
         # symbol[qualified_name => file_path, name, kind, line, end_line, parent]
-        # Use module_qn (r[1]) as qualified_name — the canonical QN format.
-        # Skip variables and references to match build_from_project() behavior.
-        # Derive parent from depth: depth==1 means top-level (module-level),
-        # depth>1 means nested inside another symbol, extract parent from mqn.
         cozo_fg_sym = []
         for r in sym_rows:
             if r[4] in ("variable", "reference"):
@@ -533,10 +657,9 @@ def _populate_facts_db(project_root: str) -> None:
             mqn = r[1]
             depth = r[7]
             if depth is not None and depth > 1:
-                # Nested symbol — parent QN = mqn minus last segment
                 parent = mqn.rsplit(".", 1)[0] if "." in mqn else ""
             else:
-                parent = ""  # Top-level symbol
+                parent = ""
             cozo_fg_sym.append([mqn, _to_rel(r[0]), r[2], r[4], r[5], r[6], parent])
         fdb.run(
             "?[qn, fp, name, kind, line, end_line, parent] <- $rows "
@@ -544,25 +667,10 @@ def _populate_facts_db(project_root: str) -> None:
             {"rows": cozo_fg_sym},
         )
 
-        # reference[symbol_qn, file_path, line, col => ref_kind, func_qn, block_id]
-        # func_qn and block_id are not available from the index — use "" and -1.
-        cozo_fg_ref = [
-            [r[0], _to_rel(r[1]), r[2], r[3], r[4], "", -1]
-            for r in ref_rows
-        ]
-        fdb.run(
-            "?[sq, fp, line, col, kind, fq, bid] <- $rows "
-            ":replace reference {sq, fp, line, col => kind, fq, bid}",
-            {"rows": cozo_fg_ref},
-        )
-
         # decorator_on[symbol_qn, decorator]
-        # Extracted from fact_symbol.decs (comma-separated decorator names).
-        # Clean decorator strings the same way _walk_symbols() does: strip @
-        # prefix and arguments, also store basename for broad matching.
         dec_rows_list: list[list[str]] = []
         for r in sym_rows:
-            mqn = r[1]  # module-qualified name
+            mqn = r[1]
             decs_str = r[12] or ""
             if decs_str:
                 for dec in decs_str.split(","):
@@ -576,7 +684,6 @@ def _populate_facts_db(project_root: str) -> None:
                     cleaned = cleaned.strip()
                     if cleaned:
                         dec_rows_list.append([mqn, cleaned])
-                        # Also store basename for broader matching
                         if "." in cleaned:
                             basename = cleaned.rsplit(".", 1)[-1]
                             if basename and basename != cleaned:
@@ -587,6 +694,223 @@ def _populate_facts_db(project_root: str) -> None:
                 ":replace decorator_on {qn, dec}",
                 {"rows": dec_rows_list},
             )
+
+        # ------------------------------------------------------------------
+        # Per-file loop: CFG, block-tagged references, calls, def_use,
+        # method_call, source_loc, import
+        # ------------------------------------------------------------------
+        file_rows = conn.execute(
+            "SELECT path FROM file_manifest WHERE worktree_id = ?",
+            (worktree_id,),
+        ).fetchall()
+
+        # Build per-file lookups from already-fetched rows
+        syms_by_file: dict[str, list] = {}
+        for r in sym_rows:
+            syms_by_file.setdefault(r[0], []).append(r)
+        refs_by_file: dict[str, list] = {}
+        for r in ref_rows:
+            refs_by_file.setdefault(r[1], []).append(r)
+
+        all_cfg_blocks: list[list] = []
+        all_cfg_edges: list[list] = []
+        all_fg_refs: list[list] = []
+        all_calls: list[list] = []
+        all_def_uses: list[list] = []
+        all_method_calls: list[list] = []
+        all_source_locs: list[list] = []
+        all_imports: list[list] = []
+
+        resolver_root = resolved_root
+
+        for (file_path_raw,) in file_rows:
+            rel_path = _to_rel(file_path_raw)
+            abs_path = str(Path(resolved_root) / rel_path)
+
+            try:
+                content = Path(abs_path).read_text(encoding="utf-8")
+            except Exception:
+                # Can't read file — emit refs with empty func_qn/block_id
+                for r in refs_by_file.get(file_path_raw, []):
+                    all_fg_refs.append([r[0], _to_rel(r[1]), r[2], r[3], r[4], "", -1])
+                continue
+
+            ext = Path(abs_path).suffix.lstrip(".") or "py"
+            module_name = _file_to_module(abs_path, project_root)
+
+            # -- Reconstruct sym_facts for this file (needed for symbol_ranges)
+            file_sym_rows = syms_by_file.get(file_path_raw, [])
+            name_to_mqn: dict[str, str] = {}
+            sym_facts_for_file: list[SymbolFact] = []
+            for r in file_sym_rows:
+                if r[4] in ("variable", "reference"):
+                    continue
+                mqn = r[1]
+                name_to_mqn[r[2]] = mqn
+                sym_facts_for_file.append(SymbolFact(
+                    file_path=rel_path, name=r[2], qualified_name=mqn,
+                    kind=r[4], line=r[5], end_line=r[6],
+                    parent=r[8] if r[8] else None,
+                ))
+
+            # -- source_loc (from symbol facts)
+            for sf in sym_facts_for_file:
+                all_source_locs.append([
+                    sf.file_path, "symbol", sf.qualified_name,
+                    sf.line, 0, sf.end_line, 0,
+                ])
+
+            # -- CFG
+            try:
+                cfgs = build_cfgs_for_source(content, ext=ext)
+            except Exception:
+                cfgs = []
+
+            block_ranges: list[tuple[str, int, int, int]] = []
+            for cfg in cfgs:
+                func_name = cfg.func_name
+                func_qn = ""
+                for sf in sym_facts_for_file:
+                    if sf.name == func_name and sf.file_path == rel_path:
+                        func_qn = sf.qualified_name
+                        break
+                if not func_qn:
+                    func_qn = f"{module_name}.{func_name}"
+
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    all_cfg_blocks.append([
+                        rel_path, func_qn, bid,
+                        bid == cfg.entry, bid == cfg.exit,
+                    ])
+                    block_ranges.append((func_qn, bid, block["start_line"], block["end_line"]))
+
+                for edge in cfg.get_edges():
+                    all_cfg_edges.append([
+                        rel_path, func_qn,
+                        edge["from"], edge["to"], edge["kind"], 0, 0,
+                    ])
+
+            block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
+
+            # -- Block-tagged references, calls, method_calls
+            symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
+            file_refs = refs_by_file.get(file_path_raw, [])
+
+            for r in file_refs:
+                tqn, _fp, line, col, kind = r[0], r[1], r[2], r[3], r[4]
+                fq, bid = _find_containing_block(block_ranges, line)
+                all_fg_refs.append([tqn, rel_path, line, col, kind, fq, bid])
+
+                if kind == "call":
+                    caller = _enclosing_symbol(symbol_ranges, line)
+                    caller_qn = caller if caller is not None else module_name
+                    all_calls.append([caller_qn, tqn, rel_path, line, col, fq, bid])
+
+                    # method_call for dotted call refs
+                    if "." in tqn:
+                        parts = tqn.rsplit(".", 1)
+                        if len(parts) == 2:
+                            all_method_calls.append([
+                                rel_path, fq,
+                                parts[0].rsplit(".", 1)[-1], parts[1],
+                                bid, line,
+                            ])
+
+            # -- Def-use facts
+            for cfg in cfgs:
+                func_name = cfg.func_name
+                func_qn = ""
+                for sf in sym_facts_for_file:
+                    if sf.name == func_name and sf.file_path == rel_path:
+                        func_qn = sf.qualified_name
+                        break
+                if not func_qn:
+                    func_qn = f"{module_name}.{func_name}"
+
+                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    for d in block.get("defs", []) or []:
+                        var_name = d[0] if isinstance(d, (list, tuple)) else d
+                        dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
+                        dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
+                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
+
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    for u in block.get("uses", []) or []:
+                        var_name = u[0] if isinstance(u, (list, tuple)) else u
+                        uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
+                        ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
+                        ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
+                        if var_name in defs_map:
+                            for def_bid, dl, dc, dk in defs_map[var_name]:
+                                all_def_uses.append([
+                                    rel_path, func_qn, var_name, dk,
+                                    def_bid, bid, dl, dc, uline, ucol,
+                                ])
+
+            # -- Import facts (via stdlib ast, Python files only)
+            if ext == "py":
+                for imp in _extract_imports(rel_path, content):
+                    all_imports.append([
+                        imp.importing_file, imp.imported_module,
+                        imp.imported_name or "", imp.line,
+                        imp.alias or "",
+                    ])
+
+        # -- Batch CozoDB writes using :replace for atomic swap
+        fdb.run(
+            "?[sq, fp, line, col, kind, fq, bid] <- $rows "
+            ":replace reference {sq, fp, line, col => kind, fq, bid}",
+            {"rows": all_fg_refs},
+        )
+
+        fdb.run(
+            "?[caller_qn, callee_qn, fp, line, col, fq, bid] <- $rows "
+            ":replace call {caller_qn, callee_qn, fp, line, col => fq, bid}",
+            {"rows": all_calls},
+        )
+
+        fdb.run(
+            "?[fp, fq, bid, is_entry, is_exit] <- $rows "
+            ":replace cfg_block {fp, fq, bid => is_entry, is_exit}",
+            {"rows": all_cfg_blocks},
+        )
+
+        fdb.run(
+            "?[fp, fq, from_block, to_block, edge_kind, from_line, to_line] <- $rows "
+            ":replace cfg_edge {fp, fq, from_block, to_block, edge_kind, from_line, to_line}",
+            {"rows": all_cfg_edges},
+        )
+
+        fdb.run(
+            "?[fp, fq, var_name, kind, def_block, use_block, "
+            "def_line, def_col, use_line, use_col] <- $rows "
+            ":replace def_use {fp, fq, var_name, kind, def_block, use_block "
+            "=> def_line, def_col, use_line, use_col}",
+            {"rows": all_def_uses},
+        )
+
+        fdb.run(
+            "?[fp, fq, receiver, method, bid, line] <- $rows "
+            ":replace method_call {fp, fq, receiver, method, bid, line}",
+            {"rows": all_method_calls},
+        )
+
+        fdb.run(
+            "?[fp, loc_kind, loc_id, line, col, end_line, rel_line] <- $rows "
+            ":replace source_loc {fp, loc_kind, loc_id => line, col, end_line, rel_line}",
+            {"rows": all_source_locs},
+        )
+
+        fdb.run(
+            "?[importing_file, imported_module, imported_name, line, alias] <- $rows "
+            ":replace import {importing_file, imported_module, imported_name, line => alias}",
+            {"rows": all_imports},
+        )
 
         conn.close()
     except BaseException:
