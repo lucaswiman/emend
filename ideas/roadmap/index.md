@@ -170,10 +170,10 @@ replace `attribute_mutation_sinks` and other bespoke features.
 
 ### Phase 4: Type-Conditioned Filtering
 
-- [ ] Add `type_constraint` field to `TaintSource`/`TaintSink`/`TaintSanitizer` — `taint.py`
-- [ ] Populate `type_binding` relation in `build_from_project()` — `fact_graph.py`
-- [ ] Evaluate constraints via `parse_type_string()` (top-level constructor, not substring)
-- [ ] Add `scalar_type` inline relation for Datalog type filtering — `fact_graph.py`
+- [x] Add `type_constraint` field to `TaintSource`/`TaintSink`/`TaintSanitizer` — `taint.py`
+- [x] Populate `type_binding` relation in `build_from_project()` — `fact_graph.py`
+- [x] Evaluate constraints via `parse_type_string()` (top-level constructor, not substring)
+- [x] Add `scalar_type` inline relation for Datalog type filtering — `fact_graph.py`
 
 ### Phase 5: Temporal Sequence Patterns
 
@@ -183,6 +183,51 @@ replace `attribute_mutation_sinks` and other bespoke features.
 - [x] Support dual-mode compilation: `data_flow` steps → `tainted` rules, temporal steps → `reachable` rules
 - [x] Add `SequenceCheck` to policy engine — `policy.py`
 - [ ] Update TOCTOU example in `commands.rst` with sequence rule form
+
+### Phase 6: Naming Unification and Cleanup — `taint` → `trace`
+
+Rename the "taint" abstraction to **"trace"** across the codebase.  The
+engine is a general labeled data-flow tracer — sources emit labeled
+values, sinks consume them, sanitizers block propagation — and "taint"
+is just one framing (security).  The same engine powers lint flow rules,
+policy flow checks, sequence patterns, and effect predicates.  "Trace"
+better describes the core action: *follow labeled values through code*.
+
+#### CLI and command renaming
+
+- [ ] Rename `emend taint` → `emend trace` (keep `taint` as hidden alias for backwards compat)
+- [ ] Rename `--interprocedural` flag (already applies to `trace`)
+- [ ] Rename `emend facts --type taint_flows` → `emend facts --type trace_flows` (alias old name)
+- [ ] Update `--preset` help text: "framework-specific trace rules" instead of "taint rules"
+- [ ] Update TOCTOU example in `commands.rst` with sequence rule form (existing Phase 5 TODO)
+
+#### Config and YAML renaming
+
+- [ ] Rename `taint:` section in `.emend/patterns.yaml` → `trace:` (accept both, prefer new)
+- [ ] Rename `TaintSource` → `TraceSource`, `TaintSink` → `TraceSink`, `TaintSanitizer` → `TraceSanitizer`, `TaintScopeSanitizer` → `TraceScopeSanitizer` in config model
+- [ ] Rename `TaintConfig` → `TraceConfig`, `TaintViolation` → `TraceViolation`
+- [ ] Keep YAML key aliases: `sources`/`sinks`/`sanitizers` stay the same (only the section name changes)
+
+#### Source file renaming
+
+- [ ] Rename `taint.py` → `trace.py` (update all imports)
+- [ ] Rename `taint_presets.py` → `trace_presets.py`
+- [ ] Rename `TaintFlowFact` → `TraceFlowFact` in `fact_graph.py`
+- [ ] Rename Datalog relations: `taint_flow` → `trace_flow` in CozoDB schema
+- [ ] Rename test files: `test_taint.py` → `test_trace.py`, `test_interprocedural_taint.py` → `test_interprocedural_trace.py`, etc.
+
+#### Simplification from code review
+
+- [ ] Extract `_inline_relation(name, cols, rows)` helper for CozoScript query building (used in `taint_propagation_datalog`, `flow_rule_check_datalog`, `_compile_sequence_query`)
+- [ ] Introduce `TraceDatalogConfig` dataclass to reduce `taint_propagation_datalog()` from 9 params to 3 (`sources`, `sinks`, `config`)
+- [ ] Deduplicate blocker resolution loops in `compile_sequence_rule()` (`not_through` / `not_through_scope` share 55 identical lines)
+- [ ] Cache `evaluate_type_constraint()` parsed constraint expressions (currently re-parses on every call)
+
+#### Documentation
+
+- [ ] Update CLAUDE.md file/command tables
+- [ ] Update `commands.rst` references
+- [ ] Add migration note in CHANGELOG explaining `taint` → `trace` rename with alias support
 
 ---
 
