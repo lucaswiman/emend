@@ -131,7 +131,7 @@ for exact joins.
 ### Phase 6: Cleanup
 
 - [x] Enforce fact-graph-only path for `impact` (remove non-Datalog fallback) — `transform.py` (`find_impact()` uses `_find_impact_via_fact_graph()` exclusively, `use_fact_graph` parameter removed)
-- [ ] Evaluate consolidating `parse.db` (SQLite) and `facts.db` (CozoDB)
+- [x] ~~Evaluate consolidating `parse.db` (SQLite) and `facts.db` (CozoDB)~~ — **Won't do**; two files vs one doesn't matter
 - [x] Update all tests — `test_fact_graph.py` (87 tests), dead code/callers/callees/graph tests updated for Datalog backend
 
 ---
