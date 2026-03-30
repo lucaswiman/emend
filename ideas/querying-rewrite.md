@@ -15,585 +15,860 @@ emend currently has **seven** overlapping query/config languages:
 | **Datalog (CozoScript)** | `?[x] := *symbol[x, kind], kind == "function"` | Relational fact queries |
 
 The pain points:
-- Trace, lint, and policy YAML all encode similar concepts (patterns, flow constraints) in slightly different schemas
+- Trace, lint, and policy YAML all encode the same concepts (patterns, flow, constraints) in three different schemas
 - The query language and pattern language overlap but have different power
 - Datalog is powerful but disconnected from the pattern/selector world
-- Users must learn multiple syntaxes to use the full feature set
+- Users must learn multiple syntaxes to use the full system
+- The YAML configs each invented ad-hoc ways to say "match this, not inside that, flowing from here to there"
+
+### What should be preserved
+
+The **pattern syntax** (`print($X)`, `$...ARGS`, `$OBJ:type[Conn]`) is emend's
+best feature. It's code-shaped, instantly readable, and compresses a tree query
+into something that looks like the code you're searching for. Any unification
+should keep patterns as the primary way to describe code.
+
+The **selector syntax** (`file.py::Class.method[params]`) is also good — it
+names a location in the code the way a filesystem path names a file. It's
+orthogonal to patterns (selectors navigate, patterns match).
+
+The mess is in everything above those two: how patterns are composed, filtered,
+connected by flow, grouped into rules, and configured.
 
 ---
 
-## Proposal 1: SQL-Flavored Query Language ("CodeQL Lite")
+## Proposal 1: Pipe Composition ("Patterns + jq + CSS pseudo-classes")
 
-Model everything as tables. Patterns become `WHERE` predicates. Traces become joins.
+**Inspiration**: jq pipes for composition, CSS pseudo-classes for filtering,
+Unix philosophy for "do one thing per stage."
 
-### Core idea
+### Core insight
 
-Code facts are tables (`symbols`, `calls`, `references`, `def_use`, `cfg_edges`).
-Pattern matching is a special predicate function `MATCHES(node, pattern)`.
-Taint/flow is a built-in `FLOWS(source, sink)` relation.
-
-### Examples
-
-```sql
--- Find all print calls (replaces: find "print($X)")
-SELECT match FROM code
-WHERE MATCHES(match, 'print($X)')
-  AND file GLOB 'src/**/*.py'
-
--- Lookup a symbol (replaces: file.py::MyClass.method[params])
-SELECT params FROM symbols
-WHERE qname = 'MyClass.method'
-
--- Taint analysis (replaces: trace YAML)
-SELECT source, sink, path FROM FLOWS
-WHERE MATCHES(source, 'request.args.get($X)')
-  AND MATCHES(sink, 'cursor.execute($Q)')
-  AND NOT EXISTS (
-    SELECT 1 FROM path_nodes(path) p
-    WHERE MATCHES(p, 'escape($X)')
-  )
-  AND label = 'user_input'
-
--- Lint rule (replaces: lint YAML)
-CREATE RULE no_print AS
-  SELECT match, 'Use logger instead' AS message
-  FROM code WHERE MATCHES(match, 'print($X)')
-
--- Transform (replaces: replace command)
-UPDATE code
-SET match = REWRITE(match, 'print($X)', 'logger.info($X)')
-WHERE MATCHES(match, 'print($X)')
-
--- Dead code
-SELECT s.qname FROM symbols s
-LEFT JOIN references r ON r.symbol_qn = s.qname
-WHERE r.symbol_qn IS NULL
-  AND s.kind = 'function'
-
--- Call graph traversal
-WITH RECURSIVE callers AS (
-  SELECT caller_qn FROM calls WHERE callee_qn = 'dangerous_func'
-  UNION
-  SELECT c.caller_qn FROM calls c
-  JOIN callers ON c.callee_qn = callers.caller_qn
-)
-SELECT * FROM callers
-```
-
-### Pros
-- Familiar to most developers
-- Naturally expresses joins, aggregation, recursion
-- Tables map cleanly to the existing fact graph
-- `MATCHES()` keeps pattern syntax unchanged
-
-### Cons
-- Verbose for simple operations (`emend find "print($X)"` becomes a full SELECT)
-- SQL recursion (WITH RECURSIVE) is clunkier than Datalog for transitive closures
-- Rewrite/transform doesn't fit SQL semantics naturally
-- Requires a SQL parser or embedding in an existing engine
-
----
-
-## Proposal 2: CSS Selector Extension ("Code Selectors")
-
-Extend the existing selector syntax to subsume patterns, flow, and filtering.
-The selector already looks CSS-like; lean into it fully.
-
-### Core idea
-
-Everything is a selector chain with pseudo-classes, combinators, and attribute filters.
-Patterns are `:matches(...)`. Flow is the `~>` combinator (taint-flows-to).
-Transforms use `{ property: value }` blocks like CSS declarations.
-
-### Examples
-
-```css
-/* Find print calls (replaces: find "print($X)") */
-call:matches(print($X))
-
-/* Scoped to files */
-file[path~="src/**/*.py"] call:matches(print($X))
-
-/* Symbol lookup (replaces: file.py::MyClass.method[params]) */
-file[path="file.py"]::MyClass::method::params
-
-/* With type filter */
-function:returns(str):kind(public)
-
-/* Nesting / containment (like CSS descendant combinator) */
-class::TestSuite > method:matches(test_*)
-
-/* NOT inside */
-call:matches(eval($X)):not-inside(function:matches(test_*))
-
-/* Taint / flow (new ~> combinator) */
-call:matches(request.args.get($X))
-  ~> call:matches(cursor.execute($Q))
-  :not-through(call:matches(escape($X)))
-  :label(user_input)
-
-/* Lint rule */
-@rule no-print {
-  call:matches(print($X)) {
-    message: "Use logger instead";
-    replace: "logger.info($X)";
-  }
-}
-
-/* Dead code */
-symbol:kind(function):not(:referenced)
-
-/* Transitive callers */
-symbol[qname="dangerous"]::callers*
-
-/* Policy */
-@policy no-sqli (severity: error) {
-  call:matches(request.args.get($X))
-    ~> call:matches(cursor.execute($Q))
-    :not-through(call:matches(sanitize($X))) {
-    message: "SQL injection risk";
-  }
-}
-```
-
-### Pros
-- Natural extension of existing selector syntax
-- Pseudo-classes (`:not()`, `:matches()`, `:returns()`) already exist in emend
-- Combinators (`>` child, ` ` descendant, `~>` flow) are intuitive
-- Compact for common cases
-
-### Cons
-- CSS selector semantics don't map perfectly to code (no real "cascade")
-- Complex flow constraints get unwieldy in selector syntax
-- Hard to express Datalog-style joins and recursion
-- Novel combinators like `~>` have no CSS precedent — might confuse
-
----
-
-## Proposal 3: Pattern Calculus ("Regex for ASTs")
-
-Extend the pattern language to be the single query language.
-Regex has `/pattern/flags`; we do `{pattern}modifiers`.
-Everything composes via regex-like operators.
-
-### Core idea
-
-The pattern `print($X)` is already the most natural part of emend.
-Extend it with quantifiers, lookahead/lookbehind, alternation, and flow operators.
-Selectors become pattern anchors. Config becomes inline annotations.
+Every emend operation is really a pipeline: *select files* → *match patterns*
+→ *filter by structure* → *do something*. Make the pipe explicit. Each stage
+is a small language that already exists (glob, pattern, selector). The pipe
+is the glue that replaces all the YAML config keys.
 
 ### Syntax
 
-```
-# Atoms (unchanged)
-print($X)                          # literal code pattern
-$X:identifier                      # typed metavar
+```bash
+# The pipe operator connects stages
+in "src/**/*.py" | match "print($X)" | inside "def $FUNC" | replace "logger.info($X)"
 
-# Regex-like operators
-print($X) | log($X)               # alternation
-request.$_($...ARGS)              # wildcard (already exists)
+# Short form (implicit first stage from context)
+match "print($X)" | not-inside "class Test*" | count
 
-# Anchors (replace selectors)
-@file.py :: @MyClass :: @method    # navigate to scope
-@file.py:4-10                      # line range anchor
-@src/**/*.py                       # file glob anchor
+# Flow is a pipe stage that takes two patterns
+in "src/**" | flow "request.args.get($X)" -> "cursor.execute($Q)" \
+             | not-through "escape($X)" \
+             | quantifier all-paths
 
-# Lookahead / lookbehind (replace --inside / --not-inside)
-print($X) (?inside def test_$_)    # inside constraint
-eval($X) (?!inside class Safe)     # NOT inside (negative lookahead)
+# Selectors are a stage too
+select "file.py::MyClass.method" | component params | index 0
 
-# Flow operator (replaces trace YAML)
-request.args.get($X) ~> cursor.execute($X)           # taint flows
-request.args.get($X) ~> cursor.execute($X) !~ escape($X)  # not through
+# Graph traversal — recurse is a pipe stage (like jq's recurse)
+select "dangerous_func" | callers | recurse callers --depth 3
 
-# Quantified flow
-request.args.get($X) ~>all cursor.execute($X)        # all paths
-request.args.get($X) ~>any cursor.execute($X)         # any path
+# Dead code is a built-in pipeline
+in "src/**" | symbols --kind function | unreferenced
 
-# Rewrite (=> already exists in GritQL layer)
-print($X) => logger.info($X)
-
-# Named rules (replace lint/policy YAML)
-rule no_print: print($X) => logger.info($X)
-  @ severity=warning
-  @ message="Use logger"
-
-# Composition
-rule sqli:
-  request.args.get($X) ~> cursor.execute($Q) !~ escape($X)
-  @ severity=error
-  @ label=user_input
+# Output shaping (steal from jq)
+in "src/**" | match "TODO" | format "{file}:{line} {matched}"
 ```
 
-### Execution model
+### Rule files (.emend/rules.pipe)
 
 ```bash
-# CLI stays simple
-emend find 'print($X)'
-emend find 'print($X) (?inside def test_$_)'
-emend find '@src/**/*.py :: request.args.get($X) ~> cursor.execute($Q)'
-emend replace 'print($X)' 'logger.info($X)' --apply
+# Each rule is a named pipeline
+rule no-print (severity=warning, message="Use logger"):
+  match "print($X)" | replace "logger.info($X)"
 
-# Config file uses the same syntax
-# .emend/rules.em
-rule no-print: print($X) => logger.info($X) @ severity=warning
-rule sqli: request.args.get($X) ~> cursor.execute($Q) !~ escape($X) @ severity=error
+rule sqli (severity=error, message="SQL injection"):
+  in "src/**" | flow "request.args.get($X)" -> "cursor.execute($Q)" \
+               | not-through "escape($X)"
+
+# Macros are just named pattern fragments
+let user_input = "request.args.get($X)" | "request.form[$X]"
+
+rule sqli2 (severity=error):
+  flow {user_input} -> "cursor.execute($Q)"
 ```
 
-### Pros
-- Single language for everything — patterns, selectors, flow, rules
-- Regex analogy is widely understood
-- Very compact for common cases
-- CLI one-liners become extremely powerful
+### Why this works
 
-### Cons
-- Novel syntax — nobody knows it yet
-- Regex-like operators on ASTs could be confusing (lookahead on trees?)
-- Hard to express relational queries (joins, aggregation, transitive closure)
-- The `~>` flow operator hides significant complexity (interprocedural analysis)
-- Rule files lose the readability of YAML
+- Patterns stay exactly as-is — they're string arguments to `match`
+- Selectors stay as-is — they're arguments to `select`
+- The pipe replaces: `--inside`, `--not-inside`, `--where`, `--scope-local`,
+  `flows-from`/`flows-to`/`not-through`, and the `where {}` clause from GritQL
+- `flow A -> B` subsumes all of: trace YAML sources/sinks, lint flow rules,
+  policy flow checks
+- Rules are just named pipelines with metadata — no separate YAML schemas
+- Each stage has one job, so the mental model is simple
+
+### Concerns
+
+- Shell-like syntax means quoting hell when used on an actual shell command line
+- Multi-line pipelines need continuation (backslash or wrapping)
+- No natural way to express Datalog-style joins (two unrelated facts about
+  the same symbol). Would still need a Datalog escape hatch for power queries.
 
 ---
 
-## Proposal 4: JSONPath/jq-Style Path Language ("Code Paths")
+## Proposal 2: List Comprehensions ("Python for code queries")
 
-Treat the codebase as a tree (files > modules > classes > methods > statements).
-Query it with a jq/JSONPath-style path language.
+**Inspiration**: Python/Haskell comprehensions, GraphQL's "request what you
+want" philosophy, Rego's rule-as-comprehension style.
 
-### Core idea
+### Core insight
 
-Code is a tree. Paths navigate it. Filters select nodes. Pipes compose operations.
-Pattern matching is a filter. Flow analysis is a built-in pipe stage.
+emend users are Python developers. They already know comprehension syntax.
+A code query is just `[what for thing in where if conditions]`. Flow is a
+generator you iterate over. Rules are assignments.
 
-### Examples
+### Syntax
 
-```bash
-# Navigate (replaces selectors)
-.src."file.py".MyClass.method.params[0]
-.src."file.py".MyClass.method | .params[0]
+```python
+# Find (comprehension over matches)
+[m for m in match("print($X)") if m.file ~ "src/**"]
 
-# Glob paths
-.src.**.*.py                          # all Python files
-..MyClass..test_*                     # recursive descent to test methods
+# With scope constraint
+[m for m in match("print($X)")
+   if m.inside ~ "def $FUNC"
+   if not m.inside ~ "class Test*"]
 
-# Filter by kind
-.src..[] | select(.kind == "function")
+# Replace (assignment to .code)
+[m.code = "logger.info($X)"
+ for m in match("print($X)")]
 
-# Pattern match filter
-.src..[] | match("print($X)")
+# Flow (iterate over flow paths)
+[v for v in flow(
+    source = "request.args.get($X)",
+    sink   = "cursor.execute($Q)",
+ )
+ if not v.through ~ "escape($X)"]
 
-# Pipe to transform
-.src..[] | match("print($X)") | rewrite("logger.info($X)")
-
-# Flow analysis
-.src..[] | flow(
-  from: "request.args.get($X)",
-  to: "cursor.execute($Q)",
-  not_through: "escape($X)"
-)
+# Symbol lookup
+[s for s in symbols("src/**")
+   if s.kind == "function"
+   if s.name ~ "test_*"]
 
 # Dead code
-.src..[] | select(.kind == "function") | select(.references | length == 0)
+[s for s in symbols("src/**")
+   if s.kind == "function"
+   if len(s.refs) == 0]
 
 # Call graph
-.src."file.py".my_func | .callers | recurse(.callers)
+[c for c in callers("dangerous_func", transitive=True, depth=3)]
 
-# Combine with output format
-.src..[] | match("TODO") | {file: .path, line: .line, text: .matched}
+# Selector access
+[s.params[0] for s in select("file.py::MyClass.method")]
 
-# Lint rules (.emend/rules.jsonl — one rule per line)
-{"name": "no-print", "query": '..[] | match("print($X)")', "message": "Use logger", "fix": 'rewrite("logger.info($X)")'}
-
-# Trace config
-{"name": "sqli", "query": '..[] | flow(from: "request.args.get($X)", to: "cursor.execute($Q)", not_through: "escape($X)")', "severity": "error"}
+# Output shaping
+[{"file": m.file, "line": m.line, "text": m.text}
+ for m in match("print($X)")]
 ```
 
-### Pros
-- jq is well-known and loved by CLI users
-- Pipes compose naturally — each stage narrows or transforms
-- Path navigation replaces selectors cleanly
-- Output shaping (`| {file, line}`) replaces `--output` flags
-- Easy to add new filter/pipe stages without grammar changes
+### Rule files (.emend/rules.py — it's just Python-shaped)
 
-### Cons
-- jq's tree model doesn't capture cross-references (calls, imports)
-- Flow analysis awkwardly shoehorned into a pipe
-- Recursive descent (`..`) on code trees could be very slow without indexing
-- Pattern matching inside jq syntax creates an ugly nesting
-- Config-as-JSON is less readable than YAML for complex rules
+```python
+# Rules are named comprehensions
+rule("no-print", severity="warning", message="Use logger")
+violations = [m for m in match("print($X)")]
+fix = "logger.info($X)"
+
+rule("sqli", severity="error", message="SQL injection")
+violations = [
+    v for v in flow(
+        source = "request.args.get($X)",
+        sink   = "cursor.execute($Q)",
+    )
+    if not v.through ~ "escape($X)"
+]
+
+# Macros are just variables
+user_input = "request.args.get($X)" | "request.form[$X]"
+
+# Compound rules
+rule("toctou", severity="error")
+violations = [
+    v for v in flow(source="$Q.first()", sink=writes("$OBJ"))
+    if not v.scope_boundary ~ "session.commit()"
+]
+```
+
+### Why this works
+
+- Zero learning curve for Python developers
+- Comprehension syntax naturally encodes filter chains, which is what all
+  the YAML configs were trying to express
+- `if` clauses replace `--where`, `--inside`, `not-through`, etc.
+- `for v in flow(...)` unifies trace analysis and flow rules into one concept
+- Pattern strings stay as opaque arguments — no grammar collision
+- The `~` operator (match) is the only new thing to learn
+
+### Concerns
+
+- It *looks* like Python but isn't — subtly different semantics would confuse
+- Actually parsing Python comprehension syntax is nontrivial
+- The `~` operator for pattern matching is ad-hoc
+- No natural way to express "all paths" vs "some path" quantifiers without
+  keyword args buried in function calls
+- Might lure people into expecting arbitrary Python (lambdas, imports, etc.)
 
 ---
 
-## Proposal 5: Datalog-First with Pattern Syntax Sugar ("Soufflé Meets Semgrep")
+## Proposal 3: S-Expression Core with Surface Sugar ("Lisp Machine for Code")
 
-Make Datalog the single underlying language but with syntactic sugar that
-compiles down to it. Patterns, selectors, and flow all desugar to Datalog rules.
+**Inspiration**: Emacs/Elisp (queries as data), Clojure spec (composable
+predicates), Datalog (logic), tree-sitter's own S-expression query syntax.
 
-### Core idea
+### Core insight
 
-The fact graph already uses CozoScript internally. Expose it as the primary
-query language, but provide a "surface syntax" that compiles common operations
-to Datalog. This is the CodeQL approach: a logic language with domain-specific
-libraries.
+Tree-sitter already has an S-expression query language for ASTs. emend's
+patterns compile to tree-sitter queries internally. What if the composition
+layer was also S-expressions? S-expressions are trivially parseable,
+homoiconic (queries are data structures), and compose without ambiguity.
+A thin surface syntax makes them human-friendly.
 
-### Surface syntax (compiles to Datalog)
+### The S-expression core (what gets executed)
+
+```scheme
+;; Find
+(find (pattern "print($X)")
+      (in "src/**/*.py")
+      (inside (pattern "def $FUNC")))
+
+;; Replace
+(rewrite (pattern "print($X)")
+         (replacement "logger.info($X)")
+         (in "src/**/*.py"))
+
+;; Flow
+(flow (source (pattern "request.args.get($X)"))
+      (sink (pattern "cursor.execute($Q)"))
+      (not-through (pattern "escape($X)"))
+      (quantifier all-paths))
+
+;; Selector lookup
+(lookup (selector "file.py::MyClass.method")
+        (component params)
+        (index 0))
+
+;; Graph
+(callers "dangerous_func" (transitive #t) (depth 3))
+
+;; Dead code
+(dead-code (kind function) (in "src/**"))
+
+;; Composition via AND/OR
+(and (find (pattern "eval($X)"))
+     (not (inside (pattern "def test_$_"))))
+
+;; Rule definition
+(rule "sqli"
+  (severity error)
+  (message "SQL injection risk")
+  (flow (source (pattern "request.args.get($X)"))
+        (sink (pattern "cursor.execute($Q)"))
+        (not-through (pattern "escape($X)"))))
+```
+
+### Surface syntax (what humans type)
+
+```bash
+# CLI: the S-expr is implicit, positional args fill common slots
+emend find "print($X)" --in "src/**" --inside "def $FUNC"
+emend flow "request.args.get($X)" -> "cursor.execute($Q)" --not-through "escape($X)"
+
+# Config file: indented keyword syntax (like Hy, or a Lisp without parens)
+rule sqli
+  severity error
+  message "SQL injection risk"
+  flow
+    source "request.args.get($X)"
+    sink "cursor.execute($Q)"
+    not-through "escape($X)"
+
+rule no-print
+  severity warning
+  message "Use logger"
+  find "print($X)"
+  fix "logger.info($X)"
+```
+
+### Why this works
+
+- S-expressions give you free composability — rules, queries, and configs
+  are all the same data structure
+- The surface syntax is just YAML-shaped indentation that desugars to S-exprs
+- Macros fall out naturally: `(define user-input (or (pattern "request.args.get($X)") (pattern "request.form[$X]")))`
+- Tree-sitter's S-expression queries are well-known in the ecosystem
+- The MCP/API layer can accept either S-expressions or the JSON equivalent
+  (S-exprs and JSON are near-isomorphic)
+- Pattern strings stay opaque — no escaping issues
+
+### Concerns
+
+- Lisp syntax is polarizing — many developers find it unreadable
+- The surface sugar adds a second syntax, partially defeating the point
+- S-expressions are verbose for simple cases: `(find (pattern "print($X)"))` vs `find "print($X)"`
+- Debugging nested S-expressions is harder than debugging flat YAML
+- The homoiconicity benefit only pays off if you build a macro system,
+  which is a big investment
+
+---
+
+## Proposal 4: Prolog-Style Unification ("Everything is a Query")
+
+**Inspiration**: Prolog unification, CodeQL (logic over code), Rego/OPA
+(policy as logic), but with emend patterns as the term language instead
+of abstract tuples.
+
+### Core insight
+
+The deepest unification is to notice that patterns, flow, selectors, and
+rules are all forms of *logical constraint*. A pattern is a constraint on
+code shape. A flow rule is a constraint on data paths. A selector is a
+constraint on location. A lint rule is a constraint that, when satisfied,
+indicates a problem.
+
+What if the query language was just: state your constraints, get back
+everything that satisfies them?
+
+### Syntax
 
 ```prolog
-% Find print calls — syntactic sugar
-find("print($X)") :- match(Node, "print($X)").
+% Simple find — "give me matches"
+?- code(X), X ~ "print($ARG)".
 
-% Explicit Datalog — same thing
-?[file, line, text] :-
-  *reference[sqn, file, line, col, kind, fq, bid],
-  match(text, "print($X)").
+% Scoped
+?- code(X), X ~ "print($ARG)", file(X, F), F ~ "src/**".
 
-% Selector navigation — sugar
-lookup("file.py::MyClass.method[params]") :-
-  *symbol[qn, file, name, kind, line, end_line, parent],
-  qn = "file.MyClass.method",
-  component(qn, "params", Result).
+% Inside constraint
+?- code(X), X ~ "print($ARG)", inside(X, Y), Y ~ "def $FUNC".
 
-% Flow analysis — sugar
-flow_violation(Src, Sink) :-
-  source(Src, "request.args.get($X)"),
-  sink(Sink, "cursor.execute($Q)"),
-  flows(Src, Sink),
-  not sanitized(Src, Sink, "escape($X)").
+% Replace — unification on the output
+?- code(X), X ~ "print($ARG)" => "logger.info($ARG)".
 
-% Dead code — direct Datalog
-dead(QN) :-
-  *symbol[QN, _, _, "function", _, _, _],
-  not *reference[QN, _, _, _, _, _, _].
+% Flow — source and sink are just constrained code nodes
+?- code(Src), Src ~ "request.args.get($KEY)",
+   code(Sink), Sink ~ "cursor.execute($Q)",
+   flows(Src, Sink),
+   \+ sanitized(Src, Sink, "escape($X)").
 
-% Transitive callers — Datalog shines here
-transitive_caller(X, Y) :- *call[X, Y, _, _, _, _, _].
-transitive_caller(X, Z) :- transitive_caller(X, Y), *call[Y, Z, _, _, _, _, _].
+% Selector — location is a constraint
+?- symbol(S), name(S, "MyClass.method"), params(S, P), nth(P, 0, First).
 
-% Rules/policies — Datalog rules with metadata annotations
-@rule(name="no-print", severity="warning", message="Use logger")
-violation(File, Line) :-
-  *reference[_, File, Line, _, _, _, _],
-  match_at(File, Line, "print($X)").
+% Dead code
+?- symbol(S), kind(S, function), \+ referenced(S).
 
-@rule(name="sqli", severity="error")
-violation(File, Line) :-
-  source_at(File, SrcLine, "request.args.get($X)"),
-  sink_at(File, Line, "cursor.execute($Q)"),
-  flows(SrcLine, Line),
-  not sanitized_between(SrcLine, Line, "escape($X)").
+% Transitive callers — Prolog does this natively
+caller(X, Y) :- calls(X, Y).
+caller(X, Z) :- calls(X, Y), caller(Y, Z).
+?- caller(Who, "dangerous_func").
+
+% Type constraint
+?- code(X), X ~ "$F($ARG)", type(ARG, "str"), returns(F, "int").
 ```
 
-### Config file (.emend/rules.dl)
+### Rule files (.emend/rules.pl)
 
 ```prolog
-% Macros
-macro(user_input, "request.args.get($X)").
-macro(user_input, "request.form[$X]").
+% Rule = a named query whose results are violations
+:- rule(no_print, severity(warning), message("Use logger")).
+no_print(File, Line) :-
+    code_at(File, Line, X), X ~ "print($ARG)".
 
-% Rules
-@rule(name="sqli", severity="error", message="SQL injection risk")
-violation(F, L) :-
-  macro(user_input, SrcPat), source_at(F, SL, SrcPat),
-  sink_at(F, L, "cursor.execute($Q)"),
-  flows(SL, L),
-  not sanitized_between(SL, L, "escape($X)").
+:- rule(sqli, severity(error), message("SQL injection")).
+sqli(File, Line) :-
+    code_at(File, SrcLine, Src), Src ~ "request.args.get($KEY)",
+    code_at(File, Line, Sink), Sink ~ "cursor.execute($Q)",
+    flows(Src, Sink),
+    \+ sanitized(Src, Sink, "escape($X)").
+
+% Macro = a reusable predicate
+user_input(X) :- X ~ "request.args.get($KEY)".
+user_input(X) :- X ~ "request.form[$KEY]".
 ```
 
-### Pros
-- Datalog is the right formalism for code analysis (CodeQL, Doop, Soufflé prove this)
-- Transitive closures, joins, negation are natural
-- Pattern matching becomes a predicate, not a separate language
-- Everything compiles to one execution engine
-- Sugar keeps simple cases simple: `find("print($X)")` is still one line
+### Why this works
 
-### Cons
-- Datalog is unfamiliar to most developers
-- The sugar layer needs careful design to not become its own language
-- CozoScript syntax is not standard Datalog — users can't transfer knowledge from Soufflé/CodeQL directly
-- Error messages from Datalog engines are notoriously bad
-- Two-level system (sugar + raw) could be confusing about what's happening
+- Logic programming is *the* natural fit for code analysis (this is why
+  CodeQL, Doop, Soufflé, and CozoScript all exist)
+- Patterns become the `~` operator on terms — code unification
+- Flow, containment, type constraints, scope — all just predicates
+- Rules are named queries — no separate YAML schema
+- Transitive closure is native (recursive rules)
+- The `~` operator on patterns is the bridge: it keeps pattern syntax
+  unchanged while embedding it in a logic context
+- Existing CozoScript/Datalog backend maps directly
 
----
+### Concerns
 
-## Proposal 6: Minimal Unification ("Keep Three, Kill Four")
-
-Don't invent a new language. Instead, reduce to three complementary layers that
-already exist, and make the YAML configs compile to them.
-
-### The three layers
-
-1. **Patterns** (unchanged): `print($X)`, `$OBJ:type[Conn]`, `$...ARGS`
-2. **Selectors** (unchanged): `file.py::Class.method[params][0]`
-3. **Datalog** (exposed): `?[x] := *symbol[x, kind], kind == "function"`
-
-### What changes
-
-- **Lint YAML** becomes a thin config that references patterns:
-  ```yaml
-  rules:
-    no-print:
-      match: "print($X)"       # pattern
-      scope: "src/**/*.py"     # file glob (selector-like)
-      inside: "def $F"         # pattern (context constraint)
-      message: "Use logger"
-      fix: "logger.info($X)"   # pattern (replacement)
-  ```
-
-- **Trace YAML** is abolished. Flow rules move into lint YAML with a `flow:` block:
-  ```yaml
-  rules:
-    sqli:
-      flow:
-        from: "request.args.get($X)"
-        to: "cursor.execute($Q)"
-        not-through: "escape($X)"
-        quantifier: all_paths
-      scope: "src/**/*.py"
-      message: "SQL injection"
-  ```
-
-- **Policy YAML** is abolished. Policies are just lint rules with severity:
-  ```yaml
-  rules:
-    sqli:
-      flow: { from: "...", to: "...", not-through: "..." }
-      severity: error
-      message: "SQL injection"
-    no-eval:
-      match: "eval($X)"
-      severity: error
-      message: "No eval"
-  ```
-
-- **Datalog** is available for advanced users via `emend query`:
-  ```bash
-  emend query '?[name] := *symbol[name, kind], kind == "function"'
-  ```
-
-- The GritQL-like query language is removed. Its features map to:
-  - `where { $x <: contains ... }` → `--inside` flag + patterns
-  - `sequential { ... }` → `emend batch` with YAML
-  - `=> replacement` → `emend replace` with pattern pair
-
-### Pros
-- Minimal disruption — patterns and selectors don't change
-- No new language to learn
-- YAML stays for config (readable, tooling-friendly)
-- Datalog escape hatch for power users
-- Clear separation: patterns=matching, selectors=navigation, datalog=relations
-
-### Cons
-- Still three languages (just fewer configs)
-- YAML is still verbose for complex rules
-- Loses the composability of a single unified language
-- The GritQL `where` clause was genuinely useful for inline constraints
+- Prolog syntax is niche — most developers haven't seen it since university
+- The `~` operator conflates tree-sitter matching with Prolog unification,
+  which could confuse people who know Prolog
+- Negation-as-failure (`\+`) is subtle and has known pitfalls
+- Performance: naive Prolog evaluation without tabling would be disastrous
+  on large codebases. Needs Datalog-style bottom-up evaluation.
+- The gap between "this looks like Prolog" and "this isn't actually Prolog"
+  would frustrate experienced logic programmers
 
 ---
 
-## Proposal 7: EBNF-Style Production Rules ("Grammar of Code Smells")
+## Proposal 5: GraphQL-Shaped Queries Over the Code Graph
 
-Treat code patterns as grammar productions. Rules are productions that define
-what constitutes a violation. Rewriting is grammar-guided transformation.
+**Inspiration**: GraphQL (ask for the shape you want back), Cypher/Neo4j
+(graph pattern matching with ASCII art), the fact that code *is* a graph
+(symbols reference each other, data flows between them).
 
-### Core idea
+### Core insight
 
-EBNF defines structure. Code queries are "grammars" that match bad code.
-Nonterminals are named patterns. Terminals are code tokens and metavars.
-Flow is expressed as production sequencing with constraints.
+The fact graph is already a property graph: nodes are symbols, files, and
+code locations; edges are calls, references, data flow, containment. What
+if you queried it the way you query a GraphQL API — by describing the shape
+of the subgraph you want back?
 
-### Examples
+### Syntax
 
-```ebnf
-(* Pattern matching — nonterminal = pattern *)
-user_input  = "request.args.get(" , $KEY , ")" ;
-sql_exec    = "cursor.execute(" , $QUERY , ")" ;
-sanitizer   = "escape(" , $X , ")" ;
+```graphql
+# Find pattern matches — query returns the shape you ask for
+query {
+  match(pattern: "print($X)", in: "src/**/*.py") {
+    file
+    line
+    captures { X }
+  }
+}
 
-(* Lint rule — a "violation" production *)
-sqli_violation = user_input , { statement - sanitizer } , sql_exec ;
-(* reads: user_input followed by any statements except sanitizer, then sql_exec *)
+# Symbol lookup with component drilling
+query {
+  symbol(name: "MyClass.method", file: "file.py") {
+    params(index: 0) { name, type, default }
+    returns { type }
+    decorators { name }
+  }
+}
 
-(* Simple find — just a single production *)
-print_call = "print(" , $ARGS , ")" ;
+# Flow analysis — edges in the graph
+query {
+  flow(
+    source: "request.args.get($X)",
+    sink: "cursor.execute($Q)",
+    notThrough: "escape($X)",
+    quantifier: ALL_PATHS
+  ) {
+    source { file, line, captures { X } }
+    sink { file, line }
+    path { steps { file, line, variable } }
+  }
+}
 
-(* Selector — hierarchical grammar *)
-target = file("src/**/*.py") > class("MyClass") > method("test_*") ;
+# Call graph — recursive graph traversal
+query {
+  symbol(name: "dangerous_func") {
+    callers(depth: 3) {
+      name
+      file
+      callers { name }  # nested = transitive
+    }
+  }
+}
 
-(* Transform — production with replacement *)
-print_call -> "logger.info(" , $ARGS , ")" ;
+# Dead code
+query {
+  symbols(in: "src/**", kind: FUNCTION, unreferenced: true) {
+    name
+    file
+    line
+  }
+}
 
-(* Dead code *)
-dead_symbol = symbol(kind="function") - referenced_symbol ;
-
-(* Composition *)
-any_input = user_input | "request.form[" , $X , "]" | "os.environ[" , $X , "]" ;
+# Rewrite via mutation
+mutation {
+  replace(
+    pattern: "print($X)",
+    replacement: "logger.info($X)",
+    in: "src/**/*.py"
+  ) {
+    file
+    line
+    before
+    after
+  }
+}
 ```
 
-### Pros
-- Formal and precise — amenable to analysis and optimization
-- Nonterminal reuse is natural (macros for free)
-- Sequence (`a, b`) and exclusion (`a - b`) map well to flow/sanitizer concepts
-- Familiar to PL/compiler folks
+### Rule files (.emend/rules.graphql)
 
-### Cons
-- EBNF is about string/token sequences, not tree structures — awkward for ASTs
-- Very unfamiliar to most developers outside compiler courses
-- Sequencing in EBNF is linear; code flow is a graph (branches, loops)
-- No natural way to express transitive closure or relational joins
-- Would feel alien as a CLI query language
+```graphql
+# Rules are named queries with violation semantics
+rule @name("no-print") @severity(WARNING) @message("Use logger") {
+  match(pattern: "print($X)") {
+    file, line
+  }
+  fix: replace(replacement: "logger.info($X)")
+}
+
+rule @name("sqli") @severity(ERROR) @message("SQL injection") {
+  flow(
+    source: "request.args.get($X)",
+    sink: "cursor.execute($Q)",
+    notThrough: "escape($X)"
+  ) {
+    source { file, line }
+    sink { file, line }
+  }
+}
+
+# Fragments for reuse (= macros)
+fragment UserInput on Match {
+  match(pattern: "request.args.get($X)") { ... }
+  match(pattern: "request.form[$X]") { ... }
+}
+```
+
+### Why this works
+
+- GraphQL is widely known (unlike Datalog/Prolog)
+- "Request the shape you want" naturally replaces `--output` flags
+- Nesting expresses graph traversal (callers of callers) without explicit
+  recursion syntax
+- Mutations map to rewrites/replacements
+- Directives (`@severity`, `@message`) handle rule metadata
+- Fragments handle macros/reuse
+- The schema *is* the documentation — tools like GraphiQL give
+  auto-complete for free
+- Pattern strings are just argument values — no grammar collision
+
+### Concerns
+
+- GraphQL is read-heavy by design; mutations are second-class. Transform
+  operations would feel bolted on.
+- The query language is optimized for requesting *known shapes* from an API,
+  not for expressing *unknown patterns* in code. The mismatch would show up
+  in complex structural queries.
+- Adding flow semantics to GraphQL's type system is a stretch — `notThrough`
+  and `quantifier` don't have GraphQL equivalents.
+- Overkill for simple `emend find "print($X)"` — forces you to specify
+  return fields.
+- Implementing a GraphQL schema + resolver layer is significant engineering.
 
 ---
 
-## Comparative Summary
+## Proposal 6: "Keep Two Languages, Unify the Rest"
 
-| Criterion | SQL | CSS | Regex-AST | jq/Path | Datalog | Minimal | EBNF |
-|-----------|-----|-----|-----------|---------|---------|---------|------|
-| Familiarity | High | High | Medium | High | Low | High | Low |
-| Pattern matching | Predicate | Pseudo-class | Native | Filter | Predicate | Native | Production |
-| Flow analysis | JOIN/CTE | Combinator | Operator | Pipe | Native | YAML | Sequence |
-| Transitive closure | CTE | Poor | Poor | `recurse` | Native | Datalog | Poor |
-| Transform/rewrite | UPDATE | Declaration | `=>` | Pipe | Annotation | Pattern | `->` |
-| Config ergonomics | Verbose | Medium | Compact | JSON | Verbose | YAML | Verbose |
-| Implementation cost | High | Medium | High | Medium | Low* | Low | High |
+**Inspiration**: The pragmatic observation that emend already has two good
+languages (patterns and selectors) and one powerful backend (Datalog). The
+problem isn't the primitives — it's the *four different YAML schemas* that
+awkwardly re-encode the same concepts. Kill the configs, not the languages.
 
-\* Low because CozoScript already exists in the codebase.
+### Core insight
+
+Trace YAML, lint YAML, and policy YAML are all expressing the same thing:
+"when this pattern/flow/condition holds, report a violation with this message."
+They should be one config format. Meanwhile the GritQL-like query language
+adds a third way to say `--inside` and `--where`, which the CLI flags already
+handle. Remove it. You're left with:
+
+1. **Patterns** — match code shapes (`print($X)`)
+2. **Selectors** — name code locations (`file.py::Class.method[params]`)
+3. **One rule config** — YAML or TOML that references patterns and selectors
+4. **Datalog escape hatch** — for power users, exposed via `emend query`
+
+### The unified rule config (.emend/rules.yaml)
+
+```yaml
+macros:
+  user_input: "request.args.get($X) | request.form[$X]"
+
+rules:
+  # Structural rule (= current lint rule)
+  no-print:
+    match: "print($X)"
+    not-inside: "def test_*"
+    in: "src/**/*.py"
+    severity: warning
+    message: "Use logger instead of print"
+    fix: "logger.info($X)"
+
+  # Flow rule (= current trace config + lint flow rule + policy flow check)
+  sqli:
+    flow:
+      from: "{user_input}"
+      to: "cursor.execute($Q)"
+      not-through: "escape($X)"
+      quantifier: all_paths        # all_paths | some_path
+    in: "src/**/*.py"
+    severity: error
+    message: "SQL injection: user input flows to cursor.execute()"
+
+  # Effect-based flow (= current trace effect sinks)
+  toctou:
+    flow:
+      from: "$Q.first()"
+      to:
+        effect: "writes($OBJ)"
+      scope-boundary: "session.commit()"
+    severity: error
+    message: "TOCTOU: mutation on unlocked ORM object"
+    interprocedural: true
+
+  # Dead code (= current deadcode config)
+  unused-functions:
+    deadcode:
+      kind: function
+      entry-points:
+        decorators: ["app.route", "task"]
+        names: ["main"]
+      exclude-paths: ["tests/", "migrations/"]
+    severity: warning
+    message: "Function appears unused"
+
+  # Type check (= current policy type check)
+  return-types:
+    type-check:
+      selector: "src/**/*.py::*"
+      kind: returns
+      expected: "str | int | None"
+    severity: info
+
+  # Raw Datalog (= current policy custom/datalog check)
+  custom-invariant:
+    datalog: |
+      ?[file, line] :=
+        *symbol[qn, file, _, "function", line, _, _],
+        *reference[qn, file, line, _, "call", _, _]
+    severity: warning
+    message: "Recursive function detected"
+```
+
+### What gets removed
+
+- **Trace YAML** (`trace:` section with `labels:`, `sources:`, `sinks:`,
+  `sanitizers:`, `scope_sanitizers:`) → folded into `flow:` rules above
+- **Policy YAML** (`.emend/policies.yaml` with `policies:` list) → folded
+  into rules above
+- **GritQL query language** (`where { $x <: contains ... }`, `sequential`,
+  `multifile`) → removed entirely; its features map to CLI flags:
+  - `where { $x <: contains P }` → `--inside P`
+  - `where { $x <: imported_from("mod") }` → `--imported-from mod`
+  - `sequential { ... }` → `emend batch`
+  - `P => Q` → `emend replace P Q`
+
+### What stays the same
+
+- `emend find "print($X)"` — unchanged
+- `emend replace "old($X)" "new($X)"` — unchanged
+- `emend search file.py::Class.method` — unchanged
+- `emend refs MyFunc --writes-only` — unchanged
+- `emend lint` — reads from unified rules.yaml instead of patterns.yaml
+- `emend trace` — reads `flow:` rules from rules.yaml, `--preset` still works
+
+### CLI for trace/flow becomes:
+
+```bash
+# Before (separate command with separate config)
+emend trace --config .emend/patterns.yaml --label user_input
+
+# After (lint subsumes trace)
+emend lint --rule sqli
+# or
+emend lint  # runs all rules including flow rules
+```
+
+### Why this works
+
+- Minimal invention: no new language, just one fewer config format
+- Patterns and selectors are untouched
+- The YAML is simpler than any of the three it replaces because it's
+  consistent: every rule has `severity`, `message`, and one of `match:`,
+  `flow:`, `deadcode:`, `type-check:`, or `datalog:`
+- Migration is straightforward: mechanical translation from the old configs
+- The Datalog escape hatch means nothing is lost
+
+### Concerns
+
+- Still two-and-a-half languages (pattern, selector, YAML-with-embedded-patterns)
+- YAML is arguably the wrong format for anything with nesting and quoting
+  (patterns with `$` in YAML strings is already annoying)
+- Users who want the GritQL `where` clause's expressiveness lose it
+- "Lint" as the name for "all checks including taint analysis" is a stretch
+
+---
+
+## Proposal 7: Cypher-Inspired Graph Pattern Language
+
+**Inspiration**: Neo4j Cypher (ASCII-art graph patterns), SPARQL (RDF graph
+queries), the observation that code analysis is fundamentally graph pattern
+matching — not tree matching (patterns) or table joining (SQL).
+
+### Core insight
+
+Code relationships form a graph: `func_a -[calls]-> func_b -[reads]-> var_x`.
+Data flow is a path in that graph. Taint analysis is reachability with
+constraints. What if you could draw the pattern you're looking for?
+
+### Syntax
+
+```cypher
+// Find pattern matches
+MATCH (n:Code)-[:matches]->("print($X)")
+WHERE n.file =~ "src/**/*.py"
+RETURN n.file, n.line, n.captures.X
+
+// Flow analysis — it's just a path pattern!
+MATCH path = (src:Code)-[:flows_to*]->(sink:Code)
+WHERE src matches "request.args.get($X)"
+  AND sink matches "cursor.execute($Q)"
+  AND NONE(n IN nodes(path) WHERE n matches "escape($X)")
+RETURN src, sink, path
+
+// Quantifier: ALL paths must be sanitized
+MATCH path = (src)-[:flows_to*]->(sink)
+WHERE src matches "request.args.get($X)"
+  AND sink matches "cursor.execute($Q)"
+  AND NOT ALL(p IN paths(src, sink)
+              WHERE ANY(n IN nodes(p) WHERE n matches "escape($X)"))
+RETURN src, sink
+
+// Call graph — natural graph traversal
+MATCH (caller:Symbol)-[:calls*1..3]->(target:Symbol {name: "dangerous_func"})
+RETURN caller.name, caller.file
+
+// Dead code
+MATCH (s:Symbol {kind: "function"})
+WHERE NOT (s)<-[:references]-()
+RETURN s.name, s.file, s.line
+
+// Containment
+MATCH (outer:Symbol)-[:contains]->(inner:Code)
+WHERE outer matches "def test_$NAME"
+  AND inner matches "assert $X"
+RETURN outer.name, inner.line
+
+// Rewrite
+MATCH (n:Code)
+WHERE n matches "print($X)"
+SET n.code = "logger.info($X)"
+
+// Scope sanitizer — a path constraint
+MATCH path = (src)-[:flows_to*]->(sink)
+WHERE src matches "$Q.first()"
+  AND sink matches writes("$OBJ")
+  AND NONE(n IN nodes(path) WHERE n matches "session.commit()")
+RETURN src, sink AS toctou_violation
+```
+
+### Rule files
+
+```cypher
+// Rules are named MATCH queries
+CREATE RULE sqli (severity: "error", message: "SQL injection") AS
+MATCH path = (src)-[:flows_to*]->(sink)
+WHERE src matches "request.args.get($X)"
+  AND sink matches "cursor.execute($Q)"
+  AND NONE(n IN nodes(path) WHERE n matches "escape($X)")
+RETURN src.file, src.line, sink.line
+
+CREATE RULE no_print (severity: "warning", message: "Use logger",
+                      fix: "logger.info($X)") AS
+MATCH (n:Code)
+WHERE n matches "print($X)"
+```
+
+### Why this works
+
+- Graph pattern matching is genuinely the right abstraction for code analysis
+- `(a)-[:calls*]->(b)` is more intuitive for transitive closure than SQL CTEs
+  or Datalog recursive rules
+- `NONE(n IN path WHERE ...)` is a *beautiful* way to express "not through" —
+  it reads like English
+- Path variables make taint analysis first-class: the path IS the trace
+- Cypher is gaining adoption (Neo4j, Memgraph, Apache AGE, the GQL ISO standard)
+- Patterns stay as string predicates via `matches`
+
+### Concerns
+
+- Requires a graph database or graph query engine — CozoScript can do some
+  of this but isn't Cypher
+- Cypher's property graph model doesn't perfectly match ASTs (ASTs are trees,
+  not arbitrary graphs; the graph structure is in the *cross-references*)
+- Variable-length path patterns (`*1..3`) have exponential worst cases
+- Mixing ASCII-art graph patterns with code patterns (`"print($X)"`) in the
+  same query is visually noisy
+- The GQL/Cypher ecosystem is fragmented (Neo4j Cypher vs ISO GQL vs openCypher)
+
+---
+
+## Cross-Cutting Observations
+
+**The real tension is between two kinds of query:**
+
+1. **Structural matching** — "find code that looks like X." This is inherently
+   *syntactic* and local. Patterns handle it perfectly.
+
+2. **Relational/graph queries** — "find code where A calls B which reads C and
+   C flows to D." This is inherently *semantic* and global. Patterns can't
+   express it; you need joins, transitive closure, path constraints.
+
+Every proposal above is really a different answer to: *how do you bridge these
+two?* The options are:
+
+- **Patterns as predicates in a relational language** (Proposals 4, 5, 7) —
+  the relational language is primary, patterns are leaf predicates
+- **Relational concepts as operators on patterns** (Proposals 1, 2, 3) —
+  patterns are primary, relations are combinators/stages/operators
+- **Keep them separate, share config** (Proposal 6) — don't bridge, just
+  reduce the config surface
+
+**The YAML configs are the real problem, not the languages.** Trace, lint,
+and policy YAML re-encode the same concepts differently. Merging them into
+one schema (Proposal 6) would eliminate most of the day-to-day confusion
+without any new language design. The other proposals are more ambitious but
+riskier.
+
+**Anything relational should probably just be Datalog.** CozoScript is already
+in the codebase. CodeQL proved that Datalog + code = a winning combination.
+The question is just how much sugar to put on top.
 
 ---
 
 ## Coding-Agent-Friendly Query Syntax (MCP Server)
 
-> **Design constraint**: Human ergonomics are irrelevant. What matters is
+> **Design constraint**: Human ergonomics are irrelevant here. What matters is
 > unambiguous, composable, low-hallucination syntax that an LLM can reliably
 > generate from natural language instructions.
 
 ### What makes a syntax LLM-friendly
 
-1. **JSON-native**: LLMs are heavily trained on JSON. Structured output with
-   known keys is far more reliable than generating novel DSL syntax.
-2. **Flat over nested**: Deeply nested structures increase hallucination.
-   A flat list of clauses is better than recursive grammar.
-3. **Enumerated values over open strings**: `"kind": "function"` is more
-   reliable than remembering arbitrary syntax like `:kind(function)`.
+1. **JSON-native**: LLMs produce JSON with extremely high reliability.
+   Structured output with known keys beats generating any DSL syntax.
+2. **Flat over nested**: Deep nesting increases hallucination rate.
+3. **Enumerated values over open syntax**: `"kind": "function"` is more
+   reliable than remembering `:kind(function)` or `kind="function"` or
+   `kind: function`.
 4. **Explicit keys over positional semantics**: `{"from": "...", "to": "..."}`
-   is better than relying on operand position.
-5. **No escaping puzzles**: Patterns contain quotes, brackets, parens.
-   Embedding them in strings-within-strings is an error magnet.
-6. **Consistent structure**: Every query should have the same shape regardless
-   of what it's doing.
+   beats relying on argument order.
+5. **Pattern strings as opaque values**: Patterns should be string values
+   for a named key. Never embedded inside a larger grammar.
+6. **Consistent shape**: Every query should have the same top-level structure.
+7. **No quoting/escaping puzzles**: Patterns contain `$`, `(`, `)`, `[`, `]`.
+   These must never need escaping in the transport format.
 
-### Proposed MCP query format
+### Proposed format
 
-Every query is a JSON object with a `type` discriminator and flat fields.
+Every MCP tool call is a JSON object with a `type` discriminator and flat,
+optional fields. Patterns are always plain string values.
 
 ```jsonc
-// Find pattern matches
+// Structural search
 {
   "type": "find",
   "pattern": "print($X)",
   "files": "src/**/*.py",
-  "inside": "def $FUNC",           // optional scope constraint
-  "not_inside": "class Test*",     // optional exclusion
-  "kind": "call",                  // optional node kind filter
+  "inside": "def $FUNC",
+  "not_inside": "class Test*",
   "limit": 50
 }
 
@@ -601,31 +876,28 @@ Every query is a JSON object with a `type` discriminator and flat fields.
 {
   "type": "lookup",
   "name": "MyClass.method",
-  "file": "src/app.py",            // optional
-  "kind": "function",              // optional: function, class, method, variable
-  "component": "params",           // optional: params, returns, decorators, bases, body
-  "index": 0                       // optional: component index
+  "file": "src/app.py",
+  "kind": "function",
+  "component": "params",
+  "index": 0
 }
 
-// Replace/transform
+// Replace
 {
   "type": "replace",
   "pattern": "print($X)",
   "replacement": "logger.info($X)",
   "files": "src/**/*.py",
-  "inside": "def $FUNC",
   "apply": true
 }
 
-// Flow/taint query
+// Flow/taint
 {
   "type": "flow",
   "from_pattern": "request.args.get($X)",
   "to_pattern": "cursor.execute($Q)",
-  "not_through": "escape($X)",     // optional
-  "quantifier": "all_paths",       // "all_paths" | "some_path"
-  "label": "user_input",
-  "files": "src/**/*.py",
+  "not_through": "escape($X)",
+  "quantifier": "all_paths",
   "interprocedural": false
 }
 
@@ -633,37 +905,34 @@ Every query is a JSON object with a `type` discriminator and flat fields.
 {
   "type": "refs",
   "symbol": "MyClass.method",
-  "filter": "writes_only",         // "writes_only" | "reads_only" | "calls_only" | null
-  "files": "src/**/*.py"
+  "filter": "writes_only"
 }
 
 // Call graph
 {
   "type": "graph",
   "symbol": "handle_request",
-  "direction": "callers",          // "callers" | "callees" | "both"
-  "depth": 3,                      // max traversal depth
+  "direction": "callers",
+  "depth": 3,
   "transitive": true
 }
 
-// Dead code detection
+// Dead code
 {
   "type": "deadcode",
   "kind": "function",
   "files": "src/**/*.py",
-  "entry_points": {
-    "decorators": ["app.route", "task"],
-    "names": ["main", "cli"]
-  }
+  "entry_point_decorators": ["app.route"],
+  "entry_point_names": ["main"]
 }
 
-// Raw Datalog (escape hatch)
+// Raw Datalog escape hatch
 {
   "type": "datalog",
   "query": "?[name, file, line] := *symbol[name, file, _, kind, line, _, _], kind == 'function'"
 }
 
-// Batch (multiple operations)
+// Batch
 {
   "type": "batch",
   "operations": [
@@ -673,30 +942,30 @@ Every query is a JSON object with a `type` discriminator and flat fields.
 }
 ```
 
-### Why this is what I'd prefer
+### Why I'd prefer this over any of the proposals above
 
-- **I can generate this reliably.** JSON with known keys is in my training
-  distribution billions of times. I almost never hallucinate valid JSON with
-  enumerated fields.
-- **Pattern strings stay opaque.** I don't need to embed patterns inside a
-  larger grammar. The pattern is always a plain string value for a known key.
-- **No syntax to forget.** I don't need to remember whether flow uses `~>`,
-  `=>`, `FLOWS()`, or `:flows-to`. It's just `"from_pattern"` and
-  `"to_pattern"`.
-- **Flat and predictable.** Every query has `type` + a few known optional
-  fields. I can construct it from a template.
-- **Composable without parsing.** `batch` is just an array. No need to figure
-  out sequencing operators.
-- **Self-documenting.** The keys say what they mean. No positional arguments.
-- **Easy to validate.** A JSON Schema can catch my mistakes before execution.
+- **Reliability**: I can produce valid JSON with known keys almost 100% of
+  the time. I cannot reliably produce novel DSL syntax, Cypher, Prolog, or
+  even Datalog — I'd make subtle errors with operator precedence, quoting,
+  and relation arity.
+- **No syntax to confuse**: I don't need to remember whether flow uses `~>`,
+  `->`, `FLOWS()`, `flows_to*`, or `not-through:`. It's just `"from_pattern"`
+  and `"to_pattern"` as JSON keys.
+- **Pattern strings are opaque**: I put the pattern in a string value and
+  don't think about how it interacts with the surrounding grammar. No
+  escaping `$` inside Cypher strings inside JSON.
+- **Schema-validatable**: A JSON Schema can catch my mistakes before execution.
+  This is a tighter feedback loop than "parse error at line 3 column 12."
+- **Discoverable**: An MCP `tools/list` response tells me every available
+  field, its type, and its enum values. I don't need to have memorized a
+  grammar.
 
 ### What I would NOT want
 
-- Having to generate Datalog/CozoScript except as a last resort — the syntax
-  is undertrained in my corpus and I'd make subtle errors with column ordering
-  and relation names.
-- Selector syntax with pseudo-classes — I'd confuse `:returns[str]` with
-  `:type[str]` with `[returns]` constantly.
-- Any syntax where I need to escape patterns inside patterns (regex inside
-  SQL strings inside JSON).
-- Positional arguments where I need to remember argument order.
+- Any syntax requiring me to remember **positional column ordering** (CozoScript
+  relation arities, Prolog term structure).
+- Any syntax where **patterns must be escaped** for embedding (Cypher string
+  literals, SQL string literals, regex inside regex).
+- **Indentation-sensitive** formats where a wrong indent changes semantics.
+- **Multiple equivalent ways** to express the same query (the current problem
+  — I'd pick the wrong one half the time).
