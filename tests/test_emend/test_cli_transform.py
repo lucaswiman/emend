@@ -12,7 +12,7 @@ runner = CliRunner()
 
 
 class TestFindCommand:
-    """Tests for 'search' command (pattern mode)."""
+    """Tests for canonical 'find' pattern mode."""
 
     def test_find_simple_pattern(self, tmp_path):
         """Find a pattern with metavariable."""
@@ -23,7 +23,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should show file:line format
@@ -37,7 +37,7 @@ class TestFindCommand:
             "y = 10\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should indicate no matches (empty output)
@@ -53,7 +53,7 @@ class TestFindCommand:
             "print('test')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file)])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file)])
 
         assert result.exit_code == 0
         # Should show 3 matches (header + code line per match = 6 lines)
@@ -72,14 +72,14 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "count"])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--output", "count"])
 
         assert result.exit_code == 0
         assert "2" in result.stdout
 
     def test_find_nonexistent_file(self, tmp_path):
         """Error when file doesn't exist."""
-        result = runner.invoke(app, ["search", "print($X)", f"{tmp_path}/nonexistent.py"])
+        result = runner.invoke(app, ["find", "print($X)", f"{tmp_path}/nonexistent.py"])
 
         assert result.exit_code != 0
         assert "does not exist" in result.stderr.lower() or "cannot find" in result.stderr.lower() or "error" in result.stderr.lower()
@@ -93,7 +93,7 @@ class TestFindCommand:
             "print('world')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--output", "json"])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--output", "json"])
 
         assert result.exit_code == 0
         # Parse JSON output
@@ -124,7 +124,7 @@ class TestFindCommand:
             "    print('other')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "my_func"])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--where", "my_func"])
 
         assert result.exit_code == 0
         # Should find only the print inside my_func (line 3): header + code = 2 lines
@@ -145,13 +145,65 @@ class TestFindCommand:
             "    print('in func')\n"
         )
 
-        result = runner.invoke(app, ["search", "print($X)", str(test_file), "--where", "MyClass.method"])
+        result = runner.invoke(app, ["find", "print($X)", str(test_file), "--where", "MyClass.method"])
 
         assert result.exit_code == 0
         # Should find only the print inside MyClass.method (line 3): header + code = 2 lines
         lines = result.stdout.strip().split('\n')
         assert len(lines) == 2
         assert ":3" in lines[0]
+
+    def test_find_multiple_files(self, tmp_path):
+        """Canonical find accepts multiple file scopes."""
+        file1 = tmp_path / "a.py"
+        file1.write_text("print('a')\n")
+        file2 = tmp_path / "b.py"
+        file2.write_text("print('b')\n")
+
+        result = runner.invoke(app, ["find", "print($X)", str(file1), str(file2)])
+
+        assert result.exit_code == 0
+        assert f"{file1}:1" in result.stdout
+        assert f"{file2}:1" in result.stdout
+
+    def test_find_within_flag(self, tmp_path):
+        """Canonical find exposes explicit --within."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "def helper():\n"
+            "    print('helper')\n"
+            "def test_case():\n"
+            "    print('match')\n"
+        )
+
+        result = runner.invoke(
+            app,
+            ["find", "--within", "def test_*", "print($X)", str(test_file)],
+        )
+
+        assert result.exit_code == 0
+        assert ":4" in result.stdout
+        assert ":2" not in result.stdout
+
+    def test_find_not_within_flag(self, tmp_path):
+        """Canonical find exposes explicit --not-within."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "def helper():\n"
+            "    print('helper')\n"
+            "class TestCase:\n"
+            "    def case(self):\n"
+            "        print('skip')\n"
+        )
+
+        result = runner.invoke(
+            app,
+            ["find", "--not-within", "class Test*", "print($X)", str(test_file)],
+        )
+
+        assert result.exit_code == 0
+        assert ":2" in result.stdout
+        assert ":5" not in result.stdout
 
 
 class TestReplaceCommand:

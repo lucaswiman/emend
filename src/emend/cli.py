@@ -11,6 +11,7 @@ import typer
 from typing import Annotated
 
 from emend.component_selector import parse_extended_selector
+from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 from emend.transform import (
     find_pattern, replace_pattern,
     find_references, rename_symbol, move_symbol,
@@ -67,6 +68,37 @@ def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool
                 if matches_language(f, language)], True
     else:
         return [path_obj], False
+
+
+def resolve_many_files(
+    paths: list[str] | tuple[str, ...] | None,
+    *,
+    language: str = "python",
+    default: str | None = None,
+) -> tuple[list[Path], bool]:
+    """Resolve multiple file/path arguments into a deduplicated file list."""
+    raw_paths = list(paths or [])
+    if not raw_paths and default is not None:
+        raw_paths = [default]
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    is_multi_file = len(raw_paths) != 1
+    for path in raw_paths:
+        files, path_is_multi = resolve_files(path, language=language)
+        is_multi_file = is_multi_file or path_is_multi or len(files) > 1
+        for file_path in files:
+            file_key = str(file_path)
+            if file_key in seen:
+                continue
+            seen.add(file_key)
+            resolved.append(file_path)
+    return resolved, is_multi_file
+
+
+def resolve_file_scopes(paths: list[str] | None, language: str = "python") -> tuple[list[Path], bool]:
+    """Backward-compatible alias for multiple file scope resolution."""
+    return resolve_many_files(paths, language=language)
 
 
 
@@ -313,10 +345,13 @@ def _print_pattern_match_code(
 # Unified Commands
 # ============================================================================
 
-@app.command("grep")
+@app.command("find")
 def search(
     query: Annotated[str, typer.Argument(help="Pattern with $X metavars, selector (file.py::sym), or file/dir path")],
-    path: Annotated[Optional[str], typer.Argument(help="File, glob, or directory to search (pattern mode)")] = None,
+    files: Annotated[
+        Optional[list[str]],
+        typer.Argument(help="File, glob, or directory scope(s) to search")
+    ] = None,
     kind: Annotated[
         Optional[list[str]],
         typer.Option("--kind", help="Symbol kind filter (function, method, class, async_*)")
@@ -351,6 +386,18 @@ def search(
             "Output format: code, location, selector, summary, metadata, json, count, "
             "summary::flat, code::dedent"
         ))
+    ] = None,
+    within: Annotated[
+        Optional[str],
+        typer.Option("--within", help="Structural containment pattern, e.g. 'def test_*' or 'class MyClass'")
+    ] = None,
+    not_within: Annotated[
+        Optional[str],
+        typer.Option("--not-within", help="Exclude matches inside this structural pattern")
+    ] = None,
+    matching: Annotated[
+        Optional[str],
+        typer.Option("--matching", help="Lookup-mode body pattern or decorator filter, e.g. 'print($X)' or '@app.command'")
     ] = None,
     where: Annotated[
         Optional[list[str]],
@@ -396,6 +443,10 @@ def search(
 ):
     """Unified search: auto-detects pattern matching vs symbol lookup.
 
+    Canonical syntax is::
+
+        emend find [FLAGS] QUERY [FILES...]
+
     The :: separator splits file scope (left) from query (right). The right
     side is auto-detected as a pattern or selector:
     - Contains $ metavariables → pattern mode
@@ -426,29 +477,30 @@ def search(
 
     Examples:
         # Pattern mode (has $):
-        emend search 'print($X)' file.py
-        emend search 'assertEqual($A, $B)' tests/ --output count
+        emend find 'print($X)' file.py
+        emend find 'assertEqual($A, $B)' tests/ --output count
 
         # Pattern mode with file scope (:: separator):
-        emend search '**::print($X)'
-        emend search 'src/::assert False'
-        emend search 'file.py::print()'
+        emend find '**::print($X)'
+        emend find 'src/::assert False'
+        emend find 'file.py::print()'
 
         # Lookup mode (valid selector after ::):
-        emend search file.py::func[params]
-        emend search src/ --kind function --where '@app.command'
+        emend find file.py::func[params]
+        emend find src/ --kind function --matching '@app.command'
 
         # Bare name (auto-detects as symbol search):
-        emend search process_encounter
-        emend search ::MyClass.method
-        emend search MyClass src/
+        emend find process_encounter
+        emend find ::MyClass.method
+        emend find MyClass src/
 
         # Summary mode (list symbols):
-        emend search file.py
-        emend search file.py::MyClass --output summary
-        emend search file.py --output summary::flat
+        emend find file.py
+        emend find file.py::MyClass --output summary
+        emend find file.py --output summary::flat
     """
     import re as _re
+    explicit_files = list(files or [])
 
     # --complete mode: fast typeahead from symbol_index
     if complete is not None:
@@ -472,14 +524,16 @@ def search(
     # --dsl mode: search inside embedded DSL regions
     if dsl is not None:
         from emend.dsl import find_in_dsl
-        target_path = path or query
+        if len(explicit_files) > 1:
+            raise ValueError("--dsl currently accepts at most one file scope.")
+        target_path = explicit_files[0] if explicit_files else query
         _lang = _state["language"]
         _dsl_files, _ = resolve_files(target_path, language=_lang)
 
         # Determine the search pattern
         if "$" in query:
             search_pattern = query
-        elif path is not None:
+        elif explicit_files:
             # query is a literal term to search for in DSL regions
             search_pattern = None  # will use string contains instead
         else:
@@ -488,7 +542,7 @@ def search(
 
         _out = output or "code"
         total_matches = 0
-        _literal_term = query.lower() if search_pattern is None and path is not None else None
+        _literal_term = query.lower() if search_pattern is None and explicit_files else None
 
         for dsl_f in _dsl_files:
             if search_pattern is not None:
@@ -540,6 +594,9 @@ def search(
     where_inside = where_params.get("inside")
     where_not_inside = where_params.get("not_inside")
     where_matching = where_params.get("matching")
+    effective_within = within or where_inside
+    effective_not_within = not_within or where_not_inside
+    effective_matching = matching or where_matching
 
     # Parse --output for :: modifier
     output_base = output
@@ -550,7 +607,7 @@ def search(
         output_modifier = parts[1]
 
     # Detect query shape (shared logic with MCP server)
-    _shape = detect_query_shape(query, path)
+    _shape = detect_query_shape(query, explicit_files[0] if explicit_files else None)
     query = _shape.query
     path = _shape.path
     is_pattern_mode = _shape.is_pattern_mode
@@ -564,7 +621,7 @@ def search(
         if resolved_query and resolved_query != query:
             # Re-detect shape with resolved query
             query = resolved_query
-            _shape = detect_query_shape(query, path)
+            _shape = detect_query_shape(query, explicit_files[0] if explicit_files else None)
             query = _shape.query
             path = _shape.path
             is_pattern_mode = _shape.is_pattern_mode
@@ -577,12 +634,13 @@ def search(
     # rather than the (broken) lookup-mode interpretation.
     # Swap them and activate pattern mode.
     if not is_pattern_mode and not has_selector and not is_line_selector:
-        if where_matching and "$" in where_matching:
+        if effective_matching and "$" in effective_matching:
             _fop = Path(query)
             if _fop.is_dir() or '*' in query or '?' in query:
-                path = query
-                query = where_matching
-                where_matching = None
+                explicit_files = [query]
+                path = None
+                query = effective_matching
+                effective_matching = None
                 is_pattern_mode = True
 
         # Bare name fallback: if query doesn't match a file/dir/glob,
@@ -593,10 +651,12 @@ def search(
                     and '/' not in query
                     and not _is_source_file_query(query)
                     and not ('*' in query or '?' in query)):
-                if path:
-                    _p = Path(path)
-                    file_scope = str(_p / '**') if _p.is_dir() else path
+                scope_hint = explicit_files[0] if explicit_files else path
+                if scope_hint:
+                    _p = Path(scope_hint)
+                    file_scope = str(_p / '**') if _p.is_dir() else scope_hint
                     path = None
+                    explicit_files = []
                 else:
                     file_scope = '**'
                 query = f'{file_scope}::{query}'
@@ -606,13 +666,19 @@ def search(
     lookup_has_decorator: Optional[list[str]] = None
     lookup_in_class: Optional[list[str]] = None
     lookup_matching: Optional[str] = None
-    if where_matching is not None:
-        if where_matching.startswith("@"):
-            lookup_has_decorator = [where_matching[1:]]
+    if effective_matching is not None:
+        if effective_matching.startswith("@"):
+            lookup_has_decorator = [effective_matching[1:]]
         else:
-            lookup_matching = where_matching
-    if where_inside is not None and where_inside.startswith("class "):
-        lookup_in_class = [where_inside[6:].strip()]
+            lookup_matching = effective_matching
+    if effective_within is not None and effective_within.startswith("class "):
+        lookup_in_class = [effective_within[6:].strip()]
+
+    if explicit_files and not is_pattern_mode and len(explicit_files) > 1:
+        raise ValueError("Multiple file scopes are only supported for pattern searches.")
+
+    if explicit_files:
+        path = explicit_files[0] if len(explicit_files) == 1 else None
 
     has_filters = bool(
         kind or name or lookup_has_decorator or returns or lookup_in_class
@@ -762,16 +828,20 @@ def search(
             _lang = _state["language"]
 
             _t0 = _time.monotonic()
-            target_obj = Path(target_path)
-            if target_obj.is_dir() and _lang == "python":
-                # Fast path: get string list directly from Rust, skip Path creation
-                from emend import emend_core
-                file_strs = emend_core.collect_python_files(str(target_obj.resolve()))
-                is_multi_file = True
+            if explicit_files:
+                resolved_files, is_multi_file = resolve_file_scopes(explicit_files, language=_lang)
+                file_strs = [str(f) for f in resolved_files]
             else:
-                files, is_multi_file = resolve_files(target_path, language=_lang)
-                file_strs = [str(f) for f in files]
-            _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, target_path)
+                target_obj = Path(target_path)
+                if target_obj.is_dir() and _lang == "python":
+                    # Fast path: get string list directly from Rust, skip Path creation
+                    from emend import emend_core
+                    file_strs = emend_core.collect_python_files(str(target_obj.resolve()))
+                    is_multi_file = True
+                else:
+                    resolved_files, is_multi_file = resolve_files(target_path, language=_lang)
+                    file_strs = [str(f) for f in resolved_files]
+            _logger.info("resolve_files: %d files in %.3fs (%s)", len(file_strs), _time.monotonic() - _t0, ",".join(explicit_files) if explicit_files else target_path)
 
             # Build a lazy iterator over all matches, yielding as each file completes.
             # This allows streaming output rather than collecting everything first.
@@ -779,8 +849,8 @@ def search(
                 project_matches = find_pattern_in_project(
                     query, file_strs,
                     scope=where_scope,
-                    inside=where_inside,
-                    not_inside=where_not_inside,
+                    inside=effective_within,
+                    not_inside=effective_not_within,
                     imported_from=imported_from,
                     scope_local=scope_local,
                     type_oracle=oracle,
@@ -850,8 +920,11 @@ def search(
             # ---- DSL symbols in scanned files ----
             from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
             _lang = _state["language"]
-            target_path_dsl = path or "."
-            _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
+            if explicit_files:
+                _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
+            else:
+                target_path_dsl = path or "."
+                _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
@@ -912,8 +985,11 @@ def search(
         # ---- DSL symbol overlay ----
         from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
         _lang = _state["language"]
-        _dsl_path = path or file_or_pattern or "."
-        _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
+        if explicit_files:
+            _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
+        else:
+            _dsl_path = path or file_or_pattern or "."
+            _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
         _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
         if _search_term:
             for _dsl_f in _dsl_files:
@@ -941,11 +1017,10 @@ def search(
         raise typer.Exit(1)
 
 
-app.command("query", hidden=True)(search)
+app.command("grep", hidden=True)(search)
 app.command("show", hidden=True)(search)
 app.command("get", hidden=True)(search)
 app.command("lookup", hidden=True)(search)
-app.command("find", hidden=True)(search)
 app.command("search", hidden=True)(search)
 app.command("ls", hidden=True)(search)
 
@@ -1250,11 +1325,19 @@ app.command("insert", hidden=True)(add)
 def replace_cmd(
     pattern: Annotated[str, typer.Argument(help="Pattern to find (e.g., 'print($X)')")],
     replacement: Annotated[str, typer.Argument(help="Replacement pattern (e.g., 'logger.info($X)')")],
-    path: Annotated[str, typer.Argument(help="Python file to modify")],
+    paths: Annotated[list[str], typer.Argument(help="File, glob, or directory scope(s) to modify")],
     apply: Annotated[
         bool,
         typer.Option("--apply", help="Apply changes to file (default is dry-run)")
     ] = False,
+    within: Annotated[
+        Optional[str],
+        typer.Option("--within", help="Only replace inside this structural container")
+    ] = None,
+    not_within: Annotated[
+        Optional[str],
+        typer.Option("--not-within", help="Exclude replacements inside this structural container")
+    ] = None,
     where: Annotated[
         Optional[list[str]],
         typer.Option("--where", help=(
@@ -1272,7 +1355,7 @@ def replace_cmd(
     """Replace pattern matches with replacement in Python file(s).
 
     Supports metavariables like $X, $A, $B in both patterns and replacements.
-    Path can be a file, glob pattern (*.py), or directory (replaces in all .py files recursively).
+    Paths can be files, glob patterns, or directories.
 
     By default, shows a diff without modifying the file (dry-run).
     Use --apply to actually modify the file.
@@ -1289,8 +1372,8 @@ def replace_cmd(
     try:
         where_params = parse_where_clause(where or [])
         scope = where_params.get("scope")
-        inside = where_params.get("inside")
-        not_inside = where_params.get("not_inside")
+        inside = within or where_params.get("inside")
+        not_inside = not_within or where_params.get("not_inside")
 
         # Create TypeOracle when --type-engine is specified or pattern contains
         # oracle constraints (:type[X] / :returns[X]).
@@ -1298,9 +1381,8 @@ def replace_cmd(
         if type_engine is not None or ":type[" in pattern or ":returns[" in pattern:
             oracle = _maybe_create_oracle(type_engine)
 
-        search_path = path
         _lang = _state["language"]
-        files, is_multi_file = resolve_files(search_path, language=_lang)
+        files, is_multi_file = resolve_file_scopes(paths, language=_lang)
 
         # Pre-filter: use Rust matcher to find which files actually have
         # matches, so we only need to process those files.
@@ -1381,7 +1463,7 @@ def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],
     config: Annotated[
         Optional[str],
-        typer.Option("--config", help="Path to patterns.yaml config file")
+        typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml config file")
     ] = None,
     fix: Annotated[
         bool,
@@ -1392,26 +1474,24 @@ def lint_cmd(
         typer.Option("--rule", help="Run only a specific rule by name")
     ] = None,
 ):
-    """Lint files using pattern rules from a YAML config.
+    """Lint files using unified rules from a YAML config.
 
-    Reads rules from .emend/patterns.yaml (or --config path).
+    Reads rules from .emend/rules.yaml by default, falling back to the legacy
+    .emend/patterns.yaml when needed.
     Rules define patterns to find and optional replacements.
 
     Examples:
         emend lint src/
-        emend lint src/ --config .emend/patterns.yaml
+        emend lint src/ --config .emend/rules.yaml
         emend lint src/ --fix
         emend lint src/ --rule no-print
     """
     try:
         from emend.lint import load_rules, run_lint
 
-        # Find config file
-        if config is None:
-            config = ".emend/patterns.yaml"
-        config_path = Path(config)
+        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
         if not config_path.exists():
-            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
         rules, macros, deadcode_config = load_rules(str(config_path))
@@ -1456,12 +1536,9 @@ def _trace_cmd_impl(
     try:
         from emend.trace import load_trace_config, run_trace_analysis, format_violations
 
-        # Find config file
-        if config is None:
-            config = ".emend/patterns.yaml"
-        config_path = Path(config)
+        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
         if not config_path.exists() and preset is None:
-            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
         if config_path.exists():
@@ -1530,7 +1607,7 @@ def _trace_cmd_impl(
 @app.command("trace")
 def trace_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
-    config: Annotated[Optional[str], typer.Option("--config", help="Path to patterns.yaml")] = None,
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml")] = None,
     label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific trace label")] = None,
     trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
@@ -1548,10 +1625,10 @@ def trace_cmd(
     With --interprocedural, tracks values across function boundaries using
     function summaries and fixed-point iteration.
 
-    Configuration is read from the ``trace`` (or ``taint``) section of
-    .emend/patterns.yaml (or the file specified by --config).  Use --preset
-    to load built-in rules for a specific framework (django, flask,
-    sqlalchemy, fastapi, all).
+    Configuration is read from .emend/rules.yaml by default, falling back to
+    the legacy trace section in .emend/patterns.yaml. Use --preset to load
+    built-in rules for a specific framework (django, flask, sqlalchemy,
+    fastapi, all).
 
     Examples:
         emend trace src/
@@ -3357,7 +3434,7 @@ def query_cmd(
 @app.command("policy")
 def policy_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to check")],
-    config: Annotated[Optional[str], typer.Option("--config", help="Path to policies.yaml")] = None,
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy policies.yaml")] = None,
     policy_name: Annotated[Optional[str], typer.Option("--policy", "-p", help="Run only a specific policy")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ):
@@ -3365,22 +3442,23 @@ def policy_cmd(
 
     Policies combine flow analysis, structural checks, type constraints,
     and dead code detection into named, reusable compliance rules loaded
-    from .emend/policies.yaml.
+    from .emend/rules.yaml by default, falling back to .emend/policies.yaml.
 
     Examples:
         emend policy src/
-        emend policy src/ --config .emend/policies.yaml
+        emend policy src/ --config .emend/rules.yaml
         emend policy src/ --policy no-sql-injection
         emend policy src/ --json
     """
     try:
         from emend.policy import load_policies, run_policy_checks, format_policy_violations
 
-        if config is None:
-            config = ".emend/policies.yaml"
-        config_path = Path(config)
+        config_path = resolve_rules_path(
+            config,
+            fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
+        )
         if not config_path.exists():
-            print(f"Error: Config file not found: {config}", file=sys.stderr)
+            print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
         policies = load_policies(str(config_path))
@@ -3394,11 +3472,75 @@ def policy_cmd(
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        violations = run_policy_checks(files, policies, language=_lang)
+        violations = run_policy_checks(files, policies, language=_lang, project_path=path)
 
         output = format_policy_violations(violations, json_output=json_output)
         if output:
             print(output, end='' if not output.endswith('\n') else '')
+
+        if violations:
+            raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@app.command("check")
+def check_cmd(
+    paths: Annotated[Optional[list[str]], typer.Argument(help="File or directory scope(s) to check")] = None,
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,
+    rule_name: Annotated[Optional[str], typer.Option("--rule", help="Run only a specific rule")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", help="Restrict to one rule kind: match, flow, deadcode, type, datalog")] = None,
+    fix: Annotated[bool, typer.Option("--fix", help="Apply auto-fixes for match rules")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+):
+    """Run unified project rules from ``.emend/rules.yaml``."""
+    try:
+        import json as _json
+
+        from emend.checks import run_checks
+
+        _lang = _state["language"]
+        resolved, _ = resolve_file_scopes(paths or ["."], language=_lang)
+        file_paths = [str(f) for f in resolved]
+        project_path = paths[0] if paths else "."
+        violations = run_checks(
+            file_paths,
+            config=config,
+            rule_name=rule_name,
+            kind=kind,
+            fix=fix,
+            language=_lang,
+            project_path=project_path,
+        )
+
+        if json_output:
+            print(_json.dumps([
+                {
+                    "rule": violation.rule_name,
+                    "kind": violation.kind,
+                    "severity": violation.severity,
+                    "message": violation.message,
+                    "file": violation.file_path,
+                    "line": violation.line,
+                    "col": violation.col,
+                    "witness": violation.witness or [],
+                }
+                for violation in violations
+            ], indent=2))
+        else:
+            for violation in violations:
+                print(
+                    f"{violation.file_path}:{violation.line}:{violation.col}: "
+                    f"[{violation.kind}:{violation.rule_name}] {violation.message}"
+                )
+                for witness_line in violation.witness or []:
+                    print(f"  {witness_line}")
 
         if violations:
             raise typer.Exit(1)
@@ -3536,7 +3678,7 @@ def mcp_cmd(
     ] = False,
     profile: Annotated[
         Optional[str],
-        typer.Option("--profile", help="Tool profile: core, refactor, or full (default)")
+        typer.Option("--profile", help="Tool profile: core (default), refactor, expert, or full")
     ] = None,
     tools: Annotated[
         Optional[str],
@@ -3551,9 +3693,10 @@ def mcp_cmd(
         pip install emend[mcp]
 
     Profiles control which tools are exposed:
-        core: search, replace, modify, refs, rename, move, semantic_context, impact, grammar_and_cookbook
-        refactor: core + graph, lint, deadcode
-        full (default): all tools
+        core (default): search, transform/references/analyze/check, grammar_and_cookbook
+        refactor: core + datalog
+        expert: refactor + mappings
+        full: all canonical + legacy compatibility tools
 
     Examples:
         emend mcp
@@ -3565,9 +3708,8 @@ def mcp_cmd(
     tools_list = [t.strip() for t in tools.split(",")] if tools else None
     try:
         if schema:
-            from emend.mcp_server import dump_schema, configure_profile
-            configure_profile(profile=profile, tools=tools_list)
-            print(dump_schema())
+            from emend.mcp_server import dump_schema
+            print(dump_schema(profile=profile, tools=tools_list))
             return
         from emend.mcp_server import run_server
     except ImportError:
