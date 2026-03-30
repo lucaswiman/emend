@@ -4,14 +4,6 @@
 
 ---
 
-## Taint Precision Improvements
-
-Spec: [taint-analysis.md](taint-analysis.md)
-
-- [ ] Object-sensitive dispatch — resolve `obj.method()` by receiver type, not just name
-
----
-
 ## Taint-CFG Precision: Effects, Path Quantifiers, and Temporal Sequences
 
 Spec: [taint-cfg-precision.md](taint-cfg-precision.md)
@@ -59,6 +51,15 @@ better describes the core action: *follow labeled values through code*.
 - [ ] Rename Datalog relations: `taint_flow` → `trace_flow` in CozoDB schema
 - [ ] Rename test files: `test_taint.py` → `test_trace.py`, `test_interprocedural_taint.py` → `test_interprocedural_trace.py`, etc.
 
+#### Object-sensitive dispatch
+
+Resolve `obj.method()` by receiver type using the `type_binding` relation
+(Phase 4) and `type_constraint` field already on sources/sinks/sanitizers.
+
+- [ ] Join `method_call` with `type_binding` in Datalog to resolve receiver types
+- [ ] Filter source/sink/sanitizer pattern matches by receiver `type_constraint`
+- [ ] Add `receiver_type` parameter to `MethodCallFact` (or resolve via join at query time)
+
 #### Simplification from code review
 
 - [ ] Extract `_inline_relation(name, cols, rows)` helper for CozoScript query building (used in `taint_propagation_datalog`, `flow_rule_check_datalog`, `_compile_sequence_query`)
@@ -77,7 +78,6 @@ better describes the core action: *follow labeled values through code*.
 ## Reference Documents
 
 - [taint-cfg-precision.md](taint-cfg-precision.md) — taint-CFG precision: mutation tracking, path sensitivity, type filtering
-- [taint-analysis.md](taint-analysis.md) — deferred taint precision work
 - [query-language-for-code-invariants.md](query-language-for-code-invariants.md) — ongoing witness-quality requirement
 - [relation-to-existing-tools.md](relation-to-existing-tools.md) — positioning vs Semgrep, CodeQL, Pysa
 - [open-questions.md](open-questions.md) — ongoing design trade-offs
