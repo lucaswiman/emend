@@ -14,7 +14,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -35,6 +35,7 @@ class TaintSource:
     """A pattern that introduces taint."""
     pattern: str  # emend pattern string
     label: str  # taint label name
+    type_constraint: str = ""  # e.g. "!int & !float & !bool & !str"
 
 
 @dataclass
@@ -49,6 +50,7 @@ class TaintSink:
     label: str  # taint label name (which labels are forbidden)
     message: str  # violation message
     effect: str = ""  # e.g. "writes($OBJ)", "reads($OBJ)"
+    type_constraint: str = ""  # e.g. "!int & !float"
 
 
 @dataclass
@@ -57,6 +59,7 @@ class TaintSanitizer:
     pattern: str  # emend pattern string
     label: str  # which label is sanitized
     quantifier: str = "all_paths"  # "all_paths" or "some_path"
+    type_constraint: str = ""  # e.g. "!int & !float"
 
 
 @dataclass
@@ -110,6 +113,50 @@ class TaintViolation:
 
 
 # ---------------------------------------------------------------------------
+# Type constraint evaluation
+# ---------------------------------------------------------------------------
+
+
+def evaluate_type_constraint(constraint: str, type_name: str) -> bool:
+    """Evaluate a boolean type constraint against a top-level type name.
+
+    Constraint syntax:
+    - Bare name: matches if ``type_name == name``
+    - ``!name``: negation
+    - ``expr & expr``: conjunction (AND)
+    - ``expr | expr``: disjunction (OR)
+
+    ``&`` binds tighter than ``|``.  Parentheses are not supported.
+    Matching is against the **top-level** type constructor only (e.g.
+    ``int`` matches ``int`` but not ``Optional[int]``).
+
+    Returns ``True`` if the type satisfies the constraint, ``False`` otherwise.
+    An empty constraint always returns ``True``.
+    """
+    constraint = constraint.strip()
+    if not constraint:
+        return True
+
+    # Split on | (OR) — lowest precedence
+    or_parts = [p.strip() for p in constraint.split("|")]
+    return any(_eval_and_expr(part, type_name) for part in or_parts)
+
+
+def _eval_and_expr(expr: str, type_name: str) -> bool:
+    """Evaluate an AND-separated type constraint expression."""
+    and_parts = [p.strip() for p in expr.split("&")]
+    return all(_eval_atom(part, type_name) for part in and_parts)
+
+
+def _eval_atom(atom: str, type_name: str) -> bool:
+    """Evaluate a single type constraint atom (possibly negated)."""
+    atom = atom.strip()
+    if atom.startswith("!"):
+        return type_name != atom[1:].strip()
+    return type_name == atom
+
+
+# ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 
@@ -142,7 +189,10 @@ def load_taint_config(config_path: str) -> TaintConfig:
 
     sources = []
     for s in raw.get("sources", []) or []:
-        sources.append(TaintSource(pattern=s["pattern"], label=s["label"]))
+        sources.append(TaintSource(
+            pattern=s["pattern"], label=s["label"],
+            type_constraint=s.get("type_constraint", ""),
+        ))
 
     sinks = []
     for s in raw.get("sinks", []) or []:
@@ -151,6 +201,7 @@ def load_taint_config(config_path: str) -> TaintConfig:
             label=s["label"],
             message=s.get("message", "Tainted value reaches sink"),
             effect=s.get("effect", ""),
+            type_constraint=s.get("type_constraint", ""),
         ))
 
     sanitizers = []
@@ -158,6 +209,7 @@ def load_taint_config(config_path: str) -> TaintConfig:
         sanitizers.append(TaintSanitizer(
             pattern=s["pattern"], label=s["label"],
             quantifier=s.get("quantifier", "all_paths"),
+            type_constraint=s.get("type_constraint", ""),
         ))
 
     scope_sanitizers = []
@@ -330,6 +382,87 @@ def _find_for_loops(source: str) -> list[tuple[int, str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Type constraint helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_type_constraints(config: TaintConfig) -> bool:
+    """Check if any source/sink/sanitizer has a type_constraint."""
+    for s in config.sources:
+        if s.type_constraint:
+            return True
+    for s in config.sinks:
+        if s.type_constraint:
+            return True
+    for s in config.sanitizers:
+        if s.type_constraint:
+            return True
+    return False
+
+
+def _maybe_create_type_oracle(config: TaintConfig) -> Any | None:
+    """Create a type oracle if any rule has a type_constraint."""
+    if not _has_type_constraints(config):
+        return None
+    try:
+        from emend.type_oracle import create_type_oracle
+        oracle = create_type_oracle(engine="auto")
+        if oracle.is_available():
+            return oracle
+    except Exception:
+        logger.debug("Could not create type oracle for type constraints", exc_info=True)
+    return None
+
+
+def _filter_vars_by_type(
+    vars: set[str],
+    constraint: str,
+    type_oracle: Any,
+    file_path: str,
+    line: int,
+) -> set[str]:
+    """Filter variables by type constraint using the type oracle.
+
+    For each variable, query the type oracle for its inferred type at the
+    given line.  Keep the variable only if its top-level type constructor
+    satisfies the constraint.  Variables whose types cannot be determined
+    are kept (conservative: don't suppress taint when type is unknown).
+    """
+    from emend.type_oracle import parse_type_string, FileTypes
+
+    kept: set[str] = set()
+    try:
+        file_types: FileTypes = type_oracle.infer_file(Path(file_path))
+        file_types.build_index()
+    except Exception:
+        logger.debug("Type oracle failed for %s, keeping all vars", file_path, exc_info=True)
+        return vars
+
+    for var in vars:
+        # Try to find this variable's type binding by name at the right line
+        bindings = file_types.types_for_name(var)
+        type_name = ""
+        if bindings:
+            # Find the binding closest to (at or before) the match line
+            best = None
+            for b in bindings:
+                if b.line <= line:
+                    if best is None or b.line > best.line:
+                        best = b
+            if best is None:
+                best = bindings[0]
+            td = parse_type_string(best.raw_type)
+            type_name = td.name
+        if not type_name:
+            # Unknown type — conservatively keep taint
+            kept.add(var)
+            continue
+        if evaluate_type_constraint(constraint, type_name):
+            kept.add(var)
+    return kept
+
+
+# ---------------------------------------------------------------------------
 # Core taint analysis
 # ---------------------------------------------------------------------------
 
@@ -341,6 +474,7 @@ def _analyze_function(
     config: TaintConfig,
     label_filter: str | None = None,
     language: str = "python",
+    type_oracle: Any | None = None,
 ) -> list[TaintViolation]:
     """Analyze a single function body for taint violations.
 
@@ -425,6 +559,16 @@ def _analyze_function(
                 # Use identifiers from matched text as tainted
                 for ident in _extract_identifiers(match.matched_text):
                     tainted_vars.add(ident)
+
+            # Type constraint check: skip this source if the assignment
+            # target's inferred type does not satisfy the constraint.
+            if src_def.type_constraint and type_oracle and tainted_vars:
+                tainted_vars = _filter_vars_by_type(
+                    tainted_vars, src_def.type_constraint,
+                    type_oracle, file_path, match_line,
+                )
+                if not tainted_vars:
+                    continue
 
             step = TaintTraceStep(
                 file_path=file_path,
@@ -751,6 +895,13 @@ def _analyze_function(
             if match.matched_text:
                 sink_idents |= _extract_qualified_identifiers(match.matched_text)
 
+            # Type constraint on sink: filter idents by type
+            if sink_def.type_constraint and type_oracle and sink_idents:
+                sink_idents = _filter_vars_by_type(
+                    sink_idents, sink_def.type_constraint,
+                    type_oracle, file_path, match_line,
+                )
+
             for ident in sink_idents:
                 if ident in taint_state and sink_def.label in taint_state[ident]:
                     # Build trace
@@ -829,6 +980,9 @@ def run_taint_analysis(
     # Fallback: Python regex-based simulation
     from emend.ast_utils import find_nested_definitions
 
+    # Create type oracle if any rule has a type_constraint
+    type_oracle = _maybe_create_type_oracle(config)
+
     violations: list[TaintViolation] = []
 
     for file_path in paths:
@@ -864,6 +1018,7 @@ def run_taint_analysis(
                 config=config,
                 label_filter=label_filter,
                 language=language,
+                type_oracle=type_oracle,
             )
             violations.extend(func_violations)
 
@@ -885,6 +1040,9 @@ def _run_taint_datalog(
     from emend.transform import _get_or_build_fact_graph
 
     graph = _get_or_build_fact_graph(project_path)
+
+    # Create type oracle for Python-side type constraint filtering
+    type_oracle = _maybe_create_type_oracle(config)
 
     # Pattern-match sources and sinks across all files
     sources: list[tuple[str, str, str, int, str]] = []
@@ -908,9 +1066,15 @@ def _run_taint_datalog(
             for m in matches:
                 if m.line is not None:
                     # Extract variable names from captures
-                    var_names = set()
+                    var_names: set[str] = set()
                     for _cn, ct in m.captures.items():
                         var_names |= _extract_names_from_text(ct)
+                    # Type constraint filtering on sources
+                    if src_def.type_constraint and type_oracle and var_names:
+                        var_names = _filter_vars_by_type(
+                            var_names, src_def.type_constraint,
+                            type_oracle, file_path, m.line or 1,
+                        )
                     for var in var_names:
                         sources.append((file_path, "", var, -1, src_def.label))
 
