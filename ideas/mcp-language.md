@@ -4,8 +4,13 @@
 
 The emend MCP server exposes code analysis and transformation as MCP tools.
 Each tool is named `emend_<verb>` (e.g. `emend_find`, `emend_replace`).
-Parameters are flat JSON objects. Code patterns (e.g. `print($X)`) are always
-passed as plain string values — never parsed by the transport layer.
+Tool parameters are flat JSON objects.
+
+**How tool calls work:** Each tool is invoked by its MCP tool name
+(e.g. `emend_find`). The JSON examples in this document show the
+**parameter objects** passed to each tool. Inside `emend_batch`, child
+operations use a `"type"` field to select which operation to run
+(e.g. `"type": "find"`).
 
 ### Conventions
 
@@ -16,7 +21,8 @@ passed as plain string values — never parsed by the transport layer.
 - **`inside`** and **`not_inside`** parameters accept the same pattern syntax
   as `pattern` (with `$METAVAR` captures), not glob wildcards.
 - All responses are JSON objects. On error: `{"error": "message"}`.
-- Tools that modify code default to dry-run mode (`"apply": false`).
+- `emend_replace` is the only tool that modifies code. It defaults to dry-run
+  mode (`"apply": false`). All other tools are read-only.
 
 ## Pattern Syntax (Quick Reference)
 
@@ -201,12 +207,12 @@ for sanitizer patterns along the path.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `from_pattern` | string | yes* | Source pattern — where tainted data originates |
-| `to_pattern` | string | yes* | Sink pattern — where tainted data must not reach. *Can be omitted if `effect` is provided.* |
+| `from_pattern` | string | no | Source pattern — where tainted data originates. Required unless `preset` is provided. |
+| `to_pattern` | string | no | Sink pattern — where tainted data must not reach. At least one of `to_pattern` or `effect` must be provided (unless `preset` supplies sinks). They are mutually exclusive. |
 | `not_through` | string | no | Sanitizer pattern (path-sensitive). Data flowing through code matching this pattern is considered safe. |
 | `quantifier` | string | no | How sanitizers are evaluated. `"all_paths"` (default): **every** CFG path from source to sink must pass through the sanitizer to suppress the violation — use this for security checks. `"some_path"`: a sanitizer on **any** path suppresses — only for exploratory queries. |
 | `scope_boundary` | string | no | Scope-level sanitizer (path-insensitive). Kills **all** taint within its enclosing scope. Use for framework boundaries like `"session.commit()"` or `"db.flush()"`. Can be combined with `not_through`. |
-| `effect` | string | no | Effect-based sink — alternative to `to_pattern`. Detects when a tainted variable is mutated. Syntax: `"writes($VAR)"` or `"reads($VAR)"`. `$VAR` matches any tainted variable or its attributes. |
+| `effect` | string | no | Effect-based sink — alternative to `to_pattern` (mutually exclusive). Detects when a tainted variable is mutated or read. Syntax: `"writes($VAR)"` or `"reads($VAR)"`. `$VAR` is not a reference to a captured metavar — it matches the tainted value propagated from the source, including attribute access (e.g. `obj.field = ...` matches `writes($VAR)` if `obj` is tainted). Only one effect type per query. |
 | `files` | string | no | File glob scope |
 | `interprocedural` | boolean | no | Enable cross-function analysis with fixed-point iteration. Default: `false` |
 | `label` | string | no | Taint label name. Tags output for grouping. Optional for single-query use; required when composing multiple flow rules in batch. |
@@ -303,7 +309,7 @@ Find symbols that appear to be unreferenced.
 | `entry_point_names` | string[] | no | Function names that are entry points |
 | `exclude_paths` | string[] | no | Glob patterns for paths to exclude from analysis |
 | `include_private` | boolean | no | Include `_private` symbols. Default: `false` |
-| `output` | string | no | Output format. One of: `text`, `json`. Default: `text` |
+| `output` | string | no | One of: `text`, `json`. Default: `json` |
 
 **Example:**
 
@@ -314,7 +320,7 @@ Find symbols that appear to be unreferenced.
   "files": "src/**/*.py",
   "entry_point_decorators": ["app.route", "celery.task"],
   "entry_point_names": ["main", "cli"],
-  "exclude_paths": ["tests/", "migrations/"]
+  "exclude_paths": ["tests/**", "migrations/**"]
 }
 ```
 
@@ -334,7 +340,7 @@ the impacted sets are unioned.
 |------|------|----------|-------------|
 | `symbol` | string | no | Symbol that changed |
 | `diff_ref` | string | no | Git ref to diff against (e.g. `"HEAD~1"`, `"main"`). emend runs `git diff` internally to identify changed symbols. |
-| `output` | string | no | `"symbols"`: all impacted symbols. `"tests"`: only impacted tests. `"graph"`: full impact graph with witness edges. Default: `"json"` |
+| `output` | string | no | `"symbols"` (default): all impacted symbols. `"tests"`: only impacted tests. `"graph"`: full impact graph with witness edges. All outputs are JSON-encoded. |
 | `max_depth` | integer | no | Maximum reverse-caller traversal depth. Default: unlimited |
 
 **Example:**
@@ -524,6 +530,8 @@ as an MCP tool — see "Not Yet Exposed" below).
 
 Not all tools support all formats. Default is `json` for all tools.
 
+**Serialization formats** (control how data is encoded):
+
 | Format | Meaning | Supported by |
 |--------|---------|-------------|
 | `json` | Structured JSON | all tools |
@@ -533,11 +541,16 @@ Not all tools support all formats. Default is `json` for all tools.
 | `summary` | Symbol tree with signatures | lookup |
 | `metadata` | Per-symbol details (lines, kind, decorators) | lookup |
 | `count` | Integer count of matches | find |
-| `text` | Human-readable text | graph, deadcode |
+| `text` | Human-readable plain text | graph, deadcode |
 | `dot` | Graphviz DOT format | graph |
-| `tests` | Impacted test symbols only | impact |
-| `symbols` | Impacted symbol list | impact |
-| `graph` | Impact graph with witness edges | impact |
+
+**Scope selectors** (control what `emend_impact` returns — always JSON-encoded):
+
+| Value | Meaning |
+|-------|---------|
+| `symbols` | All transitively impacted symbols (default) |
+| `tests` | Only impacted test symbols |
+| `graph` | Full impact graph with witness edges |
 
 ## Not Yet Exposed
 
