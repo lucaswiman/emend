@@ -441,6 +441,19 @@ _FACTS_SCHEMA = """\
     symbol_qn: String,
     decorator: String
 }}
+
+{:ensure ref_by_block {
+    file_path: String,
+    func_qn: String,
+    block_id: Int,
+    symbol_qn: String
+}}
+
+{:ensure reachable_block {
+    file_path: String,
+    func_qn: String,
+    block_id: Int
+}}
 """
 
 
@@ -528,6 +541,10 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm source_loc {fp, lk, lid => }",
         "?[fp, im, iname, line] := *import[fp, im, iname, line, _], "
         "fp == $fp  :rm import {fp, im, iname, line => }",
+        "?[fp, fq, bid, sq] := *ref_by_block[fp, fq, bid, sq], "
+        "fp == $fp  :rm ref_by_block {fp, fq, bid, sq}",
+        "?[fp, fq, bid] := *reachable_block[fp, fq, bid], "
+        "fp == $fp  :rm reachable_block {fp, fq, bid}",
     ):
         try:
             fdb.run(query, {"fp": file_path})
@@ -720,6 +737,7 @@ def _populate_facts_db(project_root: str) -> None:
         all_method_calls: list[list] = []
         all_source_locs: list[list] = []
         all_imports: list[list] = []
+        all_ref_by_block: list[list] = []
 
         resolver_root = resolved_root
 
@@ -793,6 +811,14 @@ def _populate_facts_db(project_root: str) -> None:
 
             block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
 
+            # -- source_loc entries for blocks (for unreachable block reporting)
+            for func_qn_br, bid_br, start_line_br, end_line_br in block_ranges:
+                if start_line_br > 0:
+                    all_source_locs.append([
+                        rel_path, "block", f"{func_qn_br}:{bid_br}",
+                        start_line_br, 0, end_line_br, 0,
+                    ])
+
             # -- Block-tagged references, calls, method_calls
             symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
             file_refs = refs_by_file.get(file_path_raw, [])
@@ -801,6 +827,9 @@ def _populate_facts_db(project_root: str) -> None:
                 tqn, _fp, line, col, kind = r[0], r[1], r[2], r[3], r[4]
                 fq, bid = _find_containing_block(block_ranges, line)
                 all_fg_refs.append([tqn, rel_path, line, col, kind, fq, bid])
+                # ref_by_block: only for refs with real block data
+                if fq and bid >= 0:
+                    all_ref_by_block.append([rel_path, fq, bid, tqn])
 
                 if kind == "call":
                     caller = _enclosing_symbol(symbol_ranges, line)
@@ -861,6 +890,31 @@ def _populate_facts_db(project_root: str) -> None:
                         imp.alias or "",
                     ])
 
+        # -- Compute reachable blocks via BFS from entry blocks
+        entries_by_func: dict[tuple[str, str], set[int]] = {}
+        adj: dict[tuple[str, str, int], list[int]] = {}
+        for row in all_cfg_blocks:
+            fp, fq, bid, is_entry, _ = row
+            if is_entry:
+                entries_by_func.setdefault((fp, fq), set()).add(bid)
+        for row in all_cfg_edges:
+            fp, fq, fb, tb = row[0], row[1], row[2], row[3]
+            adj.setdefault((fp, fq, fb), []).append(tb)
+
+        all_reachable: list[list] = []
+        for (fp, fq), entry_set in entries_by_func.items():
+            visited: set[int] = set()
+            stack = list(entry_set)
+            while stack:
+                bid = stack.pop()
+                if bid in visited:
+                    continue
+                visited.add(bid)
+                all_reachable.append([fp, fq, bid])
+                for nb in adj.get((fp, fq, bid), []):
+                    if nb not in visited:
+                        stack.append(nb)
+
         # -- Batch CozoDB writes using :replace for atomic swap
         fdb.run(
             "?[sq, fp, line, col, kind, fq, bid] <- $rows "
@@ -910,6 +964,18 @@ def _populate_facts_db(project_root: str) -> None:
             "?[importing_file, imported_module, imported_name, line, alias] <- $rows "
             ":replace import {importing_file, imported_module, imported_name, line => alias}",
             {"rows": all_imports},
+        )
+
+        fdb.run(
+            "?[fp, fq, bid, sq] <- $rows "
+            ":replace ref_by_block {fp, fq, bid, sq}",
+            {"rows": all_ref_by_block},
+        )
+
+        fdb.run(
+            "?[fp, fq, bid] <- $rows "
+            ":replace reachable_block {fp, fq, bid}",
+            {"rows": all_reachable},
         )
 
         conn.close()
@@ -4837,6 +4903,16 @@ class DeadSymbol:
     last_reference_commit: str | None = None  # git commit that last touched this symbol
 
 
+@dataclass
+class DeadBlock:
+    """An unreachable code block detected as dead code."""
+    file_path: str
+    func_qn: str
+    block_id: int
+    start_line: int
+    end_line: int
+
+
 # Decorator prefixes that indicate a symbol is an entry point / framework hook
 _ENTRY_POINT_DECORATORS = frozenset({
     'app.command', 'app.route', 'app.get', 'app.post', 'app.put',
@@ -5882,7 +5958,7 @@ def find_dead_code(
     entry_point_decorators: list[str] | None = None,
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
-) -> Iterator[DeadSymbol]:
+) -> Iterator[DeadSymbol | DeadBlock]:
     """Find potentially dead (unreferenced) code in a project.
 
     Uses ``dead_code_unified()`` Datalog query over the FactGraph for
@@ -5914,7 +5990,8 @@ def find_dead_code(
             Symbols defined in these paths are never reported.
 
     Yields:
-        DeadSymbol objects sorted by file path and line number.
+        DeadBlock items for unreachable code blocks, then DeadSymbol objects
+        sorted by file path and line number.
     """
     t0 = time.monotonic()
     scan_root = str(Path(project_path).resolve())
@@ -5958,7 +6035,7 @@ def find_dead_code(
                     rel = resolved
                 excl_ref_paths.append(rel)
 
-    raw_dead = graph.dead_code_unified(
+    raw_dead, raw_unreachable = graph.dead_code_unified(
         entry_point_decorators=all_ep_decorators + all_ep_basenames,
         entry_point_names=all_ep_names,
         exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
@@ -6040,6 +6117,39 @@ def find_dead_code(
         "dead_code: %d dead symbols in %.3fs",
         len(dead_symbols), time.monotonic() - t0,
     )
+
+    # Yield unreachable blocks first
+    for ub in raw_unreachable:
+        abs_fp = (
+            str(Path(project_root_resolved) / ub.file_path)
+            if not Path(ub.file_path).is_absolute()
+            else ub.file_path
+        )
+        # Look up block line range from source_loc
+        try:
+            loc_result = graph._client.run(
+                '?[line, end_line] := *source_loc[$fp, "block", $loc_id, line, _, end_line, _]',
+                {"fp": ub.file_path, "loc_id": f"{ub.func_qn}:{ub.block_id}"},
+            )
+            if loc_result["rows"]:
+                start_line = loc_result["rows"][0][0]
+                end_line = loc_result["rows"][0][1]
+            else:
+                continue  # Skip blocks without line info
+        except Exception:
+            continue
+
+        # Skip blocks with no real lines
+        if start_line <= 0:
+            continue
+
+        yield DeadBlock(
+            file_path=abs_fp,
+            func_qn=ub.func_qn,
+            block_id=ub.block_id,
+            start_line=start_line,
+            end_line=end_line,
+        )
 
     if show_last_reference and dead_symbols:
         from concurrent.futures import ThreadPoolExecutor

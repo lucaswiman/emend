@@ -774,7 +774,7 @@ class TestDeadCodeUnified:
 
     def test_unified_finds_unreferenced(self):
         g = _make_graph_with_cfg()
-        dead = g.dead_code_unified()
+        dead, _ = g.dead_code_unified()
         dead_qns = {s.qualified_name for s in dead}
         # app.helper is called but only from block 2 which is in the graph
         # lib.MyClass.__init__ has no reference and is not a dunder entry point
@@ -785,14 +785,14 @@ class TestDeadCodeUnified:
     def test_unified_respects_entry_point_decorators(self):
         g = _make_graph_with_cfg()
         g.add_entry_point_decorator(EntryPointDecoratorFact("app.route"))
-        dead = g.dead_code_unified(entry_point_decorators=["app.route"])
+        dead, _ = g.dead_code_unified(entry_point_decorators=["app.route"])
         dead_qns = {s.qualified_name for s in dead}
         # app.main has @app.route, so it's an entry point
         assert "app.main" not in dead_qns
 
     def test_unified_dunders_are_entry_points(self):
         g = _make_graph_with_cfg()
-        dead = g.dead_code_unified()
+        dead, _ = g.dead_code_unified()
         dead_qns = {s.qualified_name for s in dead}
         # __init__ is a dunder, so it's an entry point
         assert "lib.MyClass.__init__" not in dead_qns
@@ -801,7 +801,7 @@ class TestDeadCodeUnified:
         g = FactGraph()
         g.add_symbol(SymbolFact("a.py", "main", "a.main", "function", 1, 5, None))
         g.add_symbol(SymbolFact("a.py", "unused", "a.unused", "function", 7, 10, None))
-        dead = g.dead_code_unified(entry_point_names=["main"])
+        dead, _ = g.dead_code_unified(entry_point_names=["main"])
         dead_qns = {s.qualified_name for s in dead}
         assert "a.main" not in dead_qns
         assert "a.unused" in dead_qns

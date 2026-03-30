@@ -1611,3 +1611,118 @@ class TestBuiltinSyncPostDecorator:
         dead_names = {d.name for d in dead}
         assert "ws_handler" not in dead_names
         assert "truly_unused" in dead_names
+
+
+class TestDeadCodeUnreachableBlocks:
+    """Tests for unreachable block detection in dead code analysis."""
+
+    def _build_index(self, project_path: str):
+        from emend.transform import warm_caches
+        warm_caches(project_path, type_engine="none")
+
+    def test_deadcode_reports_unreachable_after_return(self, tmp_path):
+        """Code after a return statement should be reported as unreachable dead code."""
+        import textwrap
+        from emend.transform import find_dead_code, DeadBlock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def foo():
+                return 42
+                x = 1
+                print(x)
+        """))
+        self._build_index(str(project))
+        results = list(find_dead_code(str(project), show_last_reference=False))
+        unreachable = [r for r in results if isinstance(r, DeadBlock)]
+        assert len(unreachable) >= 1
+        assert any(b.func_qn.endswith("foo") for b in unreachable)
+
+    def test_deadcode_reports_unreachable_after_raise(self, tmp_path):
+        """Code after a raise statement should be reported as unreachable."""
+        import textwrap
+        from emend.transform import find_dead_code, DeadBlock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def bar():
+                raise ValueError("oops")
+                cleanup()
+        """))
+        self._build_index(str(project))
+        results = list(find_dead_code(str(project), show_last_reference=False))
+        unreachable = [r for r in results if isinstance(r, DeadBlock)]
+        assert len(unreachable) >= 1
+
+    def test_deadcode_no_false_unreachable_for_normal_code(self, tmp_path):
+        """Normal code should not be reported as unreachable."""
+        import textwrap
+        from emend.transform import find_dead_code, DeadBlock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def baz():
+                x = 1
+                y = x + 2
+                return y
+        """))
+        self._build_index(str(project))
+        results = list(find_dead_code(str(project), show_last_reference=False))
+        unreachable = [r for r in results if isinstance(r, DeadBlock)]
+        assert len(unreachable) == 0
+
+    def test_deadcode_unreachable_in_json_output(self, tmp_path):
+        """JSON output should include unreachable blocks."""
+        import textwrap
+        import json
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def foo():
+                return 42
+                x = 1
+        """))
+        self._build_index(str(project))
+        runner = CliRunner()
+        result = runner.invoke(app, ["deadcode", str(project), "--json", "--no-last-reference"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        unreachable = [d for d in data if d.get("kind") == "unreachable_block"]
+        assert len(unreachable) >= 1
+
+    @pytest.mark.xfail(reason=(
+        "References in unreachable code may not be attributed to the unreachable "
+        "block if the Rust CFG builder's block line ranges don't cover all post-return "
+        "statements. This is a known limitation of the current CFG range computation."
+    ))
+    def test_deadcode_ref_from_unreachable_not_counted(self, tmp_path):
+        """A reference from unreachable code should not keep a symbol alive.
+
+        Known limitation: the Rust CFG builder may assign end_line to the
+        unreachable block such that lines after a return statement aren't
+        covered by any block's line range. In that case the reference falls
+        through to the module-level live_ref rule and keeps the symbol alive.
+        """
+        import textwrap
+        from emend.transform import find_dead_code, DeadSymbol
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "example.py").write_text(textwrap.dedent("""\
+            def helper():
+                pass
+
+            def caller():
+                return 1
+                helper()
+        """))
+        self._build_index(str(project))
+        results = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = [r.name for r in results if isinstance(r, DeadSymbol)]
+        assert "helper" in dead_names

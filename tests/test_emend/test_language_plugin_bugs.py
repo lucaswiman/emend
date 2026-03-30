@@ -442,7 +442,7 @@ class TestFindSourceRootLanguageThreading:
         from emend.transform import find_dead_code
 
         mock_graph = MagicMock()
-        mock_graph.dead_code_unified.return_value = []
+        mock_graph.dead_code_unified.return_value = ([], [])
 
         with patch("emend.transform._get_or_build_fact_graph", return_value=mock_graph):
             with patch("emend.transform._find_project_root", return_value=str(tmp_path)):

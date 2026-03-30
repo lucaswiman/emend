@@ -18,6 +18,7 @@ from emend.transform import (
     find_callers, generate_graph, find_dead_code, find_impact,
     extract_pattern_literals, warm_caches,
     find_pattern_in_project, safe_delete,
+    DeadBlock,
 )
 from emend import ast_commands
 
@@ -2274,16 +2275,26 @@ def dead_code_cmd(
             # JSON mode: must collect all results before printing
             data = []
             for d in results:
-                entry = {
-                    "file_path": d.file_path,
-                    "name": d.name,
-                    "kind": d.kind,
-                    "line": d.line,
-                    "selector": d.selector,
-                    "reason": d.reason,
-                }
-                if d.last_reference_commit:
-                    entry["last_reference_commit"] = d.last_reference_commit
+                if isinstance(d, DeadBlock):
+                    entry = {
+                        "file_path": d.file_path,
+                        "func_qn": d.func_qn,
+                        "kind": "unreachable_block",
+                        "start_line": d.start_line,
+                        "end_line": d.end_line,
+                        "reason": "unreachable code",
+                    }
+                else:
+                    entry = {
+                        "file_path": d.file_path,
+                        "name": d.name,
+                        "kind": d.kind,
+                        "line": d.line,
+                        "selector": d.selector,
+                        "reason": d.reason,
+                    }
+                    if d.last_reference_commit:
+                        entry["last_reference_commit"] = d.last_reference_commit
                 data.append(entry)
             if not data:
                 print("[]")
@@ -2293,9 +2304,13 @@ def dead_code_cmd(
         else:
             count = 0
             for d in results:
-                line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
-                if d.last_reference_commit:
-                    line += f"\n    last commit: {d.last_reference_commit}"
+                if isinstance(d, DeadBlock):
+                    func_name = d.func_qn.rsplit(".", 1)[-1] if "." in d.func_qn else d.func_qn
+                    line = f"{d.file_path}:{d.start_line}-{d.end_line}  unreachable block in {func_name}()"
+                else:
+                    line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
+                    if d.last_reference_commit:
+                        line += f"\n    last commit: {d.last_reference_commit}"
                 print(line, flush=True)
                 count += 1
             if count == 0:

@@ -372,6 +372,19 @@ _SCHEMA_INIT = """\
 {:create entry_point_decorator { decorator: String }}
 
 {:create entry_point_name { name: String }}
+
+{:create ref_by_block {
+    file_path: String,
+    func_qn: String,
+    block_id: Int,
+    symbol_qn: String
+}}
+
+{:create reachable_block {
+    file_path: String,
+    func_qn: String,
+    block_id: Int
+}}
 """
 
 
@@ -1157,7 +1170,7 @@ class FactGraph:
         entry_point_names: list[str] | None = None,
         exclude_reference_paths: list[str] | None = None,
         exclude_reference_segments: list[str] | None = None,
-    ) -> list[SymbolFact]:
+    ) -> tuple[list[SymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
         Combines unreachable-block analysis with unreferenced-symbol detection
@@ -1166,7 +1179,7 @@ class FactGraph:
         1. Computes reachable blocks via transitive closure from CFG entry blocks
         2. Only counts references from reachable code as "live"
         3. Applies entry point heuristics (dunders, test_, decorators) as Datalog rules
-        4. Returns symbols with no live references that are not entry points
+        4. Returns a tuple of (dead symbols, unreachable blocks).
 
         String literal filtering stays as a Python post-filter (caller's responsibility).
         """
@@ -1201,19 +1214,12 @@ class FactGraph:
             excl_clauses = ", " + ", ".join(excl_parts)
 
         query = (
-            # Reachable blocks (transitive closure from entry)
-            "reachable[fp, fq, bid] := "
-            "*cfg_block[fp, fq, bid, is_entry, _], is_entry == true\n"
-
-            "reachable[fp, fq, tb] := "
-            "reachable[fp, fq, fb], "
-            "*cfg_edge[fp, fq, fb, tb, _, _, _]\n"
-
-            # Live references: from reachable code (exclude self-references
-            # where the reference target is the containing function itself)
+            # Live references: from reachable code via pre-computed relations
+            # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
+            # reachable_block keyed on (fp, fq, bid))
             "live_ref[sq] := "
-            "*reference[sq, fp, _, _, _, fq, bid], "
-            "reachable[fp, fq, bid], "
+            "*ref_by_block[fp, fq, bid, sq], "
+            "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
 
             # Live references: from module level (no function context)
@@ -1264,7 +1270,7 @@ class FactGraph:
         )
 
         result = self._client.run(query)
-        return [
+        dead_symbols = [
             SymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
                 kind=r[3], line=r[4], end_line=r[5],
@@ -1272,6 +1278,32 @@ class FactGraph:
             )
             for r in result["rows"]
         ]
+
+        # Query for unreachable blocks (non-exit blocks not reachable from entry)
+        unreachable_query = (
+            "unreachable[fp, fq, bid] := "
+            "*cfg_block[fp, fq, bid, _, is_exit], "
+            "is_exit == false, "
+            "not *reachable_block[fp, fq, bid]\n"
+
+            "?[fp, fq, bid, ie, ix] := "
+            "unreachable[fp, fq, bid], "
+            "*cfg_block[fp, fq, bid, ie, ix]"
+        )
+
+        try:
+            unreachable_result = self._client.run(unreachable_query)
+            unreachable_blocks = [
+                CfgBlockFact(
+                    file_path=r[0], func_qn=r[1], block_id=r[2],
+                    is_entry=r[3], is_exit=r[4],
+                )
+                for r in unreachable_result["rows"]
+            ]
+        except Exception:
+            unreachable_blocks = []
+
+        return dead_symbols, unreachable_blocks
 
     def unreachable_blocks_datalog(self, func_qn: str | None = None) -> list[CfgBlockFact]:
         """Find unreachable CFG blocks via Datalog.
@@ -2392,6 +2424,20 @@ class FactGraph:
 
             graph.add_cfg_blocks_batch(cfg_block_facts)
             graph.add_cfg_edges_batch(cfg_edge_facts)
+
+            # Store source_loc entries for blocks so unreachable block reporting
+            # can look up start/end lines without scanning file content again.
+            block_loc_facts: list[SourceLocFact] = []
+            for func_qn_br, bid_br, start_line_br, end_line_br in block_ranges:
+                if start_line_br > 0:
+                    block_loc_facts.append(SourceLocFact(
+                        file_path=rel_path,
+                        loc_kind="block",
+                        loc_id=f"{func_qn_br}:{bid_br}",
+                        line=start_line_br,
+                        end_line=end_line_br,
+                    ))
+            graph.add_source_locs_batch(block_loc_facts)
 
             # Sort block_ranges for lookup: innermost (smallest range) first
             block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
