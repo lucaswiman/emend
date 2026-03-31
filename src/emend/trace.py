@@ -1625,6 +1625,21 @@ def _collect_functions(
     return result
 
 
+def _collect_function_descriptors(
+    symbols: list,
+) -> list[tuple[tuple[str, ...], int, int, str]]:
+    """Recursively collect ``(path, start_line, end_line, kind)`` for functions."""
+    result: list[tuple[tuple[str, ...], int, int, str]] = []
+    for sym in symbols:
+        if sym.kind in ("function", "async_function", "method", "async_method"):
+            raw_path = tuple(getattr(sym, "path", ()) or ())
+            path = raw_path or (sym.name,)
+            result.append((path, sym.line_start, sym.line_end, sym.kind))
+        if hasattr(sym, "children") and sym.children:
+            result.extend(_collect_function_descriptors(sym.children))
+    return result
+
+
 def _collect_module_level_ranges(
     symbols: list,
     total_lines: int,
@@ -1659,6 +1674,52 @@ def _collect_module_level_ranges(
     if cursor <= total_lines:
         module_ranges.append((cursor, total_lines))
     return module_ranges
+
+
+def _format_interprocedural_qn(file_path: str, path: tuple[str, ...]) -> str:
+    """Build a stable interprocedural summary key from a symbol path."""
+    return f"{file_path}::{'::'.join(path)}"
+
+
+def _select_interprocedural_callee_qns(
+    caller_qn: str,
+    callee_name: str,
+    *,
+    name_to_qn: dict[str, list[str]],
+    func_paths: dict[str, tuple[str, ...]],
+    func_kinds: dict[str, str],
+    include_methods: bool,
+) -> list[str]:
+    """Resolve bare call names against the nearest lexical scope.
+
+    This prevents sibling nested functions with the same short name from
+    sharing summaries purely because they live in the same file.
+    """
+    candidates = name_to_qn.get(callee_name, [])
+    if not candidates:
+        return []
+
+    if not include_methods:
+        candidates = [
+            qn for qn in candidates
+            if func_kinds.get(qn) in {"function", "async_function"}
+        ]
+        if not candidates:
+            return []
+
+    caller_path = func_paths.get(caller_qn, ())
+    scope_path = caller_path
+    while True:
+        scoped = [
+            qn for qn in candidates
+            if func_paths.get(qn, ())[:-1] == scope_path
+        ]
+        if scoped:
+            return scoped
+        if not scope_path:
+            break
+        scope_path = scope_path[:-1]
+    return []
 
 
 def format_violations(
@@ -1981,6 +2042,8 @@ def run_interprocedural_trace_analysis(
     # ------------------------------------------------------------------
     # func_info: qn -> (file_path, source, func_start, func_end, param_names)
     func_info: dict[str, tuple[str, str, int, int, list[str]]] = {}
+    func_paths: dict[str, tuple[str, ...]] = {}
+    func_kinds: dict[str, str] = {}
     file_sources: dict[str, str] = {}
 
     for file_path in paths:
@@ -2001,12 +2064,13 @@ def run_interprocedural_trace_analysis(
             logger.debug("Could not parse %s", file_path, exc_info=True)
             continue
 
-        functions = _collect_functions(symbols)
-        for func_name, func_start, func_end in functions:
+        functions = _collect_function_descriptors(symbols)
+        for func_path, func_start, func_end, func_kind in functions:
             params = _collect_function_params(source, func_start, func_end)
-            # Use file_path::func_name as qualified name
-            qn = f"{file_path}::{func_name}"
+            qn = _format_interprocedural_qn(file_path, func_path)
             func_info[qn] = (file_path, source, func_start, func_end, params)
+            func_paths[qn] = func_path
+            func_kinds[qn] = func_kind
 
     # Compute initial summaries
     summaries: dict[str, FunctionSummary] = {}
@@ -2028,7 +2092,7 @@ def run_interprocedural_trace_analysis(
     # Build a reverse map from short function name -> list of qns
     name_to_qn: dict[str, list[str]] = {}
     for qn in func_info:
-        short_name = qn.rsplit("::", 1)[-1]
+        short_name = func_paths.get(qn, ())[-1]
         if short_name not in name_to_qn:
             name_to_qn[short_name] = []
         name_to_qn[short_name].append(qn)
@@ -2103,7 +2167,14 @@ def run_interprocedural_trace_analysis(
                                     if a.strip()
                                 ]
                                 # Look up callee summaries
-                                callee_qns = name_to_qn.get(callee_name, [])
+                                callee_qns = _select_interprocedural_callee_qns(
+                                    qn,
+                                    callee_name,
+                                    name_to_qn=name_to_qn,
+                                    func_paths=func_paths,
+                                    func_kinds=func_kinds,
+                                    include_methods=False,
+                                )
                                 for callee_qn in callee_qns:
                                     callee_summary = summaries.get(callee_qn)
                                     if not callee_summary:
@@ -2292,7 +2363,14 @@ def run_interprocedural_trace_analysis(
                         for a in args_m.group(1).split(",")
                         if a.strip()
                     ]
-                    for callee_qn in name_to_qn.get(callee_name, []):
+                    for callee_qn in _select_interprocedural_callee_qns(
+                        caller_qn,
+                        callee_name,
+                        name_to_qn=name_to_qn,
+                        func_paths=func_paths,
+                        func_kinds=func_kinds,
+                        include_methods=False,
+                    ):
                         callee_summary = summaries.get(callee_qn)
                         if not callee_summary:
                             continue
@@ -2422,7 +2500,14 @@ def run_interprocedural_trace_analysis(
                 args_str = call_match.group(2)
                 arg_list = [a.strip() for a in args_str.split(",") if a.strip()]
 
-                callee_qns = name_to_qn.get(callee_name, [])
+                callee_qns = _select_interprocedural_callee_qns(
+                    caller_qn,
+                    callee_name,
+                    name_to_qn=name_to_qn,
+                    func_paths=func_paths,
+                    func_kinds=func_kinds,
+                    include_methods=call_match.start() > 0 and line_text[call_match.start() - 1] == ".",
+                )
                 for callee_qn in callee_qns:
                     callee_summary = summaries.get(callee_qn)
                     if not callee_summary:

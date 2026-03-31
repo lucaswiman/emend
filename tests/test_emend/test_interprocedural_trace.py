@@ -136,6 +136,42 @@ class TestComputeFunctionSummary:
 
 
 class TestInterproceduralAnalysis:
+    def test_nested_same_named_helpers_are_scoped_to_their_owner(self, tmp_path):
+        """Sibling nested helpers should not share summaries by short name."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def outer_b(request):\n"
+            "    def helper(value):\n"
+            "        return value\n"
+            "    name = request.args.get('name')\n"
+            "    helper(name)\n"
+            "\n"
+            "def outer_a(request):\n"
+            "    def helper(value):\n"
+            "        sink(value)\n"
+            "    return request.args.get('name')\n"
+        )
+
+        config = TraceConfig(
+            labels=["user_input"],
+            sources=[
+                TraceSource(pattern="request.args.get($X)", label="user_input"),
+            ],
+            sinks=[
+                TraceSink(
+                    pattern="sink($X)",
+                    label="user_input",
+                    message="Nested helper sink reached",
+                ),
+            ],
+        )
+
+        result = run_interprocedural_trace_analysis([str(test_file)], config)
+
+        assert result.violations == []
+        assert f"{test_file}::outer_a::helper" in result.summaries
+        assert f"{test_file}::outer_b::helper" in result.summaries
+
     def test_unrelated_functions_do_not_report_violation(self, tmp_path):
         """A source in one function should not taint an unrelated sink."""
         test_file = tmp_path / "app.py"
