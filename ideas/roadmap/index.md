@@ -21,6 +21,7 @@ indefinitely.
 - [x] [Phase 7: Resolve Pattern Matches to Exact CFG Locations](./phase-7-resolve-pattern-matches-to-exact-cfg-locations.md)
 - [x] [Phase 8: Unify Flow, Policy, and Sequence Checks on One Engine](./phase-8-unify-flow-policy-and-sequence-checks.md)
 - [x] [Phase 9: Add Differential CFG/Trace/Flow Regression Coverage](./phase-9-add-differential-cfg-trace-flow-regression-coverage.md)
+- [x] [Phase 10: Finalize Interprocedural Trace Engine and Cleanup](./phase-10-finalize-interprocedural-trace-engine-and-cleanup.md)
 
 ## Current CFG / Trace / Flow Bugs
 

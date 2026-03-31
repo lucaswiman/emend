@@ -257,6 +257,7 @@ class TestInterproceduralAnalysis:
         # At least one violation should mention the function call
         messages = [v.message for v in result.violations]
         assert any("SQL injection" in m or "cursor.execute" in m.lower() for m in messages)
+        assert all(v.engine == "python" for v in result.violations)
 
     def test_intraprocedural_still_found(self, tmp_path):
         """Interprocedural mode still finds direct (intraprocedural) violations."""
@@ -371,6 +372,7 @@ class TestInterproceduralAnalysis:
             [str(test_file)], config, label_filter="user_input",
         )
         assert len(result.violations) >= 1
+        assert all(v.engine == "python" for v in result.violations)
 
         result_no_match = run_interprocedural_trace_analysis(
             [str(test_file)], config, label_filter="nonexistent",

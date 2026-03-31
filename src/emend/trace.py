@@ -2061,9 +2061,12 @@ def run_interprocedural_trace_analysis(
 ) -> InterproceduralResult:
     """Run interprocedural taint analysis across the given files.
 
-    Tries Datalog-based recursive propagation over the FactGraph first,
-    falling back to the Python fixed-point iteration when the fact graph
-    is unavailable.
+    Uses the Python fixed-point summary engine as the canonical public
+    interprocedural trace implementation.
+
+    The lower-level ``FactGraph.interprocedural_trace_datalog()`` helper still
+    exists for direct graph queries and differential testing, but the public
+    API/CLI path does not route through it.
 
     Args:
         paths: List of source file paths to analyze.
@@ -2079,9 +2082,9 @@ def run_interprocedural_trace_analysis(
     if not config.sources or not config.sinks:
         return InterproceduralResult(violations=[], summaries={}, iterations=0)
 
-    # NOTE: Datalog interprocedural path is disabled (Phase 2 migration).
-    # Python fixed-point iteration is the canonical engine.
-    # Retained reference for Phase 6 implementation.
+    # Phase 10 cleanup: public interprocedural trace is intentionally
+    # Python-canonical. Keep Datalog helpers out of this path until they are a
+    # tested semantic replacement rather than a partial alternative.
 
     from emend.ast_utils import find_nested_definitions
 
