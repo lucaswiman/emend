@@ -703,6 +703,53 @@ def handler():
 
 
 # ---------------------------------------------------------------------------
+# Phase 8: Destination-block blocker test
+# ---------------------------------------------------------------------------
+
+
+class TestDestinationBlockBlocker:
+    """Blocker in the sink's block should suppress the violation."""
+
+    def test_blocker_in_sink_block_suppresses(self):
+        """If the blocker is in the same block as the sink, the violation
+        is suppressed (blocker fires on use_block, not just def_block)."""
+        g = FactGraph()
+        # Block 0 -> Block 1 -> Block 2
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 0, is_entry=True))
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 1))
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 2, is_exit=True))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "f", 0, 1, "fallthrough", from_line=1, to_line=2))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "f", 1, 2, "fallthrough", from_line=2, to_line=3))
+        # def x in block 0, use x in block 2
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=0, use_block=2))
+        # Blocker for x in block 2 (the sink block)
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "f", "x", 0)],
+            sinks=[("app.py", "f", "x", 2)],
+            not_through=[("app.py", "f", "x", 2)],
+        )
+        assert len(violations) == 0
+
+    def test_blocker_in_intermediate_block_suppresses(self):
+        """Blocker in an intermediate block still suppresses (existing behavior)."""
+        g = FactGraph()
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 0, is_entry=True))
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 1))
+        g.add_cfg_block(CfgBlockFact("app.py", "f", 2, is_exit=True))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "f", 0, 1, "fallthrough", from_line=1, to_line=2))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "f", 1, 2, "fallthrough", from_line=2, to_line=3))
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=0, use_block=1))
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=1, use_block=2))
+        # Blocker in block 1 (intermediate)
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "f", "x", 0)],
+            sinks=[("app.py", "f", "x", 2)],
+            not_through=[("app.py", "f", "x", 1)],
+        )
+        assert len(violations) == 0
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 regression tests: CFG build failure behavior (Bug 2)
 # ---------------------------------------------------------------------------
 

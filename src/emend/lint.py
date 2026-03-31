@@ -737,6 +737,8 @@ def run_lint(
 
     # --- Flow rules: intraprocedural taint analysis ---
     if flow_rules:
+        from emend.flow_ir import from_lint_rule, execute_flow_spec
+
         for file_path in paths:
             source = all_file_contents.get(file_path)
             if source is None:
@@ -765,8 +767,9 @@ def run_lint(
                     continue
 
                 try:
-                    flow_violations = _check_flow_rule(
-                        rule, file_path, source, language
+                    spec = from_lint_rule(rule)
+                    flow_results = execute_flow_spec(
+                        spec, file_path, source, language, fact_graph=None
                     )
                 except Exception:
                     logger.debug(
@@ -775,7 +778,30 @@ def run_lint(
                     )
                     continue
 
-                for v in flow_violations:
+                for fv in flow_results:
+                    # Convert FlowViolation back to LintViolation for compat
+                    witness = None
+                    if fv.source_text or fv.sink_text:
+                        witness = FlowWitness(
+                            source_line=fv.source_line,
+                            source_text=fv.source_text,
+                            sink_line=fv.line,
+                            sink_text=fv.sink_text,
+                            taint_chain=[
+                                (s.line, s.var_name)
+                                for s in fv.witness
+                                if s.kind in ("source", "propagation")
+                            ],
+                        )
+                    v = LintViolation(
+                        rule_name=spec.name,
+                        message=fv.message,
+                        file_path=fv.file_path,
+                        line=fv.line,
+                        col=fv.col,
+                        match_text=f"flow: {fv.source_text} -> {fv.sink_text}",
+                        witness=witness,
+                    )
                     if is_noqa_suppressed(
                         v.line, v.rule_name,
                         noqa_ranges_cache.get(file_path, []),

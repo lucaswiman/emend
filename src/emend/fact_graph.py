@@ -1996,6 +1996,9 @@ class FactGraph:
         sinks: list[tuple[str, str, str, int]],     # same format
         through: list[tuple[str, str, str, int]] | None = None,  # must-pass-through points
         not_through: list[tuple[str, str, str, int]] | None = None,  # must-not-pass-through points
+        source_lines: dict[tuple[str, str, int], int] | None = None,
+        sink_lines: dict[tuple[str, str, int], int] | None = None,
+        blocker_lines: dict[tuple[str, str, int], int] | None = None,
     ) -> list[tuple[str, str, str, str]]:
         """Check flow-based lint rules via Datalog.
 
@@ -2007,6 +2010,11 @@ class FactGraph:
         path to suppress the violation).
 
         ``not_through`` blocks propagation through the specified points.
+
+        ``source_lines``, ``sink_lines``, ``blocker_lines`` are optional dicts
+        keyed by ``(file_path, func_qn, block_id)`` mapping to line numbers.
+        When provided, same-block results are post-filtered in Python:
+        source_line < sink_line, and source_line < blocker_line < sink_line.
 
         Returns list of (file_path, func_qn, source_var, sink_var) violations.
         """
@@ -2064,27 +2072,83 @@ class FactGraph:
             "reaches[fp, fq, source, def_block], "
             "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
             "target = source, "
-            "not blocked[fp, fq, source, def_block]\n"
+            "not blocked[fp, fq, source, def_block], "
+            "not blocked[fp, fq, source, use_block]\n"
         )
 
         if through:
             # Violation requires BOTH: flow reaches sink AND path avoids required
             query += (
-                "?[fp, fq, src_var, sink_var] := "
+                "?[fp, fq, src_var, sink_var, src_block, sink_block] := "
                 "reaches[fp, fq, sink_var, sink_block], "
                 "flow_sink[fp, fq, sink_var, sink_block], "
-                "through_violation[fp, fq, src_var, sink_var]"
+                "through_violation[fp, fq, src_var, sink_var], "
+                "flow_source[fp, fq, src_var, src_block]"
             )
         else:
             query += (
-                "?[fp, fq, src_var, sink_var] := "
+                "?[fp, fq, src_var, sink_var, src_block, sink_block] := "
                 "reaches[fp, fq, sink_var, sink_block], "
                 "flow_sink[fp, fq, sink_var, sink_block], "
-                "flow_source[fp, fq, src_var, _]"
+                "flow_source[fp, fq, src_var, src_block]"
             )
 
         result = self._client.run(query)
-        return [(r[0], r[1], r[2], r[3]) for r in result["rows"]]
+        raw = [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in result["rows"]]
+
+        # Post-filter: same-block line ordering
+        if source_lines or sink_lines or blocker_lines:
+            filtered: list[tuple[str, str, str, str]] = []
+            _src_lines = source_lines or {}
+            _sink_lines = sink_lines or {}
+            _blk_lines = blocker_lines or {}
+            for fp, fq, src_var, sink_var, src_block, sink_block in raw:
+                src_key = (fp, fq, src_block)
+                sink_key = (fp, fq, sink_block)
+                src_ln = _src_lines.get(src_key)
+                sink_ln = _sink_lines.get(sink_key)
+
+                # If source and sink share a block, require source_line < sink_line
+                if src_block == sink_block and src_ln is not None and sink_ln is not None:
+                    if src_ln >= sink_ln:
+                        continue
+
+                # If blocker shares a block with source/sink, require ordering
+                skip = False
+                for blk_key, blk_ln in _blk_lines.items():
+                    blk_fp, blk_fq, blk_block = blk_key
+                    if blk_fp != fp or blk_fq != fq:
+                        continue
+                    # Blocker in same block as source: must be after source
+                    if blk_block == src_block and src_ln is not None:
+                        if blk_ln <= src_ln:
+                            continue  # blocker before source, doesn't count
+                        # Blocker after source in same block — should block
+                        # but only if also before sink
+                        if sink_ln is not None and blk_block == sink_block:
+                            if src_ln < blk_ln < sink_ln:
+                                skip = True
+                                break
+                        elif blk_block != sink_block:
+                            # blocker in source block, sink in different block
+                            skip = True
+                            break
+                    # Blocker in same block as sink: must be before sink
+                    elif blk_block == sink_block and sink_ln is not None:
+                        if blk_ln < sink_ln:
+                            # Check blocker is after source (if in different block, it always is)
+                            if src_block != sink_block:
+                                skip = True
+                                break
+                            elif src_ln is not None and src_ln < blk_ln:
+                                skip = True
+                                break
+                if skip:
+                    continue
+                filtered.append((fp, fq, src_var, sink_var))
+            return filtered
+
+        return [(fp, fq, src_var, sink_var) for fp, fq, src_var, sink_var, _sb, _skb in raw]
 
     # -- Generic query (predicate-based, for backwards compat) -----------
 
@@ -2988,7 +3052,9 @@ def _compile_sequence_query(
             f'{reach_name}[fp, fq, from_block], '
             f'*cfg_edge[fp, fq, from_block, to_block, _, _, _], '
             f'not {blocker_name}[fp, fq, from_block], '
-            f'not {sk_name}[fp, fq, from_block]'
+            f'not {sk_name}[fp, fq, from_block], '
+            f'not {blocker_name}[fp, fq, to_block], '
+            f'not {sk_name}[fp, fq, to_block]'
         )
 
     # --- Step 3: Def-use liveness for bound variables ---

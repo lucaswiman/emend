@@ -913,6 +913,44 @@ class TestFlowRuleCheckDatalog:
         violations = g.flow_rule_check_datalog(sources=[], sinks=[("a.py", "f", "x", 0)])
         assert violations == []
 
+    def test_blocker_on_sink_block(self):
+        """Blocker on the use_block (sink block) should suppress violation."""
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=0, use_block=1))
+        # Blocker is in sink block (1)
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "f", "x", 0)],
+            sinks=[("app.py", "f", "x", 1)],
+            not_through=[("app.py", "f", "x", 1)],
+        )
+        assert len(violations) == 0
+
+    def test_same_block_ordering_source_before_sink(self):
+        """When source and sink share a block, source must be before sink."""
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=0, use_block=0))
+        # source at line 5, sink at line 10 — should fire
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "f", "x", 0)],
+            sinks=[("app.py", "f", "x", 0)],
+            source_lines={("app.py", "f", 0): 5},
+            sink_lines={("app.py", "f", 0): 10},
+        )
+        assert len(violations) >= 1
+
+    def test_same_block_ordering_sink_before_source(self):
+        """When source and sink share a block and sink is first, suppress."""
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "f", "x", def_block=0, use_block=0))
+        # source at line 10, sink at line 5 — should NOT fire
+        violations = g.flow_rule_check_datalog(
+            sources=[("app.py", "f", "x", 0)],
+            sinks=[("app.py", "f", "x", 0)],
+            source_lines={("app.py", "f", 0): 10},
+            sink_lines={("app.py", "f", 0): 5},
+        )
+        assert len(violations) == 0
+
 
 # ---------------------------------------------------------------------------
 # Updated serialization test for new fact types

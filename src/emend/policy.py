@@ -522,36 +522,25 @@ def _run_flow_check(
     file_path: str,
     source: str,
     language: str,
+    fact_graph: Any = None,
 ) -> list[PolicyViolation]:
-    """Run a flow check using the lint engine's _check_flow_rule."""
-    from emend.lint import LintRule, _check_flow_rule
+    """Run a flow check using the unified flow IR engine."""
+    from emend.flow_ir import from_flow_check, execute_flow_spec, format_witness
 
-    rule = LintRule(
-        name=policy.name,
-        find="",
-        message=policy.description,
-        flows_from=check.flows_from,
-        flows_to=check.flows_to,
-        not_through=check.not_through,
-    )
-    lint_violations = _check_flow_rule(rule, file_path, source, language)
+    spec = from_flow_check(check, policy.name, policy.description, policy.severity)
+    flow_violations = execute_flow_spec(spec, file_path, source, language, fact_graph=fact_graph)
 
     violations: list[PolicyViolation] = []
-    for lv in lint_violations:
-        witness: list[str] = []
-        if lv.witness is not None:
-            witness.append(f"source L{lv.witness.source_line}: {lv.witness.source_text}")
-            for step_line, step_var in lv.witness.taint_chain:
-                witness.append(f"  -> L{step_line}: {step_var}")
-            witness.append(f"sink L{lv.witness.sink_line}: {lv.witness.sink_text}")
+    for fv in flow_violations:
+        witness = format_witness(fv.witness) if fv.witness else []
         violations.append(PolicyViolation(
-            file_path=lv.file_path,
-            line=lv.line,
-            col=lv.col,
+            file_path=fv.file_path,
+            line=fv.line,
+            col=fv.col,
             policy_name=policy.name,
             check_name=f"flow:{check.label or 'default'}",
             severity=policy.severity,
-            message=lv.message or policy.description,
+            message=fv.message or policy.description,
             witness=witness,
         ))
     return violations
@@ -858,11 +847,41 @@ def _run_sequence_check(
         first_line = row_dict.get("first_line", 0)
         last_line = row_dict.get("last_line", 0)
 
-        witness = []
-        # Include step lines in witness
+        # Build WitnessStep entries from per-step line columns
+        from emend.flow_ir import WitnessStep, format_witness as _fmt_witness
+
+        witness_steps: list[WitnessStep] = []
         for h, v in zip(headers, row):
-            if h not in ("fp", "fq"):
-                witness.append(f"{h}={v}")
+            if h not in ("fp", "fq") and h.startswith("line_"):
+                step_idx = h.replace("line_", "")
+                step_name = ""
+                try:
+                    idx = int(step_idx)
+                    if idx < len(check.sequence):
+                        step_name = check.sequence[idx].bind
+                except (ValueError, IndexError):
+                    pass
+                witness_steps.append(WitnessStep(
+                    file_path=str(fp),
+                    func_qn=str(fq),
+                    block_id=0,
+                    line=int(v),
+                    var_name=step_name,
+                    kind="step",
+                ))
+            elif h in ("first_line", "last_line"):
+                kind = "source" if h == "first_line" else "sink"
+                witness_steps.append(WitnessStep(
+                    file_path=str(fp),
+                    func_qn=str(fq),
+                    block_id=0,
+                    line=int(v),
+                    kind=kind,
+                ))
+
+        witness = _fmt_witness(witness_steps) if witness_steps else [
+            f"{h}={v}" for h, v in zip(headers, row) if h not in ("fp", "fq")
+        ]
 
         violations.append(PolicyViolation(
             file_path=str(fp),
