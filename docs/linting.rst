@@ -1,12 +1,12 @@
 Linting
 =======
 
-emend includes a pattern-based linter that uses the same pattern engine as ``search`` and ``replace``. Define rules in a YAML config file, and emend will find violations -- and optionally auto-fix them.
+emend includes rule-based checking that uses the same pattern engine as ``find`` and ``edit replace``. Define rules in a YAML config file, and emend will find violations -- and optionally auto-fix them.
 
 Overview
 --------
 
-The lint command reads rules from a YAML config file (default: ``.emend/patterns.yaml``) and checks source files for pattern matches. Each rule specifies:
+The canonical entry point is ``emend check`` reading ``.emend/rules.yaml``. ``emend lint`` remains available for focused match/flow/deadcode workflows and compatibility with older configs. Each rule specifies:
 
 - A **pattern** to search for (using emend's metavariable syntax)
 - A **message** to display when the pattern is found
@@ -28,7 +28,7 @@ The lint command reads rules from a YAML config file (default: ``.emend/patterns
 Configuration
 -------------
 
-Create a ``.emend/patterns.yaml`` file in your project root:
+Create a ``.emend/rules.yaml`` file in your project root:
 
 .. code-block:: yaml
 
@@ -37,17 +37,17 @@ Create a ``.emend/patterns.yaml`` file in your project root:
 
    rules:
      no-print:
-       find: "{print_call}"
-       not-inside: "def test_*"
+       match: "{print_call}"
+       not-within: "def test_*"
        message: "Use logger instead of print"
-       replace: "logger.info($...ARGS)"
+       fix: "logger.info($...ARGS)"
 
      no-bare-assert:
-       find: "assert $X"
+       match: "assert $X"
        message: "Use pytest assertions instead of bare assert"
 
      no-type-ignore:
-       find: "$X  # type: ignore"
+       match: "$X  # type: ignore"
        message: "Avoid blanket type: ignore comments"
 
 The config file has two top-level sections:
@@ -65,7 +65,7 @@ Optional reusable pattern fragments. Reference them in rules using ``{macro_name
 
    rules:
      no-requests:
-       find: "{api_call}"
+       match: "{api_call}"
        message: "Use httpx instead of requests"
 
 rules
@@ -76,18 +76,18 @@ Each rule is a mapping with a unique key (the rule name) and the following field
 +-----------------+----------+-----------------------------------------------+
 | Field           | Required | Description                                   |
 +=================+==========+===============================================+
-| ``find``        | Yes*     | Pattern to search for (same syntax as          |
-|                 |          | ``emend search``). *Not required for flow      |
+| ``match``       | Yes*     | Pattern to search for (same syntax as          |
+|                 |          | ``emend find``). *Not required for flow        |
 |                 |          | rules that use ``flows-from``/``flows-to``.   |
 +-----------------+----------+-----------------------------------------------+
 | ``message``     | Yes      | Human-readable violation message               |
 +-----------------+----------+-----------------------------------------------+
-| ``not-inside``  | No       | Scope constraint -- exclude matches inside     |
+| ``not-within``  | No       | Scope constraint -- exclude matches inside     |
 |                 |          | this context (e.g., ``def``, ``class``,       |
 |                 |          | ``def test_*``)                               |
 +-----------------+----------+-----------------------------------------------+
-| ``replace``     | No       | Replacement pattern for auto-fix (same syntax  |
-|                 |          | as ``emend replace``)                         |
+| ``fix``         | No       | Replacement pattern for auto-fix (same syntax  |
+|                 |          | as ``emend edit replace``)                    |
 +-----------------+----------+-----------------------------------------------+
 | ``flows-from``  | No       | Source pattern for flow rules (see below)      |
 +-----------------+----------+-----------------------------------------------+
@@ -102,22 +102,22 @@ Each rule is a mapping with a unique key (the rule name) and the following field
 Patterns support the full emend pattern syntax including metavariables (``$X``, ``$...ARGS``), type constraints (``$X:str``), and all expression/statement forms. See :doc:`patterns` for the complete reference.
 
 
-Scope constraints (not-inside)
+Scope constraints (not-within)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``not-inside`` field filters out matches that occur within certain code structures:
+The ``not-within`` field filters out matches that occur within certain code structures:
 
 .. code-block:: yaml
 
    rules:
      no-print-in-production:
-       find: "print($...ARGS)"
-       not-inside: "def test_*"          # Skip matches inside test functions
+       match: "print($...ARGS)"
+       not-within: "def test_*"          # Skip matches inside test functions
        message: "Use logger instead of print"
 
      no-global-assigns:
-       find: "$X = $Y"
-       not-inside: "def"                  # Skip matches inside any function
+       match: "$X = $Y"
+       not-within: "def"                  # Skip matches inside any function
        message: "Avoid module-level assignments"
 
 Supported values:
@@ -159,15 +159,15 @@ Exit codes
 Auto-fixing
 -----------
 
-Rules that include a ``replace`` field can be auto-fixed:
+Rules that include a ``fix`` field can be auto-fixed:
 
 .. code-block:: yaml
 
    rules:
      no-print:
-       find: "print($...ARGS)"
+       match: "print($...ARGS)"
        message: "Use logger instead of print"
-       replace: "logger.info($...ARGS)"
+       fix: "logger.info($...ARGS)"
 
 .. code-block:: bash
 
@@ -177,7 +177,7 @@ Rules that include a ``replace`` field can be auto-fixed:
    # Apply fixes
    emend lint src/ --fix
 
-When ``--fix`` is used, emend applies the replacement pattern and reports how many replacements were made per file. Rules without a ``replace`` field are skipped during fix mode.
+When ``--fix`` is used, emend applies the replacement pattern and reports how many replacements were made per file. Rules without a ``fix`` field are skipped during fix mode.
 
 
 Inline suppression (``# noqa``)
@@ -271,9 +271,9 @@ CLI reference
 | Option              | Description                                   |
 +=====================+===============================================+
 | ``--config FILE``   | Path to config file                           |
-|                     | (default: ``.emend/patterns.yaml``)           |
+|                     | (default: ``.emend/rules.yaml``)              |
 +---------------------+-----------------------------------------------+
-| ``--fix``           | Auto-apply ``replace`` patterns               |
+| ``--fix``           | Auto-apply ``fix`` patterns                   |
 +---------------------+-----------------------------------------------+
 | ``--rule NAME``     | Run only a specific rule by name              |
 +---------------------+-----------------------------------------------+
@@ -287,26 +287,26 @@ Catch common anti-patterns
 
 .. code-block:: yaml
 
-   # .emend/patterns.yaml
+   # .emend/rules.yaml
    macros:
      print_call: "print($...ARGS)"
      requests_call: "requests.$METHOD($...ARGS)"
 
    rules:
      no-print:
-       find: "{print_call}"
-       not-inside: "def test_*"
+       match: "{print_call}"
+       not-within: "def test_*"
        message: "Use logger instead of print"
-       replace: "logger.info($...ARGS)"
+       fix: "logger.info($...ARGS)"
 
      no-requests:
-       find: "{requests_call}"
+       match: "{requests_call}"
        message: "Use httpx instead of requests"
 
      no-open-without-encoding:
-       find: "open($PATH)"
+       match: "open($PATH)"
        message: "Specify encoding when calling open()"
-       replace: "open($PATH, encoding='utf-8')"
+       fix: "open($PATH, encoding='utf-8')"
 
 Enforce testing conventions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -315,14 +315,14 @@ Enforce testing conventions
 
    rules:
      no-unittest-assert:
-       find: "self.assertEqual($A, $B)"
+       match: "self.assertEqual($A, $B)"
        message: "Use pytest assert instead of unittest assertEqual"
-       replace: "assert $A == $B"
+       fix: "assert $A == $B"
 
      no-unittest-assertTrue:
-       find: "self.assertTrue($X)"
+       match: "self.assertTrue($X)"
        message: "Use pytest assert instead of unittest assertTrue"
-       replace: "assert $X"
+       fix: "assert $X"
 
 
 Flow rules (data-flow linting)
@@ -337,7 +337,7 @@ Configuration
 ~~~~~~~~~~~~~
 
 Flow rules use ``flows-from``, ``flows-to``, and optionally ``not-through``
-instead of ``find``:
+instead of ``match``:
 
 .. code-block:: yaml
 
@@ -450,7 +450,7 @@ Example output
 Dead code detection
 -------------------
 
-emend can detect unreferenced (dead) code as part of linting. Add a ``deadcode`` section to your ``.emend/patterns.yaml`` config.
+emend can detect unreferenced (dead) code as part of checking. Add a ``deadcode`` section to your ``.emend/rules.yaml`` config.
 
 Quick enable
 ~~~~~~~~~~~~
@@ -534,7 +534,7 @@ Dead code detection uses tree-sitter-based scope analysis for scope-aware analys
 
 It automatically detects ``src/`` layout projects (via ``pyproject.toml``) and computes correct qualified names.
 
-Automatic exclusions are the same as the ``emend deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.  Use ``entry-point-decorators`` and ``entry-point-names`` to extend the built-in heuristics with project-specific exclusions.
+Automatic exclusions are the same as the ``emend analyze deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.  Use ``entry-point-decorators`` and ``entry-point-names`` to extend the built-in heuristics with project-specific exclusions.
 
 Interaction with rules
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -565,13 +565,14 @@ Dead code detection is also available as a standalone command with additional op
 
 .. code-block:: bash
 
-   emend deadcode src/
-   emend deadcode src/ --exclude-references-from tests/ --json
-   emend deadcode . --entry-point-decorator my_framework.handler
-   emend deadcode . --entry-point-name plugin_init
-   emend deadcode . --exclude-path frontends/devtools/
+   emend analyze deadcode src/
+   emend analyze deadcode src/ --exclude-references-from tests/ --json
+   emend analyze deadcode . --entry-point-decorator my_framework.handler
+   emend analyze deadcode . --entry-point-name plugin_init
+   emend analyze deadcode . --exclude-path frontends/devtools/
+   emend analyze deadcode . --unused-modules
 
-See :doc:`commands` for the full ``deadcode`` command reference.
+See :doc:`commands` for the full ``analyze deadcode`` command reference.
 
 
 pre-commit integration
@@ -589,7 +590,7 @@ Add the following to your ``.pre-commit-config.yaml``:
        hooks:
          - id: emend-lint
 
-This runs ``emend lint`` on all staged Python files using your project's ``.emend/patterns.yaml`` config.
+This runs ``emend lint`` on all staged Python files using your project's ``.emend/rules.yaml`` config.
 
 To use a custom config path:
 

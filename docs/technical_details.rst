@@ -235,7 +235,7 @@ There are two population paths:
 side-effect of running the Rust ``PyScopeResolver``: after each file is
 resolved, the qualified-name set is stored in the cache.
 
-**Eager (``emend index``).**  ``warm_caches()`` scans the project in parallel
+**Eager (``emend tool index``).**  ``warm_caches()`` scans the project in parallel
 using a ``ProcessPoolExecutor``.  Each worker subprocess (``_index_batch()``)
 receives a batch of ``(file_path, source_text)`` tuples and performs:
 
@@ -294,7 +294,7 @@ rows keyed on the previous content hash are deleted from ``symbol_index``,
 This check is implemented in ``_scan_manifest()`` and exposed through
 ``_ensure_index_fresh()``, which commands call before querying the index.  If
 fewer than 50 files are stale, they are re-indexed inline; otherwise the caller
-falls back to the cold path or advises running ``emend index``.
+falls back to the cold path or advises running ``emend tool index``.
 
 How caches are cleaned
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -315,12 +315,12 @@ To reclaim disk space or force a full rebuild:
 
    # Delete the entire cache and rebuild from scratch:
    rm -rf .emend/cache/
-   emend index
+   emend tool index
 
    # Or just rebuild (existing entries are overwritten):
-   emend index
+   emend tool index
 
-The ``emend index --status`` command reports the number of indexed files,
+The ``emend tool index --status`` command reports the number of indexed files,
 symbols, import edges, and references, plus how many files are stale.
 
 Warm-path query acceleration
@@ -328,9 +328,9 @@ Warm-path query acceleration
 
 When the index is fresh, several commands bypass full-project scans:
 
-- ``search --complete <prefix>`` queries ``symbol_index`` with a ``LIKE``
+- ``find --complete <prefix>`` queries ``symbol_index`` with a ``LIKE``
   prefix match — typically < 5 ms.
-- ``refs`` queries ``reference_index`` by qualified name — typically < 10 ms.
+- ``analyze refs`` queries ``reference_index`` by qualified name — typically < 10 ms.
 - ``_files_importing_module()`` checks ``import_graph`` before falling back to
   the Rust ``files_importing_module`` scan.
 
@@ -344,7 +344,7 @@ When emend runs inside a `git worktree
 <https://git-scm.com/docs/git-worktree>`_, the cache is automatically shared
 with the main repository.  This means:
 
-- Running ``emend index`` in **any** worktree populates the shared
+- Running ``emend tool index`` in **any** worktree populates the shared
   ``parse.db``.  Other worktrees immediately benefit from the cached parse
   trees, qualified-name indexes, type information, symbol definitions, and
   reference data — all of which are keyed by content hash.
@@ -400,9 +400,9 @@ Metavariable types:
 TypeOracle layer
 ----------------
 
-``type_oracle.py`` provides a pluggable type inference adapter used by ``search``
+``type_oracle.py`` provides a pluggable type inference adapter used by ``find``
 (for ``:type[X]`` / ``:returns[X]`` pattern constraints and ``--returns`` lookup
-filtering) and the ``types`` command.
+filtering) and the ``analyze types`` command.
 
 Abstract interface: ``TypeOracle``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -471,17 +471,18 @@ detection and instantiation in one call.
 Lint engine
 -----------
 
-``lint.py`` loads rules from ``.emend/patterns.yaml``.  Each rule specifies a
-``find`` pattern, a ``message``, an optional ``not-inside`` constraint, and an
-optional ``replace`` pattern for ``--fix`` mode.
+``lint.py`` loads rules from ``.emend/rules.yaml`` (with legacy fallback to
+``.emend/patterns.yaml``).  Each rule specifies a ``match`` pattern, a
+``message``, an optional ``not-within`` constraint, and an optional ``fix``
+pattern for ``--fix`` mode.
 
 The lint engine applies a two-tier scan:
 
-1. **Batch Rust path** — rules whose ``find`` pattern compiles to Rust IR are
+1. **Batch Rust path** — rules whose ``match`` pattern compiles to Rust IR are
    batched into a single ``find_multi_patterns_in_files`` call.  This handles
    the common case of simple pattern rules (function calls, attribute accesses)
    with no structural scope constraint.
-2. **Single-file Rust path** — rules with complex patterns or ``not-inside``
+2. **Single-file Rust path** — rules with complex patterns or ``not-within``
    constraints are evaluated per-file using ``find_pattern()`` with the Rust
    structural matcher.
 

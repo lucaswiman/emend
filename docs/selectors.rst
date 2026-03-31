@@ -90,11 +90,11 @@ For parameters, you can specify the parameter kind:
    file.py::func[params]:POSITIONAL_ONLY       # positional-only parameters (before /)
    file.py::func[params]:POSITIONAL_OR_KEYWORD # regular parameters
 
-These are used with the ``add`` command to insert parameters into the correct slot:
+These are used with the ``edit add`` command to insert parameters into the correct slot:
 
 .. code-block:: bash
 
-   emend add "api.py::handler[params]:KEYWORD_ONLY" "debug: bool" --apply
+   emend edit add "api.py::handler[params]:KEYWORD_ONLY" "debug: bool" --apply
 
 Line selectors
 --------------

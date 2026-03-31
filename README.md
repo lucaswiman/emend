@@ -15,8 +15,8 @@ uv tool install --python 3.13t emend
 Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
 GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
 `#[pymodule(gil_used = false)]`), so on free-threaded Python it can run parallel
-file scans with no lock contention — meaning `grep`, `lint`, `refs`, and `rename`
-across large codebases are significantly faster.
+file scans with no lock contention — meaning `find`, `lint`, `analyze refs`, and
+`edit rename` across large codebases are significantly faster.
 
 We recommend **3.13t** for the free-threaded interpreter. The 3.14t variant also
 works for core emend commands, but the optional MCP server (`emend mcp`) depends on
@@ -122,7 +122,7 @@ Plug 'lucaswiman/emend', { 'rtp': 'vim' }
 ```
 
 Then use `:Emend` to open the search prompt, or `:Emend parse` to search
-directly. The plugin communicates with `emend editor-server` via JSON-RPC over
+directly. The plugin communicates with `emend tool editor-server` via JSON-RPC over
 stdio pipes — the server stays warm for sub-5ms lookups.
 
 For local development, point to your checkout:
@@ -136,15 +136,15 @@ See [vim/README.md](vim/README.md) for full documentation.
 
 ### Indexing (recommended for large codebases)
 
-After installing, run `emend index` in your project root to pre-build caches:
+After installing, run `emend tool index` in your project root to pre-build caches:
 
 ```bash
-emend index                  # index current directory
-emend index src/ --jobs 8    # index specific directory with 8 workers
+emend tool index                  # index current directory
+emend tool index src/ --jobs 8    # index specific directory with 8 workers
 ```
 
 This parses every Python file and builds a qualified-name index, so subsequent
-cross-project operations (`refs`, `rename`, `callers`, `deadcode`) are
+cross-project operations (`analyze refs`, `edit rename`, `analyze graph`, `analyze deadcode`) are
 significantly faster. The cache is stored in `.emend/cache/parse.db` (automatically
 gitignored and dockerignored) and is keyed by file content hash, so it
 self-invalidates when files change. Git worktrees automatically share a single
@@ -155,25 +155,16 @@ background on startup.
 
 ## MCP Server
 
-The MCP server exposes emend functionality to Claude Code and other LLM clients via 17 tools:
+The MCP server now uses a smaller discriminated tool surface:
 
-1. **`search`** — Search for code patterns or symbols in Python files
-2. **`replace`** — Pattern-based code substitution
-3. **`modify`** — Edit symbols and components (set/add/remove)
-4. **`refs`** — Find all references (with filters)
-5. **`rename`** — Rename symbols/modules across the project
-6. **`move`** — Move symbols/modules or copy with copy_only flag
-7. **`graph`** — Generate call graphs
-8. **`deadcode`** — Find unreferenced code
-9. **`lint`** — Run linting rules
-10. **`impact`** — Compute transitive set of impacted symbols from a change
-11. **`semantic_context`** — Check a symbol for hidden dangers before editing it
-12. **`trace`** — Run trace analysis to detect unsafe data flows
-13. **`datalog_query`** — Query the project fact graph via CozoScript or structured params
-14. **`check_policies`** — Run policy checks against source code
-15. **`map_read`** — Read from the mapping store
-16. **`map_write`** — Write to the mapping store: add or delete entries
-17. **`grammar_and_cookbook`** — Return the emend grammar reference and cookbook
+1. **`search`** — Code search, symbol lookup, and summary listing
+2. **`transform`** — Pattern replace plus selector-based edits, adds, removes, copies, moves, and renames
+3. **`references`** — References, callers, and callees
+4. **`analyze`** — Graph, deadcode, impact, semantic context, and flow analysis
+5. **`check`** — Unified project rules from `.emend/rules.yaml`
+6. **`datalog`** — Raw CozoScript queries against the fact graph
+7. **`mappings`** — Cross-repo identifier and module mappings
+8. **`grammar_and_cookbook`** — Syntax reference and cookbook text
 
 See the [grammar_and_cookbook.rst](src/emend/grammar_and_cookbook.rst) reference for full command documentation.
 
@@ -259,78 +250,18 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ## Commands
 
-### Search & Read
+The public CLI is organized around a small set of top-level commands:
 
-**`grep`** - Unified search with auto-detection (primary name; hidden aliases: `search`, `query`, `show`, `get`, `lookup`, `find`, `ls`)
-- Pattern mode: `emend grep 'print($X)' file.py` or `emend grep '**::print($X)'`
-- Literal pattern: `emend grep '**::assert False'` or `emend grep 'src/::import os'`
-- Lookup mode: `emend grep file.py::func`
-- Summary mode: `emend grep file.py` (list symbols)
-- Filters: `--kind`, `--name`, `--returns`, `--depth`, `--has-param`, `--output`, `--where`, `--imported-from`, `--scope-local`
-- Output formats: `code`, `location`, `selector`, `summary`, `metadata`, `json`, `count`, `summary::flat`, `code::dedent`
+- **`find`** — Search for patterns, selectors, symbols, or summaries.
+- **`edit`** — Code changes and refactors. Subcommands: `set`, `rm`, `delete`, `add`, `replace`, `cp`, `rename`, `mv`, `batch`, `saturate`.
+- **`analyze`** — Read-only analysis. Subcommands: `refs`, `graph`, `deadcode`, `impact`, `types`, `trace`, `facts`, `cfg`, `dsl`.
+- **`tool`** — Operational and debugging commands. Subcommands: `index`, `editor-search`, `editor-server`, `query`.
+- **`check`** — Unified project rules from `.emend/rules.yaml`.
+- **`lint`** / **`policy`** — Focused rule runners kept for compatibility and targeted workflows.
+- **`map`** — Identifier and module mappings.
+- **`mcp`** — Start the MCP server.
 
-### Edit & Transform
-
-**`edit`** - Modify or remove existing symbol components (hidden alias: `set`)
-- Replace: `emend edit file.py::func[returns] "int" --apply`
-- Insert: `emend edit file.py::func[params] "new_param" --before ctx --apply`
-- Remove: `emend edit file.py::func[params][old_param] --rm --apply`
-- Wildcards: `emend edit 'file.py::*[decorators]' "@dataclass" --apply`
-
-**`add`** - Insert new items into list components (hidden alias: `insert`)
-- `emend add file.py::func[params] "timeout: int = 30" --apply`
-- `emend add "file.py::func[params]:KEYWORD_ONLY" "debug: bool" --apply`
-
-**`replace`** - Replace pattern matches with pattern-based substitution
-- `emend replace 'print($X)' 'logger.info($X)' file.py --apply`
-- Scope: `--where` (syntax: 'def', 'class', 'MyClass.method', 'not ...')
-
-### Symbol Management
-
-**`refs`** - Find all references to a symbol across the project (hidden aliases: `references`, `find-references`)
-- `emend refs models.py::User`
-- Filters: `--writes-only`, `--reads-only`, `--calls-only`
-- Output: `--json` for JSON output (default shows file:line)
-
-**`rename`** - Rename a symbol or module across the project
-- Symbol: `emend rename models.py::User --to Account --apply`
-- Module: `emend rename models.py --to accounts.py --apply`
-- Filters: `--docs`, `--no-hierarchy`, `--unsure`
-
-**`mv`** - Move a symbol or module with automatic import updates (primary name; hidden alias: `move`)
-- Symbol: `emend mv utils.py::parse_date helpers/dates.py --apply`
-- Module: `emend mv utils.py helpers/utils.py --apply`
-
-**`cp`** - Copy a symbol to another file (primary name; hidden aliases: `copy-to`, `copy`)
-- `emend cp workflow.py::Builder._build.helper tasks.py --dedent --apply`
-
-**`rm`** - Remove a symbol or component (primary name; hidden aliases: `remove`, `delete`; shorthand for `edit --rm`)
-- `emend rm file.py::func[params][old_param] --apply`
-- `emend rm file.py::deprecated_func --apply`
-
-### Utilities
-
-**`batch`** - Apply multiple refactoring operations from YAML/JSON file
-- `emend batch rules.json --apply`
-
-**`lint`** - Lint files using pattern rules from `.emend/patterns.yaml`
-- `emend lint src/`
-- `emend lint src/ --fix` to auto-fix issues
-- `emend lint src/ --rule no-print` to run a single rule
-- See [Linting documentation](https://lucaswiman.github.io/emend/linting.html) for full details
-
-**`deadcode`** - Find potentially dead (unreferenced) code
-- `emend deadcode src/`
-- `emend deadcode . --kind function --json`
-- `emend deadcode src/ --exclude-references-from tests/`
-
-**`graph`** - Generate a call graph for functions in a file
-- `emend graph src/module.py --format plain`
-- Formats: `plain`, `json`, `dot`
-
-**`mcp`** - Start an MCP (Model Context Protocol) server
-- `emend mcp` (stdio) or `emend mcp --transport sse --port 8080`
-- Requires `pip install emend[mcp]`
+Hidden compatibility aliases still work. For example, `emend rm ...` maps to `emend edit rm ...`, and old read commands like `search`, `grep`, `show`, `get`, and `lookup` route to `emend find`.
 
 ## Examples
 
@@ -338,93 +269,93 @@ PSEUDO_CLASS: /:KEYWORD_ONLY|:POSITIONAL_ONLY|:POSITIONAL_OR_KEYWORD/
 
 ```bash
 # Search by pattern (pattern mode)
-emend grep 'print($X)' src/
-emend grep 'assertEqual($A, $B)' tests/ --output count
+emend find 'print($X)' src/
+emend find 'assertEqual($A, $B)' tests/ --output count
 
 # Search by symbol (lookup mode)
-emend grep file.py::func
-emend grep src/ --kind function --name test_*
-emend grep file.py --output json
+emend find file.py::func
+emend find src/ --kind function --name test_*
+emend find file.py --output json
 
 # Extract function parameters
-emend grep api.py::handler[params]
-emend grep 'api.py::*[params]'  # Wildcard: all function params in file
+emend find api.py::handler[params]
+emend find 'api.py::*[params]'  # Wildcard: all function params in file
 
 # Get return types
-emend grep 'src/**/*.py::*[returns]' --output metadata
+emend find 'src/**/*.py::*[returns]' --output metadata
 
 # List symbols in a module
-emend grep file.py                          # Tree view
-emend grep file.py --output summary::flat   # Flat list
-emend grep file.py --depth 2                # Limit nesting depth
+emend find file.py                          # Tree view
+emend find file.py --output summary::flat   # Flat list
+emend find file.py --depth 2                # Limit nesting depth
 ```
 
 ### Edit Examples
 
 ```bash
 # Update return type
-emend edit api.py::handler[returns] "Response" --apply
+emend edit set api.py::handler[returns] "Response" --apply
 
 # Add parameter with default value
-emend edit api.py::handler[params] "timeout: int = 30" --apply
+emend edit add api.py::handler[params] "timeout: int = 30" --apply
 
 # Add keyword-only parameter
-emend edit "api.py::handler[params]:KEYWORD_ONLY" "debug: bool" --apply
+emend edit add "api.py::handler[params]:KEYWORD_ONLY" "debug: bool" --apply
 
 # Insert parameter before specific param
-emend edit api.py::handler[params] "ctx: Context" --before user_id --apply
+emend edit add api.py::handler[params] "ctx: Context" --before user_id --apply
 
 # Remove a specific parameter
-emend edit api.py::handler[params][deprecated_arg] --rm --apply
+emend edit rm api.py::handler[params][deprecated_arg] --apply
 
 # Edit multiple symbols at once (wildcards)
-emend edit 'file.py::*[decorators]' "@dataclass" --apply
+emend edit set 'file.py::*[decorators]' "@dataclass" --apply
 ```
 
 ### Pattern Transform Examples
 
 ```bash
 # Simple find and replace (dry-run by default)
-emend replace 'print($X)' 'logger.info($X)' file.py
+emend edit replace 'print($X)' 'logger.info($X)' file.py
 
 # Replace within a specific scope
-emend replace 'old_var' 'new_var' api.py --where process --apply
+emend edit replace 'old_var' 'new_var' api.py --where process --apply
 
 # Replace with pattern capture
-emend replace 'get_field($N)' 'field$N' api.py --where process --apply
+emend edit replace 'get_field($N)' 'field$N' api.py --where process --apply
 
 # String content interpolation: ${X.content} strips quotes from a captured string literal
-emend replace 'Union["$X", $Y]' '$X | $Y' src/ --apply
+emend edit replace 'Union["$X", $Y]' '$X | $Y' src/ --apply
 
 # Find all pattern matches
-emend grep 'print($X)' src/ --output location
+emend find 'print($X)' src/ --output location
 
 # Multi-rule batch operations
-emend batch rules.json --apply
+emend edit batch rules.json --apply
 ```
 
 ### Symbol Management Examples
 
 ```bash
 # Find all references to a symbol
-emend refs models.py::User --json
-emend refs models.py::User --writes-only    # Only write references
-emend refs models.py::User --calls-only     # Only function calls
+emend analyze refs models.py::User --json
+emend analyze refs models.py::User --writes-only    # Only write references
+emend analyze refs models.py::User --calls-only     # Only function calls
 
 # Rename a symbol project-wide
-emend rename models.py::User --to Account --apply
+emend edit rename models.py::User --to Account --apply
 
 # Move a symbol to another file (updates imports)
-emend mv utils.py::parse_date helpers/dates.py --apply
+emend edit mv utils.py::parse_date helpers/dates.py --apply
 
 # Copy a symbol to another file
-emend cp workflow.py::Builder._build.helper tasks.py --dedent --apply
+emend edit cp workflow.py::Builder._build.helper tasks.py --dedent --apply
 
 # Remove a symbol or component
-emend rm file.py::deprecated_func --apply
+emend edit rm file.py::deprecated_func --apply
 
-# List symbols using grep
-emend grep workflow.py --depth 3
+# List symbols using find
+emend find workflow.py --depth 3
 ```
 
 ### Pattern Syntax
@@ -433,23 +364,23 @@ Patterns support metavariables for capturing:
 
 ```bash
 # Single expression
-emend grep 'print($MSG)' src/
+emend find 'print($MSG)' src/
 
 # Multiple arguments with capture
-emend grep 'func($A, $B)' src/
+emend find 'func($A, $B)' src/
 
 # Variable arguments
-emend grep 'func($...ARGS)' src/
+emend find 'func($...ARGS)' src/
 
 # Type constraints
-emend grep 'range($N:int)' src/
+emend find 'range($N:int)' src/
 
 # Anonymous metavariables
-emend grep 'func($_, $ARG)' src/
+emend find 'func($_, $ARG)' src/
 
 # Structural constraints (via --where)
-emend grep 'print($X)' src/ --where 'async def'
-emend grep 'await $X' src/ --where 'not if __debug__'
+emend find 'print($X)' src/ --within 'async def'
+emend find 'await $X' src/ --where 'not if __debug__'
 
 # Supported pattern types:
 #   Literals: $X, $MSG:str, $N:int, 3.14
@@ -493,34 +424,34 @@ Lines prefixed with `-` are matched; corresponding `+` lines are the replacement
 
 ## Linting
 
-emend includes a pattern-based linter. Define rules in `.emend/patterns.yaml` and check your code for violations:
+emend's canonical rules file is `.emend/rules.yaml`. `emend check` is the unified entry point, while `emend lint` and `emend policy` remain available for focused workflows and compatibility.
 
 ```yaml
-# .emend/patterns.yaml
+# .emend/rules.yaml
 macros:
   print_call: "print($...ARGS)"
 
 rules:
   no-print:
-    find: "{print_call}"
-    not-inside: "def test_*"
+    match: "{print_call}"
+    not-within: "def test_*"
     message: "Use logger instead of print"
-    replace: "logger.info($...ARGS)"
+    fix: "logger.info($...ARGS)"
 
   no-open-without-encoding:
-    find: "open($PATH)"
+    match: "open($PATH)"
     message: "Specify encoding when calling open()"
-    replace: "open($PATH, encoding='utf-8')"
+    fix: "open($PATH, encoding='utf-8')"
 ```
 
 ```bash
-# Check for violations
-emend lint src/
+# Run all configured checks
+emend check src/
 
-# Auto-fix violations that have a replace rule
-emend lint src/ --fix
+# Auto-fix match rules that have a fix
+emend check src/ --fix
 
-# Run only a specific rule
+# Focus on match-style lint rules only
 emend lint src/ --rule no-print
 ```
 
@@ -534,10 +465,10 @@ print("keep this")  # noqa: E501, emend:no-print  # mixed with other linters
 
 ### Dead code detection
 
-emend includes a `deadcode` section in `.emend/patterns.yaml` to detect unreferenced symbols as part of linting:
+Dead code can be configured in `.emend/rules.yaml` and run either through `emend check` or directly through `emend analyze deadcode`:
 
 ```yaml
-# .emend/patterns.yaml
+# .emend/rules.yaml
 deadcode: true
 
 # Or with options:
@@ -551,12 +482,13 @@ deadcode:
 ```
 
 ```bash
-# Run as part of lint
-emend lint src/
+# Run as part of unified checks
+emend check src/
 
 # Or use the standalone command
-emend deadcode src/
-emend deadcode src/ --exclude-references-from tests/ --json
+emend analyze deadcode src/
+emend analyze deadcode src/ --exclude-references-from tests/ --json
+emend analyze deadcode src/ --unused-modules
 ```
 
 Suppress false positives inline:
@@ -596,7 +528,7 @@ repos:
       - id: emend-lint
 ```
 
-This runs `emend lint` on staged Python files using your `.emend/patterns.yaml` config.
+This runs `emend lint` on staged Python files using your `.emend/rules.yaml` config.
 
 To auto-fix violations, add `args: ["--fix"]` to the hook configuration.
 
@@ -637,8 +569,14 @@ make test TESTS="tests/test_emend/test_add_parameter.py::test_add_parameter_with
 ```
 emend/
 ├── src/emend/
-│   ├── cli.py                # CLI entry point, argument parsing
-│   ├── transform.py          # Transform primitives (get/set/add/remove/find/replace)
+│   ├── cli.py                # CLI assembly and compatibility layer
+│   ├── cli_find.py           # `find`
+│   ├── cli_edit.py           # `edit` subcommands
+│   ├── cli_analysis.py       # `analyze` subcommands
+│   ├── cli_tooling.py        # `tool` and `mcp`
+│   ├── cli_checks.py         # `check`, `lint`, `policy`
+│   ├── cli_map.py            # `map`
+│   ├── transform.py          # Core search/edit/analysis engine
 │   ├── pattern.py            # Pattern parsing and compilation
 │   ├── query.py              # Symbol querying with filters
 │   ├── ast_commands.py       # AST-based command implementations
