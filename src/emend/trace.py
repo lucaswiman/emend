@@ -1324,7 +1324,29 @@ def run_trace_analysis(
     return _deduplicate_violations(violations)
 
 
-# NOTE: Datalog trace path is disabled (Phase 2 migration). Retained for reference during Phase 6 implementation.
+def _resolve_match_to_location(
+    graph: "FactGraph",  # type: ignore[name-defined]
+    file_path: str,
+    line: int,
+) -> tuple[str, int]:
+    """Resolve a pattern match line to (func_qn, block_id).
+
+    Uses the :class:`~emend.location_resolver.LocationResolver` backed by
+    FactGraph ``source_loc`` and ``cfg_block`` facts to find the innermost
+    enclosing function and most specific CFG block.
+
+    Falls back to ``(MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK)`` for module-level
+    code or when facts are unavailable.
+    """
+    from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
+
+    try:
+        return graph.resolve_location(file_path, line)
+    except Exception:
+        pass
+    return MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK
+
+
 def _run_trace_datalog(
     paths: list[str],
     config: TraceConfig,
@@ -1350,6 +1372,10 @@ def _run_trace_datalog(
     sanitizers: list[tuple[str, str, str, int, str]] = []
     scope_kills: list[tuple[str, str, str, int]] = []
 
+    # For intra-block line ordering
+    sanitizer_lines: list[tuple[str, str, str, int, int]] = []
+    sink_lines: list[tuple[str, str, str, int, int]] = []
+
     for file_path in paths:
         path_obj = Path(file_path)
         if not path_obj.exists():
@@ -1368,15 +1394,16 @@ def _run_trace_datalog(
                     # Extract variable names from captures
                     var_names: set[str] = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_names_from_text(ct)
+                        var_names |= _extract_identifiers(ct)
                     # Type constraint filtering on sources
                     if src_def.type_constraint and type_oracle and var_names:
                         var_names = _filter_vars_by_type(
                             var_names, src_def.type_constraint,
                             type_oracle, file_path, m.line or 1,
                         )
+                    fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
-                        sources.append((file_path, "", var, -1, src_def.label))
+                        sources.append((file_path, fq, var, bid, src_def.label))
 
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
@@ -1386,9 +1413,11 @@ def _run_trace_datalog(
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_names_from_text(ct)
+                        var_names |= _extract_identifiers(ct)
+                    fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
-                        sinks.append((file_path, "", var, -1, sink_def.label))
+                        sinks.append((file_path, fq, var, bid, sink_def.label))
+                        sink_lines.append((file_path, fq, sink_def.label, bid, m.line))
 
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
@@ -1398,9 +1427,11 @@ def _run_trace_datalog(
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_names_from_text(ct)
+                        var_names |= _extract_identifiers(ct)
+                    fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
-                        sanitizers.append((file_path, "", var, -1, san_def.label))
+                        sanitizers.append((file_path, fq, var, bid, san_def.label))
+                        sanitizer_lines.append((file_path, fq, san_def.label, bid, m.line))
 
         # Scope sanitizers: match patterns and record (fp, fq, lbl, block_id)
         for scope_san in config.scope_sanitizers:
@@ -1409,7 +1440,8 @@ def _run_trace_datalog(
             matches = find_pattern(scope_san.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
-                    scope_kills.append((file_path, "", scope_san.label, -1))
+                    fq, bid = _resolve_match_to_location(graph, file_path, m.line)
+                    scope_kills.append((file_path, fq, scope_san.label, bid))
 
     if not sources or not sinks:
         return []
@@ -1425,23 +1457,49 @@ def _run_trace_datalog(
     if not sources or not sinks:
         return []
 
+    # Build effect_sinks from config
+    effect_sinks_list: list[tuple[str, str]] = []
+    for sink_def in config.sinks:
+        if sink_def.effect:
+            import re as _re
+            effect_m = _re.match(r'(writes|reads)\(\$\w+\)', sink_def.effect)
+            if effect_m:
+                effect_sinks_list.append((sink_def.label, effect_m.group(1)))
+
+    # Determine sanitizer quantifier from config
+    san_quantifier = "all_paths"
+    for san_def in config.sanitizers:
+        if san_def.quantifier == "some_path":
+            san_quantifier = "some_path"
+            break
+
+    # Build sink_messages lookup for per-sink messages
+    sink_messages: dict[tuple[str, str], str] = {}
+    for sink_def in config.sinks:
+        sink_messages[(sink_def.label, sink_def.pattern)] = sink_def.message
+
     taint_facts = graph.trace_propagation_datalog(
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers if sanitizers else None,
+        effect_sinks=effect_sinks_list if effect_sinks_list else None,
+        sanitizer_quantifier=san_quantifier,
+        sanitizer_lines=sanitizer_lines if sanitizer_lines else None,
+        sink_lines=sink_lines if sink_lines else None,
         scope_kills=scope_kills if scope_kills else None,
     )
 
     # Convert TraceFlowFact -> TraceViolation
     violations: list[TraceViolation] = []
     for tf in taint_facts:
+        msg = sink_messages.get((tf.label, tf.sink_var), f"Tainted value reaches sink: {tf.sink_var}")
         violations.append(TraceViolation(
             file_path=tf.file_path,
             line=tf.sink_line,
-            source_line=tf.source_line,
-            source_pattern=tf.source_var,
-            sink_pattern=tf.sink_var,
+            col=0,
             label=tf.label,
+            sink_pattern=tf.sink_var,
+            message=msg,
             trace=[],
         ))
     return _deduplicate_violations(violations)

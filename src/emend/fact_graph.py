@@ -1114,6 +1114,21 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def resolve_location(self, file_path: str, line: int) -> tuple[str, int]:
+        """Resolve a line number to ``(func_qn, block_id)`` using stored facts.
+
+        Uses symbol facts for function ranges and source_loc/cfg_block facts
+        for block ranges.
+
+        Returns ``(MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK)`` for module-level
+        code (i.e. when the line does not fall inside any known function).
+        """
+        from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC, LocationResolver
+
+        resolver = LocationResolver.from_fact_graph(self, file_path=file_path)
+        loc = resolver.resolve(file_path, line)
+        return loc.func_qn, loc.block_id
+
     # -- Transitive closures (Datalog! No more Python BFS) ---------------
 
     def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
@@ -1910,14 +1925,38 @@ class FactGraph:
 
     def interprocedural_trace_datalog(
         self,
+        sources: list[tuple[str, str, str, int, str]] | None = None,
+        sinks: list[tuple[str, str, str, int, str]] | None = None,
         max_iterations: int = 10,
     ) -> list[TraceFlowFact]:
         """Interprocedural taint analysis via recursive Datalog.
 
         Replaces the Python fixed-point loop in run_interprocedural_taint_analysis().
         Uses func_summary and call facts to propagate taint across function boundaries.
+
+        When *sources* and *sinks* are provided (as ``(file_path, func_qn, var_name,
+        block_id, label)`` tuples), they are used to seed the query via inline
+        relations so that only relevant label/param combinations are followed.
+        When omitted, all stored ``func_summary`` facts are considered.
         """
-        query = (
+        _ir = self._inline_relation
+        _5cols = ["fp", "fq", "var", "bid", "lbl"]
+
+        # Seed inline relations when config-driven sources/sinks are provided
+        config_seed = ""
+        if sources is not None:
+            config_seed += _ir("cfg_source", _5cols, sources)
+        if sinks is not None:
+            config_seed += _ir("cfg_sink", _5cols, sinks)
+
+        # Determine which labels to track
+        if sources is not None:
+            active_labels = list({lbl for _, _, _, _, lbl in sources})
+            active_label_rule = _ir("active_label", ["lbl"], [(lbl,) for lbl in active_labels])
+        else:
+            active_label_rule = ""
+
+        query = config_seed + active_label_rule + (
             # Direct summaries (from intraprocedural analysis)
             "param_flows_to_return[fq, param] := "
             "*func_summary[fq, param, ftr, _, _], ftr == true\n"
@@ -1933,19 +1972,19 @@ class FactGraph:
             "*def_use[_, caller_fq, caller_param, _, _, _, _, _, _, _]\n"
 
             # Violations: tainted param flows to sink through call chain
-            "violation[caller_fq, callee_fq, param, lbl] := "
-            "*call[caller_fq, callee_fq, fp, line, _, _, _], "
+            "violation[caller_fq, callee_fq, fp, param, lbl] := "
+            "*call[caller_fq, callee_fq, fp, _, _, _, _], "
             "param_flows_to_sink[callee_fq, param, lbl]\n"
 
-            "?[caller_fq, callee_fq, param, lbl] := "
-            "violation[caller_fq, callee_fq, param, lbl]"
+            "?[caller_fq, callee_fq, fp, param, lbl] := "
+            "violation[caller_fq, callee_fq, fp, param, lbl]"
         )
 
         result = self._client.run(query)
         return [
             TraceFlowFact(
-                source_var=r[2], sink_var=r[2], label=r[3],
-                file_path="", func_qn=r[0],
+                source_var=r[3], sink_var=r[3], label=r[4],
+                file_path=r[2], func_qn=r[0],
                 source_line=0, sink_line=0,
             )
             for r in result["rows"]
