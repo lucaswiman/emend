@@ -1393,6 +1393,7 @@ def _run_trace_datalog(
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
+            matched_sources: list[tuple[str, str, str, int, str]] = []
             matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
@@ -1408,13 +1409,23 @@ def _run_trace_datalog(
                         )
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
-                        sources.append((file_path, fq, var, bid, src_def.label))
+                        matched_sources.append((file_path, fq, var, bid, src_def.label))
+            if src_def.type_constraint and matched_sources:
+                matched_sources = _filter_by_receiver_type(
+                    matched_sources,
+                    src_def.type_constraint,
+                    graph,
+                )
+            sources.extend(matched_sources)
 
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
                 continue
             if not sink_def.pattern:
                 continue
+            matched_sinks: list[tuple[str, str, str, int, str]] = []
+            matched_sink_lines: list[tuple[str, str, str, int, int]] = []
+            matched_sink_metadata: dict[tuple[str, str, str, str, int], tuple[int, str, str]] = {}
             matches = find_pattern(sink_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
@@ -1423,12 +1434,31 @@ def _run_trace_datalog(
                         var_names |= _extract_identifiers(ct)
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
-                        sinks.append((file_path, fq, var, bid, sink_def.label))
-                        sink_lines.append((file_path, fq, sink_def.label, bid, m.line))
-                        sink_metadata.setdefault(
+                        match_tuple = (file_path, fq, var, bid, sink_def.label)
+                        matched_sinks.append(match_tuple)
+                        matched_sink_lines.append((file_path, fq, sink_def.label, bid, m.line))
+                        matched_sink_metadata.setdefault(
                             (file_path, fq, sink_def.label, var, bid),
                             (m.line, sink_def.pattern or sink_def.effect, sink_def.message),
                         )
+            if sink_def.type_constraint and matched_sinks:
+                matched_sinks = _filter_by_receiver_type(
+                    matched_sinks,
+                    sink_def.type_constraint,
+                    graph,
+                )
+            allowed_sinks = set(matched_sinks)
+            sinks.extend(matched_sinks)
+            for fp, fq, lbl, bid, line in matched_sink_lines:
+                if any(
+                    sink_fp == fp and sink_fq == fq and sink_lbl == lbl and sink_bid == bid
+                    for sink_fp, sink_fq, _sink_var, sink_bid, sink_lbl in allowed_sinks
+                ):
+                    sink_lines.append((fp, fq, lbl, bid, line))
+            for sink_key, sink_info in matched_sink_metadata.items():
+                fp, fq, lbl, var, bid = sink_key
+                if (fp, fq, var, bid, lbl) in allowed_sinks:
+                    sink_metadata.setdefault(sink_key, sink_info)
 
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
@@ -1456,14 +1486,6 @@ def _run_trace_datalog(
 
     if not sources:
         return []
-
-    # Object-sensitive dispatch: filter by receiver type when type_constraint is set
-    for src_def in config.sources:
-        if src_def.type_constraint:
-            sources = _filter_by_receiver_type(sources, src_def.type_constraint, graph)
-    for sink_def in config.sinks:
-        if sink_def.pattern and sink_def.type_constraint:
-            sinks = _filter_by_receiver_type(sinks, sink_def.type_constraint, graph)
 
     # Build effect_sinks from config
     effect_sinks_list: list[tuple[str, str]] = []

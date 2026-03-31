@@ -385,6 +385,86 @@ def test_run_trace_datalog_supports_effect_only_sinks(monkeypatch, tmp_path):
     assert violation.message == "TOCTOU write"
 
 
+def test_run_trace_datalog_type_constrained_sink_does_not_filter_other_sinks(
+    monkeypatch,
+    tmp_path,
+):
+    """A constrained sink rule must not prune unrelated sink matches."""
+
+    class _FakeGraph:
+        def trace_propagation_datalog(self, **kwargs):
+            seen_sinks.extend(kwargs["sinks"])
+            return [
+                TraceFlowFact(
+                    source_var=sink_var,
+                    sink_var=sink_var,
+                    label=label,
+                    file_path=file_path,
+                    func_qn=func_qn,
+                    source_line=1,
+                    sink_line=block_id,
+                )
+                for file_path, func_qn, sink_var, block_id, label in kwargs["sinks"]
+            ]
+
+    seen_sinks: list[tuple[str, str, str, int, str]] = []
+    src_file = tmp_path / "app.py"
+    src_file.write_text(
+        "def handle(req):\n"
+        "    raw = source(req)\n"
+        "    sink_a(raw)\n"
+        "    sink_b(raw)\n"
+    )
+
+    config = TraceConfig(
+        labels=["sqli"],
+        sources=[TraceSource(pattern="source($X)", label="sqli")],
+        sinks=[
+            TraceSink(pattern="sink_a($X)", label="sqli", message="A sink"),
+            TraceSink(
+                pattern="sink_b($X)",
+                label="sqli",
+                message="B sink",
+                type_constraint="only_b",
+            ),
+        ],
+    )
+
+    def _fake_filter_by_receiver_type(matches, constraint, graph):
+        assert constraint == "only_b"
+        return [m for m in matches if m[3] == 4]
+
+    monkeypatch.setattr(
+        "emend.trace._filter_by_receiver_type",
+        _fake_filter_by_receiver_type,
+    )
+    monkeypatch.setattr(
+        "emend.trace._resolve_match_to_location",
+        lambda graph, file_path, line: ("app.handle", line),
+    )
+    monkeypatch.setattr(
+        "emend.transform._get_or_build_fact_graph",
+        lambda project_path: _FakeGraph(),
+    )
+
+    result = _run_trace_datalog(
+        paths=[str(src_file)],
+        config=config,
+        label_filter=None,
+        language="python",
+        project_path=str(tmp_path),
+    )
+
+    assert seen_sinks == [
+        (str(src_file), "app.handle", "raw", 3, "sqli"),
+        (str(src_file), "app.handle", "raw", 4, "sqli"),
+    ]
+    assert {(v.line, v.message) for v in result} == {
+        (3, "A sink"),
+        (4, "B sink"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # interprocedural_trace_datalog config-driven tests
 # ---------------------------------------------------------------------------
