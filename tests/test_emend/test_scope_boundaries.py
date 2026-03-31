@@ -703,3 +703,117 @@ class TestMergeConfigsWithScopeSanitizers:
         assert len(merged.sinks) == 1
         # scope_sanitizers concatenated (both kept)
         assert len(merged.scope_sanitizers) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 regression tests: path-sensitive scope sanitizers (Bug 3)
+# ---------------------------------------------------------------------------
+
+
+class TestScopeSanitizerPathSensitive:
+    """Regression tests for Phase 5 Bug 3 fix: scope sanitizers should be
+    path-sensitive (only kill taint when they cover all paths from source to
+    sink, not when they appear anywhere in the function).
+    """
+
+    def test_scope_kill_on_one_branch_reports_violation_python(self, tmp_path):
+        """Scope sanitizer only on one branch of an if/else still allows a
+        violation via the unsanitized branch.
+
+        Code:
+            x = source()        # source
+            if flag:
+                session.commit() # scope kill only on true branch
+            sink(x)             # after merge: taint can reach via false branch
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = tainted()
+    if flag:
+        session.commit()
+    use(x)
+""")
+        config = TraceConfig(
+            labels=["lbl"],
+            sources=[TraceSource(pattern="tainted()", label="lbl")],
+            sinks=[TraceSink(
+                pattern="use($X)", label="lbl",
+                message="tainted value reached sink",
+            )],
+            scope_sanitizers=[
+                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
+            ],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # scope_kill only on true branch; false branch carries taint to sink.
+        assert len(violations) >= 1
+
+    def test_scope_kill_before_sink_on_all_paths_suppresses_python(self, tmp_path):
+        """Scope sanitizer before the sink on the only execution path suppresses
+        the violation.
+
+        Code:
+            x = source()
+            session.commit()  # scope kill covers the only path to the sink
+            use(x)            # no violation expected
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = tainted()
+    session.commit()
+    use(x)
+""")
+        config = TraceConfig(
+            labels=["lbl"],
+            sources=[TraceSource(pattern="tainted()", label="lbl")],
+            sinks=[TraceSink(
+                pattern="use($X)", label="lbl",
+                message="tainted value reached sink",
+            )],
+            scope_sanitizers=[
+                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
+            ],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        assert len(violations) == 0
+
+    def test_scope_kill_after_sink_reports_violation_python(self, tmp_path):
+        """Scope sanitizer after the sink should not suppress the violation.
+
+        Code:
+            x = source()
+            use(x)            # sink BEFORE scope kill → violation expected
+            session.commit()  # scope kill comes after the sink
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = tainted()
+    use(x)
+    session.commit()
+""")
+        config = TraceConfig(
+            labels=["lbl"],
+            sources=[TraceSource(pattern="tainted()", label="lbl")],
+            sinks=[TraceSink(
+                pattern="use($X)", label="lbl",
+                message="tainted value reached sink",
+            )],
+            scope_sanitizers=[
+                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
+            ],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # Scope kill is too late; violation should still be reported.
+        assert len(violations) >= 1
