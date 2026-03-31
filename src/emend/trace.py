@@ -1304,10 +1304,11 @@ def run_trace_analysis(
             continue
 
         functions = _collect_functions(symbols)
-
-        # Also analyze module-level code (treat the whole file as a "function")
-        # by using the full file range
-        functions.append(("__module__", 1, len(source.split("\n"))))
+        module_ranges = _collect_module_level_ranges(symbols, len(source.split("\n")))
+        functions.extend(
+            ("__module__", module_start, module_end)
+            for module_start, module_end in module_ranges
+        )
 
         for func_name, func_start, func_end in functions:
             func_violations = _analyze_function(
@@ -1622,6 +1623,42 @@ def _collect_functions(
         if hasattr(sym, "children") and sym.children:
             result.extend(_collect_functions(sym.children))
     return result
+
+
+def _collect_module_level_ranges(
+    symbols: list,
+    total_lines: int,
+) -> list[tuple[int, int]]:
+    """Return true module-level line ranges outside top-level symbol bodies."""
+    if total_lines <= 0:
+        return []
+
+    top_level_spans = sorted(
+        (sym.line_start, sym.line_end)
+        for sym in symbols
+        if getattr(sym, "line_start", None) is not None
+        and getattr(sym, "line_end", None) is not None
+    )
+    if not top_level_spans:
+        return [(1, total_lines)]
+
+    merged_spans: list[tuple[int, int]] = []
+    for start, end in top_level_spans:
+        if not merged_spans or start > merged_spans[-1][1] + 1:
+            merged_spans.append((start, end))
+        else:
+            prev_start, prev_end = merged_spans[-1]
+            merged_spans[-1] = (prev_start, max(prev_end, end))
+
+    module_ranges: list[tuple[int, int]] = []
+    cursor = 1
+    for start, end in merged_spans:
+        if cursor < start:
+            module_ranges.append((cursor, start - 1))
+        cursor = max(cursor, end + 1)
+    if cursor <= total_lines:
+        module_ranges.append((cursor, total_lines))
+    return module_ranges
 
 
 def format_violations(
@@ -2148,7 +2185,11 @@ def run_interprocedural_trace_analysis(
             continue
 
         functions = _collect_functions(symbols)
-        functions.append(("__module__", 1, len(source.split("\n"))))
+        module_ranges = _collect_module_level_ranges(symbols, len(source.split("\n")))
+        functions.extend(
+            ("__module__", module_start, module_end)
+            for module_start, module_end in module_ranges
+        )
 
         for func_name, func_start, func_end in functions:
             func_violations = _analyze_function(
@@ -2240,6 +2281,47 @@ def run_interprocedural_trace_analysis(
                             description=f"propagation: {target} = ... {ident} ...",
                             variable=target,
                         )
+
+            call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
+            if call_m:
+                callee_name = call_m.group(1)
+                args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
+                if args_m:
+                    arg_strs = [
+                        a.strip()
+                        for a in args_m.group(1).split(",")
+                        if a.strip()
+                    ]
+                    for callee_qn in name_to_qn.get(callee_name, []):
+                        callee_summary = summaries.get(callee_qn)
+                        if not callee_summary:
+                            continue
+                        callee_params = func_info[callee_qn][4]
+                        for arg_idx, arg_str in enumerate(arg_strs):
+                            if arg_idx >= len(callee_params):
+                                break
+                            callee_param = callee_params[arg_idx]
+                            if callee_param not in callee_summary.param_to_return:
+                                continue
+                            arg_idents = _extract_identifiers(arg_str)
+                            for ai in arg_idents:
+                                if ai not in taint_state:
+                                    continue
+                                for lbl in taint_state[ai]:
+                                    if label_filter and lbl != label_filter:
+                                        continue
+                                    if lbl not in callee_summary.param_to_return[callee_param]:
+                                        continue
+                                    propagated[lbl] = TraceStep(
+                                        file_path=fp,
+                                        line=stmt_line_abs,
+                                        col=0,
+                                        description=(
+                                            f"propagation: {target} = {callee_name}(...) "
+                                            f"returns tainted '{ai}'"
+                                        ),
+                                        variable=target,
+                                    )
             if propagated:
                 if target not in taint_state:
                     taint_state[target] = {}
@@ -2276,6 +2358,56 @@ def run_interprocedural_trace_analysis(
                         del taint_state[var][san_def.label]
                         if not taint_state[var]:
                             del taint_state[var]
+
+        # Check direct sinks in this function using the reconstructed taint
+        # state, which may include taint returned from callees.
+        for sink_def in config.sinks:
+            if label_filter and sink_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    sink_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+            for match in matches:
+                match_line = match.line or 1
+                match_col = match.col or 0
+                if not (fs <= match_line <= fe):
+                    continue
+                sink_idents: set[str] = set()
+                for _cn, cv in (match.captures or {}).items():
+                    if cv:
+                        sink_idents |= _extract_identifiers(cv)
+                if match.matched_text:
+                    sink_idents |= _extract_identifiers(match.matched_text)
+                for ident in sink_idents:
+                    if ident not in taint_state:
+                        continue
+                    if sink_def.label not in taint_state[ident]:
+                        continue
+                    origin_step = taint_state[ident][sink_def.label]
+                    violations.append(TraceViolation(
+                        file_path=fp,
+                        line=match_line,
+                        col=match_col,
+                        label=sink_def.label,
+                        sink_pattern=sink_def.pattern,
+                        message=sink_def.message,
+                        trace=[
+                            origin_step,
+                            TraceStep(
+                                file_path=fp,
+                                line=match_line,
+                                col=match_col,
+                                description=f"sink: {sink_def.label} via {sink_def.pattern}",
+                                variable=ident,
+                            ),
+                        ],
+                    ))
+                    break
 
         # Now scan call sites in the function body for interprocedural flow
         for line_idx in range(fs, fe + 1):

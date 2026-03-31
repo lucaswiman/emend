@@ -136,6 +136,43 @@ class TestComputeFunctionSummary:
 
 
 class TestInterproceduralAnalysis:
+    def test_unrelated_functions_do_not_report_violation(self, tmp_path):
+        """A source in one function should not taint an unrelated sink."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def read_name(request):\n"
+            "    name = request.args.get('name')\n"
+            "    return name\n"
+            "\n"
+            "def run_query(cursor):\n"
+            "    name = 'SELECT 1'\n"
+            "    cursor.execute(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace_analysis([str(test_file)], config)
+
+        assert result.violations == []
+
+    def test_callee_return_taint_reaches_caller_sink(self, tmp_path):
+        """Taint returned from a helper should remain tainted in the caller."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def passthrough(value):\n"
+            "    return value\n"
+            "\n"
+            "def handle_request(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    query = passthrough(name)\n"
+            "    cursor.execute(query)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace_analysis([str(test_file)], config)
+
+        assert len(result.violations) >= 1
+        assert any("SQL injection" in v.message for v in result.violations)
+
     def test_cross_function_violation(self, tmp_path):
         """Taint flows from source through a helper function to a sink."""
         test_file = tmp_path / "app.py"

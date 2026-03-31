@@ -183,6 +183,25 @@ def test_trace_no_false_positive_clean_value(tmp_path):
     assert len(violations) == 0
 
 
+def test_trace_does_not_cross_contaminate_separate_functions(tmp_path):
+    """A source in one function should not taint an unrelated sink in another."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def read_name(request):\n"
+        "    name = request.args.get('name')\n"
+        "    return name\n"
+        "\n"
+        "def run_query(cursor):\n"
+        "    name = 'SELECT 1'\n"
+        "    cursor.execute(name)\n"
+    )
+
+    config = _make_sql_injection_config()
+    violations = run_trace_analysis([str(test_file)], config)
+
+    assert violations == []
+
+
 def test_trace_trace_output(tmp_path):
     """Trace includes source and sink steps."""
     test_file = tmp_path / "app.py"
