@@ -288,14 +288,12 @@ def _check_flow_rule(
     file_path: str,
     source: str,
     language: str,
-    fact_graph: "Any | None" = None,
+    fact_graph: "Any | None" = None,  # unused; retained for API compatibility
 ) -> list[LintViolation]:
     """Check a flow-based lint rule within each function in the file.
 
     For each function body, finds source and sink pattern matches, then
-    propagates taint.  When *fact_graph* is provided, tries Datalog
-    propagation over def-use chains first; falls back to the regex-based
-    simulation otherwise.
+    propagates taint using the Python intraprocedural flow analysis engine.
     """
     from emend import emend_core
     from emend.ast_utils import _rust_dict_to_nested_symbol
@@ -334,50 +332,7 @@ def _check_flow_rule(
             source_override=source, language=language
         )
 
-    # Try Datalog propagation if a fact graph is available
-    if fact_graph is not None and all_source_matches and all_sink_matches:
-        try:
-            dl_sources: list[tuple[str, str, str, int]] = []
-            dl_sinks: list[tuple[str, str, str, int]] = []
-            dl_not_through: list[tuple[str, str, str, int]] | None = None
-
-            for m in all_source_matches:
-                for _cn, ct in m.captures.items():
-                    for name in _extract_names_from_text(ct):
-                        dl_sources.append((file_path, "", name, -1))
-            for m in all_sink_matches:
-                for _cn, ct in m.captures.items():
-                    for name in _extract_names_from_text(ct):
-                        dl_sinks.append((file_path, "", name, -1))
-            if all_sanitizer_matches:
-                dl_not_through = []
-                for m in all_sanitizer_matches:
-                    for _cn, ct in m.captures.items():
-                        for name in _extract_names_from_text(ct):
-                            dl_not_through.append((file_path, "", name, -1))
-
-            if dl_sources and dl_sinks:
-                dl_results = fact_graph.flow_rule_check_datalog(
-                    sources=dl_sources,
-                    sinks=dl_sinks,
-                    not_through=dl_not_through,
-                )
-                for fp, fq, src_var, sink_var in dl_results:
-                    violations.append(LintViolation(
-                        rule_name=rule.name,
-                        message=rule.message,
-                        file_path=fp,
-                        line=0,
-                        match_text=f"flow: {src_var} -> {sink_var}",
-                    ))
-                if violations:
-                    return violations
-        except Exception:
-            import logging
-            logging.getLogger(__name__).debug(
-                "Datalog flow rule check failed, falling back", exc_info=True
-            )
-
+    # Python intraprocedural flow analysis (canonical engine)
     all_lines = source.splitlines()
 
     for sym in _all_functions(symbols):

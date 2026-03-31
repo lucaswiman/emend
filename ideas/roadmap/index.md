@@ -12,8 +12,8 @@ indefinitely.
 
 ## Phases
 
-- [ ] [Phase 1: Remove Public Datalog Surfaces](./phase-1-remove-public-datalog-surfaces.md)
-- [ ] [Phase 2: Remove Fallback Execution Paths](./phase-2-remove-fallback-execution-paths.md)
+- [x] [Phase 1: Remove Public Datalog Surfaces](./phase-1-remove-public-datalog-surfaces.md)
+- [x] [Phase 2: Remove Fallback Execution Paths](./phase-2-remove-fallback-execution-paths.md)
 - [ ] [Phase 3: Make Cozo the Primary Analysis Store](./phase-3-make-cozo-primary-analysis-store.md)
 - [ ] [Phase 4: Shrink `parse.db` to FTS + Cache Metadata](./phase-4-shrink-parse-db.md)
 - [ ] [Phase 5: Repair Intraprocedural Trace Semantics](./phase-5-repair-intraprocedural-trace-semantics.md)

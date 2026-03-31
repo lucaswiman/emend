@@ -162,9 +162,8 @@ The MCP server now uses a smaller discriminated tool surface:
 3. **`references`** — References, callers, and callees
 4. **`analyze`** — Graph, deadcode, impact, semantic context, and flow analysis
 5. **`check`** — Unified project rules from `.emend/rules.yaml`
-6. **`datalog`** — Raw CozoScript queries against the fact graph
-7. **`mappings`** — Cross-repo identifier and module mappings
-8. **`grammar_and_cookbook`** — Syntax reference and cookbook text
+6. **`mappings`** — Cross-repo identifier and module mappings
+7. **`grammar_and_cookbook`** — Syntax reference and cookbook text
 
 See the [grammar_and_cookbook.rst](src/emend/grammar_and_cookbook.rst) reference for full command documentation.
 

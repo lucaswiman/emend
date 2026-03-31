@@ -198,7 +198,6 @@ Subcommands:
 - ``index`` -- pre-build caches for faster cross-project operations
 - ``editor-search`` -- one-shot JSON search for editors
 - ``editor-server`` -- long-running stdio JSON-RPC server for the Vim plugin
-- ``query`` -- raw CozoScript against the fact graph
 
 Examples:
 
@@ -207,15 +206,13 @@ Examples:
    emend tool index
    emend tool index src/ --jobs 8
    emend tool editor-server
-   emend tool query '?[name] := *symbol[name]'
 
 
 check, lint, and policy
 -----------------------
 
 ``check`` is the canonical rules entry point.  It reads
-``.emend/rules.yaml`` by default and can run match, flow, deadcode, type, and
-datalog-backed rules.
+``.emend/rules.yaml`` by default and can run match, flow, deadcode, and type rules.
 
 .. code-block:: text
 
@@ -225,7 +222,7 @@ Useful options:
 
 - ``--config`` -- path to ``rules.yaml``
 - ``--rule`` -- run one named rule
-- ``--kind`` -- restrict to ``match``, ``flow``, ``deadcode``, ``type``, or ``datalog``
+- ``--kind`` -- restrict to ``match``, ``flow``, ``deadcode``, or ``type``
 - ``--fix`` -- apply auto-fixes for match rules
 - ``--json`` -- structured output
 
@@ -267,6 +264,6 @@ Start the MCP server.
 Profiles:
 
 - ``core`` -- search, transform/references/analyze/check, grammar reference
-- ``refactor`` -- ``core`` plus raw datalog
+- ``refactor`` -- alias for ``core``
 - ``expert`` -- ``refactor`` plus mappings
 - ``full`` -- canonical tools plus legacy compatibility tools

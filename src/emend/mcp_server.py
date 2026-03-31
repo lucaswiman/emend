@@ -61,7 +61,7 @@ Prefer the discriminated tools:
 - references(mode=refs|callers|callees)
 - analyze(mode=graph|deadcode|impact|semantic_context|trace)
 - check(mode=lint|policy)
-- datalog(mode=raw|guided)
+- facts_query(fact_type=symbols|calls|references|trace_flows|types|imports)
 - mappings(operation=read|write)
 """,
 )
@@ -1034,90 +1034,70 @@ def trace_analysis(
 
 
 # ---------------------------------------------------------------------------
-# datalog_query (raw CozoScript + guided structured mode)
+# facts_query (guided structured mode)
 # ---------------------------------------------------------------------------
 
 
 @mcp_app.tool()
-def datalog_query(
-    query: Annotated[str | None, Field(description="CozoScript query (required for raw mode, ignored in guided mode).")] = None,
+def facts_query(
     project: Annotated[str, Field(description="Project root directory.")] = ".",
     limit: Annotated[int, Field(description="Maximum number of result rows to return.")] = 200,
-    mode: Annotated[str, Field(description="Query mode: 'raw' for CozoScript, 'guided' for structured queries.")] = "raw",
-    fact_type: Annotated[str | None, Field(description="Guided mode: fact type (symbols, calls, references, trace_flows, types, imports).")] = None,
-    name: Annotated[str | None, Field(description="Guided mode: filter by name.")] = None,
-    kind: Annotated[str | None, Field(description="Guided mode: filter by kind.")] = None,
-    file_path: Annotated[str | None, Field(description="Guided mode: filter by file path.")] = None,
-    symbol: Annotated[str | None, Field(description="Guided mode: symbol qualified name.")] = None,
-    label: Annotated[str | None, Field(description="Guided mode: trace label filter.")] = None,
-    transitive: Annotated[bool, Field(description="Guided mode: compute transitive closure.")] = False,
-    max_depth: Annotated[int, Field(description="Guided mode: max depth for transitive queries.")] = 10,
+    fact_type: Annotated[str | None, Field(description="Fact type (symbols, calls, references, trace_flows, types, imports).")] = None,
+    name: Annotated[str | None, Field(description="Filter by name.")] = None,
+    kind: Annotated[str | None, Field(description="Filter by kind.")] = None,
+    file_path: Annotated[str | None, Field(description="Filter by file path.")] = None,
+    symbol: Annotated[str | None, Field(description="Symbol qualified name.")] = None,
+    label: Annotated[str | None, Field(description="Trace label filter.")] = None,
+    transitive: Annotated[bool, Field(description="Compute transitive closure.")] = False,
+    max_depth: Annotated[int, Field(description="Max depth for transitive queries.")] = 10,
 ) -> str:
-    """Query the project fact graph via CozoScript (raw) or structured params (guided)."""
+    """Query the project fact graph via structured parameters."""
     from emend.fact_graph import FactGraph
+    import dataclasses
 
-    if mode == "guided":
-        import dataclasses
+    _fact_type = fact_type or "symbols"
+    graph = FactGraph.build_from_project(project)
 
-        _fact_type = fact_type or "symbols"
-        graph = FactGraph.build_from_project(project)
+    if _fact_type == "symbols":
+        results = graph.symbols(name=name, kind=kind, file_path=file_path)
+        return json.dumps([dataclasses.asdict(f) for f in results[:limit]], indent=2)
 
-        if _fact_type == "symbols":
-            results = graph.symbols(name=name, kind=kind, file_path=file_path)
-            return json.dumps([dataclasses.asdict(f) for f in results[:limit]], indent=2)
+    elif _fact_type == "calls":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for call queries."})
+        if transitive:
+            callers = graph.transitive_callers(symbol, max_depth=max_depth)
+            return json.dumps({"symbol": symbol, "transitive_callers": sorted(callers)}, indent=2)
+        from_calls = graph.calls_from(symbol)
+        to_calls = graph.calls_to(symbol)
+        return json.dumps({
+            "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
+            "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
+        }, indent=2)
 
-        elif _fact_type == "calls":
-            if not symbol:
-                return json.dumps({"error": "Provide 'symbol' parameter for call queries."})
-            if transitive:
-                callers = graph.transitive_callers(symbol, max_depth=max_depth)
-                return json.dumps({"symbol": symbol, "transitive_callers": sorted(callers)}, indent=2)
-            from_calls = graph.calls_from(symbol)
-            to_calls = graph.calls_to(symbol)
-            return json.dumps({
-                "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
-                "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
-            }, indent=2)
+    elif _fact_type == "references":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for reference queries."})
+        refs = graph.references_to(symbol)
+        return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
 
-        elif _fact_type == "references":
-            if not symbol:
-                return json.dumps({"error": "Provide 'symbol' parameter for reference queries."})
-            refs = graph.references_to(symbol)
-            return json.dumps([dataclasses.asdict(r) for r in refs[:limit]], indent=2)
+    elif _fact_type == "trace_flows":
+        flows = graph.trace_flows(label=label, file_path=file_path)
+        return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
 
-        elif _fact_type == "trace_flows":
-            flows = graph.trace_flows(label=label, file_path=file_path)
-            return json.dumps([dataclasses.asdict(f) for f in flows[:limit]], indent=2)
+    elif _fact_type == "types":
+        if not symbol:
+            return json.dumps({"error": "Provide 'symbol' parameter for type queries."})
+        types = graph.types_for(symbol)
+        return json.dumps([dataclasses.asdict(t) for t in types[:limit]], indent=2)
 
-        elif _fact_type == "types":
-            if not symbol:
-                return json.dumps({"error": "Provide 'symbol' parameter for type queries."})
-            types = graph.types_for(symbol)
-            return json.dumps([dataclasses.asdict(t) for t in types[:limit]], indent=2)
+    elif _fact_type == "imports":
+        if not file_path:
+            return json.dumps({"error": "Provide 'file_path' parameter for import queries."})
+        imports = graph.imports_in(file_path)
+        return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
 
-        elif _fact_type == "imports":
-            if not file_path:
-                return json.dumps({"error": "Provide 'file_path' parameter for import queries."})
-            imports = graph.imports_in(file_path)
-            return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
-
-        return json.dumps({"error": f"Unknown fact_type: {_fact_type}"})
-
-    # raw mode
-    if query is None:
-        return json.dumps({"error": "Provide 'query' parameter for raw mode."})
-
-    try:
-        graph = FactGraph.build_from_project(project)
-        result = graph.run_query(query)
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
-
-    headers = result.get("headers", [])
-    rows = result.get("rows", [])
-    if limit > 0:
-        rows = rows[:limit]
-    return json.dumps({"headers": headers, "rows": rows, "count": len(rows)}, indent=2)
+    return json.dumps({"error": f"Unknown fact_type: {_fact_type}"})
 
 
 # ---------------------------------------------------------------------------
@@ -1557,20 +1537,6 @@ def check(
     ], indent=2)
 
 
-@mcp_app.tool()
-def datalog(
-    query: Annotated[str | None, Field(description="Raw CozoScript query.")] = None,
-    project: Annotated[str, Field(description="Project root directory.")] = ".",
-    limit: Annotated[int, Field(description="Maximum rows to return.")] = 200,
-) -> str:
-    """Run raw CozoScript against the fact graph."""
-    return datalog_query(
-        query=query,
-        project=project,
-        limit=limit,
-        mode="raw",
-    )
-
 
 @mcp_app.tool()
 def mappings(
@@ -1852,7 +1818,7 @@ _CORE_TOOLS: set[str] = {
     "references",
     "analyze",
     "check",
-    "datalog",
+    "facts_query",
     "grammar_and_cookbook",
 }
 
