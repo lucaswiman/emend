@@ -40,13 +40,13 @@ def test_analyze_group_has_subcommands():
     assert "impact" in result.stdout
 
 
-def test_tool_group_has_query_subcommand():
-    """Raw datalog query is available under `tool` for debugging."""
+def test_tool_group_no_query_subcommand():
+    """Raw datalog query has been removed from the public CLI (Phase 1)."""
     result = runner.invoke(app, ["tool", "--help"])
 
     assert result.exit_code == 0
     assert "Commands" in result.stdout
-    assert "query" in result.stdout
+    assert "query" not in result.stdout
 
 
 def test_rm_alias_still_works_without_edit_prefix(tmp_path):

@@ -28,16 +28,44 @@ Primary candidates:
 
 ## Todo
 
-- [ ] Inventory every "try Datalog, then fall back" path.
-- [ ] Classify each feature as one of:
+- [x] Inventory every "try Datalog, then fall back" path.
+- [x] Classify each feature as one of:
   - fact-graph canonical
   - Python canonical
   - pending migration
-- [ ] For fact-graph-canonical features, remove the silent fallback.
-- [ ] Replace silent fallback with explicit failure or a clear bootstrap step.
+- [x] For fact-graph-canonical features, remove the silent fallback.
+- [x] Replace silent fallback with explicit failure or a clear bootstrap step.
 - [ ] Tighten tests so they assert the intended engine rather than just output shape.
-- [ ] Add debug logging that reports which engine a feature used.
+- [x] Add debug logging that reports which engine a feature used.
 - [ ] Remove dead code left behind from fallback helpers after each feature is migrated.
+
+## Implementation Notes
+
+### Classification
+
+| Feature | Canonical Engine | Status |
+|---------|-----------------|--------|
+| Intraprocedural trace | Python | Silent fallback removed |
+| Lint flow rules | Python | Silent fallback already removed |
+| CFG/unreachable blocks | Fact graph | No fallback existed |
+| Dead code | Fact graph | No silent fallback |
+| Cascade delete | Fact graph | No silent fallback |
+| FactGraph loading | Multi-stage bootstrap | Kept (intentional) |
+| Policy datalog checks | Fact graph | Returns explicit error on failure (not silent) |
+
+### Changes Made
+
+- `trace.py`: Removed `if project_path: try: _run_trace_datalog(…)` fallback.
+  Python is now the canonical intraprocedural engine. `_run_trace_datalog()`
+  retained as dead code for Phase 6 reference.
+- `lint.py`: Datalog flow rule fallback was already removed. `fact_graph`
+  parameter kept in signature for API compatibility.
+- Debug logging added: `logger.debug("Using Python intraprocedural trace engine for %d files", len(paths))`
+
+### Remaining Work
+
+- Tests could be tightened to assert engine choice (low priority)
+- `_run_trace_datalog()` dead code can be removed after Phase 6
 
 ## Exit Criteria
 

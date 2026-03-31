@@ -41,7 +41,7 @@ from emend.cli_edit import (
 )
 from emend.cli_find import search
 from emend.cli_map import map_app as _map_app  # noqa: F401
-from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd, query_cmd
+from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd
 
 
 app.command("search", hidden=True)(search)
@@ -91,8 +91,6 @@ analyze_app.command("dead_code", hidden=True)(dead_code_cmd)
 tool_app.command("index")(index_cmd)
 tool_app.command("editor-search")(editor_search_cmd)
 tool_app.command("editor-server")(editor_server_cmd)
-tool_app.command("query")(query_cmd)
-tool_app.command("datalog", hidden=True)(query_cmd)
 tool_app.command("mcp", hidden=True)(mcp_cmd)
 
 

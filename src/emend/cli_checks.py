@@ -144,7 +144,7 @@ def check_cmd(
     paths: Annotated[Optional[list[str]], typer.Argument(help="File or directory scope(s) to check")] = None,
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,
     rule_name: Annotated[Optional[str], typer.Option("--rule", help="Run only a specific rule")] = None,
-    kind: Annotated[Optional[str], typer.Option("--kind", help="Restrict to one rule kind: match, flow, deadcode, type, datalog")] = None,
+    kind: Annotated[Optional[str], typer.Option("--kind", help="Restrict to one rule kind: match, flow, deadcode, type")] = None,
     fix: Annotated[bool, typer.Option("--fix", help="Apply auto-fixes for match rules")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ):

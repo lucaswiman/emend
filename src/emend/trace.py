@@ -1156,12 +1156,7 @@ def run_trace_analysis(
     language: str = "python",
     project_path: str | None = None,
 ) -> list[TraceViolation]:
-    """Run taint analysis on the given files.
-
-    Tries Datalog-based propagation over the FactGraph first (pattern matching
-    identifies sources/sinks, Datalog handles propagation through def-use chains).
-    Falls back to the Python regex-based simulation when the fact graph is
-    unavailable.
+    """Run taint analysis on the given files using the Python intraprocedural engine.
 
     Args:
         paths: List of source file paths to analyze.
@@ -1176,18 +1171,8 @@ def run_trace_analysis(
     if not config.sources or not config.sinks:
         return []
 
-    # Try Datalog path: pattern-match sources/sinks, propagate via FactGraph
-    if project_path:
-        try:
-            datalog_result = _run_trace_datalog(
-                paths, config, label_filter, language, project_path,
-            )
-            if datalog_result is not None:
-                return datalog_result
-        except Exception:
-            logger.debug("Datalog taint analysis failed, falling back", exc_info=True)
-
-    # Fallback: Python regex-based simulation
+    # Python intraprocedural trace analysis
+    logger.debug("Using Python intraprocedural trace engine for %d files", len(paths))
     from emend.ast_utils import find_nested_definitions
 
     # Create type oracle if any rule has a type_constraint
@@ -1235,6 +1220,7 @@ def run_trace_analysis(
     return _deduplicate_violations(violations)
 
 
+# NOTE: Datalog trace path is disabled (Phase 2 migration). Retained for reference during Phase 6 implementation.
 def _run_trace_datalog(
     paths: list[str],
     config: TraceConfig,

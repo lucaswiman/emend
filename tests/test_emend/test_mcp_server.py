@@ -18,7 +18,7 @@ try:
         references,
         analyze,
         check,
-        datalog,
+        facts_query,
         mappings,
         grammar_and_cookbook,
     )
@@ -41,16 +41,16 @@ def test_all_tools_registered_core():
         "references",
         "analyze",
         "check",
-        "datalog",
+        "facts_query",
         "grammar_and_cookbook",
     }
 
 
-def test_expert_profile_includes_mappings_and_datalog():
+def test_expert_profile_includes_mappings_and_facts_query():
     configure_profile(profile="expert")
     tool_names = {t.name for t in mcp_app._tool_manager.list_tools()}
     assert "mappings" in tool_names
-    assert "datalog" in tool_names
+    assert "facts_query" in tool_names
 
 
 def test_dump_schema():
@@ -65,7 +65,7 @@ def test_dump_schema():
         "references",
         "analyze",
         "check",
-        "datalog",
+        "facts_query",
         "grammar_and_cookbook",
     }
     for tool in data["tools"]:
@@ -217,26 +217,20 @@ def test_check_unified_rules(tmp_path):
     assert data[0]["rule"] == "no-print"
 
 
-def test_datalog_raw_query(tmp_path):
+def test_facts_query_guided_symbols(tmp_path):
     configure_profile(profile="expert")
     p = tmp_path / "example.py"
     p.write_text("def foo():\n    pass\n\ndef bar():\n    foo()\n")
 
-    result = datalog(
-        query='?[name, kind] := *symbol[_, _, name, kind, _, _, _]',
+    result = facts_query(
+        fact_type="symbols",
         project=str(tmp_path),
     )
     data = json.loads(result)
-    assert "headers" in data
-    assert "rows" in data
-    assert "count" in data
-
-
-def test_datalog_missing_query(tmp_path):
-    configure_profile(profile="expert")
-    result = datalog(project=str(tmp_path))
-    data = json.loads(result)
-    assert "error" in data
+    assert isinstance(data, list)
+    names = {entry["name"] for entry in data}
+    assert "foo" in names
+    assert "bar" in names
 
 
 def test_mappings_read_write(monkeypatch, tmp_path):
