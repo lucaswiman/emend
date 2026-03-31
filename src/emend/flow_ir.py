@@ -236,6 +236,26 @@ def _execute_via_datalog(
 
     resolver = LocationResolver.from_fact_graph(fact_graph, file_path)
 
+    def _remember_match(
+        store: dict[tuple[str, str, str, int], dict[str, object]],
+        fallback_store: dict[tuple[str, str, str], dict[str, object]],
+        *,
+        fp: str,
+        fq: str,
+        var_name: str,
+        block_id: int,
+        line: int,
+        col: int,
+        text: str,
+    ) -> None:
+        meta = {
+            "line": line,
+            "col": col,
+            "text": text,
+        }
+        store.setdefault((fp, fq, var_name, block_id), meta)
+        fallback_store.setdefault((fp, fq, var_name), meta)
+
     # Resolve source matches
     source_matches = find_pattern(
         spec.sources, file_path, source_override=source, language=language,
@@ -250,6 +270,8 @@ def _execute_via_datalog(
     # Build resolved location tuples for Datalog
     source_locs: list[tuple[str, str, str, int]] = []
     source_lines: dict[tuple[str, str, int], int] = {}
+    source_meta: dict[tuple[str, str, str, int], dict[str, object]] = {}
+    source_meta_by_var: dict[tuple[str, str, str], dict[str, object]] = {}
     for m in source_matches:
         if m.line is None:
             continue
@@ -265,10 +287,22 @@ def _execute_via_datalog(
         key = (loc.file_path, loc.func_qn, loc.block_id)
         if key not in source_lines:
             source_lines[key] = m.line
+        _remember_match(
+            source_meta,
+            source_meta_by_var,
+            fp=loc.file_path,
+            fq=loc.func_qn,
+            var_name=var_name,
+            block_id=loc.block_id,
+            line=m.line,
+            col=m.col or 0,
+            text=(m.matched_text or var_name).strip(),
+        )
 
     sink_locs: list[tuple[str, str, str, int]] = []
     sink_lines: dict[tuple[str, str, int], int] = {}
-    sink_text_map: dict[tuple[str, str, str], str] = {}
+    sink_meta: dict[tuple[str, str, str, int], dict[str, object]] = {}
+    sink_meta_by_var: dict[tuple[str, str, str], dict[str, object]] = {}
     for m in sink_matches:
         if m.line is None:
             continue
@@ -283,9 +317,17 @@ def _execute_via_datalog(
         key = (loc.file_path, loc.func_qn, loc.block_id)
         if key not in sink_lines:
             sink_lines[key] = m.line
-        sink_text_map[(loc.file_path, loc.func_qn, var_name)] = (
-            m.matched_text or ""
-        ).strip()
+        _remember_match(
+            sink_meta,
+            sink_meta_by_var,
+            fp=loc.file_path,
+            fq=loc.func_qn,
+            var_name=var_name,
+            block_id=loc.block_id,
+            line=m.line,
+            col=m.col or 0,
+            text=(m.matched_text or var_name).strip(),
+        )
 
     # Resolve blocker (not-through) matches
     blocker_locs: list[tuple[str, str, str, int]] | None = None
@@ -338,6 +380,7 @@ def _execute_via_datalog(
             source_lines=source_lines,
             sink_lines=sink_lines,
             blocker_lines=blocker_lines,
+            include_locations=True,
         )
     except Exception:
         logger.debug(
@@ -348,17 +391,30 @@ def _execute_via_datalog(
         return _execute_via_python(spec, file_path, source, language)
 
     results: list[FlowViolation] = []
-    for fp, fq, src_var, sink_var in raw_violations:
-        sink_text = sink_text_map.get((fp, fq, sink_var), sink_var)
+    for fp, fq, src_var, sink_var, src_block, sink_block in raw_violations:
+        src_info = source_meta.get((fp, fq, src_var, src_block))
+        if src_info is None:
+            src_info = source_meta_by_var.get((fp, fq, src_var), {})
+        sink_info = sink_meta.get((fp, fq, sink_var, sink_block))
+        if sink_info is None:
+            sink_info = sink_meta_by_var.get((fp, fq, sink_var), {})
+
+        src_line = int(src_info.get("line", 0))
+        src_col = int(src_info.get("col", 0))
+        src_text = str(src_info.get("text", src_var))
+        sink_line = int(sink_info.get("line", 0))
+        sink_col = int(sink_info.get("col", 0))
+        sink_text = str(sink_info.get("text", sink_var))
+
         # Build minimal witness
         witness_steps = [
             WitnessStep(
-                file_path=fp, func_qn=fq, block_id=0,
-                line=0, var_name=src_var, kind="source",
+                file_path=fp, func_qn=fq, block_id=src_block,
+                line=src_line, col=src_col, var_name=src_text, kind="source",
             ),
             WitnessStep(
-                file_path=fp, func_qn=fq, block_id=0,
-                line=0, var_name=sink_var, kind="sink",
+                file_path=fp, func_qn=fq, block_id=sink_block,
+                line=sink_line, col=sink_col, var_name=sink_text, kind="sink",
             ),
         ]
         results.append(FlowViolation(
@@ -366,8 +422,10 @@ def _execute_via_datalog(
             message=spec.message,
             severity=spec.severity,
             file_path=fp,
-            line=0,
-            source_text=src_var,
+            line=sink_line,
+            col=sink_col,
+            source_line=src_line,
+            source_text=src_text,
             sink_text=sink_text,
             witness=witness_steps,
         ))

@@ -1375,6 +1375,7 @@ def _run_trace_datalog(
     sinks: list[tuple[str, str, str, int, str]] = []
     sanitizers: list[tuple[str, str, str, int, str]] = []
     scope_kills: list[tuple[str, str, str, int]] = []
+    sink_metadata: dict[tuple[str, str, str, str, int], tuple[int, str, str]] = {}
 
     # For intra-block line ordering
     sanitizer_lines: list[tuple[str, str, str, int, int]] = []
@@ -1412,6 +1413,8 @@ def _run_trace_datalog(
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
                 continue
+            if not sink_def.pattern:
+                continue
             matches = find_pattern(sink_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
@@ -1422,6 +1425,10 @@ def _run_trace_datalog(
                     for var in var_names:
                         sinks.append((file_path, fq, var, bid, sink_def.label))
                         sink_lines.append((file_path, fq, sink_def.label, bid, m.line))
+                        sink_metadata.setdefault(
+                            (file_path, fq, sink_def.label, var, bid),
+                            (m.line, sink_def.pattern or sink_def.effect, sink_def.message),
+                        )
 
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
@@ -1447,7 +1454,7 @@ def _run_trace_datalog(
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     scope_kills.append((file_path, fq, scope_san.label, bid))
 
-    if not sources or not sinks:
+    if not sources:
         return []
 
     # Object-sensitive dispatch: filter by receiver type when type_constraint is set
@@ -1455,11 +1462,8 @@ def _run_trace_datalog(
         if src_def.type_constraint:
             sources = _filter_by_receiver_type(sources, src_def.type_constraint, graph)
     for sink_def in config.sinks:
-        if sink_def.type_constraint:
+        if sink_def.pattern and sink_def.type_constraint:
             sinks = _filter_by_receiver_type(sinks, sink_def.type_constraint, graph)
-
-    if not sources or not sinks:
-        return []
 
     # Build effect_sinks from config
     effect_sinks_list: list[tuple[str, str]] = []
@@ -1470,6 +1474,9 @@ def _run_trace_datalog(
             if effect_m:
                 effect_sinks_list.append((sink_def.label, effect_m.group(1)))
 
+    if not sources or (not sinks and not effect_sinks_list):
+        return []
+
     # Determine sanitizer quantifier from config
     san_quantifier = "all_paths"
     for san_def in config.sanitizers:
@@ -1477,10 +1484,10 @@ def _run_trace_datalog(
             san_quantifier = "some_path"
             break
 
-    # Build sink_messages lookup for per-sink messages
-    sink_messages: dict[tuple[str, str], str] = {}
+    effect_defs_by_label: dict[str, list[TraceSink]] = {}
     for sink_def in config.sinks:
-        sink_messages[(sink_def.label, sink_def.pattern)] = sink_def.message
+        if sink_def.effect:
+            effect_defs_by_label.setdefault(sink_def.label, []).append(sink_def)
 
     taint_facts = graph.trace_propagation_datalog(
         sources=sources,
@@ -1493,16 +1500,76 @@ def _run_trace_datalog(
         scope_kills=scope_kills if scope_kills else None,
     )
 
+    def _resolve_effect_sink_line(
+        file_path: str,
+        func_qn: str,
+        sink_var: str,
+        sink_block: int,
+        effect_kind: str,
+    ) -> int:
+        try:
+            if effect_kind == "writes":
+                for du in graph.def_uses(file_path=file_path, func_qn=func_qn):
+                    if du.def_block != sink_block:
+                        continue
+                    if du.kind not in {"write", "aug_write"}:
+                        continue
+                    if du.var_name == sink_var or du.var_name.startswith(f"{sink_var}."):
+                        return du.def_line or du.use_line or 0
+                for mc in graph.method_calls(file_path=file_path, func_qn=func_qn):
+                    if mc.block_id == sink_block and mc.receiver == sink_var:
+                        return mc.line
+            elif effect_kind == "reads":
+                for du in graph.def_uses(file_path=file_path, func_qn=func_qn):
+                    if du.use_block != sink_block or du.kind != "read":
+                        continue
+                    if du.var_name == sink_var or du.var_name.startswith(f"{sink_var}."):
+                        return du.use_line or du.def_line or 0
+        except Exception:
+            logger.debug(
+                "Failed to resolve effect sink line for %s:%s %s in block %s",
+                file_path,
+                func_qn,
+                sink_var,
+                sink_block,
+                exc_info=True,
+            )
+        return 0
+
     # Convert TraceFlowFact -> TraceViolation
     violations: list[TraceViolation] = []
     for tf in taint_facts:
-        msg = sink_messages.get((tf.label, tf.sink_var), f"Tainted value reaches sink: {tf.sink_var}")
+        sink_block = tf.sink_line
+        line = 0
+        sink_pattern = tf.sink_var
+        msg = f"Tainted value reaches sink: {tf.sink_var}"
+
+        metadata = sink_metadata.get(
+            (tf.file_path, tf.func_qn, tf.label, tf.sink_var, sink_block)
+        )
+        if metadata is not None:
+            line, sink_pattern, msg = metadata
+        else:
+            effect_defs = effect_defs_by_label.get(tf.label, [])
+            if len(effect_defs) == 1:
+                effect_def = effect_defs[0]
+                sink_pattern = effect_def.effect or effect_def.pattern or tf.sink_var
+                msg = effect_def.message or msg
+                effect_kind = effect_def.effect.split("(", 1)[0] if effect_def.effect else ""
+                if effect_kind:
+                    line = _resolve_effect_sink_line(
+                        tf.file_path,
+                        tf.func_qn,
+                        tf.sink_var,
+                        sink_block,
+                        effect_kind,
+                    )
         violations.append(TraceViolation(
             file_path=tf.file_path,
-            line=tf.sink_line,
+            line=line,
             col=0,
             label=tf.label,
-            sink_pattern=tf.sink_var,
+            sink_pattern=sink_pattern,
             message=msg,
             trace=[],
             engine="datalog",

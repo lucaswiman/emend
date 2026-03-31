@@ -12,6 +12,7 @@ from emend.flow_ir import (
     from_lint_rule,
     _flow_witness_to_steps,
 )
+from emend.transform import PatternMatch
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +204,76 @@ class TestFlowViolation:
         assert v.col == 0
         assert v.source_text == ""
         assert v.sink_text == ""
+
+
+class TestExecuteFlowSpecDatalog:
+    def test_preserves_exact_match_locations(self, monkeypatch, tmp_path):
+        class _FakeGraph:
+            def symbols(self, **kwargs):
+                return []
+
+            def cfg_blocks(self, **kwargs):
+                return []
+
+            def source_locs(self, **kwargs):
+                return []
+
+            def flow_rule_check_datalog(self, **kwargs):
+                assert kwargs["include_locations"] is True
+                return [(str(src_file), "<module>", "raw", "raw", 0, 0)]
+
+        src_file = tmp_path / "app.py"
+        source = (
+            "raw = request.args.get('name')\n"
+            "cursor.execute(raw)\n"
+        )
+        src_file.write_text(source)
+
+        spec = FlowSpec(
+            name="sql-injection",
+            message="SQL injection risk",
+            sources="request.args.get($X)",
+            sinks="cursor.execute($X)",
+        )
+
+        def _fake_find_pattern(pattern, file_path, **kwargs):
+            if pattern == "request.args.get($X)":
+                return [
+                    PatternMatch(
+                        node_text="request.args.get(raw)",
+                        captures={"X": "raw"},
+                        line=1,
+                        matched_text="request.args.get(raw)",
+                        col=7,
+                    )
+                ]
+            if pattern == "cursor.execute($X)":
+                return [
+                    PatternMatch(
+                        node_text="cursor.execute(raw)",
+                        captures={"X": "raw"},
+                        line=2,
+                        matched_text="cursor.execute(raw)",
+                        col=1,
+                    )
+                ]
+            return []
+
+        monkeypatch.setattr("emend.transform.find_pattern", _fake_find_pattern)
+
+        violations = execute_flow_spec(
+            spec,
+            str(src_file),
+            source,
+            "python",
+            fact_graph=_FakeGraph(),
+        )
+
+        assert len(violations) == 1
+        violation = violations[0]
+        assert violation.line == 2
+        assert violation.source_line == 1
+        assert violation.sink_text == "cursor.execute(raw)"
+        assert len(violation.witness) == 2
+        assert violation.witness[0].line == 1
+        assert violation.witness[1].line == 2

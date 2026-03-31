@@ -14,7 +14,8 @@ from emend.trace import (
     _run_trace_datalog,
     _resolve_match_to_location,
 )
-from emend.fact_graph import FactGraph, FuncSummaryFact, TraceFlowFact
+from emend.fact_graph import DefUseFact, FactGraph, FuncSummaryFact, TraceFlowFact
+from emend.transform import PatternMatch
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,172 @@ def test_run_trace_datalog_missing_file_skipped(tmp_path):
         project_path=str(tmp_path),
     )
     assert result == []
+
+
+def test_run_trace_datalog_uses_exact_sink_metadata(monkeypatch, tmp_path):
+    """Datalog trace adapter should preserve sink line, pattern, and message."""
+
+    class _FakeGraph:
+        def trace_propagation_datalog(self, **kwargs):
+            return [
+                TraceFlowFact(
+                    source_var="raw",
+                    sink_var="raw",
+                    label="sqli",
+                    file_path=str(src_file),
+                    func_qn="app.handle",
+                    source_line=1,
+                    sink_line=7,  # block id from the Datalog engine, not a source line
+                )
+            ]
+
+    src_file = tmp_path / "app.py"
+    src_file.write_text("def handle():\n    pass\n")
+
+    config = TraceConfig(
+        labels=["sqli"],
+        sources=[TraceSource(pattern="request.args.get($X)", label="sqli")],
+        sinks=[TraceSink(
+            pattern="cursor.execute($X)",
+            label="sqli",
+            message="SQL injection",
+        )],
+    )
+
+    def _fake_find_pattern(pattern, file_path, **kwargs):
+        if pattern == "request.args.get($X)":
+            return [
+                PatternMatch(
+                    node_text="request.args.get(raw)",
+                    captures={"X": "raw"},
+                    line=2,
+                    matched_text="request.args.get(raw)",
+                    col=5,
+                )
+            ]
+        if pattern == "cursor.execute($X)":
+            return [
+                PatternMatch(
+                    node_text="cursor.execute(raw)",
+                    captures={"X": "raw"},
+                    line=17,
+                    matched_text="cursor.execute(raw)",
+                    col=5,
+                )
+            ]
+        return []
+
+    monkeypatch.setattr("emend.trace.find_pattern", _fake_find_pattern)
+    monkeypatch.setattr(
+        "emend.trace._resolve_match_to_location",
+        lambda graph, file_path, line: ("app.handle", 7),
+    )
+    monkeypatch.setattr(
+        "emend.transform._get_or_build_fact_graph",
+        lambda project_path: _FakeGraph(),
+    )
+
+    result = _run_trace_datalog(
+        paths=[str(src_file)],
+        config=config,
+        label_filter=None,
+        language="python",
+        project_path=str(tmp_path),
+    )
+
+    assert len(result) == 1
+    violation = result[0]
+    assert violation.line == 17
+    assert violation.sink_pattern == "cursor.execute($X)"
+    assert violation.message == "SQL injection"
+
+
+def test_run_trace_datalog_supports_effect_only_sinks(monkeypatch, tmp_path):
+    """Effect-only sinks should not be dropped before the Datalog query runs."""
+
+    class _FakeGraph:
+        def trace_propagation_datalog(self, **kwargs):
+            assert kwargs["sinks"] == []
+            assert kwargs["effect_sinks"] == [("toctou", "writes")]
+            return [
+                TraceFlowFact(
+                    source_var="session",
+                    sink_var="session",
+                    label="toctou",
+                    file_path=str(src_file),
+                    func_qn="app.handle",
+                    source_line=1,
+                    sink_line=4,  # sink block id
+                )
+            ]
+
+        def def_uses(self, **kwargs):
+            return [
+                DefUseFact(
+                    file_path=str(src_file),
+                    func_qn="app.handle",
+                    var_name="session.value",
+                    kind="write",
+                    def_block=4,
+                    use_block=4,
+                    def_line=21,
+                )
+            ]
+
+        def method_calls(self, **kwargs):
+            return []
+
+    src_file = tmp_path / "app.py"
+    src_file.write_text("def handle():\n    pass\n")
+
+    config = TraceConfig(
+        labels=["toctou"],
+        sources=[TraceSource(pattern="load_session($OBJ)", label="toctou")],
+        sinks=[TraceSink(
+            pattern="",
+            label="toctou",
+            message="TOCTOU write",
+            effect="writes($OBJ)",
+        )],
+    )
+
+    def _fake_find_pattern(pattern, file_path, **kwargs):
+        if pattern == "load_session($OBJ)":
+            return [
+                PatternMatch(
+                    node_text="load_session(session)",
+                    captures={"OBJ": "session"},
+                    line=2,
+                    matched_text="load_session(session)",
+                    col=5,
+                )
+            ]
+        assert pattern == ""
+        return []
+
+    monkeypatch.setattr("emend.trace.find_pattern", _fake_find_pattern)
+    monkeypatch.setattr(
+        "emend.trace._resolve_match_to_location",
+        lambda graph, file_path, line: ("app.handle", 4),
+    )
+    monkeypatch.setattr(
+        "emend.transform._get_or_build_fact_graph",
+        lambda project_path: _FakeGraph(),
+    )
+
+    result = _run_trace_datalog(
+        paths=[str(src_file)],
+        config=config,
+        label_filter=None,
+        language="python",
+        project_path=str(tmp_path),
+    )
+
+    assert len(result) == 1
+    violation = result[0]
+    assert violation.line == 21
+    assert violation.sink_pattern == "writes($OBJ)"
+    assert violation.message == "TOCTOU write"
 
 
 # ---------------------------------------------------------------------------

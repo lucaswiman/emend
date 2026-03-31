@@ -1999,7 +1999,8 @@ class FactGraph:
         source_lines: dict[tuple[str, str, int], int] | None = None,
         sink_lines: dict[tuple[str, str, int], int] | None = None,
         blocker_lines: dict[tuple[str, str, int], int] | None = None,
-    ) -> list[tuple[str, str, str, str]]:
+        include_locations: bool = False,
+    ) -> list[tuple]:
         """Check flow-based lint rules via Datalog.
 
         Replaces _check_flow_rule() in lint.py for flows-from/flows-to/not-through rules.
@@ -2016,7 +2017,9 @@ class FactGraph:
         When provided, same-block results are post-filtered in Python:
         source_line < sink_line, and source_line < blocker_line < sink_line.
 
-        Returns list of (file_path, func_qn, source_var, sink_var) violations.
+        Returns list of ``(file_path, func_qn, source_var, sink_var)`` tuples.
+        When ``include_locations`` is true, the result also includes
+        ``(source_block, sink_block)``.
         """
         if not sources or not sinks:
             return []
@@ -2098,7 +2101,7 @@ class FactGraph:
 
         # Post-filter: same-block line ordering
         if source_lines or sink_lines or blocker_lines:
-            filtered: list[tuple[str, str, str, str]] = []
+            filtered: list[tuple] = []
             _src_lines = source_lines or {}
             _sink_lines = sink_lines or {}
             _blk_lines = blocker_lines or {}
@@ -2145,9 +2148,14 @@ class FactGraph:
                                 break
                 if skip:
                     continue
-                filtered.append((fp, fq, src_var, sink_var))
+                if include_locations:
+                    filtered.append((fp, fq, src_var, sink_var, src_block, sink_block))
+                else:
+                    filtered.append((fp, fq, src_var, sink_var))
             return filtered
 
+        if include_locations:
+            return raw
         return [(fp, fq, src_var, sink_var) for fp, fq, src_var, sink_var, _sb, _skb in raw]
 
     # -- Generic query (predicate-based, for backwards compat) -----------
