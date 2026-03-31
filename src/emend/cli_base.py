@@ -1,0 +1,283 @@
+import glob as glob_mod
+import logging
+import re as _re_module
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Optional
+
+import click
+import typer
+
+from emend.component_selector import parse_extended_selector
+
+
+def _maybe_create_oracle(type_engine: str | None):
+    """Create a TypeOracle if *type_engine* is specified, returning ``None`` if unavailable."""
+    from emend.type_oracle import create_type_oracle
+
+    engine = type_engine or "pyrefly"
+    oracle = create_type_oracle(engine=engine)
+    if not oracle.is_available():
+        logging.getLogger("emend.type_oracle").warning(
+            "Type engine '%s' not available; type constraints will have no effect",
+            engine,
+        )
+        return None
+    return oracle
+
+
+def _reject_file_glob(selector_str: str, command_name: str) -> None:
+    """Raise ValueError if selector contains file globs (for commands that don't support them)."""
+    if "*" in selector_str.split("::")[0] or "?" in selector_str.split("::")[0]:
+        raise ValueError(
+            f"File glob selectors are not supported for {command_name}. "
+            "Use a specific file path instead."
+        )
+
+
+def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool]:
+    """Resolve a path argument to a list of source files."""
+    from emend.language_registry import get_extensions, matches_language
+
+    path_obj = Path(path)
+    if path_obj.is_dir():
+        from emend import emend_core
+
+        abs_path = str(path_obj.resolve())
+        exts = get_extensions(language)
+        return [Path(f) for f in emend_core.collect_files(abs_path, exts)], True
+    if "*" in path or "?" in path:
+        return [
+            Path(f)
+            for f in glob_mod.glob(path, recursive=True)
+            if matches_language(f, language)
+        ], True
+    return [path_obj], False
+
+
+def resolve_many_files(
+    paths: list[str] | tuple[str, ...] | None,
+    *,
+    language: str = "python",
+    default: str | None = None,
+) -> tuple[list[Path], bool]:
+    """Resolve multiple file/path arguments into a deduplicated file list."""
+    raw_paths = list(paths or [])
+    if not raw_paths and default is not None:
+        raw_paths = [default]
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    is_multi_file = len(raw_paths) != 1
+    for path in raw_paths:
+        files, path_is_multi = resolve_files(path, language=language)
+        is_multi_file = is_multi_file or path_is_multi or len(files) > 1
+        for file_path in files:
+            file_key = str(file_path)
+            if file_key in seen:
+                continue
+            seen.add(file_key)
+            resolved.append(file_path)
+    return resolved, is_multi_file
+
+
+def resolve_file_scopes(
+    paths: list[str] | None,
+    language: str = "python",
+) -> tuple[list[Path], bool]:
+    """Backward-compatible alias for multiple file scope resolution."""
+    return resolve_many_files(paths, language=language)
+
+
+_state: dict[str, str] = {"language": "python"}
+
+
+def _is_source_file_query(query: str) -> bool:
+    """Return True if *query* ends with a known source file extension."""
+    from emend.language_registry import is_source_file
+
+    return is_source_file(query)
+
+
+@dataclass
+class QueryShape:
+    """Result of detecting a query's mode (pattern, selector, or line)."""
+
+    query: str
+    path: str | None
+    is_pattern_mode: bool
+    has_selector: bool
+    is_line_selector: bool
+
+
+def detect_query_shape(query: str, path: str | None = None) -> QueryShape:
+    """Detect whether a search query is a pattern, selector, or line selector."""
+    is_line_selector = bool(_re_module.search(r":\d+(-\d+)?$", query))
+    is_pattern_mode = False
+    has_selector = False
+
+    if "::" in query and not is_line_selector:
+        file_part, right_part = query.split("::", 1)
+        if "$" in right_part:
+            is_pattern_mode = True
+        else:
+            selector_query = query if not query.startswith("::") else "**" + query
+            try:
+                parse_extended_selector(selector_query)
+                has_selector = True
+            except Exception:
+                is_pattern_mode = True
+
+        if is_pattern_mode:
+            query = right_part
+            file_scope = file_part.strip()
+            if not path and file_scope and file_scope != "**":
+                path = file_scope
+    elif "$" in query:
+        is_pattern_mode = True
+    elif _re_module.match(r"\s*(?:async\s+)?(?:def|class)\s+\w*[*?]", query):
+        is_pattern_mode = True
+
+    if has_selector and query.startswith("::"):
+        query = "**" + query
+
+    return QueryShape(
+        query=query,
+        path=path,
+        is_pattern_mode=is_pattern_mode,
+        has_selector=has_selector,
+        is_line_selector=is_line_selector,
+    )
+
+
+_STRUCTURAL_KEYWORDS = (
+    "def",
+    "async def",
+    "class",
+    "for",
+    "while",
+    "try",
+    "with",
+    "if",
+    "except",
+)
+
+
+def parse_where_clause(values: list[str]) -> dict:
+    """Parse --where values into internal API params."""
+    result: dict = {}
+    for value in values:
+        if value.startswith("not "):
+            result["not_inside"] = value[4:].strip()
+        elif value.startswith("@"):
+            result["matching"] = value
+        elif "$" in value:
+            result["matching"] = value
+        elif any(
+            value == kw or value.startswith(kw + " ") or value.startswith(kw + ":")
+            for kw in _STRUCTURAL_KEYWORDS
+        ):
+            result["inside"] = value
+        else:
+            result["scope"] = value.split(".")
+    return result
+
+
+class _LegacyEditGroup(typer.core.TyperGroup):
+    """Route unknown `edit` forms to `edit set` for legacy compatibility."""
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            return super().resolve_command(ctx, ["set", *args])
+
+
+app = typer.Typer(
+    help="Python refactoring CLI",
+    no_args_is_help=True,
+    add_completion=False,
+)
+edit_app = typer.Typer(help="Code changes and refactors.", cls=_LegacyEditGroup)
+analyze_app = typer.Typer(help="Read-only code analysis commands.")
+tool_app = typer.Typer(help="Infrastructure and debugging commands.")
+app.add_typer(edit_app, name="edit")
+app.add_typer(analyze_app, name="analyze")
+app.add_typer(tool_app, name="tool")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from emend import __version__
+
+        typer.echo(f"emend {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _app_callback(
+    version: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show version and exit.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        int,
+        typer.Option(
+            "-v",
+            "--verbose",
+            count=True,
+            help="Verbose output (-v info, -vv debug with timestamps).",
+        ),
+    ] = 0,
+    language: Annotated[
+        Optional[str],
+        typer.Option(
+            "--language",
+            "-L",
+            help="Source language (python, typescript, etc.). Default: python.",
+        ),
+    ] = None,
+) -> None:
+    if verbose >= 2:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    elif verbose >= 1:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s.%(msecs)03d %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    if language is not None:
+        _state["language"] = language
+
+
+__all__ = [
+    "QueryShape",
+    "_LegacyEditGroup",
+    "_app_callback",
+    "_is_source_file_query",
+    "_maybe_create_oracle",
+    "_reject_file_glob",
+    "_state",
+    "_version_callback",
+    "analyze_app",
+    "app",
+    "detect_query_shape",
+    "edit_app",
+    "parse_where_clause",
+    "resolve_file_scopes",
+    "resolve_files",
+    "resolve_many_files",
+    "tool_app",
+]
