@@ -27,16 +27,27 @@ This duplication guarantees semantic drift.
 
 ## Todo
 
-- [ ] Define one canonical intermediate representation for flow/path checks.
-- [ ] Make lint and policy flow rules compile into that shared IR.
-- [ ] Decide whether sequence checks are a specialized form of the same IR or a
+- [x] Define one canonical intermediate representation for flow/path checks.
+  — `FlowSpec`, `WitnessStep`, `FlowViolation` in `src/emend/flow_ir.py`.
+- [x] Make lint and policy flow rules compile into that shared IR.
+  — `from_lint_rule()` and `from_flow_check()` converters in `flow_ir.py`.
+- [x] Decide whether sequence checks are a specialized form of the same IR or a
   separate IR layered on top of exact CFG locations.
-- [ ] Fix blocker semantics so both source and destination blocks are handled
+  — Sequence checks remain separate but share the `WitnessStep`/`format_witness`
+  witness model via `flow_ir.py`.
+- [x] Fix blocker semantics so both source and destination blocks are handled
   correctly.
-- [ ] Add same-block ordering semantics for blockers where needed.
-- [ ] Stop routing policy flow checks through lint-specific formatting code.
-- [ ] Normalize witness generation so lint/policy/check output share one path
+  — `flow_rule_check_datalog()` now checks `not blocked[..., use_block]`;
+  `_compile_sequence_query()` checks `not blocker[..., to_block]` and
+  `not scope_kill[..., to_block]`.
+- [x] Add same-block ordering semantics for blockers where needed.
+  — `flow_rule_check_datalog()` accepts `source_lines`/`sink_lines`/`blocker_lines`
+  and post-filters in Python for same-block line ordering.
+- [x] Stop routing policy flow checks through lint-specific formatting code.
+  — `policy._run_flow_check()` now uses `execute_flow_spec()` directly.
+- [x] Normalize witness generation so lint/policy/check output share one path
   explanation model.
+  — `WitnessStep` + `format_witness()` used by lint, policy, and sequence checks.
 
 ## Exit Criteria
 

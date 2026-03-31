@@ -19,7 +19,7 @@ indefinitely.
 - [x] [Phase 5: Repair Intraprocedural Trace Semantics](./phase-5-repair-intraprocedural-trace-semantics.md)
 - [x] [Phase 6: Make Datalog Trace Paths Real](./phase-6-make-datalog-trace-paths-real.md)
 - [x] [Phase 7: Resolve Pattern Matches to Exact CFG Locations](./phase-7-resolve-pattern-matches-to-exact-cfg-locations.md)
-- [ ] [Phase 8: Unify Flow, Policy, and Sequence Checks on One Engine](./phase-8-unify-flow-policy-and-sequence-checks.md)
+- [x] [Phase 8: Unify Flow, Policy, and Sequence Checks on One Engine](./phase-8-unify-flow-policy-and-sequence-checks.md)
 - [ ] [Phase 9: Add Differential CFG/Trace/Flow Regression Coverage](./phase-9-add-differential-cfg-trace-flow-regression-coverage.md)
 
 ## Current CFG / Trace / Flow Bugs
@@ -41,9 +41,12 @@ architectural migration work above.
 - The Datalog trace entry points are also incomplete: they do not yet thread
   through effect sinks, per-sink messages, sanitizer quantifiers, same-block
   line-ordering data, or exact function/block resolution.
-- Flow/policy/sequence logic still resolves many matches to `("", -1)` or
+- ~~Flow/policy/sequence logic still resolves many matches to `("", -1)` or
   nearest-line approximations instead of exact `(file, function, block)` facts,
-  which makes blocker semantics and CFG reasoning lossy.
+  which makes blocker semantics and CFG reasoning lossy.~~
+  Fixed in Phase 8: `flow_ir.py` uses `LocationResolver` for exact resolution,
+  blockers now check both def_block and use_block, and same-block line ordering
+  is post-filtered in Python.
 
 ## Intended End State
 
