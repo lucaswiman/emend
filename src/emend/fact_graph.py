@@ -1942,28 +1942,41 @@ class FactGraph:
         _ir = self._inline_relation
         _5cols = ["fp", "fq", "var", "bid", "lbl"]
 
-        # Seed inline relations when config-driven sources/sinks are provided
+        # Seed inline relations when config-driven sources/sinks are provided.
+        # The interprocedural summary relation does not preserve exact match
+        # vars/blocks across call boundaries, so these seeds constrain the
+        # caller/callee functions and labels rather than pretending to track
+        # the original per-match tuples end-to-end.
         config_seed = ""
         if sources is not None:
             config_seed += _ir("cfg_source", _5cols, sources)
         if sinks is not None:
             config_seed += _ir("cfg_sink", _5cols, sinks)
 
-        # Determine which labels to track
+        source_seed_rule = ""
+        source_violation_guard = ""
         if sources is not None:
-            active_labels = list({lbl for _, _, _, _, lbl in sources})
-            active_label_rule = _ir("active_label", ["lbl"], [(lbl,) for lbl in active_labels])
-        else:
-            active_label_rule = ""
+            source_seed_rule = (
+                "seed_source[fp, fq, lbl] := cfg_source[fp, fq, _, _, lbl]\n"
+            )
+            source_violation_guard = ", seed_source[fp, caller_fq, lbl]"
 
-        query = config_seed + active_label_rule + (
+        sink_seed_rule = ""
+        sink_summary_guard = ""
+        if sinks is not None:
+            sink_seed_rule = (
+                "seed_sink[fq, lbl] := cfg_sink[_, fq, _, _, lbl]\n"
+            )
+            sink_summary_guard = ", seed_sink[fq, lbl]"
+
+        query = config_seed + source_seed_rule + sink_seed_rule + (
             # Direct summaries (from intraprocedural analysis)
             "param_flows_to_return[fq, param] := "
             "*func_summary[fq, param, ftr, _, _], ftr == true\n"
 
             # Direct summaries: param flows to sink
             "param_flows_to_sink[fq, param, lbl] := "
-            "*func_summary[fq, param, _, fts, lbl], fts == true\n"
+            f"*func_summary[fq, param, _, fts, lbl], fts == true{sink_summary_guard}\n"
 
             # Transitive: if callee's param flows to return, propagate through call
             "param_flows_to_return[caller_fq, caller_param] := "
@@ -1974,7 +1987,7 @@ class FactGraph:
             # Violations: tainted param flows to sink through call chain
             "violation[caller_fq, callee_fq, fp, param, lbl] := "
             "*call[caller_fq, callee_fq, fp, _, _, _, _], "
-            "param_flows_to_sink[callee_fq, param, lbl]\n"
+            f"param_flows_to_sink[callee_fq, param, lbl]{source_violation_guard}\n"
 
             "?[caller_fq, callee_fq, fp, param, lbl] := "
             "violation[caller_fq, callee_fq, fp, param, lbl]"

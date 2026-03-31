@@ -885,6 +885,18 @@ class TestInterproceduralTraceDatalog:
         violations = g.interprocedural_trace_datalog()
         assert violations == []
 
+    def test_config_driven_sources_and_sinks_filter_results(self):
+        g = FactGraph()
+        g.add_call(CallFact("a.foo", "b.bar", "a.py", 2, 0))
+        g.add_func_summary(FuncSummaryFact("b.bar", "x", flows_to_sink=True, sink_label="sqli"))
+
+        violations = g.interprocedural_trace_datalog(
+            sources=[("a.py", "a.foo", "data", 0, "xss")],
+            sinks=[("b.py", "b.bar", "query", 1, "xss")],
+        )
+
+        assert violations == []
+
 
 class TestFlowRuleCheckDatalog:
     """Test flow_rule_check_datalog() Datalog method."""
