@@ -25,6 +25,70 @@ def _write_config(tmp_path, config_dict):
     return config_file
 
 
+def _write_rules_config(tmp_path, config_dict):
+    """Helper to write canonical rules.yaml config."""
+    config_file = tmp_path / ".emend" / "rules.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(yaml.dump(config_dict))
+    return config_file
+
+
+def test_trace_load_config_from_unified_flow_rules(tmp_path):
+    _write_rules_config(tmp_path, {
+        "macros": {
+            "input": "request.args.get($X)",
+        },
+        "rules": {
+            "sql-injection": {
+                "flow": {
+                    "from": "{input}",
+                    "to": "cursor.execute($Q)",
+                    "not-through": "escape($X)",
+                    "quantifier": "some_path",
+                },
+                "message": "Unsanitized input reaches SQL execution",
+            },
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    assert config.labels == ["sql-injection"]
+    assert len(config.sources) == 1
+    assert config.sources[0].pattern == "request.args.get($X)"
+    assert len(config.sinks) == 1
+    assert config.sinks[0].pattern == "cursor.execute($Q)"
+    assert config.sinks[0].message == "Unsanitized input reaches SQL execution"
+    assert len(config.sanitizers) == 1
+    assert config.sanitizers[0].pattern == "escape($X)"
+    assert config.sanitizers[0].quantifier == "some_path"
+
+
+def test_trace_load_config_merges_trace_section_and_unified_flow_rules(tmp_path):
+    _write_rules_config(tmp_path, {
+        "trace": {
+            "sources": [
+                {"pattern": "request.form[$X]", "label": "legacy-source"},
+            ],
+            "sinks": [
+                {"pattern": "eval($X)", "label": "legacy-source", "message": "Code injection"},
+            ],
+        },
+        "rules": {
+            "sql-injection": {
+                "flow": {
+                    "from": "request.args.get($X)",
+                    "to": "cursor.execute($Q)",
+                },
+                "message": "SQL injection",
+            },
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    assert {s.label for s in config.sources} == {"legacy-source", "sql-injection"}
+    assert {s.label for s in config.sinks} == {"legacy-source", "sql-injection"}
+
+
 def _make_sql_injection_config():
     """Return a TraceConfig for SQL injection detection."""
     return TraceConfig(
@@ -264,6 +328,30 @@ def test_trace_load_config(tmp_path):
     assert len(config.sinks) == 1
     assert config.sinks[0].message == "SQL injection"
     assert len(config.sanitizers) == 1
+
+
+def test_trace_loads_flow_rules_from_unified_rules_yaml(tmp_path):
+    config_file = tmp_path / ".emend" / "rules.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(yaml.dump({
+        "presets": ["flask"],
+        "rules": {
+            "sql-injection": {
+                "flow": {
+                    "from": "request.args.get($X)",
+                    "to": "cursor.execute($Q)",
+                    "not-through": "escape($X)",
+                },
+                "message": "Unsanitized input reaches SQL execution",
+            },
+        },
+    }))
+
+    config = load_trace_config(str(config_file))
+    assert "sql-injection" in config.labels
+    assert any(source.pattern == "request.args.get($X)" for source in config.sources)
+    assert any(sink.pattern == "cursor.execute($Q)" for sink in config.sinks)
+    assert any(s.pattern == "escape($X)" for s in config.sanitizers)
 
 
 def test_trace_load_config_missing_trace_section(tmp_path):

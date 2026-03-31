@@ -15,7 +15,7 @@ Python 3.13+ ships a **free-threaded** variant (``3.13t``, ``3.14t``) that remov
 the Global Interpreter Lock (GIL). emend's Rust core is already GIL-free, so on a
 free-threaded interpreter it can parallelize file I/O and pattern-matching with no
 lock contention — giving substantially faster results on multi-file operations like
-``search``, ``lint``, ``refs``, and ``rename`` across large codebases.
+``find``, ``lint``, ``analyze refs``, and ``edit rename`` across large codebases.
 
 We recommend **3.13t** for the free-threaded interpreter. The ``3.14t`` variant also
 works for core emend commands, but the optional MCP server (``emend mcp``) depends on
@@ -130,7 +130,7 @@ Vim / Neovim plugin
 -------------------
 
 emend ships with a Vim/Neovim plugin for interactive code search.  It
-communicates with ``emend editor-server`` via JSON-RPC over stdio pipes,
+communicates with ``emend tool editor-server`` via JSON-RPC over stdio pipes,
 keeping the server warm for sub-5ms symbol lookups.
 
 Install with `vim-plug <https://github.com/junegunn/vim-plug>`_:

@@ -5,13 +5,20 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-import yaml
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 from emend.trace import _extract_identifiers
+from emend.rules_config import (
+    LEGACY_PATTERNS_PATH,
+    load_rules_document,
+    yaml_key,
+    as_list,
+    expand_macros,
+)
 
 
 @dataclass
@@ -39,12 +46,14 @@ class LintRule:
     # DSL mode: "sql", "css", "html", etc.  When set, the rule matches
     # inside embedded DSL regions rather than host-language code.
     dsl: str | None = None
+    files: list[str] | None = None
 
 
 @dataclass
 class DeadCodeConfig:
     """Configuration for the deadcode lint rule."""
     enabled: bool = False
+    rule_name: str = "deadcode"
     kind: str | None = None
     include_private: bool = False
     exclude_references_from: list[str] | None = None
@@ -119,23 +128,60 @@ def is_noqa_suppressed(
     return False
 
 
-def expand_macros(pattern: str, macros: dict[str, str]) -> str:
-    """Substitute {macro_name} references in a pattern string.
+def _coerce_optional_str_list(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    values = [str(v) for v in as_list(value)]
+    return values or None
 
-    Args:
-        pattern: Pattern string possibly containing {macro_name} references
-        macros: Mapping of macro names to their pattern expansions
 
-    Returns:
-        Pattern with all macro references expanded
-    """
-    for name, expansion in macros.items():
-        pattern = pattern.replace(f"{{{name}}}", expansion)
-    return pattern
+def _parse_deadcode_config(raw_dc: object, *, rule_name: str = "deadcode") -> DeadCodeConfig | None:
+    if raw_dc is None:
+        return None
+    if isinstance(raw_dc, bool):
+        return DeadCodeConfig(enabled=raw_dc)
+    if not isinstance(raw_dc, dict):
+        return None
+
+    entry_points = raw_dc.get("entry-points")
+    ep_decorators = yaml_key(raw_dc, "entry_point_decorators")
+    ep_names = yaml_key(raw_dc, "entry_point_names")
+    if isinstance(entry_points, dict):
+        ep_decorators = ep_decorators or entry_points.get("decorators")
+        ep_names = ep_names or entry_points.get("names")
+
+    return DeadCodeConfig(
+        enabled=raw_dc.get("enabled", True),
+        rule_name=rule_name,
+        kind=raw_dc.get("kind"),
+        include_private=raw_dc.get("include-private", False),
+        exclude_references_from=_coerce_optional_str_list(
+            yaml_key(raw_dc, "exclude_references_from")
+        ),
+        strings_count_as_references=raw_dc.get("strings-count-as-references", True),
+        message=raw_dc.get("message", "Symbol appears to be unused"),
+        entry_point_decorators=_coerce_optional_str_list(ep_decorators),
+        entry_point_names=_coerce_optional_str_list(ep_names),
+        exclude_paths=_coerce_optional_str_list(yaml_key(raw_dc, "exclude_paths")),
+    )
+
+
+def _path_matches_rule_globs(file_path: str, globs: list[str] | None) -> bool:
+    if not globs:
+        return True
+    normalized = file_path.replace("\\", "/")
+    path_obj = Path(normalized)
+    for pattern in globs:
+        if fnmatch(normalized, pattern) or path_obj.match(pattern):
+            return True
+        prefixed = pattern if pattern.startswith("**/") else f"**/{pattern}"
+        if fnmatch(normalized, prefixed) or path_obj.match(prefixed):
+            return True
+    return False
 
 
 def load_rules(
-    config_path: str,
+    config_path: str | None = None,
 ) -> tuple[list[LintRule], dict[str, str], DeadCodeConfig | None]:
     """Parse a YAML rules file into LintRule objects.
 
@@ -151,21 +197,36 @@ def load_rules(
     Raises:
         FileNotFoundError: If config file does not exist
     """
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(path) as f:
-        config = yaml.safe_load(f)
+    config, _path = load_rules_document(
+        config_path,
+        fallbacks=(LEGACY_PATTERNS_PATH,),
+    )
 
     macros = config.get("macros", {}) or {}
     raw_rules = config.get("rules", {}) or {}
 
     rules = []
+    deadcode_config = _parse_deadcode_config(config.get("deadcode"))
     for name, rule_def in raw_rules.items():
-        flows_from = rule_def.get("flows-from")
-        flows_to = rule_def.get("flows-to")
-        not_through = rule_def.get("not-through")
+        if not isinstance(rule_def, dict):
+            continue
+
+        if "deadcode" in rule_def:
+            parsed_deadcode = _parse_deadcode_config(rule_def.get("deadcode"), rule_name=name)
+            if parsed_deadcode is not None and deadcode_config is None:
+                if rule_def.get("message"):
+                    parsed_deadcode.message = rule_def["message"]
+                deadcode_config = parsed_deadcode
+            continue
+
+        flow_def = rule_def.get("flow")
+        flows_from = yaml_key(rule_def, "flows_from")
+        flows_to = yaml_key(rule_def, "flows_to")
+        not_through = yaml_key(rule_def, "not_through")
+        if isinstance(flow_def, dict):
+            flows_from = flows_from or flow_def.get("from")
+            flows_to = flows_to or flow_def.get("to")
+            not_through = not_through or yaml_key(flow_def, "not_through")
 
         if flows_from and flows_to:
             # Flow rule: find is not required
@@ -173,55 +234,33 @@ def load_rules(
             flows_from = expand_macros(flows_from, macros)
             flows_to = expand_macros(flows_to, macros)
             if not_through:
-                not_through = expand_macros(not_through, macros)
+                if isinstance(not_through, list):
+                    expanded = [
+                        expand_macros(str(item), macros)
+                        for item in not_through
+                    ]
+                    not_through = " | ".join(item for item in expanded if item)
+                else:
+                    not_through = expand_macros(str(not_through), macros)
         else:
             # Pattern rule: find is required
-            find_pattern_str = expand_macros(rule_def["find"], macros)
+            match_pattern = rule_def.get("match", rule_def.get("find"))
+            find_pattern_str = expand_macros(match_pattern, macros)
+
+        rule_files = _coerce_optional_str_list(rule_def.get("files"))
 
         rules.append(LintRule(
             name=name,
             find=find_pattern_str,
             message=rule_def.get("message", ""),
-            not_inside=rule_def.get("not-inside"),
-            replace=rule_def.get("replace"),
+            not_inside=yaml_key(rule_def, "not_within", "not_inside"),
+            replace=rule_def.get("fix", rule_def.get("replace")),
             flows_from=flows_from if flows_from else None,
             flows_to=flows_to if flows_to else None,
             not_through=not_through if not_through else None,
             dsl=rule_def.get("dsl"),
+            files=rule_files,
         ))
-
-    # Parse deadcode section
-    deadcode_config = None
-    raw_dc = config.get("deadcode")
-    if raw_dc is not None:
-        if isinstance(raw_dc, bool):
-            deadcode_config = DeadCodeConfig(enabled=raw_dc)
-        elif isinstance(raw_dc, dict):
-            exclude = raw_dc.get("exclude-references-from")
-            if isinstance(exclude, str):
-                exclude = [exclude]
-            ep_decorators = raw_dc.get("entry-point-decorators")
-            if isinstance(ep_decorators, str):
-                ep_decorators = [ep_decorators]
-            ep_names = raw_dc.get("entry-point-names")
-            if isinstance(ep_names, str):
-                ep_names = [ep_names]
-            excl_paths = raw_dc.get("exclude-paths")
-            if isinstance(excl_paths, str):
-                excl_paths = [excl_paths]
-            deadcode_config = DeadCodeConfig(
-                enabled=raw_dc.get("enabled", True),
-                kind=raw_dc.get("kind"),
-                include_private=raw_dc.get("include-private", False),
-                exclude_references_from=exclude,
-                strings_count_as_references=raw_dc.get(
-                    "strings-count-as-references", True),
-                message=raw_dc.get(
-                    "message", "Symbol appears to be unused"),
-                entry_point_decorators=ep_decorators,
-                entry_point_names=ep_names,
-                exclude_paths=excl_paths,
-            )
 
     return rules, macros, deadcode_config
 
@@ -529,6 +568,8 @@ def run_lint(
         literals = extract_pattern_literals(rule.find)
         matching: set[str] = set()
         for fpath, content in all_file_contents.items():
+            if not _path_matches_rule_globs(fpath, rule.files):
+                continue
             if all(lit in content for lit in literals):
                 matching.add(fpath)
         rule_file_sets[rule.name] = matching
@@ -686,6 +727,8 @@ def run_lint(
             noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
 
         for rule in fix_rules:
+            if not _path_matches_rule_globs(file_path, rule.files):
+                continue
             try:
                 matches = find_pattern(
                     rule.find,
@@ -756,6 +799,8 @@ def run_lint(
                 noqa_ranges_cache[file_path] = noqa_ranges_for_file_flow
 
             for rule in flow_rules:
+                if not _path_matches_rule_globs(file_path, rule.files):
+                    continue
                 # Pre-filter: check if source and sink literals exist in file
                 from_literals = extract_pattern_literals(rule.flows_from or "")
                 to_literals = extract_pattern_literals(rule.flows_to or "")
@@ -808,6 +853,8 @@ def run_lint(
                 continue
 
             for rule in dsl_rules:
+                if not _path_matches_rule_globs(file_path, rule.files):
+                    continue
                 rule_dsl = rule.dsl.lower() if rule.dsl else ""
                 find_re = _compile_dsl_pattern(rule.find)
 
@@ -838,7 +885,11 @@ def run_lint(
     # --- Dead code analysis (if configured) ---
     if (deadcode_config is not None
             and deadcode_config.enabled
-            and (rule_filter is None or rule_filter in {"deadcode", "dead-code", "dead_code"})):
+            and (
+                rule_filter is None
+                or rule_filter == deadcode_config.rule_name
+                or rule_filter in {"deadcode", "dead-code", "dead_code"}
+            )):
         from emend.transform import find_dead_code
         dc_project = project_path or "."
         try:
@@ -855,7 +906,7 @@ def run_lint(
             )
             for d in dead:
                 violations.append(LintViolation(
-                    rule_name="deadcode",
+                    rule_name=deadcode_config.rule_name,
                     message=f"{deadcode_config.message}: {d.name}",
                     file_path=d.file_path,
                     line=d.line,

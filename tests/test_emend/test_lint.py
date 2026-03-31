@@ -21,6 +21,80 @@ def _write_config(tmp_path, config_dict):
     return config_file
 
 
+def _write_rules_config(tmp_path, config_dict):
+    """Helper to write unified rules.yaml config file."""
+    config_file = tmp_path / ".emend" / "rules.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(yaml.dump(config_dict))
+    return config_file
+
+
+def test_load_rules_falls_back_to_rules_yaml(tmp_path):
+    config = {
+        "macros": {
+            "input": "request.args.get($X)",
+        },
+        "rules": {
+            "no-print": {
+                "match": "print($X)",
+                "message": "No print",
+                "not-within": "def test_$_",
+                "fix": "logger.info($X)",
+                "files": "src/**/*.py",
+            },
+            "sql-injection": {
+                "flow": {
+                    "from": "{input}",
+                    "to": "cursor.execute($Q)",
+                    "not-through": "escape($X)",
+                },
+                "message": "Unsafe flow",
+            },
+        },
+    }
+    _write_rules_config(tmp_path, config)
+
+    rules, macros, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
+
+    assert deadcode is None
+    assert macros["input"] == "request.args.get($X)"
+    assert {r.name for r in rules} == {"no-print", "sql-injection"}
+
+    no_print = next(r for r in rules if r.name == "no-print")
+    assert no_print.find == "print($X)"
+    assert no_print.not_inside == "def test_$_"
+    assert no_print.replace == "logger.info($X)"
+    assert no_print.files == ["src/**/*.py"]
+
+    sqli = next(r for r in rules if r.name == "sql-injection")
+    assert sqli.flows_from == "request.args.get($X)"
+    assert sqli.flows_to == "cursor.execute($Q)"
+    assert sqli.not_through == "escape($X)"
+
+
+def test_load_rules_reads_deadcode_from_rule_block(tmp_path):
+    config = {
+        "rules": {
+            "deadcode-defaults": {
+                "deadcode": {
+                    "enabled": True,
+                    "include-private": True,
+                    "entry-point-names": "main",
+                },
+            },
+        },
+    }
+    _write_rules_config(tmp_path, config)
+
+    rules, _, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
+
+    assert rules == []
+    assert deadcode is not None
+    assert deadcode.enabled is True
+    assert deadcode.include_private is True
+    assert deadcode.entry_point_names == ["main"]
+
+
 def test_lint_basic_rule(tmp_path):
     """lint reports violations for basic pattern rules."""
     test_file = tmp_path / "example.py"
@@ -95,6 +169,53 @@ def test_lint_macro_in_rules(tmp_path):
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 1
     assert violations[0].rule_name == "no-print"
+
+
+def test_load_rules_unified_rules_yaml_match_and_fix(tmp_path):
+    test_file = tmp_path / "example.py"
+    test_file.write_text("print('debug')\n")
+
+    config_file = tmp_path / ".emend" / "rules.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(yaml.dump({
+        "rules": {
+            "no-print": {
+                "match": "print($...ARGS)",
+                "fix": "logger.info($...ARGS)",
+                "message": "Use logger instead of print",
+            },
+        },
+    }))
+
+    rules, macros, _ = load_rules(str(config_file))
+    assert len(rules) == 1
+    assert rules[0].find == "print($...ARGS)"
+    assert rules[0].replace == "logger.info($...ARGS)"
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+
+
+def test_unified_rule_files_scope_filters_matches(tmp_path):
+    allowed = tmp_path / "src" / "allowed.py"
+    allowed.parent.mkdir()
+    allowed.write_text("print('yes')\n")
+    blocked = tmp_path / "tests" / "blocked.py"
+    blocked.parent.mkdir()
+    blocked.write_text("print('no')\n")
+
+    rules = [
+        LintRule(
+            name="no-print",
+            find="print($...ARGS)",
+            message="No print",
+            files=["*/src/*.py"],
+        ),
+    ]
+
+    violations = run_lint(rules, [str(allowed), str(blocked)])
+    assert len(violations) == 1
+    assert violations[0].file_path == str(allowed)
 
 
 def test_lint_not_inside(tmp_path):

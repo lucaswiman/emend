@@ -40,6 +40,19 @@ def test_search_pattern_directory(tmp_path):
     assert "b.py" in result.stdout
 
 
+def test_find_canonical_command_accepts_multiple_file_scopes(tmp_path):
+    left = tmp_path / "left.py"
+    left.write_text("print('left')\n")
+    right = tmp_path / "right.py"
+    right.write_text("print('right')\n")
+
+    result = runner.invoke(app, ["find", "print($X)", str(left), str(right)])
+
+    assert result.exit_code == 0
+    assert "left.py:1" in result.stdout
+    assert "right.py:1" in result.stdout
+
+
 class TestSearchEdgeCases:
     """Edge cases for mode detection in search command."""
 

@@ -134,6 +134,24 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "Client" not in dead_names, "Client is referenced in Service type annotation"
 
+    def test_fact_graph_bootstrap_persists_facts_db(self, tmp_path, monkeypatch):
+        """Fact-dependent commands should materialize ``facts.db`` on first use."""
+        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text("def unused():\n    return 1\n")
+
+        cache_dir = _cache_db_dir(str(project))
+        facts_db = cache_dir / "facts.db"
+        assert not facts_db.exists()
+
+        monkeypatch.setattr("emend.transform.warm_caches", lambda *args, **kwargs: {})
+        graph = _get_or_build_fact_graph(str(project))
+
+        assert facts_db.exists()
+        graph.close()
+
     def test_warm_path_intra_file_function_call(self, tmp_path):
         """Warm path: helper function called only within the same file is not dead."""
         from emend.transform import find_dead_code
@@ -152,6 +170,24 @@ class TestDeadCodeWarmPath:
         dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
+
+    def test_warm_path_finds_unused_module_when_enabled(self, tmp_path):
+        """Unused modules are only reported when the feature flag is enabled."""
+        from emend.transform import DeadModule, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "used.py").write_text("VALUE = 1\n")
+        (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        without_flag = list(find_dead_code(str(project), show_last_reference=False))
+        assert not any(isinstance(d, DeadModule) for d in without_flag)
+
+        with_flag = list(find_dead_code(str(project), show_last_reference=False, unused_modules=True))
+        dead_modules = {d.module_name for d in with_flag if isinstance(d, DeadModule)}
+        assert "orphan" in dead_modules
+        assert "used" not in dead_modules
 
 
 class TestFindDeadCode:
@@ -651,6 +687,31 @@ class TestDeadCodeCLI:
         # With --include-private
         result = run_emend_cmd(["deadcode", str(project), "--include-private"])
         assert "_private_unused" in result.stdout
+
+    def test_cli_unused_modules(self, tmp_path, run_emend_cmd):
+        """CLI --unused-modules reports unimported module files."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "used.py").write_text("VALUE = 1\n")
+        (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        result = run_emend_cmd(["deadcode", str(project), "--unused-modules"])
+        assert "orphan (module)" in result.stdout
+        assert "used (module)" not in result.stdout
+
+    def test_cli_unused_modules_json(self, tmp_path, run_emend_cmd):
+        """CLI JSON includes module entries when --unused-modules is enabled."""
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("print('hi')\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        result = run_emend_cmd(["deadcode", str(project), "--unused-modules", "--json"])
+        data = json.loads(result.stdout)
+        modules = [entry for entry in data if entry["kind"] == "module"]
+        assert any(entry["module_name"] == "orphan" for entry in modules)
 
 
 class TestExcludeReferencesFrom:

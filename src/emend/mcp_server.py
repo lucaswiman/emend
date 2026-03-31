@@ -24,6 +24,7 @@ from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
 from emend.component_selector import parse_extended_selector
+from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 from emend.transform import (
     find_pattern,
     replace_pattern,
@@ -36,6 +37,7 @@ from emend.transform import (
     cmd_edit,
     cmd_add,
     find_callers,
+    find_callees,
     generate_graph,
     find_dead_code,
     find_impact,
@@ -51,19 +53,16 @@ emend is a Python refactoring tool. All write operations default to dry-run
 
 Call the grammar_and_cookbook tool for full syntax reference.
 
-## Mappings
-
-emend includes cross-service identifier mappings and module-to-repo mappings.
-Use map_read to query and map_write to add/update/delete entries.
-
 ## Quick reference
 
-Selectors: file.py::func, file.py::Class.method, file.py::func[params][x],
-  file.py::func[returns], file.py::Class[bases], file.py::func[decorators],
-  file.py::func[body], file.py::*[params] (wildcards), 'src/**/*.py::func' (globs)
-Patterns: print($X), func($...ARGS), $A + $B, return $X ($ prefix = metavar)
-Where: 'def', 'class', 'def test_*', 'not class', '@decorator'
-Output: code, location, selector, summary, metadata, json, count
+Prefer the discriminated tools:
+- search(mode=code|symbol|summary)
+- transform(operation=replace|edit|add|remove|rename|move)
+- references(mode=refs|callers|callees)
+- analyze(mode=graph|deadcode|impact|semantic_context|trace)
+- check(mode=lint|policy)
+- datalog(mode=raw|guided)
+- mappings(operation=read|write)
 """,
 )
 
@@ -83,50 +82,42 @@ def _capture_output(func: Any, *args: Any, **kwargs: Any) -> str:
 
 @mcp_app.tool()
 def search(
+    mode: Annotated[str, Field(description="Search mode: code, symbol, summary, or auto (legacy inference).")] = "code",
     query: Annotated[str, Field(description=(
-        "What to search for. Can be: "
-        "(1) a code pattern with $-metavars: 'print($X)', 'assert $A == $B'; "
-        "(2) a literal code pattern: 'assert False', 'import os'; "
-        "(3) a symbol selector: 'MyClass.method', 'func[params]'; "
-        "(4) a file/dir path for symbol summary. "
-        "The file scope can be embedded with :: (e.g. 'src/::print($X)') "
-        "but prefer using the separate 'files' parameter instead."
-    ))],
-    files: Annotated[str | None, Field(description=(
-        "File scope: a file path, glob pattern, or directory. "
-        "Examples: 'src/', '**/*.py', 'file.py'. "
-        "Defaults to current directory (all Python files)."
-    ))] = None,
+        "Search query payload. "
+        "Code mode: pattern or literal code snippet. "
+        "Symbol mode: selector (file.py::sym) or bare symbol name. "
+        "Summary mode: optional selector filter when files is set."
+    ))] = "",
+    files: Annotated[list[str] | None, Field(description="File scope(s): file paths, globs, or directories.")] = None,
+    within: Annotated[str | None, Field(description="Structural containment pattern for code mode.")] = None,
+    not_within: Annotated[str | None, Field(description="Inverse containment pattern for code mode.")] = None,
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, method, class, async_function, async_method.")] = None,
     name: Annotated[str | None, Field(description="Name pattern filter (glob like 'test_*' or /regex/).")] = None,
     returns: Annotated[str | None, Field(description="Return type filter.")] = None,
     depth: Annotated[str | None, Field(description="Nesting depth filter (lookup) or display depth (summary).")] = None,
     has_param: Annotated[str | None, Field(description="Parameter filter.")] = None,
     output: Annotated[str, Field(description="Output format: code, location, selector, summary, metadata, json, count, code::dedent, summary::flat.")] = "code",
-    where: Annotated[str | None, Field(description="Scope constraint: 'def', 'class', 'def test_*', 'not class', 'MyClass.method', '@decorator'.")] = None,
+    where: Annotated[str | None, Field(description="Legacy compatibility field. Prefer within/not_within and explicit mode.")] = None,
     imported_from: Annotated[str | None, Field(description="Only match when root name is imported from this module.")] = None,
     scope_local: Annotated[bool, Field(description="Only match locally-defined names, exclude imports.")] = False,
     case_insensitive: Annotated[bool, Field(description="Case-insensitive matching.")] = False,
     smart_case: Annotated[bool, Field(description="Match naming convention variants (snake_case/camelCase/etc).")] = False,
 ) -> str:
-    """Search for code patterns or symbols in Python files.
-
-    Mode is auto-detected from the query:
-    - Pattern mode: query has $-metavars ('print($X)') or isn't a valid
-      symbol selector ('assert False', 'import os')
-    - Lookup mode: query is a symbol selector ('MyClass.method', 'func[params]')
-    - Summary mode: query is a bare file/dir path with no filters
-
-    For pattern searches, set ``files`` to scope the search. For symbol
-    lookups, embed the file in the query ('file.py::func') or set ``files``.
-    """
+    """Search for code or symbols with explicit modes."""
     import re as _re
-    from emend.cli import resolve_files, parse_where_clause, detect_query_shape
+    from emend.cli import resolve_files, resolve_file_scopes, parse_where_clause, detect_query_shape
 
+    mode = (mode or "code").lower()
+    if mode not in {"code", "symbol", "summary", "auto"}:
+        return json.dumps({"error": f"Unknown mode {mode!r}. Use: code, symbol, summary, auto."})
+
+    # Keep --where behavior as a compatibility shim while canonical MCP usage
+    # moves to explicit mode + dedicated fields.
     where_params = parse_where_clause([where] if where else [])
     where_scope = where_params.get("scope")
-    where_inside = where_params.get("inside")
-    where_not_inside = where_params.get("not_inside")
+    where_inside = within or where_params.get("inside")
+    where_not_inside = not_within or where_params.get("not_inside")
     where_matching = where_params.get("matching")
 
     output_base = output
@@ -136,12 +127,22 @@ def search(
         output_base = parts[0]
         output_modifier = parts[1]
 
-    _shape = detect_query_shape(query, files)
-    query = _shape.query
-    files = _shape.path
-    is_pattern_mode = _shape.is_pattern_mode
-    has_selector = _shape.has_selector
-    is_line_selector = _shape.is_line_selector
+    # auto mode preserves legacy inference for compatibility.
+    is_pattern_mode = mode == "code"
+    has_selector = False
+    is_line_selector = bool(_re.search(r":\d+(-\d+)?$", query))
+    if mode == "auto":
+        _shape = detect_query_shape(query, files[0] if files else None)
+        query = _shape.query
+        files = [str(_shape.path)] if _shape.path else files
+        is_pattern_mode = _shape.is_pattern_mode
+        has_selector = _shape.has_selector
+        is_line_selector = _shape.is_line_selector
+    elif mode == "summary":
+        is_pattern_mode = False
+    elif mode == "symbol":
+        if "::" in query and not is_line_selector:
+            has_selector = True
 
     lookup_has_decorator: list[str] | None = None
     lookup_in_class: list[str] | None = None
@@ -183,11 +184,11 @@ def search(
         effective_output = "selector"
 
     # --- Summary mode ---
-    if effective_output == "summary" and not is_pattern_mode:
+    if mode == "summary" or (effective_output == "summary" and not is_pattern_mode):
         tree_depth = int(depth) if depth else None
-        file_for_summary = query
+        file_for_summary = files[0] if files else query
         selector_for_summary = None
-        if has_selector:
+        if "::" in query and not files:
             parts = query.split("::", 1)
             file_for_summary = parts[0]
             selector_for_summary = parts[1] or None
@@ -229,11 +230,16 @@ def search(
                         ast_commands._print_symbol_tree(symbols, indent=1)
             return buf.getvalue()
 
-    # --- Pattern mode ---
-    if is_pattern_mode:
-        target_path = files or "."
+    # --- Code pattern mode ---
+    if is_pattern_mode or mode == "code":
+        if mode == "code" and "::" in query and not files:
+            _shape = detect_query_shape(query, None)
+            if _shape.is_pattern_mode:
+                query = _shape.query
+                files = [str(_shape.path)] if _shape.path else None
+        target_paths = files or ["."]
 
-        resolved_files, is_multi_file = resolve_files(target_path)
+        resolved_files, is_multi_file = resolve_file_scopes(target_paths)
         all_matches: list[tuple[str, Any]] = []
         for file_path in resolved_files:
             file_path_str = str(file_path)
@@ -276,18 +282,25 @@ def search(
                     lines.append(f"{file_path_str}:?")
             return "\n".join(lines)
 
-    # --- Lookup mode ---
-    file_or_pattern = query
+    # --- Symbol lookup mode ---
+    if files and len(files) > 1:
+        return json.dumps({"error": "symbol mode accepts at most one file scope"})
+
+    file_or_pattern = files[0] if files else (query or "**")
     selector_str = None
-    if has_selector or is_line_selector:
+    if has_selector or is_line_selector or ("::" in query and not is_line_selector):
         selector_str = query
-        if has_selector:
+        if "::" in query and not is_line_selector:
             parts = query.split("::", 1)
             file_or_pattern = parts[0]
         elif is_line_selector:
             m = _re.search(r"^(.+?):\d+", query)
             if m:
                 file_or_pattern = m.group(1)
+    elif query:
+        # In explicit symbol mode, a bare query acts as a name filter.
+        if name is None:
+            name = query
 
     return cmd_lookup(
         file_or_pattern=file_or_pattern,
@@ -551,14 +564,113 @@ def move(
 # ---------------------------------------------------------------------------
 
 
+def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | None, format: str, project: str | None) -> str:
+    """Symbol-level call graph query."""
+    from emend.component_selector import parse_extended_selector
+    from emend.transform import _find_project_root, _file_to_module, _get_or_build_fact_graph
+
+    sel = parse_extended_selector(symbol)
+    sym_name = sel.symbol_path[-1] if sel.symbol_path else None
+    if not sym_name:
+        return json.dumps({"error": "Could not parse symbol from selector."})
+
+    # Build qualified name for Datalog queries
+    module_root = _find_project_root(sel.file_path) if sel.file_path else (project or ".")
+    scan_root = project or module_root
+    fg = _get_or_build_fact_graph(scan_root)
+
+    if sel.file_path:
+        target_module = _file_to_module(sel.file_path, module_root)
+        qn = ".".join([target_module] + sel.symbol_path) if target_module else ".".join(sel.symbol_path)
+    else:
+        qn = ".".join(sel.symbol_path)
+
+    edges: list[tuple[str, str]] = []
+
+    if direction in ("callers", "both"):
+        caller_facts = fg.callers_datalog(qn)
+        if not caller_facts:
+            caller_facts = fg.callers_datalog(sym_name)
+        for c in caller_facts:
+            edges.append((c.caller_qn, qn))
+        if transitive:
+            visited = {qn}
+            frontier = [c.caller_qn for c in caller_facts]
+            current_depth = 1
+            while frontier and (depth is None or current_depth < depth):
+                next_level: list[str] = []
+                for caller_qn in frontier:
+                    if caller_qn in visited:
+                        continue
+                    visited.add(caller_qn)
+                    upstream = fg.callers_datalog(caller_qn)
+                    for u in upstream:
+                        edges.append((u.caller_qn, caller_qn))
+                        if u.caller_qn not in visited:
+                            next_level.append(u.caller_qn)
+                current_depth += 1
+                frontier = next_level
+
+    if direction in ("callees", "both"):
+        callee_facts = fg.callees_datalog(qn)
+        if not callee_facts:
+            callee_facts = fg.callees_datalog(sym_name)
+        for c in callee_facts:
+            edges.append((qn, c.callee_qn))
+        if transitive:
+            visited_callees = {qn}
+            frontier_callees = [c.callee_qn for c in callee_facts]
+            current_depth = 1
+            while frontier_callees and (depth is None or current_depth < depth):
+                next_level_c: list[str] = []
+                for callee_qn in frontier_callees:
+                    if callee_qn in visited_callees:
+                        continue
+                    visited_callees.add(callee_qn)
+                    downstream = fg.callees_datalog(callee_qn)
+                    for d in downstream:
+                        edges.append((callee_qn, d.callee_qn))
+                        if d.callee_qn not in visited_callees:
+                            next_level_c.append(d.callee_qn)
+                current_depth += 1
+                frontier_callees = next_level_c
+
+    # Deduplicate edges
+    edges = list(dict.fromkeys(edges))
+
+    if format == "json":
+        return json.dumps({"symbol": sym_name, "direction": direction, "transitive": transitive, "edges": [{"caller": c, "callee": e} for c, e in edges]}, indent=2)
+    elif format == "dot":
+        lines = ["digraph callgraph {"]
+        for caller, callee in edges:
+            lines.append(f'  "{caller}" -> "{callee}";')
+        lines.append("}")
+        return "\n".join(lines)
+    else:
+        return "\n".join(f"{c} -> {e}" for c, e in edges) or "(no edges found)"
+
+
 @mcp_app.tool()
 def graph(
-    file_path: Annotated[str, Field(description="Python file to analyze.")],
+    file_path: Annotated[str | None, Field(description="Source file to analyze. Produces a full call graph for all functions in the file.")] = None,
+    symbol: Annotated[str | None, Field(description="Symbol selector (e.g. 'file.py::func' or 'Class.method'). When given, direction/transitive/depth apply.")] = None,
+    direction: Annotated[str, Field(description="'callers', 'callees', or 'both'. Only used with symbol.")] = "both",
+    transitive: Annotated[bool, Field(description="Follow call chains recursively. Only used with symbol.")] = False,
+    depth: Annotated[int | None, Field(description="Max traversal depth when transitive=true. Default: unlimited.")] = None,
     format: Annotated[str, Field(description="Output format: plain, json, or dot (Graphviz).")] = "json",
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
-    """Generate a call graph for functions in a Python file."""
-    return generate_graph(file_path, project_path=project, format=format)
+    """Generate a call graph.
+
+    Two modes:
+    - file_path: full call graph for all functions in a file.
+    - symbol: callers/callees for a specific symbol (with direction, transitive, depth).
+    """
+    if symbol:
+        return _graph_symbol(symbol, direction, transitive, depth, format, project)
+    if file_path:
+        return generate_graph(file_path, project_path=project, format=format)
+    return json.dumps({"error": "Provide file_path or symbol."})
 
 
 # ---------------------------------------------------------------------------
@@ -568,65 +680,89 @@ def graph(
 
 @mcp_app.tool()
 def deadcode(
-    path: Annotated[str, Field(description="Project directory to scan.")] = ".",
-    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class.")] = None,
+    path: Annotated[str, Field(description="File glob or directory to scan (e.g. 'src/**/*.py').")] = ".",
+    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class, method, variable.")] = None,
     include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
+    unused_modules: Annotated[bool, Field(description="Also report Python modules with no incoming imports.")] = False,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
-    config: Annotated[str | None, Field(description="Path to patterns.yaml config (default: .emend/patterns.yaml). Configure entry points, exclusions, and other settings there.")] = None,
+    entry_point_decorators: Annotated[list[str] | None, Field(description="Decorators that mark entry points (not dead even if unreferenced). E.g. ['app.route', 'celery.task'].")] = None,
+    entry_point_names: Annotated[list[str] | None, Field(description="Function names that are entry points. E.g. ['main', 'cli'].")] = None,
+    exclude_paths: Annotated[list[str] | None, Field(description="Glob patterns for paths to exclude. E.g. ['tests/**', 'migrations/**'].")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml config. Direct params above override config values.")] = None,
 ) -> str:
     """Find potentially dead (unreferenced) code. Returns JSON.
 
     Skips dunder methods, test functions, decorated entry points,
     __all__ members, and conventional entry points.
 
-    Use a .emend/patterns.yaml config file (or --config) to set
-    entry_point_decorators, entry_point_names, exclude_paths,
-    exclude_references_from, and other advanced options.
+    Entry points and exclusions can be set via parameters directly
+    or via .emend/rules.yaml (falling back to legacy patterns.yaml). Direct parameters
+    override config file values.
     """
     from pathlib import Path as _Path
     from emend.lint import load_rules
 
     # Load deadcode settings from config file if present
-    exclude_references_from = None
-    strings_count_as_references = True
-    entry_point_decorators = None
-    entry_point_names = None
-    exclude_paths = None
+    cfg_exclude_refs_from = None
+    cfg_strings_as_refs = True
+    cfg_ep_decorators = None
+    cfg_ep_names = None
+    cfg_excl_paths = None
 
-    config_path = _Path(config or ".emend/patterns.yaml")
+    config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
     if config_path.exists():
         _, _, deadcode_config = load_rules(str(config_path))
         if deadcode_config is not None:
-            exclude_references_from = deadcode_config.exclude_references_from
-            strings_count_as_references = deadcode_config.strings_count_as_references
-            entry_point_decorators = deadcode_config.entry_point_decorators
-            entry_point_names = deadcode_config.entry_point_names
-            exclude_paths = deadcode_config.exclude_paths
+            cfg_exclude_refs_from = deadcode_config.exclude_references_from
+            cfg_strings_as_refs = deadcode_config.strings_count_as_references
+            cfg_ep_decorators = deadcode_config.entry_point_decorators
+            cfg_ep_names = deadcode_config.entry_point_names
+            cfg_excl_paths = deadcode_config.exclude_paths
 
+    # Direct params override config file values
     results = find_dead_code(
         project_path=path,
         kind=kind,
         include_private=include_private,
-        exclude_references_from=exclude_references_from,
-        strings_count_as_references=strings_count_as_references,
+        exclude_references_from=cfg_exclude_refs_from,
+        strings_count_as_references=cfg_strings_as_refs,
         show_last_reference=not no_last_reference,
         all_files=False,
-        entry_point_decorators=entry_point_decorators,
-        entry_point_names=entry_point_names,
-        exclude_paths=exclude_paths,
+        entry_point_decorators=entry_point_decorators or cfg_ep_decorators,
+        entry_point_names=entry_point_names or cfg_ep_names,
+        exclude_paths=exclude_paths or cfg_excl_paths,
+        unused_modules=unused_modules,
     )
     data = []
     for d in results:
-        entry = {
-            "file_path": d.file_path,
-            "name": d.name,
-            "kind": d.kind,
-            "line": d.line,
-            "selector": d.selector,
-            "reason": d.reason,
-        }
-        if d.last_reference_commit:
-            entry["last_reference_commit"] = d.last_reference_commit
+        if hasattr(d, "module_name"):
+            entry = {
+                "file_path": d.file_path,
+                "name": d.name,
+                "module_name": d.module_name,
+                "kind": "module",
+                "reason": d.reason,
+            }
+        elif hasattr(d, "func_qn") and hasattr(d, "block_id"):
+            entry = {
+                "file_path": d.file_path,
+                "func_qn": d.func_qn,
+                "kind": "unreachable_block",
+                "start_line": d.start_line,
+                "end_line": d.end_line,
+                "reason": "unreachable code",
+            }
+        else:
+            entry = {
+                "file_path": d.file_path,
+                "name": d.name,
+                "kind": d.kind,
+                "line": d.line,
+                "selector": d.selector,
+                "reason": d.reason,
+            }
+            if d.last_reference_commit:
+                entry["last_reference_commit"] = d.last_reference_commit
         data.append(entry)
     return json.dumps(data, indent=2)
 
@@ -639,16 +775,16 @@ def deadcode(
 @mcp_app.tool()
 def lint(
     path: Annotated[str, Field(description="File or directory to lint.")],
-    config: Annotated[str | None, Field(description="Path to patterns.yaml config file (default: .emend/patterns.yaml).")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml config file.")] = None,
     fix: Annotated[bool, Field(description="Auto-apply fix replacements.")] = False,
     rule: Annotated[str | None, Field(description="Run only a specific rule by name.")] = None,
 ) -> str:
-    """Lint Python files using pattern rules from .emend/patterns.yaml."""
+    """Lint Python files using rules from .emend/rules.yaml or legacy patterns.yaml."""
     from pathlib import Path as _Path
     from emend.lint import load_rules, run_lint
     from emend.cli import resolve_files
 
-    config_path = _Path(config or ".emend/patterns.yaml")
+    config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
     if not config_path.exists():
         return f"Error: Config file not found: {config_path}"
 
@@ -799,27 +935,69 @@ def semantic_context(
 @mcp_app.tool()
 def trace_analysis(
     path: Annotated[str, Field(description="File or directory to analyze.")],
-    config: Annotated[str | None, Field(description="Path to patterns.yaml (default: .emend/patterns.yaml).")] = None,
+    from_pattern: Annotated[str | None, Field(description=(
+        "Inline mode: source pattern where tainted data originates "
+        "(e.g. 'request.args.get($X)'). When provided, config file is not needed."
+    ))] = None,
+    to_pattern: Annotated[str | None, Field(description=(
+        "Inline mode: sink pattern where tainted data must not reach "
+        "(e.g. 'cursor.execute($Q)')."
+    ))] = None,
+    not_through: Annotated[str | None, Field(description=(
+        "Inline mode: sanitizer pattern. Data flowing through this is safe "
+        "(e.g. 'escape($X)')."
+    ))] = None,
+    preset: Annotated[str | None, Field(description="Load framework-specific rules: flask, django, sqlalchemy, fastapi. Can combine with inline patterns.")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml. Not needed if using inline mode or preset.")] = None,
     label: Annotated[str | None, Field(description="Only check a specific trace label.")] = None,
-    trace: Annotated[bool, Field(description="Include propagation traces.")] = False,
-    interprocedural: Annotated[bool, Field(description="Enable interprocedural analysis (cross-function trace tracking).")] = False,
+    trace: Annotated[bool, Field(description="Include propagation traces in output.")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable cross-function analysis with fixed-point iteration.")] = False,
 ) -> str:
-    """Run trace analysis to detect unsafe data flows.
+    """Run trace analysis to detect unsafe data flows. Returns JSON.
 
-    Tracks labeled value flow from sources to sinks within functions.
+    Two modes:
+    - Inline: pass from_pattern + to_pattern directly (no config file needed).
+    - Config: reads sources/sinks/sanitizers from .emend/rules.yaml or legacy patterns.yaml.
+
+    Can also use preset= to load framework-specific rules (flask, django, etc.).
     Set interprocedural=True for cross-function analysis.
     """
     from pathlib import Path as _Path
-    from emend.trace import load_trace_config, run_trace_analysis, format_violations
+    from emend.trace import (
+        load_trace_config, run_trace_analysis, format_violations,
+        TraceConfig, TraceSource, TraceSink, TraceSanitizer,
+    )
     from emend.cli import resolve_files
 
-    config_path = _Path(config or ".emend/patterns.yaml")
-    if not config_path.exists():
-        return json.dumps({"error": f"Config file not found: {config_path}"})
+    # Build config from inline params, preset, or config file
+    if from_pattern and to_pattern:
+        # Inline mode: build config from params
+        inline_label = label or "inline"
+        trace_config = TraceConfig(
+            labels=[inline_label],
+            sources=[TraceSource(pattern=from_pattern, label=inline_label)],
+            sinks=[TraceSink(pattern=to_pattern, label=inline_label, message=f"Tainted data flows to {to_pattern}")],
+            sanitizers=[TraceSanitizer(pattern=not_through, label=inline_label)] if not_through else [],
+            scope_sanitizers=[],
+        )
+        if preset:
+            from emend.trace_presets import get_preset, merge_configs
+            preset_config = get_preset(preset)
+            if preset_config:
+                trace_config = merge_configs(trace_config, preset_config)
+    elif preset:
+        from emend.trace_presets import get_preset
+        trace_config = get_preset(preset)
+        if not trace_config:
+            return json.dumps({"error": f"Unknown preset: {preset}"})
+    else:
+        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
+        if not config_path.exists():
+            return json.dumps({"error": f"Config file not found: {config_path}. Provide from_pattern + to_pattern for inline mode, or use preset=."})
+        trace_config = load_trace_config(str(config_path))
 
-    trace_config = load_trace_config(str(config_path))
     if not trace_config.sources or not trace_config.sinks:
-        return json.dumps({"error": "No trace sources or sinks configured."})
+        return json.dumps({"error": "No trace sources or sinks configured. Provide from_pattern + to_pattern, a preset, or a config file."})
 
     resolved, _ = resolve_files(path)
     files = [str(f) for f in resolved]
@@ -950,7 +1128,7 @@ def datalog_query(
 @mcp_app.tool()
 def check_policies(
     path: Annotated[str, Field(description="File or directory to check.")],
-    config: Annotated[str | None, Field(description="Path to policies.yaml (default: .emend/policies.yaml).")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy policies.yaml.")] = None,
     policy_name: Annotated[str | None, Field(description="Run only a specific policy by name.")] = None,
 ) -> str:
     """Run policy checks against source code.
@@ -962,7 +1140,10 @@ def check_policies(
     from emend.policy import load_policies, run_policy_checks, format_policy_violations
     from emend.cli import resolve_files
 
-    config_path = _Path(config or ".emend/policies.yaml")
+    config_path = resolve_rules_path(
+        config,
+        fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
+    )
     if not config_path.exists():
         return json.dumps({"error": f"Config file not found: {config_path}"})
 
@@ -1145,6 +1326,270 @@ def map_write(
         return json.dumps({"error": f"Unknown kind '{kind}'. Use: mapping, module."})
 
     return json.dumps({"error": f"Unknown op '{op}'. Use: add, delete."})
+
+
+# ---------------------------------------------------------------------------
+# Unified MCP surface (discriminated tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def transform(
+    operation: Annotated[str, Field(description="Operation: replace, edit, add, remove, rename, move.")],
+    apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
+    selector: Annotated[str | None, Field(description="Symbol selector for edit/add/remove/rename/move operations.")] = None,
+    value: Annotated[str | None, Field(description="New component value for edit/add operations.")] = None,
+    before: Annotated[str | None, Field(description="Insert before this name (add operation).")] = None,
+    after: Annotated[str | None, Field(description="Insert after this name (add operation).")] = None,
+    at: Annotated[int | None, Field(description="Insert at index (add operation).")] = None,
+    pattern: Annotated[str | None, Field(description="Code pattern for replace operation.")] = None,
+    replacement: Annotated[str | None, Field(description="Replacement code pattern for replace operation.")] = None,
+    path: Annotated[str | None, Field(description="File path/glob/dir for replace operation.")] = None,
+    destination: Annotated[str | None, Field(description="Destination for move operation.")] = None,
+    to: Annotated[str | None, Field(description="Target name for rename operation.")] = None,
+    where: Annotated[str | None, Field(description="Compatibility scope constraint for replace.")] = None,
+    docs: Annotated[bool, Field(description="Rename docs in rename operation.")] = False,
+    no_hierarchy: Annotated[bool, Field(description="Disable hierarchy-aware symbol rename.")] = False,
+    unsure: Annotated[bool, Field(description="Rename uncertain occurrences.")] = False,
+    copy_only: Annotated[bool, Field(description="Copy instead of move for move operation.")] = False,
+    dedent: Annotated[bool, Field(description="Dedent moved/copied symbol body.")] = False,
+    no_update_imports: Annotated[bool, Field(description="Skip import updates for move operation.")] = False,
+    project: Annotated[str | None, Field(description="Project root for rename/move operations.")] = None,
+) -> str:
+    """Apply write-style refactoring operations through one discriminated endpoint."""
+    op = (operation or "").lower()
+    if op == "replace":
+        if not pattern or not replacement or not path:
+            return json.dumps({"error": "replace requires pattern, replacement, and path"})
+        return replace(
+            pattern=pattern,
+            replacement=replacement,
+            path=path,
+            apply=apply,
+            where=where,
+        )
+    if op in {"edit", "add", "remove"}:
+        if not selector:
+            return json.dumps({"error": f"{op} requires selector"})
+        mode = "set" if op == "edit" else op
+        return modify(
+            selector=selector,
+            value=value,
+            mode=mode,
+            before=before,
+            after=after,
+            at=at,
+            apply=apply,
+        )
+    if op == "rename":
+        if not selector or not to:
+            return json.dumps({"error": "rename requires selector and to"})
+        return rename(
+            selector=selector,
+            to=to,
+            apply=apply,
+            docs=docs,
+            no_hierarchy=no_hierarchy,
+            unsure=unsure,
+            project=project,
+        )
+    if op == "move":
+        if not selector or not destination:
+            return json.dumps({"error": "move requires selector and destination"})
+        return move(
+            selector=selector,
+            destination=destination,
+            copy_only=copy_only,
+            dedent=dedent,
+            no_update_imports=no_update_imports,
+            apply=apply,
+            project=project,
+        )
+    return json.dumps({"error": f"Unknown operation {operation!r}. Use: replace, edit, add, remove, rename, move."})
+
+
+@mcp_app.tool()
+def references(
+    selector: Annotated[str, Field(description="Symbol selector to inspect.")],
+    kind: Annotated[str, Field(description="Reference kind: all, reads, writes, or calls.")] = "all",
+    exclude_definition: Annotated[bool, Field(description="Exclude definition row (refs mode).")] = False,
+    exclude_imports: Annotated[bool, Field(description="Exclude import rows (refs mode).")] = False,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
+) -> str:
+    """Find references through a focused endpoint."""
+    query_kind = (kind or "all").lower()
+    if query_kind not in {"all", "reads", "writes", "calls"}:
+        return json.dumps({"error": f"Unknown kind {kind!r}. Use: all, reads, writes, calls."})
+    return refs(
+        selector=selector,
+        exclude_definition=exclude_definition,
+        exclude_imports=exclude_imports,
+        writes_only=query_kind == "writes",
+        reads_only=query_kind == "reads",
+        calls_only=query_kind == "calls",
+        project=project,
+    )
+
+
+@mcp_app.tool()
+def analyze(
+    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, or flow.")] = "graph",
+    path: Annotated[str | None, Field(description="Path scope for deadcode/trace/check-style modes.")] = None,
+    selector: Annotated[str | None, Field(description="Selector input for semantic_context/impact modes.")] = None,
+    symbol: Annotated[str | None, Field(description="Symbol selector for graph mode.")] = None,
+    file_path: Annotated[str | None, Field(description="File path for graph mode.")] = None,
+    format: Annotated[str, Field(description="Output format where supported (graph).")] = "json",
+    direction: Annotated[str, Field(description="Graph direction for symbol graph mode.")] = "both",
+    transitive: Annotated[bool, Field(description="Enable transitive graph/caller expansion.")] = False,
+    depth: Annotated[int | None, Field(description="Max depth for transitive graph expansion.")] = None,
+    kind: Annotated[str | None, Field(description="Deadcode kind filter.")] = None,
+    include_private: Annotated[bool, Field(description="Include private names in deadcode mode.")] = False,
+    no_last_reference: Annotated[bool, Field(description="Disable git last-reference info in deadcode mode.")] = False,
+    entry_point_decorators: Annotated[list[str] | None, Field(description="Entry-point decorators for deadcode mode.")] = None,
+    entry_point_names: Annotated[list[str] | None, Field(description="Entry-point names for deadcode mode.")] = None,
+    exclude_paths: Annotated[list[str] | None, Field(description="Excluded globs for deadcode mode.")] = None,
+    config: Annotated[str | None, Field(description="Config path for deadcode/trace mode.")] = None,
+    diff: Annotated[str | None, Field(description="Git diff range for impact mode.")] = None,
+    output: Annotated[str, Field(description="Impact output mode.")] = "symbols",
+    max_depth: Annotated[int, Field(description="Impact BFS max depth.")] = 10,
+    interface_decorators: Annotated[list[str] | None, Field(description="Extra interface decorators for semantic_context mode.")] = None,
+    from_pattern: Annotated[str | None, Field(description="Flow source pattern for inline flow mode.")] = None,
+    to_pattern: Annotated[str | None, Field(description="Flow sink pattern for inline flow mode.")] = None,
+    not_through: Annotated[str | None, Field(description="Flow sanitizer pattern for inline flow mode.")] = None,
+    preset: Annotated[str | None, Field(description="Flow preset (flask/django/sqlalchemy/fastapi).")] = None,
+    label: Annotated[str | None, Field(description="Flow label filter.")] = None,
+    trace: Annotated[bool, Field(description="Include propagation steps in flow mode.")] = False,
+    interprocedural: Annotated[bool, Field(description="Enable interprocedural flow analysis.")] = False,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
+) -> str:
+    """Run analysis operations through one discriminated endpoint."""
+    analysis_mode = (mode or "graph").lower()
+    if analysis_mode == "graph":
+        return graph(
+            file_path=file_path or path,
+            symbol=symbol or selector,
+            direction=direction,
+            transitive=transitive,
+            depth=depth,
+            format=format,
+            project=project,
+        )
+    if analysis_mode == "deadcode":
+        return deadcode(
+            path=path or ".",
+            kind=kind,
+            include_private=include_private,
+            no_last_reference=no_last_reference,
+            entry_point_decorators=entry_point_decorators,
+            entry_point_names=entry_point_names,
+            exclude_paths=exclude_paths,
+            config=config,
+        )
+    if analysis_mode == "impact":
+        return impact(
+            selector=selector,
+            diff=diff,
+            output=output,
+            max_depth=max_depth,
+            project=project,
+        )
+    if analysis_mode == "semantic_context":
+        if not selector:
+            return json.dumps({"error": "semantic_context mode requires selector"})
+        return semantic_context(
+            selector=selector,
+            project=project,
+            interface_decorators=interface_decorators,
+        )
+    if analysis_mode in {"flow", "trace"}:
+        if not path:
+            return json.dumps({"error": "flow mode requires path"})
+        return trace_analysis(
+            path=path,
+            from_pattern=from_pattern,
+            to_pattern=to_pattern,
+            not_through=not_through,
+            preset=preset,
+            config=config,
+            label=label,
+            trace=trace,
+            interprocedural=interprocedural,
+        )
+    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow."})
+
+
+@mcp_app.tool()
+def check(
+    paths: Annotated[list[str] | None, Field(description="File or directory scope(s) to check.")] = None,
+    config: Annotated[str | None, Field(description="Rules config path. Defaults to .emend/rules.yaml with legacy fallback.")] = None,
+    rule: Annotated[str | None, Field(description="Run only one named rule.")] = None,
+    kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type, datalog.")] = None,
+    fix: Annotated[bool, Field(description="Apply auto-fixes for match rules when available.")] = False,
+) -> str:
+    """Run unified project rules from ``rules.yaml``."""
+    from emend.checks import run_checks
+    from emend.cli import resolve_file_scopes
+
+    resolved, _ = resolve_file_scopes(paths or ["."], language="python")
+    file_paths = [str(f) for f in resolved]
+    project_path = paths[0] if paths else "."
+    violations = run_checks(
+        file_paths,
+        config=config,
+        rule_name=rule,
+        kind=kind,
+        fix=fix,
+        language="python",
+        project_path=project_path,
+    )
+    return json.dumps([
+        {
+            "rule": violation.rule_name,
+            "kind": violation.kind,
+            "severity": violation.severity,
+            "message": violation.message,
+            "file": violation.file_path,
+            "line": violation.line,
+            "col": violation.col,
+            "witness": violation.witness or [],
+        }
+        for violation in violations
+    ], indent=2)
+
+
+@mcp_app.tool()
+def datalog(
+    query: Annotated[str | None, Field(description="Raw CozoScript query.")] = None,
+    project: Annotated[str, Field(description="Project root directory.")] = ".",
+    limit: Annotated[int, Field(description="Maximum rows to return.")] = 200,
+) -> str:
+    """Run raw CozoScript against the fact graph."""
+    return datalog_query(
+        query=query,
+        project=project,
+        limit=limit,
+        mode="raw",
+    )
+
+
+@mcp_app.tool()
+def mappings(
+    operation: Annotated[str, Field(description="Mappings operation: read or write.")],
+    kind: Annotated[str, Field(description="Mapping kind: mapping or module.")] = "mapping",
+    query: Annotated[str, Field(description="Read query string for read operation.")] = "",
+    options: Annotated[dict | None, Field(description="Read options for read operation.")] = None,
+    op: Annotated[str | None, Field(description="Write operation: add or delete (write operation only).")] = None,
+    entry: Annotated[dict | None, Field(description="Write payload (write operation only).")] = None,
+) -> str:
+    """Read/write mapping state through one discriminated endpoint."""
+    normalized = (operation or "").lower()
+    if normalized == "read":
+        return map_read(kind=kind, query=query, options=options)
+    if normalized == "write":
+        if not op or entry is None:
+            return json.dumps({"error": "write operation requires op and entry"})
+        return map_write(kind=kind, op=op, entry=entry)
+    return json.dumps({"error": f"Unknown operation {operation!r}. Use: read, write."})
 
 
 # ---------------------------------------------------------------------------
@@ -1358,7 +1803,27 @@ def _compress_schema(obj: object) -> object:
     return compressed
 
 
-def dump_schema() -> str:
+def _resolve_profile_tools(
+    profile: str | None = None,
+    tools: list[str] | None = None,
+) -> set[str] | None:
+    if tools is not None:
+        return set(tools)
+    if profile == "full":
+        return None
+    if profile is None:
+        return set(_CORE_TOOLS)
+    keep = PROFILES.get(profile)
+    if keep is None:
+        valid = ", ".join(sorted(PROFILES.keys()) + ["full"])
+        raise ValueError(f"Unknown profile {profile!r}. Available: {valid}")
+    return set(keep)
+
+
+def dump_schema(
+    profile: str | None = None,
+    tools: list[str] | None = None,
+) -> str:
     """Return the MCP tool schema as a JSON string.
 
     Each tool is serialised with its name, description, and full
@@ -1367,6 +1832,7 @@ def dump_schema() -> str:
     remove Pydantic boilerplate (``title`` keys) and collapse nullable
     ``anyOf`` unions into plain ``type`` entries.
     """
+    selected = _resolve_profile_tools(profile=profile, tools=tools)
     tools = mcp_app._tool_manager.list_tools()
     result = [
         {
@@ -1375,22 +1841,37 @@ def dump_schema() -> str:
             "inputSchema": _compress_schema(t.parameters),
         }
         for t in tools
+        if selected is None or t.name in selected
     ]
     return json.dumps({"tools": result}, indent=2)
 
 
-PROFILES: dict[str, set[str]] = {
-    "core": {
-        "search", "replace", "modify", "refs", "rename", "move",
-        "semantic_context", "impact", "grammar_and_cookbook",
-    },
-    "refactor": {
-        "search", "replace", "modify", "refs", "rename", "move",
-        "semantic_context", "impact", "grammar_and_cookbook",
-        "graph", "lint", "deadcode",
-    },
-    # "full" keeps all tools — no filtering needed.
+_CORE_TOOLS: set[str] = {
+    "search",
+    "transform",
+    "references",
+    "analyze",
+    "check",
+    "datalog",
+    "grammar_and_cookbook",
 }
+
+PROFILES: dict[str, set[str]] = {
+    "core": set(_CORE_TOOLS),
+    "refactor": set(_CORE_TOOLS),
+    "expert": set(_CORE_TOOLS) | {"mappings"},
+}
+
+# Snapshot all registered tools (including legacy endpoints) so profiles can
+# switch losslessly at runtime.
+_ALL_TOOLS: dict[str, Any] = {
+    t.name: t for t in mcp_app._tool_manager.list_tools()
+}
+
+
+def _restore_all_tools() -> None:
+    mcp_app._tool_manager._tools.clear()
+    mcp_app._tool_manager._tools.update(_ALL_TOOLS)
 
 
 def configure_profile(
@@ -1401,27 +1882,16 @@ def configure_profile(
 
     Must be called **before** ``run_server()`` or ``dump_schema()``.
     """
-    if profile == "full" or (profile is None and tools is None):
-        return
+    _restore_all_tools()
 
-    if tools is not None:
-        keep = set(tools)
-    elif profile is not None:
-        keep = PROFILES.get(profile)
-        if keep is None:
-            valid = ", ".join(sorted(PROFILES.keys()) + ["full"])
-            raise ValueError(f"Unknown profile {profile!r}. Available: {valid}")
-    else:
+    keep = _resolve_profile_tools(profile=profile, tools=tools)
+    if keep is None:
         return
 
     all_tools = mcp_app._tool_manager.list_tools()
     for t in all_tools:
         if t.name not in keep:
             mcp_app._tool_manager._tools.pop(t.name, None)
-
-    # Trim the instructions block when mapping tools are absent.
-    if "map_read" not in keep and "map_write" not in keep:
-        mcp_app.instructions = (mcp_app.instructions or "").split("## Mappings")[0].rstrip()
 
 
 def run_server(
@@ -1442,3 +1912,8 @@ def run_server(
 
     mcp_app.settings.port = port
     mcp_app.run(transport=transport)
+
+
+# Keep module-import default aligned with the core profile so schema dumps and
+# direct tool enumeration reflect the reduced MCP surface.
+configure_profile(profile="core")

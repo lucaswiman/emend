@@ -1,241 +1,107 @@
-Knowledge Base
-==============
+Mappings
+========
 
-emend includes a built-in knowledge base for recording cross-service identifier
-mappings, module-to-repo mappings, and free-form architectural notes. Everything
-is stored in a per-project SQLite database at ``.emend/knowledge.db`` with
-FTS5 trigram indexing for instant substring search.
-
-Three subsystems:
-
-1. **Knowledge notes** — a searchable scratchpad for architectural decisions,
-   conventions, patterns, or any other information relevant to the codebase.
-2. **Identifier mappings** — records that an identifier in one project maps to
-   an identifier in another (e.g. ``users.UserService.create`` →
-   ``POST /api/v1/users`` in the gateway repo).
-3. **Module mappings** — coarse mappings from a Python module prefix to an
-   external repo or local directory, with automatic ``gh`` cloning and
-   git worktree management.
+emend includes a built-in mapping store for cross-repo identifier mappings and
+module-to-repo mappings.  The public CLI surface for this is ``emend map``.
 
 
-Environment Variables
----------------------
+Overview
+--------
 
-.. envvar:: EMEND_CACHE_DIR
+Two mapping kinds are supported:
 
-   Override the global emend cache directory. Defaults to ``~/.cache/emend``.
+1. **Identifier mappings** -- relationships between identifiers in different
+   systems, such as ``users.UserService.create`` -> ``POST /api/v1/users``.
+2. **Module mappings** -- a module prefix that resolves into another repo or a
+   local directory so selectors can jump across repositories.
 
-   This controls where external repo checkouts are stored::
-
-       $EMEND_CACHE_DIR/repo-checkouts/{repo-id}/contents       # bare clone
-       $EMEND_CACHE_DIR/repo-checkouts/{repo-id}/checkouts/{ref} # worktrees
-
-   Example::
-
-       export EMEND_CACHE_DIR=/tmp/emend-cache
-       emend modmap resolve payments.models
+Mappings are stored in emend's project metadata and are also exposed through the
+MCP server's ``mappings`` tool.
 
 
-Knowledge Notes (``emend kb``)
-------------------------------
+Identifier mappings
+-------------------
 
-Add, search, and manage free-form notes.
+Use identifier mappings to record cross-service relationships.
 
 .. code-block:: bash
 
-   # Add a note
-   emend kb add "Auth flow" "Uses OAuth2 with PKCE. Tokens stored in Redis." \
-       --category architecture --tags "auth,oauth"
-
-   # Search notes (FTS5 trigram — any substring works)
-   emend kb search "oauth"
-   emend kb search "auth" --category architecture
-
-   # Show a specific note
-   emend kb show 1
-
-   # Delete a note
-   emend kb rm 1
-
-**Fields:**
-
-+-----------------+----------------------------------------------------------------------+
-| Field           | Description                                                          |
-+=================+======================================================================+
-| ``title``       | Short title (required)                                               |
-+-----------------+----------------------------------------------------------------------+
-| ``content``     | Free-form body text (required)                                       |
-+-----------------+----------------------------------------------------------------------+
-| ``--category``  | ``note``, ``architecture``, ``convention``, ``decision``, ``pattern``|
-+-----------------+----------------------------------------------------------------------+
-| ``--tags``      | Comma-separated tags                                                 |
-+-----------------+----------------------------------------------------------------------+
-| ``--source``    | ``user``, ``llm``, ``heuristic``                                     |
-+-----------------+----------------------------------------------------------------------+
-| ``--project``   | Scope to a specific project/repo                                     |
-+-----------------+----------------------------------------------------------------------+
-| ``--file-path`` | Related file                                                         |
-+-----------------+----------------------------------------------------------------------+
-| ``--symbol``    | Related symbol                                                       |
-+-----------------+----------------------------------------------------------------------+
-
-
-Identifier and Module Mappings (``emend map``)
----------------------------------------------
-
-emend provides a unified ``map`` command for managing both cross-service
-identifier mappings and module-to-repo mappings.
-
-Identifier mappings record relationships between symbols in different projects,
-while module mappings provide coarse information about where code for a
-specific module lives.
-
-Identifier Mappings
-~~~~~~~~~~~~~~~~~~~
-
-Record and query cross-service identifier relationships.
-
-.. code-block:: bash
-
-   # Add a mapping
    emend map add \
        backend "users.UserService.create" \
        gateway "POST /api/v1/users" \
        --rel calls --src-kind function --tgt-kind endpoint
 
-   # Search mappings (FTS5 trigram)
    emend map search "UserService"
-
-   # Find all mappings for an identifier
    emend map lookup "users.UserService.create"
+   emend map rm "users.UserService.create"
 
-   # Delete a mapping
-   emend map rm 1
-
-**Relationship types:** ``equivalent``, ``calls``, ``implements``, ``produces``, ``consumes``
+Relationship kinds include ``equivalent``, ``calls``, ``implements``,
+``produces``, and ``consumes``.
 
 
-Module Mappings
-~~~~~~~~~~~~~~~
+Module mappings
+---------------
 
-Map Python module prefixes to external repositories or local directories. When
-a mapping points to a GitHub repo, emend clones it automatically using ``gh``
-and manages worktrees for different branches.
+Module mappings tell emend where another codebase lives.
 
 .. code-block:: bash
 
-   # Map a module prefix to a GitHub repo
    emend map add-module payments --repo org/payments-service
-
-   # Map to a specific branch and subdirectory
    emend map add-module gateway --repo org/gateway --branch v2 --subpath src/gateway
-
-   # Map to a local directory
    emend map add-module shared.utils --path /home/user/shared-utils
 
-   # List all module mappings
    emend map list-modules
-
-   # Delete a mapping
+   emend map update-module payments --branch release
    emend map rm-module payments
 
-How to specify mappings
-^^^^^^^^^^^^^^^^^^^^^^^
 
-The path (or repo + subpath) should point to the directory or file that
-**corresponds to the module prefix**. The prefix itself is stripped from the
-module name during resolution, and the remainder is appended to the mapped path.
+Resolution
+----------
 
-.. tip::
-
-   **Rule of Thumb:** The ``--repo`` + ``--subpath`` (or ``--path``) should
-   point to the **directory that IS the package** — i.e. the directory whose
-   name matches the module prefix's last component, or whose contents are
-   the package's ``__init__.py`` and submodules.
-
-   - ``payments`` package lives at ``repo-root/payments/`` → ``--repo org/repo --subpath payments``
-   - ``payments`` package lives at ``repo-root/src/payments/`` → ``--repo org/repo --subpath src/payments``
-   - ``payments`` package IS the repo root → ``--repo org/repo`` (no subpath)
-
-.. warning::
-
-   **Anti-Pattern:** Do NOT point to the directory *containing* the package.
-   If ``payments/`` is at ``src/payments/``, mapping to ``--subpath src`` is
-   wrong because resolution would look for ``src/payments/models.py`` by
-   appending ``payments.models`` to ``src/``, duplicating the ``payments`` part.
-
-**Example 1: Package in a subdirectory**
-  If your repo ``shared-libs`` has a package ``utils`` at ``src/utils/``, map it as::
-
-      emend map add-module utils --repo org/shared-libs --subpath src/utils
-
-  Resolution: ``utils.networking.fetch`` → ``.../shared-libs/src/utils/networking.py::fetch``
-
-**Example 2: Top-level package**
-  If your repo ``payments-service`` has the ``payments`` package in the root, map it as::
-
-      emend map add-module payments --repo org/payments-service
-
-  Resolution: ``payments.models.Order`` → ``.../payments-service/payments/models.py::Order``
-
-
-Unified Resolution
-~~~~~~~~~~~~~~~~~~
-
-The ``resolve`` and ``resolve-file`` commands provide a unified way to find
-the local location of a symbol or module, taking all mappings into account.
+``emend map resolve`` resolves a dotted symbol or module path into a local
+selector, taking mappings into account.
 
 .. code-block:: bash
 
-   # Resolve to an explicit selector (file.py::Symbol)
    emend map resolve payments.models.Order
-   # Output: /path/to/payments/models.py::Order
+   # /path/to/payments/models.py::Order
 
-   # Resolve to file and line (for editor integration)
-   emend map resolve-file payments.models.Order
-   # Output:
-   # File: /path/to/payments/models.py
-   # Line: 42
-   # Kind: class
+You can also use mapped resolution directly from ``find``:
 
-**Dotted Selectors:** You can use dotted paths like ``path.to.module.Symbol``
-anywhere a selector is expected if you use the ``--include-map`` flag with
-``emend search`` (aliased as ``grep``)::
+.. code-block:: bash
 
-    emend search --include-map payments.models.Order
+   emend find --include-map payments.models.Order
 
 
-Repo Checkout Layout
-~~~~~~~~~~~~~~~~~~~~
+Choosing the mapped path
+------------------------
 
-When a module mapping references a GitHub repo, emend uses ``gh repo clone``
-to create a **bare clone**, then creates **git worktrees** for each
-branch/tag/commit that is referenced:
+The target path (or repo + subpath) should point to the directory or file that
+corresponds to the mapped prefix itself.
+
+Examples:
+
+- If the ``payments`` package lives at ``repo-root/payments/``, map with
+  ``--repo org/repo --subpath payments``.
+- If the ``payments`` package lives at ``repo-root/src/payments/``, map with
+  ``--repo org/repo --subpath src/payments``.
+- If the repo root is itself the package, use ``--repo org/repo`` with no
+  subpath.
+
+
+Repo checkout layout
+--------------------
+
+When a module mapping points at GitHub, emend uses ``gh repo clone`` to create a
+bare clone, then creates git worktrees for requested refs:
 
 .. code-block:: text
 
    ~/.cache/emend/repo-checkouts/
    └── org--payments-service/
-       ├── contents/                  # bare clone
+       ├── contents/
        └── checkouts/
-           ├── main/                  # worktree for main branch
-           └── v2/                    # worktree for v2 branch
+           ├── main/
+           └── v2/
 
-This layout:
-
-- Stores repos globally (not per-project), avoiding redundant clones
-- Allows multiple branches of the same repo to coexist
-- Uses the ``EMEND_CACHE_DIR`` env var to relocate the cache (see above)
-
-**Prerequisites:** The `GitHub CLI <https://cli.github.com/>`_ (``gh``) must be
-installed and authenticated for repo cloning to work.
-
-
-MCP / Editor Integration
--------------------------
-
-The knowledge base is also available through the MCP server and the Vim/Neovim
-editor server (JSON-RPC). The MCP server exposes ``kb_search``,
-``mapping_lookup``, and ``module_resolve`` tools. The editor server provides
-``kb_search``, ``mapping_lookup``, ``mapping_goto``, and ``module_resolve`` RPC
-methods.
+Set ``EMEND_CACHE_DIR`` to relocate this cache root.

@@ -4,7 +4,9 @@ import json
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
+from emend.cli import app
 from emend.policy import (
     FlowCheck,
     Policy,
@@ -19,6 +21,8 @@ from emend.policy import (
     validate_policies,
 )
 
+runner = CliRunner()
+
 
 def _write_policies(tmp_path, policies_dict):
     """Write a YAML policy config file."""
@@ -26,6 +30,15 @@ def _write_policies(tmp_path, policies_dict):
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "policies.yaml"
     config_file.write_text(yaml.dump(policies_dict))
+    return str(config_file)
+
+
+def _write_rules(tmp_path, rules_dict):
+    """Write a unified rules config file."""
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "rules.yaml"
+    config_file.write_text(yaml.dump(rules_dict))
     return str(config_file)
 
 
@@ -107,6 +120,85 @@ class TestLoadPolicies:
         assert isinstance(check, FlowCheck)
         assert check.not_through == "sanitize($X)"
 
+    def test_load_unified_rules_yaml_as_policies(self, tmp_path):
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "rules.yaml"
+        config_file.write_text(yaml.dump({
+            "rules": {
+                "no-print": {
+                    "match": "print($X)",
+                    "message": "No print calls",
+                    "severity": "warning",
+                },
+                "no-sqli": {
+                    "flow": {
+                        "from": "request.args.get($X)",
+                        "to": "cursor.execute($Q)",
+                    },
+                    "message": "No SQL injection",
+                    "severity": "error",
+                },
+            },
+        }))
+
+        policies = load_policies(str(config_file))
+        assert {p.name for p in policies} == {"no-print", "no-sqli"}
+        structural = next(p for p in policies if p.name == "no-print")
+        flow = next(p for p in policies if p.name == "no-sqli")
+        assert isinstance(structural.checks[0], StructuralCheck)
+        assert isinstance(flow.checks[0], FlowCheck)
+
+    def test_load_unified_rules_via_legacy_policies_path(self, tmp_path):
+        _write_rules(tmp_path, {
+            "macros": {"input": "request.args.get($X)"},
+            "rules": {
+                "no-print": {
+                    "match": "print($X)",
+                    "message": "No print",
+                    "severity": "warning",
+                },
+                "no-sqli": {
+                    "flow": {
+                        "from": "{input}",
+                        "to": "cursor.execute($Q)",
+                        "not-through": "escape($X)",
+                    },
+                    "message": "No SQL injection",
+                    "severity": "error",
+                },
+                "deadcode-check": {
+                    "deadcode": {
+                        "entry-point-names": ["main"],
+                    },
+                    "message": "Dead code policy",
+                },
+            },
+        })
+        policies = load_policies(str(tmp_path / ".emend" / "policies.yaml"))
+        by_name = {p.name: p for p in policies}
+        assert "no-print" in by_name
+        assert "no-sqli" in by_name
+        assert "deadcode-check" in by_name
+        assert isinstance(by_name["no-print"].checks[0], StructuralCheck)
+        assert isinstance(by_name["no-sqli"].checks[0], FlowCheck)
+        assert by_name["no-sqli"].checks[0].flows_from == "request.args.get($X)"
+        assert isinstance(by_name["deadcode-check"].checks[0], DeadCodeCheck)
+
+    def test_load_unified_rules_top_level_deadcode(self, tmp_path):
+        _write_rules(tmp_path, {
+            "deadcode": {
+                "entry-point-decorators": ["app.command"],
+            },
+            "rules": {
+                "no-print": {"match": "print($X)", "message": "No print"},
+            },
+        })
+        policies = load_policies(str(tmp_path / ".emend" / "policies.yaml"))
+        names = {p.name for p in policies}
+        assert "no-print" in names
+        assert "deadcode" in names
+
 
 class TestValidatePolicies:
     def test_valid_policy(self):
@@ -182,3 +274,24 @@ class TestFormatViolations:
         ]
         output = format_policy_violations(violations)
         assert "source L1: x" in output
+
+
+def test_check_cli_uses_rules_yaml(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    (config_dir / "rules.yaml").write_text(yaml.dump({
+        "rules": {
+            "no-print": {
+                "match": "print($X)",
+                "message": "Use logging",
+            }
+        }
+    }))
+    test_file = tmp_path / "app.py"
+    test_file.write_text("print('hello')\n")
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "no-print" in result.stdout
