@@ -3,7 +3,9 @@
 ## Goal
 
 Close the gap between "migration stabilized" and "the intended engine choice is
-explicit, documented, and encoded in tests."
+explicit, documented, and encoded in tests, while making the remaining
+interprocedural Datalog migration an official next step rather than an implied
+cleanup.
 
 ## Why
 
@@ -20,9 +22,10 @@ one migration seam half-finished:
 
 That ambiguity makes future cleanup harder, because it is unclear whether the
 remaining Datalog helper is supposed to replace the public engine or remain a
-lower-level/reference path.
+lower-level/reference path. This phase resolves that ambiguity by recording the
+current checkpoint and handing off to explicit migration phases.
 
-## Decision
+## Checkpoint Decision
 
 For now, **public interprocedural trace remains Python-canonical**.
 
@@ -33,6 +36,21 @@ Rationale:
 - it already carries the bug fixes from the roadmap regression work
 - the Datalog helper is still useful as a lower-level/reference query, but it
   is not yet a drop-in replacement for public interprocedural analysis
+
+This is a **staging decision**, not the final architecture. The project still
+intends to migrate public interprocedural trace to the fact-graph/Datalog path
+after parity and cutover work are complete.
+
+## Follow-On Migration
+
+The migration is officially part of this roadmap:
+
+- Phase 11 reaches semantic parity between the Python public engine and the
+  Datalog interprocedural path.
+- Phase 12 switches the public API/CLI entry points to the Datalog engine once
+  parity is proven by engine-observable tests.
+- Phase 13 removes the legacy Python interprocedural path and any stale
+  migration scaffolding left behind by the cutover.
 
 ## Scope
 
@@ -49,15 +67,15 @@ Rationale:
   explicitly.
 - [x] Record the engine decision in the roadmap index so this cleanup is no
   longer implicit tribal knowledge.
-- [ ] If the project later wants Datalog-canonical interprocedural trace,
-  create a follow-up phase that first reaches full parity on:
-  - summary semantics
-  - witness generation
-  - engine-observable tests at API/CLI boundaries
+- [x] Split the remaining interprocedural Datalog migration into explicit
+  follow-on roadmap phases.
 
 ## Exit Criteria
 
 - The public interprocedural trace API has one clearly documented canonical
-  engine.
-- Tests fail if that engine choice changes silently.
+  engine at the Phase 10 checkpoint.
+- Tests fail if that checkpoint engine choice changes silently before the
+  planned cutover work.
 - Roadmap/docs no longer imply a fallback path that does not exist.
+- The remaining Datalog migration is explicitly scheduled, not left as an
+  ambiguous future cleanup.
