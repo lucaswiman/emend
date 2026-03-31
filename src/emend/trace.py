@@ -119,6 +119,7 @@ class TraceViolation:
     sink_pattern: str
     message: str
     trace: list[TraceStep] = field(default_factory=list)
+    engine: str = ""  # "python" or "datalog" — which engine produced this violation
 
 
 # ---------------------------------------------------------------------------
@@ -1321,6 +1322,9 @@ def run_trace_analysis(
             )
             violations.extend(func_violations)
 
+    for v in violations:
+        if not v.engine:
+            v.engine = "python"
     return _deduplicate_violations(violations)
 
 
@@ -1501,6 +1505,7 @@ def _run_trace_datalog(
             sink_pattern=tf.sink_var,
             message=msg,
             trace=[],
+            engine="datalog",
         ))
     return _deduplicate_violations(violations)
 
@@ -1556,6 +1561,8 @@ def format_violations(
                 "sink_pattern": v.sink_pattern,
                 "message": v.message,
             }
+            if v.engine:
+                entry["engine"] = v.engine
             if show_trace:
                 entry["trace"] = [
                     {
@@ -2255,6 +2262,9 @@ def run_interprocedural_trace_analysis(
                                             trace=trace,
                                         ))
 
+    for v in violations:
+        if not v.engine:
+            v.engine = "python"
     return InterproceduralResult(
         violations=_deduplicate_violations(violations),
         summaries=summaries,

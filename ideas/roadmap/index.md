@@ -20,7 +20,7 @@ indefinitely.
 - [x] [Phase 6: Make Datalog Trace Paths Real](./phase-6-make-datalog-trace-paths-real.md)
 - [x] [Phase 7: Resolve Pattern Matches to Exact CFG Locations](./phase-7-resolve-pattern-matches-to-exact-cfg-locations.md)
 - [x] [Phase 8: Unify Flow, Policy, and Sequence Checks on One Engine](./phase-8-unify-flow-policy-and-sequence-checks.md)
-- [ ] [Phase 9: Add Differential CFG/Trace/Flow Regression Coverage](./phase-9-add-differential-cfg-trace-flow-regression-coverage.md)
+- [x] [Phase 9: Add Differential CFG/Trace/Flow Regression Coverage](./phase-9-add-differential-cfg-trace-flow-regression-coverage.md)
 
 ## Current CFG / Trace / Flow Bugs
 

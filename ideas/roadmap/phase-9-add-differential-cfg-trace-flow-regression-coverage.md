@@ -21,20 +21,20 @@ semantics."
 
 ## Todo
 
-- [ ] Add direct regression tests for the currently known bugs:
+- [x] Add direct regression tests for the currently known bugs:
   - sanitizer on all sink-reaching paths but not all exit paths
   - scope sanitizer on one branch only
   - Datalog trace runtime breakage
   - effect sinks end-to-end
   - blocked sink/destination block semantics
-- [ ] Add parity tests that run the same scenario through:
+- [x] Add parity tests that run the same scenario through:
   - engine API
   - CLI command
   - MCP entry point where applicable
-- [ ] During migration, add differential tests comparing the reference engine
+- [x] During migration, add differential tests comparing the reference engine
   and the canonical fact-graph engine on the same fixtures.
-- [ ] Add explicit engine-used reporting in debug/JSON output.
-- [ ] Add a small curated corpus with nested functions, module-level code,
+- [x] Add explicit engine-used reporting in debug/JSON output.
+- [x] Add a small curated corpus with nested functions, module-level code,
   same-block ordering cases, and branch-sensitive sanitization.
 
 ## Exit Criteria
