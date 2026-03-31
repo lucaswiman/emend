@@ -4654,6 +4654,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     project_root = _find_project_root(project_path)
     emend_dir = Path(project_root) / ".emend" / "cache"
+    emend_dir.mkdir(parents=True, exist_ok=True)
     facts_db = emend_dir / "facts.db"
 
     if facts_db.exists():
@@ -4678,9 +4679,16 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         except Exception:
             logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
+    # If indexing still didn't leave a usable facts.db, persist one directly
+    # so fact-dependent commands bootstrap the cache instead of falling back
+    # to an ephemeral in-memory graph.
+    try:
+        return FactGraph.build_from_project(project_path, db_path=str(facts_db))
+    except Exception:
+        logger.debug("Failed to persist facts.db directly, using in-memory graph", exc_info=True)
+
     # Final fallback: build in-memory (mainly for tests)
-    graph = FactGraph.build_from_project(project_path)
-    return graph
+    return FactGraph.build_from_project(project_path)
 
 
 def find_references(

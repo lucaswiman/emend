@@ -134,6 +134,24 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "Client" not in dead_names, "Client is referenced in Service type annotation"
 
+    def test_fact_graph_bootstrap_persists_facts_db(self, tmp_path, monkeypatch):
+        """Fact-dependent commands should materialize ``facts.db`` on first use."""
+        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text("def unused():\n    return 1\n")
+
+        cache_dir = _cache_db_dir(str(project))
+        facts_db = cache_dir / "facts.db"
+        assert not facts_db.exists()
+
+        monkeypatch.setattr("emend.transform.warm_caches", lambda *args, **kwargs: {})
+        graph = _get_or_build_fact_graph(str(project))
+
+        assert facts_db.exists()
+        graph.close()
+
     def test_warm_path_intra_file_function_call(self, tmp_path):
         """Warm path: helper function called only within the same file is not dead."""
         from emend.transform import find_dead_code
