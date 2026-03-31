@@ -14,9 +14,9 @@ indefinitely.
 
 - [x] [Phase 1: Remove Public Datalog Surfaces](./phase-1-remove-public-datalog-surfaces.md)
 - [x] [Phase 2: Remove Fallback Execution Paths](./phase-2-remove-fallback-execution-paths.md)
-- [ ] [Phase 3: Make Cozo the Primary Analysis Store](./phase-3-make-cozo-primary-analysis-store.md)
-- [ ] [Phase 4: Shrink `parse.db` to FTS + Cache Metadata](./phase-4-shrink-parse-db.md)
-- [ ] [Phase 5: Repair Intraprocedural Trace Semantics](./phase-5-repair-intraprocedural-trace-semantics.md)
+- [x] [Phase 3: Make Cozo the Primary Analysis Store](./phase-3-make-cozo-primary-analysis-store.md)
+- [x] [Phase 4: Shrink `parse.db` to FTS + Cache Metadata](./phase-4-shrink-parse-db.md)
+- [x] [Phase 5: Repair Intraprocedural Trace Semantics](./phase-5-repair-intraprocedural-trace-semantics.md)
 - [ ] [Phase 6: Make Datalog Trace Paths Real](./phase-6-make-datalog-trace-paths-real.md)
 - [ ] [Phase 7: Resolve Pattern Matches to Exact CFG Locations](./phase-7-resolve-pattern-matches-to-exact-cfg-locations.md)
 - [ ] [Phase 8: Unify Flow, Policy, and Sequence Checks on One Engine](./phase-8-unify-flow-policy-and-sequence-checks.md)

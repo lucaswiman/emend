@@ -111,6 +111,18 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     Called from ``_get_disk_cache()`` (lazy init) and ``warm_caches()``
     (pre-create before spawning workers).  Keeping the DDL in one place
     prevents the two call-sites from drifting out of sync.
+
+    **parse.db role** (Phase 4):  parse.db is limited to data that SQLite
+    handles best: full-text / editor search (FTS5 trigram), freshness
+    metadata (file_manifest, index_meta), QN pre-filter cache, type cache,
+    and DSL symbols.  Structured analysis facts (symbols, references,
+    imports, CFG, def-use, calls) are owned by CozoDB facts.db and built
+    directly from source files by ``_build_facts_db()``.
+
+    The ``symbol_index`` and ``reference_index`` tables remain because they
+    serve editor search and search-optimization queries.  ``import_graph``
+    is retained for compatibility but is no longer read by the facts.db
+    build path.
     """
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -552,21 +564,95 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
             pass
 
 
-def _populate_facts_db(project_root: str) -> None:
-    """Populate CozoDB facts.db from SQLite parse.db.
+def _build_fact_sym_rows(
+    out: list[list],
+    raw_symbols: list[dict],
+    rel_path: str,
+    module_name: str,
+    abs_path: str,
+    project_root: str,
+    content: str,
+) -> None:
+    """Build fact_symbol rows from raw Rust symbol output.
 
-    Called once after indexing completes (from the main process) to avoid
-    SQLite lock panics from concurrent subprocess CozoDB writes.  Reads
-    all symbols, references, and imports from parse.db and bulk-inserts
-    them into facts.db.
+    Includes all symbol kinds (function, class, variable, etc.) with full
+    metadata, matching what the old parse.db symbol_index contained.
     """
-    import sqlite3 as _sql3
+    exported_names = _extract_all_exports_text(content)
+    noqa_lines = _extract_noqa_lines(content)
+
+    def _walk(symbols: list[dict], parent_prefix: str = "") -> None:
+        for d in symbols:
+            kind = d.get("kind", "")
+            name = d["name"]
+            path_parts = list(d.get("path", []))
+            if path_parts:
+                dotted = ".".join(path_parts)
+                mqn = f"{module_name}.{dotted}"
+            else:
+                dotted = name
+                mqn = f"{module_name}.{name}"
+
+            depth = len(path_parts) if path_parts else 1
+            parent = ""
+            if depth > 1 and "." in mqn:
+                parent = mqn.rsplit(".", 1)[0]
+
+            decs = d.get("decorators", []) or []
+            decs_str = ",".join(decs) if decs else ""
+            sig = ""
+            params = d.get("parameters", [])
+            returns = d.get("returns", "") or ""
+            if params is not None and kind in ("function", "method"):
+                ret_str = f" -> {returns}" if returns else ""
+                sig = f"def {name}({', '.join(params)}){ret_str}"
+
+            bases = d.get("bases", []) or []
+            bases_str = ",".join(bases) if bases else ""
+
+            is_entry = _is_likely_entry_point(name, kind, decs, depth)
+            is_exported = name in exported_names
+            has_noqa = d.get("line", 0) in noqa_lines
+
+            out.append([
+                rel_path, mqn, name, dotted, kind,
+                d.get("line", 0), d.get("end_line", 0), depth,
+                parent, bases_str, sig, returns, decs_str,
+                bool(is_entry), bool(is_exported), bool(has_noqa),
+            ])
+
+            children = d.get("children", [])
+            if children:
+                _walk(children, mqn)
+
+    _walk(raw_symbols)
+
+
+def _build_facts_db(project_root: str) -> None:
+    """Build CozoDB facts.db directly from source files.
+
+    Extracts all analysis facts (symbols, references, imports, CFG, def-use,
+    etc.) directly from source files using the Rust emend_core extractors.
+    Called once after indexing completes from the main process.
+
+    This is the canonical path for populating facts.db — it does NOT read
+    from parse.db's structured-analysis tables (symbol_index, reference_index,
+    import_graph).  Those SQLite tables exist only for editor search and
+    QN pre-filtering; Cozo owns all structured analysis data.
+    """
+    from emend.cfg import build_cfgs_for_source
+    from emend.fact_graph import (
+        _find_containing_block,
+        _enclosing_symbol,
+        _extract_imports,
+        _build_symbol_line_index,
+        _walk_symbols,
+        SymbolFact,
+        DecoratorOnFact,
+    )
+    from emend import emend_core as _rust
 
     cache_dir = _cache_db_dir(project_root)
-    db_path = cache_dir / "parse.db"
-    if not db_path.exists():
-        return
-
     facts_path = str(cache_dir / "facts.db")
 
     try:
@@ -574,160 +660,47 @@ def _populate_facts_db(project_root: str) -> None:
     except BaseException:
         return
 
+    resolved_root = str(Path(project_root).resolve())
+
+    def _to_rel(abs_path: str) -> str:
+        """Convert an absolute file path to relative (to project root)."""
+        try:
+            return str(Path(abs_path).relative_to(resolved_root))
+        except ValueError:
+            return abs_path
+
     try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
+        # Discover source files directly from the filesystem.
+        source_files = _collect_source_files_scandir(resolved_root)
 
-        worktree_id = _get_worktree_id(project_root)
-        resolved_root = str(Path(project_root).resolve())
-
-        def _to_rel(abs_path: str) -> str:
-            """Convert an absolute file path to relative (to project root)."""
+        # Read all file contents up-front for scope resolver indexing.
+        file_contents: list[tuple[str, str, str, str]] = []  # (abs, rel, ext, content)
+        for abs_path in source_files:
+            rel_path = _to_rel(abs_path)
             try:
-                return str(Path(abs_path).relative_to(resolved_root))
-            except ValueError:
-                return abs_path
-
-        # Symbols — use :replace so the entire relation is atomically
-        # swapped, which also removes any stale rows from deleted symbols.
-        sym_rows = conn.execute(
-            "SELECT si.file_path, si.module_qn, si.name, si.qualified_name, si.kind, "
-            "si.line, si.end_line, si.depth, si.parent, si.bases, si.signature, "
-            "si.returns, si.decorators, si.is_entry_point, si.is_exported, si.has_noqa "
-            "FROM symbol_index si "
-            "INNER JOIN file_manifest fm "
-            "  ON si.content_hash = fm.content_hash AND si.file_path = fm.path "
-            "  AND fm.worktree_id = ?",
-            (worktree_id,),
-        ).fetchall()
-
-        cozo_sym = [
-            [_to_rel(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-             r[8] or "", r[9] or "", r[10] or "", r[11] or "", r[12] or "",
-             bool(r[13]), bool(r[14]), bool(r[15])]
-            for r in sym_rows
-        ]
-        fdb.run(
-            "?[fp, mqn, name, qn, kind, line, end_line, depth, "
-            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
-            ":replace fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
-            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
-            {"rows": cozo_sym},
-        )
-
-        # References
-        ref_rows = conn.execute(
-            "SELECT ri.target_qn, ri.file_path, ri.line, ri.col, ri.ref_kind "
-            "FROM reference_index ri "
-            "INNER JOIN file_manifest fm "
-            "  ON ri.content_hash = fm.content_hash AND ri.file_path = fm.path "
-            "  AND fm.worktree_id = ?",
-            (worktree_id,),
-        ).fetchall()
-
-        cozo_ref = [[r[0], _to_rel(r[1]), r[2], r[3], r[4]] for r in ref_rows]
-        fdb.run(
-            "?[tqn, fp, line, col, kind] <- $rows "
-            ":replace fact_reference {tqn, fp, line, col => kind}",
-            {"rows": cozo_ref},
-        )
-
-        # Imports
-        imp_rows = conn.execute(
-            "SELECT ig.file_path, ig.imported_module "
-            "FROM import_graph ig "
-            "INNER JOIN file_manifest fm "
-            "  ON ig.content_hash = fm.content_hash AND ig.file_path = fm.path "
-            "  AND fm.worktree_id = ?",
-            (worktree_id,),
-        ).fetchall()
-
-        cozo_imp = [[_to_rel(r[0]), r[1]] for r in imp_rows]
-        fdb.run(
-            "?[fp, mod] <- $rows "
-            ":replace fact_import {fp, mod}",
-            {"rows": cozo_imp},
-        )
-
-        # ------------------------------------------------------------------
-        # Populate FactGraph-style relations so that dead_code_unified() and
-        # other Datalog queries work on the persisted facts.db without
-        # rebuilding from scratch via build_from_project().
-        # ------------------------------------------------------------------
-        from emend.cfg import build_cfgs_for_source
-        from emend.fact_graph import (
-            _find_containing_block,
-            _enclosing_symbol,
-            _extract_imports,
-            _build_symbol_line_index,
-            _map_ref_kind,
-            _walk_symbols,
-            SymbolFact,
-        )
-        from emend import emend_core as _rust
-
-        # symbol[qualified_name => file_path, name, kind, line, end_line, parent]
-        cozo_fg_sym = []
-        for r in sym_rows:
-            if r[4] in ("variable", "reference"):
+                content = Path(abs_path).read_text(encoding="utf-8")
+            except Exception:
                 continue
-            mqn = r[1]
-            depth = r[7]
-            if depth is not None and depth > 1:
-                parent = mqn.rsplit(".", 1)[0] if "." in mqn else ""
-            else:
-                parent = ""
-            cozo_fg_sym.append([mqn, _to_rel(r[0]), r[2], r[4], r[5], r[6], parent])
-        fdb.run(
-            "?[qn, fp, name, kind, line, end_line, parent] <- $rows "
-            ":replace symbol {qn => fp, name, kind, line, end_line, parent}",
-            {"rows": cozo_fg_sym},
-        )
+            ext = Path(abs_path).suffix.lstrip(".") or "py"
+            file_contents.append((abs_path, rel_path, ext, content))
 
-        # decorator_on[symbol_qn, decorator]
-        dec_rows_list: list[list[str]] = []
-        for r in sym_rows:
-            mqn = r[1]
-            decs_str = r[12] or ""
-            if decs_str:
-                for dec in decs_str.split(","):
-                    cleaned = dec.strip()
-                    if not cleaned:
-                        continue
-                    if cleaned.startswith("@"):
-                        cleaned = cleaned[1:]
-                    if "(" in cleaned:
-                        cleaned = cleaned[:cleaned.index("(")]
-                    cleaned = cleaned.strip()
-                    if cleaned:
-                        dec_rows_list.append([mqn, cleaned])
-                        if "." in cleaned:
-                            basename = cleaned.rsplit(".", 1)[-1]
-                            if basename and basename != cleaned:
-                                dec_rows_list.append([mqn, basename])
-        if dec_rows_list:
-            fdb.run(
-                "?[qn, dec] <- $rows "
-                ":replace decorator_on {qn, dec}",
-                {"rows": dec_rows_list},
-            )
+        # Create a project-level scope resolver and index all files.
+        scope_resolver = _rust.PyScopeResolver(resolved_root)
+        for abs_path, _rel, _ext, content in file_contents:
+            try:
+                scope_resolver.index_file(abs_path, content)
+            except Exception:
+                pass
 
         # ------------------------------------------------------------------
-        # Per-file loop: CFG, block-tagged references, calls, def_use,
-        # method_call, source_loc, import
+        # Per-file extraction: symbols, references, imports, CFG, def-use,
+        # method_call, source_loc — all from Rust extractors, no parse.db.
         # ------------------------------------------------------------------
-        file_rows = conn.execute(
-            "SELECT path FROM file_manifest WHERE worktree_id = ?",
-            (worktree_id,),
-        ).fetchall()
-
-        # Build per-file lookups from already-fetched rows
-        syms_by_file: dict[str, list] = {}
-        for r in sym_rows:
-            syms_by_file.setdefault(r[0], []).append(r)
-        refs_by_file: dict[str, list] = {}
-        for r in ref_rows:
-            refs_by_file.setdefault(r[1], []).append(r)
+        cozo_fact_sym: list[list] = []      # fact_symbol relation
+        cozo_fact_ref: list[list] = []      # fact_reference relation
+        cozo_fact_imp: list[list] = []      # fact_import relation
+        cozo_fg_sym: list[list] = []        # symbol relation
+        dec_rows_list: list[list] = []      # decorator_on relation
 
         all_cfg_blocks: list[list] = []
         all_cfg_edges: list[list] = []
@@ -739,37 +712,71 @@ def _populate_facts_db(project_root: str) -> None:
         all_imports: list[list] = []
         all_ref_by_block: list[list] = []
 
-        resolver_root = resolved_root
+        import_re = re.compile(
+            r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+            re.MULTILINE,
+        )
 
-        for (file_path_raw,) in file_rows:
-            rel_path = _to_rel(file_path_raw)
-            abs_path = str(Path(resolved_root) / rel_path)
-
-            try:
-                content = Path(abs_path).read_text(encoding="utf-8")
-            except Exception:
-                # Can't read file — emit refs with empty func_qn/block_id
-                for r in refs_by_file.get(file_path_raw, []):
-                    all_fg_refs.append([r[0], _to_rel(r[1]), r[2], r[3], r[4], "", -1])
-                continue
-
-            ext = Path(abs_path).suffix.lstrip(".") or "py"
+        for abs_path, rel_path, ext, content in file_contents:
             module_name = _file_to_module(abs_path, project_root)
 
-            # -- Reconstruct sym_facts for this file (needed for symbol_ranges)
-            file_sym_rows = syms_by_file.get(file_path_raw, [])
-            name_to_mqn: dict[str, str] = {}
+            # -- Extract symbols via Rust
+            try:
+                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
+            except Exception:
+                raw_symbols = []
+
             sym_facts_for_file: list[SymbolFact] = []
-            for r in file_sym_rows:
-                if r[4] in ("variable", "reference"):
-                    continue
-                mqn = r[1]
-                name_to_mqn[r[2]] = mqn
-                sym_facts_for_file.append(SymbolFact(
-                    file_path=rel_path, name=r[2], qualified_name=mqn,
-                    kind=r[4], line=r[5], end_line=r[6],
-                    parent=r[8] if r[8] else None,
-                ))
+            dec_facts_for_file: list[DecoratorOnFact] = []
+            _walk_symbols(
+                sym_facts_for_file, dec_facts_for_file,
+                raw_symbols, rel_path, module_name, parent_qn=None,
+            )
+
+            # Build fact_symbol rows from the raw Rust output (all symbol kinds)
+            _build_fact_sym_rows(
+                cozo_fact_sym, raw_symbols, rel_path, module_name,
+                abs_path, project_root, content,
+            )
+
+            # Populate FactGraph-style symbol rows (filtered)
+            for sf in sym_facts_for_file:
+                cozo_fg_sym.append([
+                    sf.qualified_name, sf.file_path, sf.name, sf.kind,
+                    sf.line, sf.end_line, sf.parent or "",
+                ])
+
+            # Populate decorator_on
+            for df in dec_facts_for_file:
+                dec_rows_list.append([df.symbol_qn, df.decorator])
+
+            # -- Extract references via Rust scope resolver
+            file_refs: list[tuple] = []
+            try:
+                for qn_str, line, col, _offset, _end_offset, kind in \
+                        scope_resolver.references_in_file(abs_path):
+                    file_refs.append((qn_str, line, col, kind))
+                    cozo_fact_ref.append([qn_str, rel_path, line, col, kind])
+            except Exception:
+                pass
+
+            # -- Extract imports
+            if ext == "py":
+                try:
+                    for m_match in import_re.finditer(content):
+                        mod = m_match.group(1) or m_match.group(2)
+                        if mod:
+                            cozo_fact_imp.append([rel_path, mod])
+                except Exception:
+                    pass
+
+                # Detailed imports for the import relation
+                for imp in _extract_imports(rel_path, content):
+                    all_imports.append([
+                        imp.importing_file, imp.imported_module,
+                        imp.imported_name or "", imp.line,
+                        imp.alias or "",
+                    ])
 
             # -- source_loc (from symbol facts)
             for sf in sym_facts_for_file:
@@ -830,10 +837,8 @@ def _populate_facts_db(project_root: str) -> None:
 
             # -- Block-tagged references, calls, method_calls
             symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
-            file_refs = refs_by_file.get(file_path_raw, [])
 
-            for r in file_refs:
-                tqn, _fp, line, col, kind = r[0], r[1], r[2], r[3], r[4]
+            for tqn, line, col, kind in file_refs:
                 fq, bid = _find_containing_block(block_ranges, line)
                 all_fg_refs.append([tqn, rel_path, line, col, kind, fq, bid])
                 # ref_by_block: only for refs with real block data
@@ -890,15 +895,6 @@ def _populate_facts_db(project_root: str) -> None:
                                     def_bid, bid, dl, dc, uline, ucol,
                                 ])
 
-            # -- Import facts (via stdlib ast, Python files only)
-            if ext == "py":
-                for imp in _extract_imports(rel_path, content):
-                    all_imports.append([
-                        imp.importing_file, imp.imported_module,
-                        imp.imported_name or "", imp.line,
-                        imp.alias or "",
-                    ])
-
         # -- Compute reachable blocks via BFS from entry blocks
         entries_by_func: dict[tuple[str, str], set[int]] = {}
         adj: dict[tuple[str, str, int], list[int]] = {}
@@ -925,6 +921,39 @@ def _populate_facts_db(project_root: str) -> None:
                         stack.append(nb)
 
         # -- Batch CozoDB writes using :replace for atomic swap
+        fdb.run(
+            "?[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa] <- $rows "
+            ":replace fact_symbol {fp, mqn => name, qn, kind, line, end_line, depth, "
+            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa}",
+            {"rows": cozo_fact_sym},
+        )
+
+        fdb.run(
+            "?[tqn, fp, line, col, kind] <- $rows "
+            ":replace fact_reference {tqn, fp, line, col => kind}",
+            {"rows": cozo_fact_ref},
+        )
+
+        fdb.run(
+            "?[fp, mod] <- $rows "
+            ":replace fact_import {fp, mod}",
+            {"rows": cozo_fact_imp},
+        )
+
+        fdb.run(
+            "?[qn, fp, name, kind, line, end_line, parent] <- $rows "
+            ":replace symbol {qn => fp, name, kind, line, end_line, parent}",
+            {"rows": cozo_fg_sym},
+        )
+
+        if dec_rows_list:
+            fdb.run(
+                "?[qn, dec] <- $rows "
+                ":replace decorator_on {qn, dec}",
+                {"rows": dec_rows_list},
+            )
+
         fdb.run(
             "?[sq, fp, line, col, kind, fq, bid] <- $rows "
             ":replace reference {sq, fp, line, col => kind, fq, bid}",
@@ -987,9 +1016,8 @@ def _populate_facts_db(project_root: str) -> None:
             {"rows": all_reachable},
         )
 
-        conn.close()
     except BaseException:
-        logger.debug("facts db population failed", exc_info=True)
+        logger.debug("facts db build failed", exc_info=True)
 
     try:
         fdb.close()
@@ -1367,9 +1395,9 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             pass
 
-    # NOTE: CozoDB dual-write is NOT done here — it's done by the caller
-    # (_populate_facts_db) after all workers complete, to avoid SQLite
-    # lock panics from concurrent subprocess writes.
+    # NOTE: CozoDB facts.db is NOT written here — it's built by the caller
+    # (_build_facts_db) after all workers complete, extracting directly
+    # from source files to avoid dual-write through parse.db.
 
     return (processed, len(qn_rows), skipped,
             len(sym_rows), len(import_rows), len(ref_rows), len(dsl_rows))
@@ -1620,9 +1648,9 @@ def _ensure_index_fresh(
         if files_to_index:
             _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
-            # Populate CozoDB facts.db from the freshly-written SQLite data.
+            # Build CozoDB facts.db directly from source files.
             try:
-                _populate_facts_db(project_root)
+                _build_facts_db(project_root)
             except BaseException:
                 pass
             # Update manifest for re-indexed files
@@ -2560,13 +2588,13 @@ def warm_caches(
         logger.debug("warm_caches: FTS rebuild skipped: %s", exc)
         stats["fts_indexed"] = 0
 
-    # Phase 5: populate CozoDB facts.db from SQLite.
-    # Done here (main process, single-threaded) to avoid SQLite lock
-    # panics from concurrent subprocess writes.
+    # Phase 5: build CozoDB facts.db directly from source files.
+    # Done here (main process, single-threaded) — extracts analysis facts
+    # via Rust extractors without reading from parse.db.
     try:
-        _populate_facts_db(project_root)
+        _build_facts_db(project_root)
     except BaseException:
-        logger.debug("warm_caches: facts db population failed", exc_info=True)
+        logger.debug("warm_caches: facts db build failed", exc_info=True)
 
     return stats
 
