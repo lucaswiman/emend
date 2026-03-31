@@ -171,6 +171,24 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
 
+    def test_warm_path_finds_unused_module_when_enabled(self, tmp_path):
+        """Unused modules are only reported when the feature flag is enabled."""
+        from emend.transform import DeadModule, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "used.py").write_text("VALUE = 1\n")
+        (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        without_flag = list(find_dead_code(str(project), show_last_reference=False))
+        assert not any(isinstance(d, DeadModule) for d in without_flag)
+
+        with_flag = list(find_dead_code(str(project), show_last_reference=False, unused_modules=True))
+        dead_modules = {d.module_name for d in with_flag if isinstance(d, DeadModule)}
+        assert "orphan" in dead_modules
+        assert "used" not in dead_modules
+
 
 class TestFindDeadCode:
     """Tests for find_dead_code() in transform.py."""
@@ -669,6 +687,31 @@ class TestDeadCodeCLI:
         # With --include-private
         result = run_emend_cmd(["deadcode", str(project), "--include-private"])
         assert "_private_unused" in result.stdout
+
+    def test_cli_unused_modules(self, tmp_path, run_emend_cmd):
+        """CLI --unused-modules reports unimported module files."""
+        project = tmp_path / "project"
+        project.mkdir()
+
+        (project / "used.py").write_text("VALUE = 1\n")
+        (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        result = run_emend_cmd(["deadcode", str(project), "--unused-modules"])
+        assert "orphan (module)" in result.stdout
+        assert "used (module)" not in result.stdout
+
+    def test_cli_unused_modules_json(self, tmp_path, run_emend_cmd):
+        """CLI JSON includes module entries when --unused-modules is enabled."""
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("print('hi')\n")
+        (project / "orphan.py").write_text("VALUE = 2\n")
+
+        result = run_emend_cmd(["deadcode", str(project), "--unused-modules", "--json"])
+        data = json.loads(result.stdout)
+        modules = [entry for entry in data if entry["kind"] == "module"]
+        assert any(entry["module_name"] == "orphan" for entry in modules)
 
 
 class TestExcludeReferencesFrom:

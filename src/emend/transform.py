@@ -4930,6 +4930,15 @@ class DeadBlock:
     end_line: int
 
 
+@dataclass
+class DeadModule:
+    """A module file detected as unused because nothing imports it."""
+    file_path: str
+    name: str
+    module_name: str
+    reason: str
+
+
 # Decorator prefixes that indicate a symbol is an entry point / framework hook
 _ENTRY_POINT_DECORATORS = frozenset({
     'app.command', 'app.route', 'app.get', 'app.post', 'app.put',
@@ -5975,7 +5984,8 @@ def find_dead_code(
     entry_point_decorators: list[str] | None = None,
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
-) -> Iterator[DeadSymbol | DeadBlock]:
+    unused_modules: bool = False,
+) -> Iterator[DeadSymbol | DeadBlock | DeadModule]:
     """Find potentially dead (unreferenced) code in a project.
 
     Uses ``dead_code_unified()`` Datalog query over the FactGraph for
@@ -6005,10 +6015,12 @@ def find_dead_code(
             never flagged as dead code.
         exclude_paths: Directories to exclude entirely from dead code analysis.
             Symbols defined in these paths are never reported.
+        unused_modules: If True, also report Python module files that have no
+            incoming imports from non-excluded project files.
 
     Yields:
         DeadBlock items for unreachable code blocks, then DeadSymbol objects
-        sorted by file path and line number.
+        sorted by file path and line number, then optional DeadModule objects.
     """
     t0 = time.monotonic()
     scan_root = str(Path(project_path).resolve())
@@ -6135,6 +6147,43 @@ def find_dead_code(
         len(dead_symbols), time.monotonic() - t0,
     )
 
+    def _path_is_excluded(file_path: str, patterns: list[str] | None) -> bool:
+        if not patterns:
+            return False
+        import fnmatch
+
+        for pattern in patterns:
+            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pattern + "*"):
+                return True
+            if "**" in pattern:
+                relaxed = pattern.replace("**", "*")
+                if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "*"):
+                    return True
+        return False
+
+    def _reference_file_is_excluded(file_path: str) -> bool:
+        if _is_test_file(file_path):
+            return exclude_references_from is not None
+        if not exclude_references_from:
+            return False
+        import fnmatch
+
+        try:
+            rel_path = str(Path(file_path).resolve().relative_to(project_root_resolved))
+        except ValueError:
+            rel_path = file_path
+
+        for pattern in exclude_references_from:
+            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(rel_path, pattern):
+                return True
+            if fnmatch.fnmatch(file_path, pattern + "*") or fnmatch.fnmatch(rel_path, pattern + "*"):
+                return True
+            if pattern.startswith("**/"):
+                segment = pattern[3:].rstrip("/")
+                if segment and segment in Path(rel_path).parts:
+                    return True
+        return False
+
     # Yield unreachable blocks first
     for ub in raw_unreachable:
         abs_fp = (
@@ -6180,6 +6229,64 @@ def find_dead_code(
                 yield d
     else:
         yield from dead_symbols
+
+    if not unused_modules:
+        return
+
+    source_files = _collect_source_files(
+        project_root_resolved,
+        language="python",
+        git_tracked_only=not all_files,
+    )
+    from emend.fact_graph import _extract_imports
+
+    imported_targets: set[str] = set()
+    for abs_file in source_files:
+        abs_path = Path(abs_file).resolve()
+        if not abs_path.exists():
+            continue
+        if _reference_file_is_excluded(str(abs_path)):
+            continue
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for imp in _extract_imports(str(abs_path), content):
+            imported_targets.add(imp.imported_module)
+            if imp.imported_name:
+                imported_targets.add(f"{imp.imported_module}.{imp.imported_name}")
+
+    candidate_modules: list[DeadModule] = []
+    scan_root_path = Path(scan_root).resolve()
+
+    for abs_file in source_files:
+        abs_path = Path(abs_file).resolve()
+        if not abs_path.exists():
+            continue
+        if not abs_path.is_relative_to(scan_root_path):
+            continue
+        if abs_path.name in {"__init__.py", "__main__.py"}:
+            continue
+        if _is_test_file(str(abs_path)):
+            continue
+        if _path_is_excluded(str(abs_path), exclude_paths):
+            continue
+        if not include_private and abs_path.stem.startswith("_"):
+            continue
+        module_name = _file_to_module(str(abs_path), project_root_resolved)
+        if module_name in imported_targets:
+            continue
+        candidate_modules.append(
+            DeadModule(
+                file_path=str(abs_path),
+                name=abs_path.stem,
+                module_name=module_name,
+                reason="module is never imported",
+            )
+        )
+
+    candidate_modules.sort(key=lambda m: m.file_path)
+    yield from candidate_modules
 
 
 @dataclass

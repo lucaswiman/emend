@@ -683,6 +683,7 @@ def deadcode(
     path: Annotated[str, Field(description="File glob or directory to scan (e.g. 'src/**/*.py').")] = ".",
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, class, method, variable.")] = None,
     include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
+    unused_modules: Annotated[bool, Field(description="Also report Python modules with no incoming imports.")] = False,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
     entry_point_decorators: Annotated[list[str] | None, Field(description="Decorators that mark entry points (not dead even if unreferenced). E.g. ['app.route', 'celery.task'].")] = None,
     entry_point_names: Annotated[list[str] | None, Field(description="Function names that are entry points. E.g. ['main', 'cli'].")] = None,
@@ -730,19 +731,38 @@ def deadcode(
         entry_point_decorators=entry_point_decorators or cfg_ep_decorators,
         entry_point_names=entry_point_names or cfg_ep_names,
         exclude_paths=exclude_paths or cfg_excl_paths,
+        unused_modules=unused_modules,
     )
     data = []
     for d in results:
-        entry = {
-            "file_path": d.file_path,
-            "name": d.name,
-            "kind": d.kind,
-            "line": d.line,
-            "selector": d.selector,
-            "reason": d.reason,
-        }
-        if d.last_reference_commit:
-            entry["last_reference_commit"] = d.last_reference_commit
+        if hasattr(d, "module_name"):
+            entry = {
+                "file_path": d.file_path,
+                "name": d.name,
+                "module_name": d.module_name,
+                "kind": "module",
+                "reason": d.reason,
+            }
+        elif hasattr(d, "func_qn") and hasattr(d, "block_id"):
+            entry = {
+                "file_path": d.file_path,
+                "func_qn": d.func_qn,
+                "kind": "unreachable_block",
+                "start_line": d.start_line,
+                "end_line": d.end_line,
+                "reason": "unreachable code",
+            }
+        else:
+            entry = {
+                "file_path": d.file_path,
+                "name": d.name,
+                "kind": d.kind,
+                "line": d.line,
+                "selector": d.selector,
+                "reason": d.reason,
+            }
+            if d.last_reference_commit:
+                entry["last_reference_commit"] = d.last_reference_commit
         data.append(entry)
     return json.dumps(data, indent=2)
 

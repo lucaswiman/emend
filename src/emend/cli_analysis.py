@@ -427,7 +427,7 @@ import sys
 from typing import Optional
 import typer
 from typing import Annotated
-from emend.transform import find_dead_code, DeadBlock
+from emend.transform import DeadBlock, DeadModule, find_dead_code
 
 @app.command("deadcode", hidden=True)
 def dead_code_cmd(
@@ -454,6 +454,10 @@ def dead_code_cmd(
         Optional[list[str]],
         typer.Option("--exclude-path", help="Directories to exclude entirely from analysis (repeatable)")
     ] = None,
+    unused_modules: Annotated[
+        bool,
+        typer.Option("--unused-modules", help="Also report Python modules that are never imported")
+    ] = False,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
@@ -489,6 +493,7 @@ def dead_code_cmd(
         emend deadcode . --all-files
         emend deadcode . --entry-point-decorator my_framework.handler
         emend deadcode . --entry-point-name plugin_init
+        emend deadcode . --unused-modules
     """
     try:
         results = find_dead_code(
@@ -502,6 +507,7 @@ def dead_code_cmd(
             entry_point_decorators=entry_point_decorator,
             entry_point_names=entry_point_name,
             exclude_paths=exclude_path,
+            unused_modules=unused_modules,
         )
 
         if json_output:
@@ -516,6 +522,14 @@ def dead_code_cmd(
                         "start_line": d.start_line,
                         "end_line": d.end_line,
                         "reason": "unreachable code",
+                    }
+                elif isinstance(d, DeadModule):
+                    entry = {
+                        "file_path": d.file_path,
+                        "name": d.name,
+                        "module_name": d.module_name,
+                        "kind": "module",
+                        "reason": d.reason,
                     }
                 else:
                     entry = {
@@ -540,6 +554,8 @@ def dead_code_cmd(
                 if isinstance(d, DeadBlock):
                     func_name = d.func_qn.rsplit(".", 1)[-1] if "." in d.func_qn else d.func_qn
                     line = f"{d.file_path}:{d.start_line}-{d.end_line}  unreachable block in {func_name}()"
+                elif isinstance(d, DeadModule):
+                    line = f"{d.file_path}  {d.module_name} (module) - {d.reason}"
                 else:
                     line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
                     if d.last_reference_commit:
@@ -549,7 +565,7 @@ def dead_code_cmd(
             if count == 0:
                 print("No dead code found.")
             else:
-                print(f"\nFound {count} potentially dead symbol(s).", file=sys.stderr)
+                print(f"\nFound {count} potentially dead result(s).", file=sys.stderr)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         raise typer.Exit(3)
