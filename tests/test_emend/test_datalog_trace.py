@@ -465,6 +465,146 @@ def test_run_trace_datalog_type_constrained_sink_does_not_filter_other_sinks(
     }
 
 
+def test_run_trace_datalog_sanitizer_quantifier_is_scoped_per_label(
+    monkeypatch,
+    tmp_path,
+):
+    """A some_path sanitizer for one label must not relax another label."""
+
+    class _FakeGraph:
+        def __init__(self):
+            self.calls = []
+
+        def resolve_location(self, file_path, line):
+            return ("app.f", 1)
+
+        def trace_propagation_datalog(self, **kwargs):
+            self.calls.append(kwargs)
+            labels = {lbl for _fp, _fq, _var, _bid, lbl in kwargs["sources"]}
+            if labels == {"b"} and kwargs["sanitizer_quantifier"] == "all_paths":
+                return [
+                    TraceFlowFact(
+                        source_var="y",
+                        sink_var="y",
+                        label="b",
+                        file_path=str(src_file),
+                        func_qn="app.f",
+                        source_line=2,
+                        sink_line=1,
+                    )
+                ]
+            return []
+
+    src_file = tmp_path / "app.py"
+    src_file.write_text(
+        "def f(flag):\n"
+        "    x = source_a()\n"
+        "    y = source_b()\n"
+        "    if flag:\n"
+        "        x = san_a(x)\n"
+        "        y = san_b(y)\n"
+        "    sink_a(x)\n"
+        "    sink_b(y)\n"
+    )
+
+    config = TraceConfig(
+        labels=["a", "b"],
+        sources=[
+            TraceSource(pattern="$X = source_a()", label="a"),
+            TraceSource(pattern="$X = source_b()", label="b"),
+        ],
+        sinks=[
+            TraceSink(pattern="sink_a($X)", label="a", message="A sink"),
+            TraceSink(pattern="sink_b($X)", label="b", message="B sink"),
+        ],
+        sanitizers=[
+            TraceSanitizer(pattern="san_a($X)", label="a", quantifier="some_path"),
+            TraceSanitizer(pattern="san_b($X)", label="b", quantifier="all_paths"),
+        ],
+    )
+
+    fake_graph = _FakeGraph()
+
+    def _fake_find_pattern(pattern, file_path, **kwargs):
+        matches_by_pattern = {
+            "$X = source_a()": [
+                PatternMatch(
+                    node_text="x = source_a()",
+                    captures={"X": "x"},
+                    line=2,
+                    matched_text="x = source_a()",
+                    col=4,
+                )
+            ],
+            "$X = source_b()": [
+                PatternMatch(
+                    node_text="y = source_b()",
+                    captures={"X": "y"},
+                    line=3,
+                    matched_text="y = source_b()",
+                    col=4,
+                )
+            ],
+            "sink_a($X)": [
+                PatternMatch(
+                    node_text="sink_a(x)",
+                    captures={"X": "x"},
+                    line=7,
+                    matched_text="sink_a(x)",
+                    col=4,
+                )
+            ],
+            "sink_b($X)": [
+                PatternMatch(
+                    node_text="sink_b(y)",
+                    captures={"X": "y"},
+                    line=8,
+                    matched_text="sink_b(y)",
+                    col=4,
+                )
+            ],
+            "san_a($X)": [
+                PatternMatch(
+                    node_text="san_a(x)",
+                    captures={"X": "x"},
+                    line=5,
+                    matched_text="san_a(x)",
+                    col=8,
+                )
+            ],
+            "san_b($X)": [
+                PatternMatch(
+                    node_text="san_b(y)",
+                    captures={"X": "y"},
+                    line=6,
+                    matched_text="san_b(y)",
+                    col=8,
+                )
+            ],
+        }
+        return matches_by_pattern.get(pattern, [])
+
+    monkeypatch.setattr(
+        "emend.transform._get_or_build_fact_graph",
+        lambda project_path: fake_graph,
+    )
+    monkeypatch.setattr("emend.trace.find_pattern", _fake_find_pattern)
+
+    result = _run_trace_datalog(
+        paths=[str(src_file)],
+        config=config,
+        label_filter=None,
+        language="python",
+        project_path=str(tmp_path),
+    )
+
+    assert [v.label for v in result] == ["b"]
+    assert [call["sanitizer_quantifier"] for call in fake_graph.calls] == [
+        "all_paths",
+        "some_path",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # interprocedural_trace_datalog config-driven tests
 # ---------------------------------------------------------------------------

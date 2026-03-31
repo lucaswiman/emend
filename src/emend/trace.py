@@ -1500,28 +1500,70 @@ def _run_trace_datalog(
     if not sources or (not sinks and not effect_sinks_list):
         return []
 
-    # Determine sanitizer quantifier from config
-    san_quantifier = "all_paths"
-    for san_def in config.sanitizers:
-        if san_def.quantifier == "some_path":
-            san_quantifier = "some_path"
-            break
-
     effect_defs_by_label: dict[str, list[TraceSink]] = {}
     for sink_def in config.sinks:
         if sink_def.effect:
             effect_defs_by_label.setdefault(sink_def.label, []).append(sink_def)
 
-    taint_facts = graph.trace_propagation_datalog(
-        sources=sources,
-        sinks=sinks,
-        sanitizers=sanitizers if sanitizers else None,
-        effect_sinks=effect_sinks_list if effect_sinks_list else None,
-        sanitizer_quantifier=san_quantifier,
-        sanitizer_lines=sanitizer_lines if sanitizer_lines else None,
-        sink_lines=sink_lines if sink_lines else None,
-        scope_kills=scope_kills if scope_kills else None,
+    label_quantifiers: dict[str, str] = {}
+    for san_def in config.sanitizers:
+        if label_filter and san_def.label != label_filter:
+            continue
+        if san_def.quantifier == "some_path":
+            label_quantifiers[san_def.label] = "some_path"
+        else:
+            label_quantifiers.setdefault(san_def.label, "all_paths")
+
+    active_labels = (
+        {lbl for _fp, _fq, _var, _bid, lbl in sources}
+        | {lbl for _fp, _fq, _var, _bid, lbl in sinks}
+        | {lbl for lbl, _kind in effect_sinks_list}
     )
+    taint_facts: list[TraceFlowFact] = []
+    for san_quantifier in ("all_paths", "some_path"):
+        group_labels = {
+            lbl
+            for lbl in active_labels
+            if label_quantifiers.get(lbl, "all_paths") == san_quantifier
+        }
+        if not group_labels:
+            continue
+
+        group_sources = [source for source in sources if source[4] in group_labels]
+        group_sinks = [sink for sink in sinks if sink[4] in group_labels]
+        group_effect_sinks = [
+            effect_sink
+            for effect_sink in effect_sinks_list
+            if effect_sink[0] in group_labels
+        ]
+        if not group_sources or (not group_sinks and not group_effect_sinks):
+            continue
+
+        group_sanitizers = [
+            sanitizer for sanitizer in sanitizers if sanitizer[4] in group_labels
+        ]
+        group_sanitizer_lines = [
+            sanitizer_line
+            for sanitizer_line in sanitizer_lines
+            if sanitizer_line[2] in group_labels
+        ]
+        group_sink_lines = [
+            sink_line for sink_line in sink_lines if sink_line[2] in group_labels
+        ]
+        group_scope_kills = [
+            scope_kill for scope_kill in scope_kills if scope_kill[2] in group_labels
+        ]
+
+        taint_facts.extend(graph.trace_propagation_datalog(
+            sources=group_sources,
+            sinks=group_sinks,
+            sanitizers=group_sanitizers if group_sanitizers else None,
+            effect_sinks=group_effect_sinks if group_effect_sinks else None,
+            sanitizer_quantifier=san_quantifier,
+            sanitizer_lines=group_sanitizer_lines if group_sanitizer_lines else None,
+            sink_lines=group_sink_lines if group_sink_lines else None,
+            scope_kills=group_scope_kills if group_scope_kills else None,
+        ))
 
     def _resolve_effect_sink_line(
         file_path: str,
