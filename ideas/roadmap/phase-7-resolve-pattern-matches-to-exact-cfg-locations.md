@@ -29,17 +29,17 @@ be trusted.
 
 ## Todo
 
-- [ ] Add a single resolver from `PatternMatch` to exact CFG-backed locations.
-- [ ] Use `source_loc` / `cfg_block` facts as the source of truth rather than
+- [x] Add a single resolver from `PatternMatch` to exact CFG-backed locations.
+- [x] Use `source_loc` / `cfg_block` facts as the source of truth rather than
   nearest-line guesses from `def_use` and `cfg_edge`.
-- [ ] Resolve matches to the innermost containing function consistently.
-- [ ] Decide on a first-class representation for module-level code instead of
+- [x] Resolve matches to the innermost containing function consistently.
+- [x] Decide on a first-class representation for module-level code instead of
   mixing empty function names and sentinel block IDs.
-- [ ] Thread exact block IDs through trace, lint flow rules, policy checks, and
+- [x] Thread exact block IDs through trace, lint flow rules, policy checks, and
   sequence/path constraints.
-- [ ] Remove the remaining `("", -1)` sentinel plumbing once the resolver is in
+- [x] Remove the remaining `("", -1)` sentinel plumbing once the resolver is in
   place.
-- [ ] Add regressions for nested functions, same-line multiple blocks, and
+- [x] Add regressions for nested functions, same-line multiple blocks, and
   module-level matches.
 
 ## Exit Criteria

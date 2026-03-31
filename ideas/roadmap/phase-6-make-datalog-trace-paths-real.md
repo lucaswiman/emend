@@ -36,9 +36,9 @@ Until this phase is done, "remove fallback" would just expose broken code.
 
 ## Todo
 
-- [ ] Fix the immediate runtime breakages in `_run_trace_datalog()`.
-- [ ] Align `TraceViolation` construction with the current dataclass.
-- [ ] Pass full trace configuration into the Datalog path:
+- [x] Fix the immediate runtime breakages in `_run_trace_datalog()`.
+- [x] Align `TraceViolation` construction with the current dataclass.
+- [x] Pass full trace configuration into the Datalog path:
   - sources
   - sinks
   - effect sinks
@@ -47,12 +47,12 @@ Until this phase is done, "remove fallback" would just expose broken code.
   - sanitizer quantifier
   - same-block line-ordering inputs
   - type/scalar filters
-- [ ] Decide whether interprocedural Datalog should consume precomputed
+- [x] Decide whether interprocedural Datalog should consume precomputed
   summaries, raw facts, or both, and make that explicit.
-- [ ] Make interprocedural Datalog config-driven rather than a graph-global
+- [x] Make interprocedural Datalog config-driven rather than a graph-global
   query with no trace config inputs.
-- [ ] Add tests that fail if the Datalog path throws and silently falls back.
-- [ ] Add end-to-end tests for effect sinks and interprocedural configured flow.
+- [x] Add tests that fail if the Datalog path throws and silently falls back.
+- [x] Add end-to-end tests for effect sinks and interprocedural configured flow.
 
 ## Exit Criteria
 
