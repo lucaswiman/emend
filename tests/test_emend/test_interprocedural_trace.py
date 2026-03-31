@@ -134,6 +134,28 @@ class TestComputeFunctionSummary:
         )
         assert "x" not in summary.param_to_return
 
+    def test_param_to_sink_respects_statement_order(self, tmp_path):
+        """A later assignment must not taint an earlier sink in the summary."""
+        test_file = tmp_path / "test.py"
+        source = (
+            "def run_query(cursor, query):\n"
+            "    cursor.execute(sql)\n"
+            "    sql = query\n"
+        )
+        test_file.write_text(source)
+
+        config = _make_sql_config()
+        summary = _compute_function_summary(
+            file_path=str(test_file),
+            source=source,
+            func_start=1,
+            func_end=3,
+            config=config,
+            func_qn="test::run_query",
+            param_names=["cursor", "query"],
+        )
+        assert "query" not in summary.param_to_sink
+
 
 class TestInterproceduralAnalysis:
     def test_nested_same_named_helpers_are_scoped_to_their_owner(self, tmp_path):
@@ -277,6 +299,28 @@ class TestInterproceduralAnalysis:
             if "via" in v.message.lower() or "function call" in v.message.lower()
         ]
         assert len(interprocedural_violations) == 0
+
+    def test_late_sanitizer_does_not_erase_earlier_interprocedural_violation(self, tmp_path):
+        """A sanitizer after the call site must not retroactively suppress it."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def run_query(cursor, query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def handle_request(request, cursor):\n"
+            "    name = request.args.get('name')\n"
+            "    run_query(cursor, name)\n"
+            "    name = escape(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace_analysis([str(test_file)], config)
+
+        interprocedural_violations = [
+            v for v in result.violations
+            if "via" in v.message.lower() or "function call" in v.message.lower()
+        ]
+        assert len(interprocedural_violations) >= 1
 
     def test_convergence(self, tmp_path):
         """Fixed-point iteration converges within max_iterations."""
