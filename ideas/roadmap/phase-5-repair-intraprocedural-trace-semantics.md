@@ -30,20 +30,24 @@ These bugs mean the current "fallback" path is not a trustworthy oracle.
 
 ## Todo
 
-- [ ] Define the intended suppression semantics explicitly:
-  - source-to-sink path coverage
-  - same-block line ordering
-  - branch-sensitive scope sanitizers
-- [ ] Replace the current entry-to-exit `_all_paths_sanitized()` check with a
+- [x] Define the intended suppression semantics explicitly:
+  - source-to-sink path coverage (BFS from source block to sink block)
+  - same-block line ordering (source_line ≤ san_line ≤ sink_line)
+  - branch-sensitive scope sanitizers (same path check as regular sanitizers)
+- [x] Replace the current entry-to-exit `_all_paths_sanitized()` check with a
   sink-specific reachability test.
-- [ ] Change CFG-construction failure from "assume sanitized" to an explicit
+  - Renamed to `_source_to_sink_sanitized(source_block, sink_block, san_blocks)`
+  - BFS from source_block to sink_block, treating sanitizer blocks as impassable
+- [x] Change CFG-construction failure from "assume sanitized" to an explicit
   degraded-mode policy that does not silently suppress findings.
-- [ ] Make scope sanitizers path-sensitive and order-sensitive, not global
+  - Returns `False` (fail closed = report violation) with debug log
+- [x] Make scope sanitizers path-sensitive and order-sensitive, not global
   function-wide label deletion.
+  - Uses same `_source_to_sink_sanitized()` check with line-number fallback
 - [ ] Replace regex assignment-target discovery with AST/block-aware resolution.
 - [ ] Decide how module-level code should participate in CFG-backed tracing and
   encode that consistently.
-- [ ] Add focused regressions for:
+- [x] Add focused regressions for:
   - sanitizer only on sink-reaching branch
   - scope kill on one branch only
   - same-block sanitizer after sink

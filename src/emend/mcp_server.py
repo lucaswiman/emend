@@ -1503,7 +1503,7 @@ def check(
     paths: Annotated[list[str] | None, Field(description="File or directory scope(s) to check.")] = None,
     config: Annotated[str | None, Field(description="Rules config path. Defaults to .emend/rules.yaml with legacy fallback.")] = None,
     rule: Annotated[str | None, Field(description="Run only one named rule.")] = None,
-    kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type, datalog.")] = None,
+    kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type.")] = None,
     fix: Annotated[bool, Field(description="Apply auto-fixes for match rules when available.")] = False,
 ) -> str:
     """Run unified project rules from ``rules.yaml``."""

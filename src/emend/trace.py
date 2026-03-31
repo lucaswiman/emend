@@ -945,37 +945,97 @@ def _analyze_function(
                     best_block_id = block["id"]
         return best_block_id
 
-    def _all_paths_sanitized(san_blocks: set[int]) -> bool:
-        """Check if all CFG paths from entry to exit pass through a san block.
+    def _source_to_sink_sanitized(
+        source_block: int | None,
+        sink_block: int | None,
+        san_blocks: set[int],
+        source_line: int = 0,
+        sink_line: int = 0,
+        san_lines_by_block: dict[int, int] | None = None,
+    ) -> bool:
+        """Check if all CFG paths from source_block to sink_block pass through
+        a sanitizer block.
 
-        Uses BFS from the entry block, treating sanitizer blocks as impassable.
-        If the exit is unreachable, all paths are sanitized.
+        Uses BFS from source_block avoiding sanitizer blocks. If the sink_block
+        is unreachable from source_block without passing through a sanitizer,
+        all paths are sanitized.
+
+        For same-block cases (source_block == sink_block), uses line-number
+        ordering as a tiebreaker: the sanitizer must appear between source_line
+        and sink_line.
+
+        Returns False (not sanitized = violation) when CFG is unavailable, so
+        that missing CFG info never silently suppresses violations (fail-closed).
         """
         if _cfg_for_func is None or _cfg_edges is None:
-            return True  # fallback: assume all paths sanitized (old behaviour)
-        entry = _cfg_for_func.entry
-        exit_b = _cfg_for_func.exit
-        # BFS avoiding sanitizer blocks
+            # Bug 2 fix: fail closed — report violation when CFG unavailable
+            logger.debug(
+                "CFG unavailable for source-to-sink sanitizer check; "
+                "assuming NOT sanitized (fail-closed)"
+            )
+            return False
+        if source_block is None or sink_block is None:
+            # Can't determine block positions — fail closed
+            return False
+
+        if source_block == sink_block:
+            # Intra-block: source and sink in same block.
+            # Sanitized only if a sanitizer is in the same block AND
+            # its line is between source_line and sink_line.
+            if source_block in san_blocks:
+                san_line = (san_lines_by_block or {}).get(source_block, 0)
+                if san_line == 0:
+                    # No line info for the sanitizer — conservatively sanitized
+                    return True
+                if source_line <= san_line <= sink_line:
+                    return True
+            return False
+
+        # Different blocks: BFS from source_block, avoiding sanitizer blocks,
+        # checking if sink_block is reachable without hitting a sanitizer.
         visited: set[int] = set()
-        queue = [entry]
+        queue = [source_block]
         while queue:
             block = queue.pop(0)
             if block in visited:
                 continue
             visited.add(block)
-            if block == exit_b:
-                return False  # reached exit without going through sanitizer
+            if block == sink_block:
+                return False  # sink reachable without going through sanitizer
             if block in san_blocks:
-                continue  # sanitizer blocks stop propagation
+                # If this sanitizer block is the same as the source block,
+                # only stop propagation if the sanitizer line is after the
+                # source line (otherwise the sanitizer precedes the source).
+                if block == source_block and san_lines_by_block:
+                    san_line = san_lines_by_block.get(block, source_line + 1)
+                    if san_line <= source_line:
+                        # Sanitizer before source in same block — doesn't help
+                        pass
+                    else:
+                        continue  # sanitizer after source, stops propagation
+                else:
+                    continue  # sanitizer in a later block, stops propagation
             for succ in _cfg_edges.get(block, []):
                 if succ not in visited:
                     queue.append(succ)
-        return True  # exit not reachable without going through sanitizers
+        return True  # sink not reachable without going through sanitizers
 
-    # First pass: collect all sanitizer matches grouped by (var, label)
-    # to evaluate path coverage collectively.
-    _san_matches: dict[tuple[str, str], list[tuple[int, str]]] = {}  # (var, label) -> [(match_line, quantifier)]
-    _san_match_details: list[tuple[str, str, int, str]] = []  # (var, label, match_line, quantifier)
+    # Collect source blocks: (var, label) -> block_id where taint was introduced.
+    # Used for source-to-sink path checking in Step 4.
+    _taint_source_blocks: dict[tuple[str, str], int | None] = {}
+    for var, labels in taint_state.items():
+        for label, step in labels.items():
+            src_line = step.line or 1
+            _taint_source_blocks[(var, label)] = _find_block_for_line(src_line)
+
+    # Step 3: Collect sanitizer info (lazy — applied during sink check in Step 4).
+    # Maps (var, label) -> (set of sanitizer block IDs, any_some_path flag,
+    #   block_id->min_line mapping for intra-block line ordering).
+    # Path-sensitive: only remove taint if sanitizer(s) cover all paths from
+    # the source to the sink.  When a sanitizer is in a conditional branch but
+    # the other branch is uncovered, taint is preserved.
+    _san_info: dict[tuple[str, str], tuple[set[int], bool, dict[int, int]]] = {}
+    # (var, label) -> (san_blocks, any_some_path, block_to_line)
 
     for san_def in config.sanitizers:
         if label_filter and san_def.label != label_filter:
@@ -1009,44 +1069,25 @@ def _analyze_function(
                 if cap_val and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cap_val):
                     sanitized_vars.add(cap_val)
 
+            block_id = _find_block_for_line(match_line)
             for var in sanitized_vars:
                 key = (var, san_def.label)
-                _san_matches.setdefault(key, []).append(
-                    (match_line, san_def.quantifier)
-                )
+                if key not in _san_info:
+                    _san_info[key] = (set(), False, {})
+                san_blocks_set, any_some_path, block_to_line = _san_info[key]
+                if san_def.quantifier == "some_path":
+                    _san_info[key] = (san_blocks_set, True, block_to_line)
+                elif block_id is not None:
+                    san_blocks_set.add(block_id)
+                    # Track earliest sanitizer line per block for same-block ordering
+                    if block_id not in block_to_line or match_line < block_to_line[block_id]:
+                        block_to_line[block_id] = match_line
 
-    # Apply sanitizers: path-sensitive check
-    for (var, label), match_entries in _san_matches.items():
-        if var not in taint_state or label not in taint_state[var]:
-            continue
+    # Step 3b: Collect scope sanitizer blocks (lazy — applied during sink check in Step 4).
+    # Scope sanitizers (e.g. session.commit()) clear ALL taint for a label.
+    # Maps label -> (set of block IDs, block_id->min_line mapping).
+    _scope_kill_blocks: dict[str, tuple[set[int], dict[int, int]]] = {}
 
-        # Collect all sanitizer blocks for this (var, label)
-        san_blocks: set[int] = set()
-        any_some_path = False
-        for match_line, quantifier in match_entries:
-            if quantifier == "some_path":
-                any_some_path = True
-                break
-            block_id = _find_block_for_line(match_line)
-            if block_id is not None:
-                san_blocks.add(block_id)
-
-        # With some_path quantifier, any single match suffices
-        if any_some_path:
-            del taint_state[var][label]
-            if not taint_state[var]:
-                del taint_state[var]
-            continue
-
-        # With all_paths: check if sanitizer blocks cover all paths
-        if _all_paths_sanitized(san_blocks):
-            del taint_state[var][label]
-            if not taint_state[var]:
-                del taint_state[var]
-
-    # Step 3b: Apply scope sanitizers — kill ALL taint for a label.
-    # Scope sanitizers (e.g. session.commit()) clear every variable's taint
-    # for the given label, not just variables captured by the pattern.
     for scope_san in config.scope_sanitizers:
         if label_filter and scope_san.label != label_filter:
             continue
@@ -1064,15 +1105,73 @@ def _analyze_function(
             match_line = match.line or 1
             if not _in_range(match_line):
                 continue
-            # Kill ALL taint for this label across all variables
-            vars_to_clean = [
-                var for var, labels in taint_state.items()
-                if scope_san.label in labels
-            ]
-            for var in vars_to_clean:
-                del taint_state[var][scope_san.label]
-                if not taint_state[var]:
-                    del taint_state[var]
+            block_id = _find_block_for_line(match_line)
+            if scope_san.label not in _scope_kill_blocks:
+                _scope_kill_blocks[scope_san.label] = (set(), {})
+            blocks_set, block_to_line = _scope_kill_blocks[scope_san.label]
+            if block_id is not None:
+                blocks_set.add(block_id)
+                # Track earliest scope kill line per block for same-block ordering
+                if block_id not in block_to_line or match_line < block_to_line[block_id]:
+                    block_to_line[block_id] = match_line
+            else:
+                # No CFG block found — use line-number fallback: record the
+                # match line so we can compare against sink lines later.
+                # Store as negative value as a sentinel for line-number mode.
+                blocks_set.add(-(match_line))
+
+    def _is_sanitized(
+        var: str, label: str, sink_block: int | None, sink_line: int
+    ) -> bool:
+        """Check whether the (var, label) taint is sanitized before reaching
+        the given sink_block/sink_line.
+
+        Uses the source-to-sink path check to ensure sanitizer blocks actually
+        cover all paths between the taint origin and the sink.  For same-block
+        cases (source, sanitizer, and sink in the same basic block), uses
+        line-number ordering instead of BFS.
+        """
+        source_block = _taint_source_blocks.get((var, label))
+        source_step = taint_state.get(var, {}).get(label)
+        source_line = source_step.line if source_step else 1
+
+        # Check regular sanitizers
+        if (var, label) in _san_info:
+            san_blocks_set, any_some_path, block_to_line = _san_info[(var, label)]
+            if any_some_path:
+                return True
+            # Same-block case: source and sink in same block — use line ordering
+            if (source_block is not None and source_block == sink_block
+                    and source_block in san_blocks_set):
+                san_line = block_to_line.get(source_block, 0)
+                if source_line <= san_line <= sink_line:
+                    return True
+            # Inter-block case: BFS from source to sink avoiding sanitizer blocks
+            elif _source_to_sink_sanitized(source_block, sink_block, san_blocks_set):
+                return True
+
+        # Check scope sanitizers (kill ALL taint for this label)
+        if label in _scope_kill_blocks:
+            scope_blocks_set, scope_block_to_line = _scope_kill_blocks[label]
+            # Separate real block IDs from line-number sentinels
+            real_scope_blocks = {b for b in scope_blocks_set if b >= 0}
+            line_sentinels = {-b for b in scope_blocks_set if b < 0}
+            if real_scope_blocks:
+                # Same-block case: use line ordering
+                if (source_block is not None and source_block == sink_block
+                        and source_block in real_scope_blocks):
+                    scope_line = scope_block_to_line.get(source_block, 0)
+                    if source_line <= scope_line <= sink_line:
+                        return True
+                # Inter-block case: BFS
+                elif _source_to_sink_sanitized(source_block, sink_block, real_scope_blocks):
+                    return True
+            # Line-number fallback: scope sanitizer must appear before sink line
+            if line_sentinels:
+                if any(source_line <= san_line <= sink_line for san_line in line_sentinels):
+                    return True
+
+        return False
 
     violations: list[TraceViolation] = []
 
@@ -1112,8 +1211,13 @@ def _analyze_function(
                     type_oracle, file_path, match_line,
                 )
 
+            sink_block = _find_block_for_line(match_line)
             for ident in sink_idents:
                 if ident in taint_state and sink_def.label in taint_state[ident]:
+                    # Check if all source-to-sink paths pass through a sanitizer
+                    if _is_sanitized(ident, sink_def.label, sink_block, match_line):
+                        continue
+
                     # Build trace
                     trace: list[TraceStep] = []
                     origin = taint_state[ident].get(sink_def.label)
@@ -1675,32 +1779,9 @@ def run_interprocedural_trace_analysis(
     if not config.sources or not config.sinks:
         return InterproceduralResult(violations=[], summaries={}, iterations=0)
 
-    # Try Datalog interprocedural path
-    if project_path:
-        try:
-            from emend.transform import _get_or_build_fact_graph
-            graph = _get_or_build_fact_graph(project_path)
-            taint_facts = graph.interprocedural_trace_datalog(
-                max_iterations=max_iterations,
-            )
-            if taint_facts:
-                violations = [
-                    TraceViolation(
-                        file_path=tf.file_path or "",
-                        line=tf.sink_line,
-                        source_line=tf.source_line,
-                        source_pattern=tf.source_var,
-                        sink_pattern=tf.sink_var,
-                        label=tf.label,
-                        trace=[],
-                    )
-                    for tf in taint_facts
-                ]
-                return InterproceduralResult(
-                    violations=violations, summaries={}, iterations=1,
-                )
-        except Exception:
-            logger.debug("Datalog interprocedural taint failed, falling back", exc_info=True)
+    # NOTE: Datalog interprocedural path is disabled (Phase 2 migration).
+    # Python fixed-point iteration is the canonical engine.
+    # Retained reference for Phase 6 implementation.
 
     from emend.ast_utils import find_nested_definitions
 

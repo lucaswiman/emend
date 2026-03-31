@@ -585,3 +585,203 @@ def handler():
             [str(f)], config, project_path=None,
         )
         assert len(violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 regression tests: source-to-sink path check semantics
+# ---------------------------------------------------------------------------
+
+
+class TestSourceToSinkPathSemantics:
+    """Regression tests for Phase 5 Bug 1 fix: source-to-sink (not entry-to-exit)
+    path check for sanitizer coverage."""
+
+    def test_sanitizer_on_branch_not_reaching_source_reports_violation(self, tmp_path):
+        """Sanitizer is only on the branch that does NOT reach the sink from
+        the same source.  Violation should still be reported.
+
+        Code pattern:
+            x = source()       # source
+            if flag:
+                y = sanitize(x)  # sanitizer on true branch, but y is not x
+            sink(x)            # sink: x is still tainted
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = get_user_input()
+    if flag:
+        y = validate(x)
+    sink(x)
+""")
+        config = TraceConfig(
+            labels=["sqli"],
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
+                pattern="sink($X)", label="sqli",
+                message="SQL injection",
+            )],
+            sanitizers=[TraceSanitizer(
+                pattern="validate($X)", label="sqli",
+            )],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # validate only sanitizes y (via capture), not x.
+        # x still reaches sink — violation expected.
+        assert len(violations) >= 1
+
+    def test_sanitizer_after_sink_same_block_reports_violation(self, tmp_path):
+        """Sanitizer appears after the sink in the same basic block.
+        The violation should still be reported.
+
+        Code:
+            x = source()      # line 2
+            sink(x)           # line 3 — SINK (sanitizer not yet applied)
+            x = sanitize(x)   # line 4 — sanitizer comes AFTER sink
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = get_user_input()
+    execute(x)
+    x = sanitize(x)
+""")
+        config = TraceConfig(
+            labels=["sqli"],
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
+                pattern="execute($X)", label="sqli",
+                message="SQL injection",
+            )],
+            sanitizers=[TraceSanitizer(
+                pattern="sanitize($X)", label="sqli",
+            )],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # Sanitizer is after the sink; violation should fire.
+        assert len(violations) >= 1
+
+    def test_sanitizer_before_sink_same_block_suppresses(self, tmp_path):
+        """Sanitizer appears before the sink in the same basic block.
+        The violation should be suppressed.
+
+        Code:
+            x = source()      # line 2
+            x = sanitize(x)   # line 3 — sanitizer before sink
+            sink(x)           # line 4
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = get_user_input()
+    x = sanitize(x)
+    execute(x)
+""")
+        config = TraceConfig(
+            labels=["sqli"],
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
+                pattern="execute($X)", label="sqli",
+                message="SQL injection",
+            )],
+            sanitizers=[TraceSanitizer(
+                pattern="sanitize($X)", label="sqli",
+            )],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # Sanitizer is before the sink in the same block — no violation.
+        assert len(violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 regression tests: CFG build failure behavior (Bug 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCfgBuildFailureBehavior:
+    """When CFG construction fails, violations should still be reported.
+
+    Previously, CFG failure returned True (all paths sanitized), which
+    silently suppressed violations.  The fix returns False (fail-closed),
+    ensuring violations are always reported when the CFG is unavailable.
+    """
+
+    def test_violation_reported_without_cfg(self, tmp_path, monkeypatch):
+        """Violations are reported even when CFG construction fails.
+
+        Monkeypatching build_cfgs_for_source to raise an exception simulates
+        a CFG build failure and verifies the fail-closed behavior.
+        """
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = get_user_input()
+    x = sanitize(x)
+    execute(x)
+""")
+        config = TraceConfig(
+            labels=["sqli"],
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
+                pattern="execute($X)", label="sqli",
+                message="SQL injection",
+            )],
+            sanitizers=[TraceSanitizer(
+                pattern="sanitize($X)", label="sqli",
+            )],
+        )
+        # Patch build_cfgs_for_source to simulate CFG construction failure
+        import emend.trace as trace_mod
+        original = getattr(trace_mod, "_build_cfgs_for_source_orig", None)
+
+        import emend.cfg as cfg_mod
+        original_build = cfg_mod.build_cfgs_for_source
+
+        def failing_build(*args, **kwargs):
+            raise RuntimeError("Simulated CFG build failure")
+
+        monkeypatch.setattr(cfg_mod, "build_cfgs_for_source", failing_build)
+
+        from emend.trace import run_trace_analysis
+        # With CFG unavailable and a sanitizer present, the fail-closed
+        # behavior means we still report the violation (can't prove sanitized).
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        # Fail-closed: violation should be reported even though it would be
+        # suppressed if CFG were available and showed the sanitizer covers
+        # all paths.  This is intentional (prefer false positives over
+        # false negatives when CFG is unavailable).
+        assert len(violations) >= 1
+
+    def test_taint_without_sanitizer_always_reports(self, tmp_path):
+        """Without any sanitizer, violations are always reported regardless
+        of CFG availability."""
+        f = tmp_path / "app.py"
+        f.write_text("""\
+def handler():
+    x = get_user_input()
+    execute(x)
+""")
+        config = TraceConfig(
+            labels=["sqli"],
+            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
+            sinks=[TraceSink(
+                pattern="execute($X)", label="sqli",
+                message="SQL injection",
+            )],
+        )
+        from emend.trace import run_trace_analysis
+        violations = run_trace_analysis(
+            [str(f)], config, project_path=None,
+        )
+        assert len(violations) >= 1

@@ -2315,6 +2315,11 @@ class FactGraph:
         Uses emend's tree-sitter infrastructure (``emend_core``) to
         extract symbols, references, calls, and imports from every
         source file in the project.
+
+        **Note**: This is a deliberate full-rebuild path used by tests and
+        one-off analysis.  In steady-state indexing, ``_build_facts_db()``
+        in ``transform.py`` is the canonical path that populates the
+        persisted ``facts.db`` directly from source files.
         """
         from emend import emend_core as _rust
         from emend.transform import (
