@@ -1,4 +1,4 @@
-"""Tests for interprocedural taint analysis (Phase 5)."""
+"""Tests for interprocedural taint analysis."""
 
 import pytest
 
@@ -11,7 +11,7 @@ from emend.trace import (
     TraceSource,
     _collect_function_params,
     _compute_function_summary,
-    run_interprocedural_trace_analysis,
+    run_interprocedural_trace,
 )
 
 
@@ -188,7 +188,7 @@ class TestInterproceduralAnalysis:
             ],
         )
 
-        result = run_interprocedural_trace_analysis([str(test_file)], config)
+        result = run_interprocedural_trace([str(test_file)], config)
 
         assert result.violations == []
         assert f"{test_file}::outer_a::helper" in result.summaries
@@ -208,7 +208,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis([str(test_file)], config)
+        result = run_interprocedural_trace([str(test_file)], config)
 
         assert result.violations == []
 
@@ -226,7 +226,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis([str(test_file)], config)
+        result = run_interprocedural_trace([str(test_file)], config)
 
         assert len(result.violations) >= 1
         assert any("SQL injection" in v.message for v in result.violations)
@@ -244,20 +244,15 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis(
-            [str(test_file)], config,
-        )
+        result = run_interprocedural_trace([str(test_file)], config)
 
         assert isinstance(result, InterproceduralResult)
-        assert result.iterations >= 1
         assert len(result.summaries) > 0
 
-        # Should find at least one violation (the interprocedural one)
         assert len(result.violations) >= 1
-        # At least one violation should mention the function call
         messages = [v.message for v in result.violations]
         assert any("SQL injection" in m or "cursor.execute" in m.lower() for m in messages)
-        assert all(v.engine == "python" for v in result.violations)
+        assert all(v.engine == "datalog" for v in result.violations)
 
     def test_intraprocedural_still_found(self, tmp_path):
         """Interprocedural mode still finds direct (intraprocedural) violations."""
@@ -269,9 +264,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis(
-            [str(test_file)], config,
-        )
+        result = run_interprocedural_trace([str(test_file)], config)
 
         assert len(result.violations) >= 1
         assert result.violations[0].label == "user_input"
@@ -290,9 +283,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis(
-            [str(test_file)], config,
-        )
+        result = run_interprocedural_trace([str(test_file)], config)
 
         # After sanitization, the interprocedural violation should not appear
         interprocedural_violations = [
@@ -315,7 +306,7 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis([str(test_file)], config)
+        result = run_interprocedural_trace([str(test_file)], config)
 
         interprocedural_violations = [
             v for v in result.violations
@@ -323,39 +314,19 @@ class TestInterproceduralAnalysis:
         ]
         assert len(interprocedural_violations) >= 1
 
-    def test_convergence(self, tmp_path):
-        """Fixed-point iteration converges within max_iterations."""
-        test_file = tmp_path / "app.py"
-        test_file.write_text(
-            "def pass_through(x):\n"
-            "    return x\n"
-            "\n"
-            "def another(x):\n"
-            "    return pass_through(x)\n"
-        )
-
-        config = _make_sql_config()
-        result = run_interprocedural_trace_analysis(
-            [str(test_file)], config, max_iterations=5,
-        )
-
-        assert result.iterations <= 5
-
     def test_empty_files(self, tmp_path):
         """Handles empty file list gracefully."""
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis([], config)
+        result = run_interprocedural_trace([], config)
         assert result.violations == []
         assert result.summaries == {}
-        # With no functions to iterate over, converges immediately (1 iteration)
-        assert result.iterations <= 1
 
     def test_no_sources(self, tmp_path):
         """Returns empty result when no sources configured."""
         config = TraceConfig(labels=["x"], sources=[], sinks=[
             TraceSink(pattern="sink($X)", label="x", message="test"),
         ])
-        result = run_interprocedural_trace_analysis(["/nonexistent"], config)
+        result = run_interprocedural_trace(["/nonexistent"], config)
         assert result.violations == []
 
     def test_label_filter(self, tmp_path):
@@ -368,13 +339,13 @@ class TestInterproceduralAnalysis:
         )
 
         config = _make_sql_config()
-        result = run_interprocedural_trace_analysis(
+        result = run_interprocedural_trace(
             [str(test_file)], config, label_filter="user_input",
         )
         assert len(result.violations) >= 1
-        assert all(v.engine == "python" for v in result.violations)
+        assert all(v.engine == "datalog" for v in result.violations)
 
-        result_no_match = run_interprocedural_trace_analysis(
+        result_no_match = run_interprocedural_trace(
             [str(test_file)], config, label_filter="nonexistent",
         )
         assert len(result_no_match.violations) == 0

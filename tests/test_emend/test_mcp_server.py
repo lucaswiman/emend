@@ -221,7 +221,7 @@ def test_trace_analysis_interprocedural_includes_engine(tmp_path):
     data = json.loads(result)
 
     assert data["violations"]
-    assert all(v["engine"] == "python" for v in data["violations"])
+    assert all(v["engine"] == "datalog" for v in data["violations"])
 
 
 def test_analyze_trace_mode_interprocedural_includes_engine(tmp_path):
@@ -245,7 +245,7 @@ def test_analyze_trace_mode_interprocedural_includes_engine(tmp_path):
     data = json.loads(result)
 
     assert data["violations"]
-    assert all(v["engine"] == "python" for v in data["violations"])
+    assert all(v["engine"] == "datalog" for v in data["violations"])
 
 
 def test_check_unified_rules(tmp_path):

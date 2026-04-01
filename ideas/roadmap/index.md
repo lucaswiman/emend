@@ -1,16 +1,10 @@
 # Datalog Migration Roadmap
 
-This roadmap assumes the current codebase is in the middle of a migration:
+This roadmap tracks the migration from dual Python/Datalog analysis engines to
+a single Datalog/FactGraph-based engine, and the subsequent extension to
+cross-language support.
 
-- `parse.db` is still the primary cache/index
-- `facts.db` / `FactGraph` / CozoDB power a growing share of analysis
-- several features still use "try Datalog, then fall back"
-- raw Datalog is still exposed as a user-facing surface
-
-The goal is to finish the migration cleanly instead of carrying both models
-indefinitely.
-
-## Phases
+## Completed Phases
 
 - [x] [Phase 1: Remove Public Datalog Surfaces](./phase-1-remove-public-datalog-surfaces.md)
 - [x] [Phase 2: Remove Fallback Execution Paths](./phase-2-remove-fallback-execution-paths.md)
@@ -24,33 +18,39 @@ indefinitely.
 - [x] [Phase 10: Finalize Interprocedural Trace Engine and Cleanup](./phase-10-finalize-interprocedural-trace-engine-and-cleanup.md)
 - [ ] [Phase 11: Reach Interprocedural Datalog Parity](./phase-11-reach-interprocedural-datalog-parity.md)
 - [x] [Phase 12: Cut Over Public Interprocedural Trace to Datalog](./phase-12-cut-over-public-interprocedural-trace-to-datalog.md)
-- [ ] [Phase 13: Remove Legacy Python Interprocedural Trace Path](./phase-13-remove-legacy-python-interprocedural-trace-path.md)
+- [x] [Phase 13: Remove Legacy Python Interprocedural Trace Path](./phase-13-remove-legacy-python-interprocedural-trace-path.md)
 
-## Current CFG / Trace / Flow Bugs
+## Intraprocedural Datalog Migration
 
-The current tracing and flow stack has correctness bugs in addition to the
-architectural migration work above.
+- [ ] [Phase 14: Fix Datalog Intraprocedural Trace for Small Projects](./phase-14-fix-datalog-intraprocedural-trace-for-small-projects.md)
+- [ ] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
+- [ ] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
+- [ ] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
 
-- The Python intraprocedural sanitizer check is sink-insensitive: it asks
-  whether all entry-to-exit paths pass through a sanitizer, not whether all
-  source-to-sink paths do. That can report false positives when every path to
-  the sink is sanitized but some unrelated path to function exit is not.
-- Python scope sanitizers are not path-sensitive: a single matched
-  `scope_sanitizer` currently kills all taint for the label across the whole
-  function, which causes false negatives when the kill occurs on only one
-  branch.
-- The Datalog trace path is currently hidden behind fallback, but not actually
-  healthy. The current code calls an undefined helper in `_run_trace_datalog()`
-  and still constructs `TraceViolation` objects using stale field names.
-- The Datalog trace entry points are also incomplete: they do not yet thread
-  through effect sinks, per-sink messages, sanitizer quantifiers, same-block
-  line-ordering data, or exact function/block resolution.
-- ~~Flow/policy/sequence logic still resolves many matches to `("", -1)` or
-  nearest-line approximations instead of exact `(file, function, block)` facts,
-  which makes blocker semantics and CFG reasoning lossy.~~
-  Fixed in Phase 8: `flow_ir.py` uses `LocationResolver` for exact resolution,
-  blockers now check both def_block and use_block, and same-block line ordering
-  is post-filtered in Python.
+## Cross-Language Extension
+
+- [ ] [Phase 18: Cross-Language Trace Analysis](./phase-18-cross-language-trace-analysis.md)
+
+## Current CFG / Trace / Flow Status
+
+Status of known issues in the tracing and flow stack:
+
+- ~~The Python intraprocedural sanitizer check is sink-insensitive.~~
+  Addressed: the Datalog engine uses sink-scoped propagation rules.  The Python
+  engine retains this limitation but will be removed in Phase 17.
+- ~~Python scope sanitizers are not path-sensitive.~~
+  Same status: Datalog handles this correctly; Python engine limitation remains
+  until Phase 17 removal.
+- ~~The Datalog trace path called undefined helpers and used stale field names.~~
+  Fixed in Phases 5–6.
+- ~~Datalog trace entry points were incomplete (effect sinks, sanitizer
+  quantifiers, same-block ordering, exact resolution).~~
+  Fixed in Phases 7–9.
+- ~~Flow/policy/sequence logic resolved matches to `("", -1)`.~~
+  Fixed in Phase 8.
+- **Open:** The Datalog intraprocedural engine returns empty results on small
+  file sets because FactGraph construction requires a full project build.
+  Tracked in Phase 14.
 
 ## Intended End State
 
@@ -60,6 +60,8 @@ architectural migration work above.
 - CFG, trace, and flow analyses share one block-aware location model.
 - Trace and flow semantics are sink-scoped, path-sensitive, and testable across
   both direct API and CLI entry points.
+- Trace analysis works for Python, TypeScript, and Rust using the same Datalog
+  rules over language-agnostic facts.
 - `parse.db` remains only where SQLite is still the better fit:
   - full-text/editor search
   - freshness metadata / manifests

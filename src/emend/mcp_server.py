@@ -1003,8 +1003,8 @@ def trace_analysis(
     files = [str(f) for f in resolved]
 
     if interprocedural:
-        from emend.trace import run_interprocedural_trace_analysis
-        result = run_interprocedural_trace_analysis(
+        from emend.trace import run_interprocedural_trace
+        result = run_interprocedural_trace(
             files, trace_config, label_filter=label,
         )
         violations = result.violations
