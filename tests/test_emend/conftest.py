@@ -188,3 +188,45 @@ def get_decorator_names(code: str, target_path: str = None) -> list[str]:
             decorator_names.append(ast.unparse(decorator))
 
     return decorator_names
+
+
+# ---------------------------------------------------------------------------
+# Shared trace test helpers (Phase 11+)
+# ---------------------------------------------------------------------------
+
+
+def make_sql_injection_config():
+    """Return a standard SQL-injection TraceConfig for interprocedural tests."""
+    from emend.trace import TraceConfig, TraceSanitizer, TraceSink, TraceSource
+
+    return TraceConfig(
+        labels=["user_input"],
+        sources=[TraceSource(pattern="request.args.get($X)", label="user_input")],
+        sinks=[
+            TraceSink(
+                pattern="cursor.execute($X)",
+                label="user_input",
+                message="SQL injection: user input reaches cursor.execute()",
+            ),
+        ],
+        sanitizers=[TraceSanitizer(pattern="escape($X)", label="user_input")],
+    )
+
+
+def run_both_interprocedural_engines(tmp_path, source, config=None):
+    """Run both Python and Datalog interprocedural engines on *source*.
+
+    Returns ``(python_result, datalog_result)`` as ``InterproceduralResult`` pairs.
+    """
+    from emend.trace import (
+        _run_interprocedural_trace_datalog,
+        run_interprocedural_trace_analysis,
+    )
+
+    config = config or make_sql_injection_config()
+    test_file = tmp_path / "app.py"
+    test_file.write_text(source)
+    paths = [str(test_file)]
+    py = run_interprocedural_trace_analysis(paths, config)
+    dl = _run_interprocedural_trace_datalog(paths, config)
+    return py, dl

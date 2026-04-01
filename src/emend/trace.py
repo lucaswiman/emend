@@ -3227,3 +3227,46 @@ def _run_interprocedural_trace_datalog(
         summaries=summaries,
         iterations=1 if summaries else 0,
     )
+
+
+INTERPROCEDURAL_ENGINES = ("python", "datalog")
+
+
+def run_interprocedural_trace(
+    paths: list[str],
+    config: TraceConfig,
+    label_filter: str | None = None,
+    language: str = "python",
+    max_iterations: int = 10,
+    project_path: str | None = None,
+    engine: str = "python",
+) -> InterproceduralResult:
+    """Public dispatch for interprocedural trace with engine selection.
+
+    Args:
+        engine: ``"python"`` (default) for the fixed-point engine, or
+            ``"datalog"`` for the Phase 11 Datalog parity adapter.
+
+    Raises:
+        ValueError: If *engine* is not a recognised engine name.
+    """
+    if engine not in INTERPROCEDURAL_ENGINES:
+        raise ValueError(
+            f"Unknown interprocedural engine {engine!r}; "
+            f"expected one of {INTERPROCEDURAL_ENGINES}"
+        )
+    if engine == "datalog":
+        return _run_interprocedural_trace_datalog(
+            paths, config,
+            label_filter=label_filter,
+            language=language,
+            max_iterations=max_iterations,
+            project_path=project_path,
+        )
+    return run_interprocedural_trace_analysis(
+        paths, config,
+        label_filter=label_filter,
+        language=language,
+        max_iterations=max_iterations,
+        project_path=project_path,
+    )

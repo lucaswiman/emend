@@ -2,30 +2,9 @@
 
 from __future__ import annotations
 
-from emend.trace import (
-    TraceConfig,
-    TraceSanitizer,
-    TraceSink,
-    TraceSource,
-    TraceViolation,
-    _run_interprocedural_trace_datalog,
-    run_interprocedural_trace_analysis,
-)
+from emend.trace import TraceViolation
 
-
-def _sql_config() -> TraceConfig:
-    return TraceConfig(
-        labels=["user_input"],
-        sources=[TraceSource(pattern="request.args.get($X)", label="user_input")],
-        sinks=[
-            TraceSink(
-                pattern="cursor.execute($X)",
-                label="user_input",
-                message="SQL injection: user input reaches cursor.execute()",
-            ),
-        ],
-        sanitizers=[TraceSanitizer(pattern="escape($X)", label="user_input")],
-    )
+from conftest import make_sql_injection_config, run_both_interprocedural_engines
 
 
 def _violation_signature(v: TraceViolation) -> tuple:
@@ -50,13 +29,8 @@ def _summary_signature(summary) -> tuple:
     )
 
 
-def _run_both(tmp_path, source: str, config: TraceConfig):
-    test_file = tmp_path / "app.py"
-    test_file.write_text(source)
-    paths = [str(test_file)]
-    python_result = run_interprocedural_trace_analysis(paths, config)
-    datalog_result = _run_interprocedural_trace_datalog(paths, config)
-    return python_result, datalog_result
+def _run_both(tmp_path, source: str, config=None):
+    return run_both_interprocedural_engines(tmp_path, source, config or make_sql_injection_config())
 
 
 def test_interprocedural_datalog_matches_python_for_cross_function_violation(tmp_path):
@@ -68,7 +42,7 @@ def test_interprocedural_datalog_matches_python_for_cross_function_violation(tmp
         "    name = request.args.get('name')\n"
         "    run_query(cursor, name)\n"
     )
-    python_result, datalog_result = _run_both(tmp_path, source, _sql_config())
+    python_result, datalog_result = _run_both(tmp_path, source)
 
     assert { _violation_signature(v) for v in python_result.violations } == {
         _violation_signature(v) for v in datalog_result.violations
@@ -87,7 +61,7 @@ def test_interprocedural_datalog_matches_python_for_returned_taint(tmp_path):
         "    query = passthrough(name)\n"
         "    cursor.execute(query)\n"
     )
-    python_result, datalog_result = _run_both(tmp_path, source, _sql_config())
+    python_result, datalog_result = _run_both(tmp_path, source)
 
     assert { _violation_signature(v) for v in python_result.violations } == {
         _violation_signature(v) for v in datalog_result.violations
@@ -111,7 +85,7 @@ def test_interprocedural_datalog_matches_python_for_late_sanitizer(tmp_path):
         "    run_query(cursor, name)\n"
         "    name = escape(name)\n"
     )
-    python_result, datalog_result = _run_both(tmp_path, source, _sql_config())
+    python_result, datalog_result = _run_both(tmp_path, source)
 
     assert { _violation_signature(v) for v in python_result.violations } == {
         _violation_signature(v) for v in datalog_result.violations
@@ -131,7 +105,7 @@ def test_interprocedural_datalog_matches_python_for_nested_same_named_helpers(tm
         "        cursor.execute(value)\n"
         "    return request.args.get('name')\n"
     )
-    python_result, datalog_result = _run_both(tmp_path, source, _sql_config())
+    python_result, datalog_result = _run_both(tmp_path, source)
 
     assert python_result.violations == []
     assert datalog_result.violations == []
