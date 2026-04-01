@@ -252,20 +252,3 @@ def setup_trace_fixture(tmp_path, source=None):
     return src, cfg
 
 
-def run_both_interprocedural_engines(tmp_path, source, config=None):
-    """Run both Python and Datalog interprocedural engines on *source*.
-
-    Returns ``(python_result, datalog_result)`` as ``InterproceduralResult`` pairs.
-    """
-    from emend.trace import (
-        _run_interprocedural_trace_datalog,
-        run_interprocedural_trace_analysis,
-    )
-
-    config = config or make_sql_injection_config()
-    test_file = tmp_path / "app.py"
-    test_file.write_text(source)
-    paths = [str(test_file)]
-    py = run_interprocedural_trace_analysis(paths, config)
-    dl = _run_interprocedural_trace_datalog(paths, config)
-    return py, dl

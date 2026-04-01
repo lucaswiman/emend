@@ -1,11 +1,9 @@
-"""Phase 12: Cut over public interprocedural trace to Datalog.
+"""Phase 12/13: Interprocedural trace uses the Datalog engine.
 
 These tests verify that:
-1. The default interprocedural engine is now ``"datalog"``.
-2. The CLI default (no ``--engine`` flag) produces ``engine == "datalog"``.
-3. Explicit ``--engine python`` still routes to the Python engine.
-4. Failures are explicit — no silent fallback to the Python engine.
-5. All existing violation shapes are preserved.
+1. The interprocedural engine produces ``engine == "datalog"`` violations.
+2. The CLI produces ``engine == "datalog"`` in JSON output.
+3. All existing violation shapes are preserved.
 """
 
 from __future__ import annotations
@@ -33,12 +31,12 @@ runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# API-level: default engine is now datalog
+# API-level: engine is datalog
 # ---------------------------------------------------------------------------
 
 
 class TestDefaultEngineIsDatalog:
-    """``run_interprocedural_trace()`` uses datalog by default."""
+    """``run_interprocedural_trace()`` uses datalog."""
 
     def test_default_engine_produces_datalog_violations(self, tmp_path):
         test_file = tmp_path / "app.py"
@@ -54,34 +52,14 @@ class TestDefaultEngineIsDatalog:
             f"Expected engine='datalog' but got: {[v.engine for v in result.violations]}"
         )
 
-    def test_explicit_python_still_works(self, tmp_path):
-        test_file = tmp_path / "app.py"
-        test_file.write_text(CROSS_FUNCTION_SOURCE)
-
-        result = run_interprocedural_trace(
-            [str(test_file)], make_sql_injection_config(), engine="python",
-        )
-
-        assert len(result.violations) >= 1
-        assert all(v.engine == "python" for v in result.violations)
-
-    def test_unknown_engine_raises(self, tmp_path):
-        test_file = tmp_path / "app.py"
-        test_file.write_text(CROSS_FUNCTION_SOURCE)
-
-        with pytest.raises(ValueError, match="Unknown interprocedural engine"):
-            run_interprocedural_trace(
-                [str(test_file)], make_sql_injection_config(), engine="magic",
-            )
-
 
 # ---------------------------------------------------------------------------
-# CLI-level: default --engine is datalog
+# CLI-level: engine is datalog
 # ---------------------------------------------------------------------------
 
 
 class TestCLIDefaultEngine:
-    """CLI ``trace --interprocedural`` without ``--engine`` uses datalog."""
+    """CLI ``trace --interprocedural`` uses datalog."""
 
     def test_cli_default_engine_is_datalog(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
@@ -96,29 +74,14 @@ class TestCLIDefaultEngine:
             f"Expected engine='datalog' but got: {[v['engine'] for v in data]}"
         )
 
-    def test_cli_explicit_python_engine(self, tmp_path):
-        src, cfg = setup_trace_fixture(tmp_path)
-        result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "python", "--json",
-            ],
-        )
-        assert result.exit_code in (0, 1), result.output
-        data = json.loads(result.output)
-        assert len(data) > 0
-        assert all(v["engine"] == "python" for v in data)
-
-    def test_cli_stderr_reports_datalog_engine(self, tmp_path):
+    def test_cli_stderr_reports_engine(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             ["trace", str(src), "--config", str(cfg), "--interprocedural"],
             catch_exceptions=False,
         )
-        # CliRunner mixes stderr into output; check the status line mentions datalog
-        assert "Interprocedural analysis (datalog)" in result.output
+        assert "Interprocedural analysis:" in result.output
 
 
 # ---------------------------------------------------------------------------

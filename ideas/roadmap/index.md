@@ -24,7 +24,7 @@ indefinitely.
 - [x] [Phase 10: Finalize Interprocedural Trace Engine and Cleanup](./phase-10-finalize-interprocedural-trace-engine-and-cleanup.md)
 - [ ] [Phase 11: Reach Interprocedural Datalog Parity](./phase-11-reach-interprocedural-datalog-parity.md)
 - [x] [Phase 12: Cut Over Public Interprocedural Trace to Datalog](./phase-12-cut-over-public-interprocedural-trace-to-datalog.md)
-- [ ] [Phase 13: Remove Legacy Python Interprocedural Trace Path](./phase-13-remove-legacy-python-interprocedural-trace-path.md)
+- [x] [Phase 13: Remove Legacy Python Interprocedural Trace Path](./phase-13-remove-legacy-python-interprocedural-trace-path.md)
 
 ## Current CFG / Trace / Flow Bugs
 

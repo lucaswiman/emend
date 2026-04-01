@@ -1,11 +1,8 @@
-"""Phase 11 CLI/API tests: engine choice observability and result equivalence.
+"""Phase 11/13 CLI tests: engine observability and result shape.
 
-These tests exercise the trace CLI command with both Python and Datalog engines
-and verify:
-1. The ``--engine`` flag routes to the correct implementation.
-2. JSON output includes the ``engine`` field so callers can observe which
-   engine produced each violation.
-3. Both engines produce equivalent results on the same fixtures.
+These tests exercise the trace CLI command with the Datalog engine and verify:
+1. JSON output includes the ``engine`` field.
+2. The engine is always ``"datalog"``.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# File-specific source fixtures (not shared because they are only used here)
+# File-specific source fixtures
 # ---------------------------------------------------------------------------
 
 _RETURNED_TAINT_SOURCE = textwrap.dedent("""\
@@ -53,12 +50,26 @@ _LATE_SANITIZER_SOURCE = textwrap.dedent("""\
 
 
 # ---------------------------------------------------------------------------
-# Engine flag routing
+# Engine field in JSON output
 # ---------------------------------------------------------------------------
 
 
-class TestEngineFlag:
-    """The ``--engine`` flag on ``trace --interprocedural`` selects the engine."""
+class TestEngineInJsonOutput:
+    """JSON output from ``trace --interprocedural`` always includes ``engine``."""
+
+    def test_datalog_engine_in_json(self, tmp_path):
+        src, cfg = setup_trace_fixture(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "trace", str(src), "--config", str(cfg),
+                "--interprocedural", "--json",
+            ],
+        )
+        data = json.loads(result.output)
+        for v in data:
+            assert "engine" in v, "engine field missing from JSON output"
+            assert v["engine"] == "datalog"
 
     def test_default_engine_is_datalog(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
@@ -71,123 +82,36 @@ class TestEngineFlag:
         assert len(data) > 0
         assert all(v["engine"] == "datalog" for v in data)
 
-    def test_engine_python_explicit(self, tmp_path):
-        src, cfg = setup_trace_fixture(tmp_path)
-        result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "python", "--json",
-            ],
-        )
-        assert result.exit_code in (0, 1), result.output
-        data = json.loads(result.output)
-        assert len(data) > 0
-        assert all(v["engine"] == "python" for v in data)
 
-    def test_engine_datalog(self, tmp_path):
-        src, cfg = setup_trace_fixture(tmp_path)
+# ---------------------------------------------------------------------------
+# Result shape on CLI-level fixtures
+# ---------------------------------------------------------------------------
+
+
+class TestResultShape:
+    """Violations have the expected shape on CLI-level fixtures."""
+
+    def _run_interprocedural(self, tmp_path, source):
+        src, cfg = setup_trace_fixture(tmp_path, source)
         result = runner.invoke(
             app,
             [
                 "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "datalog", "--json",
+                "--interprocedural", "--json",
             ],
         )
         assert result.exit_code in (0, 1), result.output
-        data = json.loads(result.output)
+        return json.loads(result.output)
+
+    def test_cross_function_produces_violations(self, tmp_path):
+        data = self._run_interprocedural(tmp_path, CROSS_FUNCTION_SOURCE)
         assert len(data) > 0
         assert all(v["engine"] == "datalog" for v in data)
 
+    def test_returned_taint_produces_violations(self, tmp_path):
+        data = self._run_interprocedural(tmp_path, _RETURNED_TAINT_SOURCE)
+        assert len(data) > 0
 
-# ---------------------------------------------------------------------------
-# JSON output includes engine field
-# ---------------------------------------------------------------------------
-
-
-class TestEngineInJsonOutput:
-    """JSON output from ``trace --interprocedural`` always includes ``engine``."""
-
-    def test_python_engine_in_json(self, tmp_path):
-        src, cfg = setup_trace_fixture(tmp_path)
-        result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "python", "--json",
-            ],
-        )
-        data = json.loads(result.output)
-        for v in data:
-            assert "engine" in v, "engine field missing from JSON output"
-            assert v["engine"] == "python"
-
-    def test_datalog_engine_in_json(self, tmp_path):
-        src, cfg = setup_trace_fixture(tmp_path)
-        result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "datalog", "--json",
-            ],
-        )
-        data = json.loads(result.output)
-        for v in data:
-            assert "engine" in v, "engine field missing from JSON output"
-            assert v["engine"] == "datalog"
-
-
-# ---------------------------------------------------------------------------
-# Result equivalence across engines
-# ---------------------------------------------------------------------------
-
-
-def _normalize_violations(data: list[dict]) -> set[tuple]:
-    """Extract a comparable signature from JSON violation dicts."""
-    result = set()
-    for v in data:
-        result.add((
-            v["line"],
-            v["label"],
-            v["sink_pattern"],
-            v["message"],
-        ))
-    return result
-
-
-class TestResultEquivalence:
-    """Both engines produce equivalent violations on CLI-level fixtures."""
-
-    def _run_both_engines(self, tmp_path, source):
-        src, cfg = setup_trace_fixture(tmp_path, source)
-        py_result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "python", "--json",
-            ],
-        )
-        dl_result = runner.invoke(
-            app,
-            [
-                "trace", str(src), "--config", str(cfg),
-                "--interprocedural", "--engine", "datalog", "--json",
-            ],
-        )
-        assert py_result.exit_code in (0, 1), py_result.output
-        assert dl_result.exit_code in (0, 1), dl_result.output
-        py_data = json.loads(py_result.output)
-        dl_data = json.loads(dl_result.output)
-        return py_data, dl_data
-
-    def test_cross_function_equivalence(self, tmp_path):
-        py, dl = self._run_both_engines(tmp_path, CROSS_FUNCTION_SOURCE)
-        assert _normalize_violations(py) == _normalize_violations(dl)
-
-    def test_returned_taint_equivalence(self, tmp_path):
-        py, dl = self._run_both_engines(tmp_path, _RETURNED_TAINT_SOURCE)
-        assert _normalize_violations(py) == _normalize_violations(dl)
-
-    def test_late_sanitizer_equivalence(self, tmp_path):
-        py, dl = self._run_both_engines(tmp_path, _LATE_SANITIZER_SOURCE)
-        assert _normalize_violations(py) == _normalize_violations(dl)
+    def test_late_sanitizer_produces_violations(self, tmp_path):
+        data = self._run_interprocedural(tmp_path, _LATE_SANITIZER_SOURCE)
+        assert len(data) > 0
