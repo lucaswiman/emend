@@ -159,19 +159,12 @@ When two engines are expected to match, compare:
 
 Also manually inspect a few traces/witnesses, not just counts.
 
-### Accepted Divergences
+### Divergence Status
 
-The following differences between the Python and Datalog engines are documented
-and accepted (see `tests/test_emend/test_phase11_divergence.py`):
-
-1. **Iteration count**: Datalog always reports `iterations=1` because it uses a
-   single transitive closure query. Python may report higher iteration counts
-   for multi-hop call chains. This is a representation difference, not a
-   semantic one.
-
-2. **Trace step descriptions**: The descriptive text in trace steps may use
-   slightly different phrasing between engines. The semantic content (file,
-   line, variable) matches; the description is informational only.
+No accepted divergences remain as of Phase 11 completion.  Cases originally
+expected to diverge (iteration count, trace step descriptions) were tested and
+confirmed at full parity.  See `tests/test_emend/test_phase11_divergence.py`
+for the regression guards.
 
 ### During Cutover Work
 

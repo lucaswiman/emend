@@ -201,16 +201,15 @@ class TestParity:
 # ---------------------------------------------------------------------------
 
 
-class TestAcceptedDivergence:
-    """Cases where the engines may diverge; documented as intentional."""
+class TestFullParity:
+    """Cases previously expected to diverge, now confirmed at parity.
 
-    def test_iteration_count_diverges(self, tmp_path):
-        """Accepted: Datalog always reports iterations=1, Python may iterate more.
+    These were originally documented as accepted divergences but testing
+    showed both engines already agree.  They remain as regression guards.
+    """
 
-        The Datalog adapter uses a single Datalog transitive closure query
-        instead of iterative fixed-point, so it always reports 1 iteration.
-        This is a representation difference, not a semantic divergence.
-        """
+    def test_iteration_count_matches(self, tmp_path):
+        """Both engines report the same iteration count on multi-hop chains."""
         source = (
             "def step1(value):\n"
             "    return value\n"
@@ -224,20 +223,11 @@ class TestAcceptedDivergence:
             "    cursor.execute(q)\n"
         )
         py, dl = _run_both(tmp_path, source)
-        # Violations should match even though iteration counts differ
         assert _violation_locs(py.violations) == _violation_locs(dl.violations)
-        # Document the expected divergence
-        assert dl.iterations == 1, "Datalog adapter always uses 1 iteration (transitive closure)"
-        # Python may need more iterations for multi-hop chains
-        assert py.iterations >= 1
+        assert py.iterations == dl.iterations
 
-    def test_trace_step_descriptions_may_differ(self, tmp_path):
-        """Accepted: trace step descriptions may differ in wording.
-
-        Both engines produce traces, but the descriptive text in trace steps
-        may use slightly different phrasing. The semantic content (file, line,
-        variable) should match; the description is informational.
-        """
+    def test_trace_step_descriptions_match(self, tmp_path):
+        """Trace step descriptions are identical across engines."""
         source = (
             "def run_query(cursor, query):\n"
             "    cursor.execute(query)\n"
@@ -253,14 +243,11 @@ class TestAcceptedDivergence:
             sorted(py.violations, key=lambda v: v.line),
             sorted(dl.violations, key=lambda v: v.line),
         ):
-            # Core fields must match
             assert pv.line == dv.line
             assert pv.label == dv.label
             assert pv.sink_pattern == dv.sink_pattern
-            # Trace lengths should match
             assert len(pv.trace) == len(dv.trace)
-            # Trace lines and variables should match
             for ps, ds in zip(pv.trace, dv.trace):
                 assert ps.line == ds.line
                 assert ps.variable == ds.variable
-                # Description text may differ — this is accepted
+                assert ps.description == ds.description

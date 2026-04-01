@@ -79,13 +79,12 @@ Done in this phase:
   - explicit `--engine python` and `--engine datalog` route correctly
   - JSON output includes `engine` field for both engines
   - result equivalence (cross-function, returned taint, late sanitizer)
-- `tests/test_emend/test_phase11_divergence.py` enumerates divergences:
-  - 9 parity cases (must agree): empty config, intraprocedural, sanitizer
-    ordering, multi-label, call chains, label filtering, summary contents
-  - 2 accepted divergences (documented):
-    - iteration count: Datalog always reports 1 (transitive closure), Python
-      may iterate more — representation difference, not semantic
-    - trace step descriptions: wording may differ, but file/line/variable match
+- `tests/test_emend/test_phase11_divergence.py` enumerates parity:
+  - 11 parity cases covering: empty config, intraprocedural, sanitizer
+    ordering, multi-label, call chains, label filtering, summary contents,
+    iteration counts, and trace step descriptions
+  - no accepted divergences remain — cases originally expected to diverge
+    (iteration count, trace descriptions) were confirmed at full parity
 
 Still required before cutover:
 
