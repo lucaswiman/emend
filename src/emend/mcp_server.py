@@ -1015,6 +1015,8 @@ def trace_analysis(
                 "file": v.file_path, "line": v.line, "col": v.col,
                 "label": v.label, "sink_pattern": v.sink_pattern, "message": v.message,
             }
+            if v.engine:
+                entry["engine"] = v.engine
             if trace:
                 entry["trace"] = [
                     {"file": s.file_path, "line": s.line, "col": s.col,
@@ -1413,7 +1415,7 @@ def references(
 
 @mcp_app.tool()
 def analyze(
-    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, or flow.")] = "graph",
+    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, flow, or trace.")] = "graph",
     path: Annotated[str | None, Field(description="Path scope for deadcode/trace/check-style modes.")] = None,
     selector: Annotated[str | None, Field(description="Selector input for semantic_context/impact modes.")] = None,
     symbol: Annotated[str | None, Field(description="Symbol selector for graph mode.")] = None,
@@ -1495,7 +1497,7 @@ def analyze(
             trace=trace,
             interprocedural=interprocedural,
         )
-    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow."})
+    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow, trace."})
 
 
 @mcp_app.tool()

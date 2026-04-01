@@ -17,6 +17,7 @@ try:
         transform,
         references,
         analyze,
+        trace_analysis,
         check,
         facts_query,
         mappings,
@@ -198,6 +199,53 @@ def test_analyze_deadcode_mode(tmp_path):
     )
     data = json.loads(result)
     assert isinstance(data, list)
+
+
+def test_trace_analysis_interprocedural_includes_engine(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text(
+        "def run_query(cursor, query):\n"
+        "    cursor.execute(query)\n"
+        "\n"
+        "def handle_request(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    run_query(cursor, name)\n"
+    )
+
+    result = trace_analysis(
+        path=str(p),
+        from_pattern="request.args.get($X)",
+        to_pattern="cursor.execute($Q)",
+        interprocedural=True,
+    )
+    data = json.loads(result)
+
+    assert data["violations"]
+    assert all(v["engine"] == "python" for v in data["violations"])
+
+
+def test_analyze_trace_mode_interprocedural_includes_engine(tmp_path):
+    p = tmp_path / "example.py"
+    p.write_text(
+        "def run_query(cursor, query):\n"
+        "    cursor.execute(query)\n"
+        "\n"
+        "def handle_request(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    run_query(cursor, name)\n"
+    )
+
+    result = analyze(
+        mode="trace",
+        path=str(p),
+        from_pattern="request.args.get($X)",
+        to_pattern="cursor.execute($Q)",
+        interprocedural=True,
+    )
+    data = json.loads(result)
+
+    assert data["violations"]
+    assert all(v["engine"] == "python" for v in data["violations"])
 
 
 def test_check_unified_rules(tmp_path):

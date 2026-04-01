@@ -1,8 +1,4 @@
-"""Phase 9 parity tests: verify trace/flow/policy results are consistent across API, CLI, and MCP entry points.
-
-MCP parity can be tested once MCP test infrastructure exists (direct tool invocation without
-going through the stdio transport). For now we cover API vs CLI parity.
-"""
+"""Phase 9 parity tests for trace/flow/policy entry points."""
 
 import json
 import textwrap
@@ -34,6 +30,15 @@ SOURCE = textwrap.dedent("""\
     def handle_request(request, cursor):
         name = request.args.get('name')
         cursor.execute(name)
+""")
+
+INTERPROCEDURAL_SOURCE = textwrap.dedent("""\
+    def run_query(cursor, query):
+        cursor.execute(query)
+
+    def handle_request(request, cursor):
+        name = request.args.get('name')
+        run_query(cursor, name)
 """)
 
 CONFIG_YAML = textwrap.dedent("""\
@@ -264,3 +269,24 @@ class TestEngineFieldInJsonOutput:
         assert len(data) >= 1
         assert "engine" in data[0], f"'engine' key missing from CLI JSON output: {data[0]}"
         assert data[0]["engine"] == "python"
+
+    def test_cli_interprocedural_json_output_includes_engine(self, tmp_path, run_emend_cmd):
+        """CLI interprocedural trace JSON keeps the canonical engine visible."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(INTERPROCEDURAL_SOURCE)
+        config_path = _write_trace_config(tmp_path)
+
+        result = run_emend_cmd(
+            [
+                "analyze", "trace", str(test_file),
+                "--config", config_path,
+                "--json",
+                "--interprocedural",
+            ],
+            check=False,
+        )
+        assert result.returncode in (0, 1)
+
+        data = json.loads(result.stdout)
+        assert len(data) >= 1
+        assert all(item["engine"] == "python" for item in data)
