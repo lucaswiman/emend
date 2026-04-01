@@ -23,20 +23,7 @@ from emend.trace import (
     run_interprocedural_trace_analysis,
 )
 
-
-def _sql_config() -> TraceConfig:
-    return TraceConfig(
-        labels=["user_input"],
-        sources=[TraceSource(pattern="request.args.get($X)", label="user_input")],
-        sinks=[
-            TraceSink(
-                pattern="cursor.execute($X)",
-                label="user_input",
-                message="SQL injection: user input reaches cursor.execute()",
-            ),
-        ],
-        sanitizers=[TraceSanitizer(pattern="escape($X)", label="user_input")],
-    )
+from conftest import make_sql_injection_config, run_both_interprocedural_engines
 
 
 def _violation_locs(violations: list[TraceViolation]) -> set[tuple[int, str, str]]:
@@ -45,13 +32,7 @@ def _violation_locs(violations: list[TraceViolation]) -> set[tuple[int, str, str
 
 
 def _run_both(tmp_path, source: str, config: TraceConfig | None = None):
-    config = config or _sql_config()
-    test_file = tmp_path / "app.py"
-    test_file.write_text(source)
-    paths = [str(test_file)]
-    py = run_interprocedural_trace_analysis(paths, config)
-    dl = _run_interprocedural_trace_datalog(paths, config)
-    return py, dl
+    return run_both_interprocedural_engines(tmp_path, source, config)
 
 
 # ---------------------------------------------------------------------------

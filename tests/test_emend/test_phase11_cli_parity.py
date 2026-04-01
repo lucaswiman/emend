@@ -225,7 +225,3 @@ class TestResultEquivalence:
     def test_late_sanitizer_equivalence(self, tmp_path):
         py, dl = self._run_both_engines(tmp_path, _LATE_SANITIZER_SOURCE)
         assert _normalize_violations(py) == _normalize_violations(dl)
-
-    def test_violation_count_matches(self, tmp_path):
-        py, dl = self._run_both_engines(tmp_path, _CROSS_FUNCTION_SOURCE)
-        assert len(py) == len(dl)

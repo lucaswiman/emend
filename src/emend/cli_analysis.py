@@ -60,25 +60,22 @@ def _trace_cmd_impl(
 
         _proj_root = project or str(Path(path).resolve())
 
+        if engine != "python" and not interprocedural:
+            print(
+                f"Warning: --engine {engine} has no effect without --interprocedural",
+                file=sys.stderr,
+            )
+
         if interprocedural:
-            if engine == "datalog":
-                from emend.trace import _run_interprocedural_trace_datalog
-                result = _run_interprocedural_trace_datalog(
-                    files, trace_config,
-                    label_filter=label,
-                    language=_lang,
-                    max_iterations=max_iterations,
-                    project_path=_proj_root,
-                )
-            else:
-                from emend.trace import run_interprocedural_trace_analysis
-                result = run_interprocedural_trace_analysis(
-                    files, trace_config,
-                    label_filter=label,
-                    language=_lang,
-                    max_iterations=max_iterations,
-                    project_path=_proj_root,
-                )
+            from emend.trace import run_interprocedural_trace
+            result = run_interprocedural_trace(
+                files, trace_config,
+                label_filter=label,
+                language=_lang,
+                max_iterations=max_iterations,
+                project_path=_proj_root,
+                engine=engine,
+            )
             violations = result.violations
             if not json_output:
                 print(
