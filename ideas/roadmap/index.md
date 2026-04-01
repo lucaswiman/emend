@@ -23,6 +23,7 @@ cross-language support.
 ## Intraprocedural Datalog Migration
 
 - [ ] [Phase 14: Fix Datalog Intraprocedural Trace for Small Projects](./phase-14-fix-datalog-intraprocedural-trace-for-small-projects.md)
+- [ ] [Phase 14a: Incremental Fact Updates and Builder Consolidation](./phase-14a-incremental-fact-updates.md)
 - [ ] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
 - [ ] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
 - [ ] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
@@ -51,6 +52,10 @@ Status of known issues in the tracing and flow stack:
 - **Open:** The Datalog intraprocedural engine returns empty results on small
   file sets because FactGraph construction requires a full project build.
   Tracked in Phase 14.
+- **Open:** Fact graph updates are not incremental — `_ensure_index_fresh()`
+  calls `_build_facts_db()` for a full CozoDB rebuild even when one file
+  changes, and there are four separate build/load paths for FactGraph.
+  Tracked in Phase 14a.
 
 ## Intended End State
 
