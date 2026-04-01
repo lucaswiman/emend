@@ -1784,6 +1784,16 @@ class FactGraph:
                 "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
                 "not scope_kill[fp, fq, lbl, def_block]\n"
 
+                # Cross-variable taint via assignment (some_path variant)
+                "tainted[fp, fq, def_var, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "not str_includes(def_var, \".\"), "
+                "not scope_kill[fp, fq, lbl, block]\n"
+
                 # Pattern-based violations: taint reaches sink, not sanitized
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
@@ -1835,6 +1845,9 @@ class FactGraph:
                 # A variable is tainted in a block if:
                 #   (a) it's a source in that block, OR
                 #   (b) taint propagates via def-use AND block is unsanitized-reachable
+                #   (c) taint flows across variable names via assignment:
+                #       when tainted var X is used on line L and var Y is defined
+                #       on the same line L (same block), Y becomes tainted.
                 "tainted[fp, fq, var, block, lbl] := "
                 f"{source_relation}[fp, fq, var, block, lbl]\n"
 
@@ -1842,6 +1855,20 @@ class FactGraph:
                 "tainted[fp, fq, var, def_block, lbl], "
                 "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
                 "unsanitized[fp, fq, lbl, use_block]\n"
+
+                # Cross-variable taint via assignment: ``y = f(x)`` where x is
+                # tainted means y is tainted.  Detected when a tainted var has a
+                # use on the same line as another var's def (same block).
+                # Only applies to simple names (no dots) to avoid false positives
+                # from attribute writes like ``x.value = ...``.
+                "tainted[fp, fq, def_var, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "not str_includes(def_var, \".\"), "
+                "unsanitized[fp, fq, lbl, block]\n"
 
                 # Pattern-based violations: taint reaches sink
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
@@ -2423,6 +2450,241 @@ class FactGraph:
                 continue
             fact_cls, adder = _TYPE_MAP[type_name]
             adder(fact_cls(**entry))
+        return graph
+
+    # -- File-list builder ------------------------------------------------
+
+    @classmethod
+    def build_from_files(
+        cls,
+        file_paths: list[str],
+        language: str = "python",
+        db_path: str | None = None,
+    ) -> FactGraph:
+        """Populate a fact graph from an explicit list of source files.
+
+        Unlike ``build_from_project`` this does not require a project
+        directory — it builds symbol, CFG, def-use, and import facts
+        directly from the given files.  This is the lightweight path
+        needed for small file sets (e.g. single-file test fixtures) where
+        a full project build is unnecessary or impossible.
+        """
+        from emend import emend_core as _rust
+        from emend.cfg import build_cfgs_for_source
+
+        graph = cls(db_path=db_path)
+
+        for abs_file_path in file_paths:
+            try:
+                content = Path(abs_file_path).read_text(encoding="utf-8")
+            except Exception:
+                logger.debug("Could not read %s", abs_file_path, exc_info=True)
+                continue
+
+            # Use the absolute path as the fact key so callers that pass
+            # absolute paths (e.g. _run_trace_datalog) can look up facts
+            # directly.  Derive a module name from the stem.
+            rel_path = str(Path(abs_file_path).resolve())
+            module_name = Path(abs_file_path).stem
+
+            # -- Symbol facts -----------------------------------------------
+            ext = Path(abs_file_path).suffix.lstrip(".") or "py"
+            try:
+                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
+            except Exception:
+                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
+                raw_symbols = []
+
+            sym_facts: list[SymbolFact] = []
+            dec_facts: list[DecoratorOnFact] = []
+            _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
+            graph.add_symbols_batch(sym_facts)
+            graph.add_decorator_on_batch(dec_facts)
+
+            # -- Source location facts for symbols --------------------------
+            source_loc_facts: list[SourceLocFact] = []
+            for sf in sym_facts:
+                source_loc_facts.append(SourceLocFact(
+                    file_path=sf.file_path,
+                    loc_kind="symbol",
+                    loc_id=sf.qualified_name,
+                    line=sf.line,
+                    end_line=sf.end_line,
+                ))
+            graph.add_source_locs_batch(source_loc_facts)
+
+            # -- CFG blocks and edges ---------------------------------------
+            try:
+                cfgs = build_cfgs_for_source(content, ext=ext)
+            except Exception:
+                logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
+                cfgs = []
+
+            block_ranges: list[tuple[str, int, int, int, bool]] = []
+            cfg_block_facts: list[CfgBlockFact] = []
+            cfg_edge_facts: list[CfgEdgeFact] = []
+
+            for cfg in cfgs:
+                func_name = cfg.func_name
+                func_qn = ""
+                for sf in sym_facts:
+                    if sf.name == func_name and sf.file_path == rel_path:
+                        func_qn = sf.qualified_name
+                        break
+                if not func_qn:
+                    func_qn = f"{module_name}.{func_name}"
+
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    cfg_block_facts.append(CfgBlockFact(
+                        file_path=rel_path,
+                        func_qn=func_qn,
+                        block_id=bid,
+                        is_entry=(bid == cfg.entry),
+                        is_exit=(bid == cfg.exit),
+                    ))
+                    has_content = bool(
+                        block.get("statements")
+                        or block.get("defs")
+                        or block.get("uses")
+                    )
+                    block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
+
+                for edge in cfg.get_edges():
+                    cfg_edge_facts.append(CfgEdgeFact(
+                        file_path=rel_path,
+                        func_qn=func_qn,
+                        from_block=edge["from"],
+                        to_block=edge["to"],
+                        edge_kind=edge["kind"],
+                        from_line=0,
+                        to_line=0,
+                    ))
+
+            graph.add_cfg_blocks_batch(cfg_block_facts)
+            graph.add_cfg_edges_batch(cfg_edge_facts)
+
+            # Source-loc entries for blocks
+            block_loc_facts: list[SourceLocFact] = []
+            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
+                if start_line_br > 0 and has_content_br:
+                    block_loc_facts.append(SourceLocFact(
+                        file_path=rel_path,
+                        loc_kind="block",
+                        loc_id=f"{func_qn_br}:{bid_br}",
+                        line=start_line_br,
+                        end_line=end_line_br,
+                    ))
+            graph.add_source_locs_batch(block_loc_facts)
+
+            block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
+
+            # -- Reference and call facts (scope resolver) ------------------
+            resolver = None
+            refs: list = []
+            try:
+                resolver_root = str(Path(abs_file_path).parent.resolve())
+                resolver = _rust.PyScopeResolver(resolver_root, ext)
+                resolver.index_file(abs_file_path, content)
+            except Exception:
+                logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
+
+            if resolver is not None:
+                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
+                try:
+                    refs = resolver.references_in_file(abs_file_path)
+                except Exception:
+                    logger.debug("references_in_file failed for %s", abs_file_path, exc_info=True)
+                    refs = []
+
+                ref_facts: list[ReferenceFact] = []
+                call_facts: list[CallFact] = []
+                for qn, line, col, _offset, _end_offset, kind in refs:
+                    ref_kind = _map_ref_kind(kind)
+                    fq, bid = _find_containing_block(block_ranges, line)
+                    ref_facts.append(ReferenceFact(
+                        symbol_qn=qn, file_path=rel_path,
+                        line=line, col=col, ref_kind=ref_kind,
+                        func_qn=fq, block_id=bid,
+                    ))
+                    if ref_kind == "call":
+                        caller = _enclosing_symbol(symbol_ranges, line)
+                        caller_qn = caller if caller is not None else module_name
+                        call_facts.append(CallFact(
+                            caller_qn=caller_qn, callee_qn=qn,
+                            file_path=rel_path, line=line, col=col,
+                            func_qn=fq, block_id=bid,
+                        ))
+                graph.add_references_batch(ref_facts)
+                graph.add_calls_batch(call_facts)
+
+            # -- Def-use facts ----------------------------------------------
+            def_use_facts: list[DefUseFact] = []
+            method_call_facts: list[MethodCallFact] = []
+            for cfg in cfgs:
+                func_name = cfg.func_name
+                func_qn = ""
+                for sf in sym_facts:
+                    if sf.name == func_name and sf.file_path == rel_path:
+                        func_qn = sf.qualified_name
+                        break
+                if not func_qn:
+                    func_qn = f"{module_name}.{func_name}"
+
+                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    for d in block.get("defs", []) or []:
+                        var_name = d[0] if isinstance(d, (list, tuple)) else d
+                        dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
+                        dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
+                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
+
+                for block in cfg.get_blocks():
+                    bid = block["id"]
+                    for u in block.get("uses", []) or []:
+                        var_name = u[0] if isinstance(u, (list, tuple)) else u
+                        uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
+                        ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
+                        if var_name in defs_map:
+                            for def_bid, dl, dc, dk in defs_map[var_name]:
+                                def_use_facts.append(DefUseFact(
+                                    file_path=rel_path,
+                                    func_qn=func_qn,
+                                    var_name=var_name,
+                                    kind=dk,
+                                    def_block=def_bid,
+                                    use_block=bid,
+                                    def_line=dl,
+                                    def_col=dc,
+                                    use_line=uline,
+                                    use_col=ucol,
+                                ))
+
+            # Method call facts from dotted-name call references
+            if resolver is not None:
+                for qn, line, col, _offset, _end_offset, kind in refs:
+                    if _map_ref_kind(kind) == "call" and "." in qn:
+                        parts = qn.rsplit(".", 1)
+                        if len(parts) == 2:
+                            fq, bid = _find_containing_block(block_ranges, line)
+                            method_call_facts.append(MethodCallFact(
+                                file_path=rel_path,
+                                func_qn=fq,
+                                receiver=parts[0].rsplit(".", 1)[-1],
+                                method=parts[1],
+                                block_id=bid,
+                                line=line,
+                            ))
+
+            graph.add_def_uses_batch(def_use_facts)
+            graph.add_method_calls_batch(method_call_facts)
+
+            # -- Import facts -----------------------------------------------
+            import_facts = _extract_imports(rel_path, content)
+            graph.add_imports_batch(import_facts)
+
         return graph
 
     # -- Project builder --------------------------------------------------

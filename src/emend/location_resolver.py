@@ -78,7 +78,7 @@ def _find_most_specific_block(block_ranges: list[_BlockRange], func_qn: str, lin
             continue
         if start <= line <= end:
             span = end - start
-            if span < best_span:
+            if span < best_span or (span == best_span and bid > best_bid):
                 best_span = span
                 best_bid = bid
     return best_bid

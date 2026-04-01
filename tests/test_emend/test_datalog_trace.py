@@ -278,8 +278,8 @@ def test_run_trace_datalog_uses_exact_sink_metadata(monkeypatch, tmp_path):
         lambda graph, file_path, line: ("app.handle", 7),
     )
     monkeypatch.setattr(
-        "emend.transform._get_or_build_fact_graph",
-        lambda project_path: _FakeGraph(),
+        "emend.trace._build_trace_fact_graph",
+        lambda paths, language, project_path: _FakeGraph(),
     )
 
     result = _run_trace_datalog(
@@ -366,8 +366,8 @@ def test_run_trace_datalog_supports_effect_only_sinks(monkeypatch, tmp_path):
         lambda graph, file_path, line: ("app.handle", 4),
     )
     monkeypatch.setattr(
-        "emend.transform._get_or_build_fact_graph",
-        lambda project_path: _FakeGraph(),
+        "emend.trace._build_trace_fact_graph",
+        lambda paths, language, project_path: _FakeGraph(),
     )
 
     result = _run_trace_datalog(
@@ -443,8 +443,8 @@ def test_run_trace_datalog_type_constrained_sink_does_not_filter_other_sinks(
         lambda graph, file_path, line: ("app.handle", line),
     )
     monkeypatch.setattr(
-        "emend.transform._get_or_build_fact_graph",
-        lambda project_path: _FakeGraph(),
+        "emend.trace._build_trace_fact_graph",
+        lambda paths, language, project_path: _FakeGraph(),
     )
 
     result = _run_trace_datalog(
@@ -585,8 +585,8 @@ def test_run_trace_datalog_sanitizer_quantifier_is_scoped_per_label(
         return matches_by_pattern.get(pattern, [])
 
     monkeypatch.setattr(
-        "emend.transform._get_or_build_fact_graph",
-        lambda project_path: fake_graph,
+        "emend.trace._build_trace_fact_graph",
+        lambda paths, language, project_path: fake_graph,
     )
     monkeypatch.setattr("emend.trace.find_pattern", _fake_find_pattern)
 
