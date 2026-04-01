@@ -2051,6 +2051,170 @@ def _snapshot_summary(s: FunctionSummary) -> tuple:
     )
 
 
+def _compute_return_reachable_vars(
+    source: str,
+    func_start: int,
+    func_end: int,
+) -> set[str]:
+    """Return variables whose values can still reach a later return."""
+    lines = source.split("\n")
+    body_start = func_start + 1
+    if body_start > func_end:
+        return set()
+
+    import textwrap as _textwrap
+
+    body_text_lines = lines[body_start - 1 : func_end]
+    body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
+    body_assignments = _find_assignments_in_source(body_dedented)
+    assignments_by_line: dict[int, list[tuple[str, str]]] = {}
+    for stmt_line_rel, target, rhs in body_assignments:
+        stmt_line_abs = stmt_line_rel + body_start - 1
+        assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+
+    reachable: set[str] = set()
+    for line_idx in range(func_end, func_start - 1, -1):
+        if line_idx - 1 >= len(lines):
+            continue
+        stripped = lines[line_idx - 1].strip()
+        ret_m = re.match(r"return\s+(.+)", stripped)
+        if ret_m:
+            reachable |= _extract_identifiers(ret_m.group(1))
+        for target, rhs in reversed(assignments_by_line.get(line_idx, [])):
+            if target in reachable:
+                reachable.discard(target)
+                reachable |= _extract_identifiers(rhs)
+
+    return reachable
+
+
+def _collect_param_to_return_dependencies(
+    *,
+    source: str,
+    func_start: int,
+    func_end: int,
+    func_qn: str,
+    param_names: list[str],
+    func_info: dict[str, tuple[str, str, int, int, list[str]]],
+    name_to_qn: dict[str, list[str]],
+    func_paths: dict[str, tuple[str, ...]],
+    func_kinds: dict[str, str],
+) -> list[tuple[str, str, str, str]]:
+    """Collect ``caller_param -> callee_param`` return-summary edges."""
+    if not param_names:
+        return []
+
+    lines = source.split("\n")
+    body_start = func_start + 1
+    if body_start > func_end:
+        return []
+
+    import textwrap as _textwrap
+
+    body_text_lines = lines[body_start - 1 : func_end]
+    body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
+    body_assignments = _find_assignments_in_source(body_dedented)
+    assignments_by_line: dict[int, list[tuple[str, str]]] = {}
+    for stmt_line_rel, target, rhs in body_assignments:
+        stmt_line_abs = stmt_line_rel + body_start - 1
+        assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+
+    return_reachable = _compute_return_reachable_vars(source, func_start, func_end)
+    deps: set[tuple[str, str, str, str]] = set()
+
+    for param_name in param_names:
+        tainted_vars: set[str] = {param_name}
+        for line_idx in range(func_start, func_end + 1):
+            for target, rhs in assignments_by_line.get(line_idx, []):
+                rhs_idents = _extract_identifiers(rhs)
+                if any(ident in tainted_vars for ident in rhs_idents):
+                    tainted_vars.add(target)
+
+                if target not in return_reachable:
+                    continue
+
+                call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
+                if not call_m:
+                    continue
+                callee_name = call_m.group(1)
+                args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
+                if not args_m:
+                    continue
+                arg_strs = [a.strip() for a in args_m.group(1).split(",") if a.strip()]
+                callee_qns = _select_interprocedural_callee_qns(
+                    func_qn,
+                    callee_name,
+                    name_to_qn=name_to_qn,
+                    func_paths=func_paths,
+                    func_kinds=func_kinds,
+                    include_methods=False,
+                )
+                for callee_qn in callee_qns:
+                    callee_params = func_info.get(callee_qn, ("", "", 0, 0, []))[4]
+                    for arg_idx, arg_str in enumerate(arg_strs):
+                        if arg_idx >= len(callee_params):
+                            break
+                        if any(ident in tainted_vars for ident in _extract_identifiers(arg_str)):
+                            deps.add((func_qn, param_name, callee_qn, callee_params[arg_idx]))
+
+    return sorted(deps)
+
+
+def _run_interprocedural_return_datalog(
+    summaries: dict[str, FunctionSummary],
+    return_dependencies: list[tuple[str, str, str, str]],
+    *,
+    label_filter: str | None,
+) -> dict[str, FunctionSummary]:
+    """Use Datalog to compute the transitive ``param_to_return`` closure."""
+    if not return_dependencies:
+        return summaries
+
+    from emend.fact_graph import FactGraph
+
+    direct_returns: list[tuple[str, str, str]] = []
+    for summary in summaries.values():
+        for param_name, labels in summary.param_to_return.items():
+            for label in labels:
+                if label_filter and label != label_filter:
+                    continue
+                direct_returns.append((summary.qualified_name, param_name, label))
+
+    graph = FactGraph()
+    ir = graph._inline_relation
+    query = (
+        ir("direct_return", ["fq", "param", "lbl"], direct_returns)
+        + ir(
+            "return_dep",
+            ["caller_fq", "caller_param", "callee_fq", "callee_param"],
+            return_dependencies,
+        )
+        + "param_to_return[fq, param, lbl] := direct_return[fq, param, lbl]\n"
+        + "param_to_return[caller_fq, caller_param, lbl] := "
+        + "return_dep[caller_fq, caller_param, callee_fq, callee_param], "
+        + "param_to_return[callee_fq, callee_param, lbl]\n"
+        + "?[fq, param, lbl] := param_to_return[fq, param, lbl]"
+    )
+    result = graph._client.run(query)
+
+    updated: dict[str, FunctionSummary] = {
+        qn: FunctionSummary(
+            qualified_name=summary.qualified_name,
+            file_path=summary.file_path,
+            param_to_return={k: set(v) for k, v in summary.param_to_return.items()},
+            param_to_sink={k: list(v) for k, v in summary.param_to_sink.items()},
+            param_to_param={k: set(v) for k, v in summary.param_to_param.items()},
+        )
+        for qn, summary in summaries.items()
+    }
+    for fq, param, lbl in result["rows"]:
+        updated.setdefault(
+            fq,
+            FunctionSummary(qualified_name=fq, file_path=summaries.get(fq, FunctionSummary(fq, "")).file_path),
+        ).param_to_return.setdefault(param, set()).add(lbl)
+    return updated
+
+
 def run_interprocedural_trace_analysis(
     paths: list[str],
     config: TraceConfig,
@@ -2644,4 +2808,422 @@ def run_interprocedural_trace_analysis(
         violations=_deduplicate_violations(violations),
         summaries=summaries,
         iterations=iterations,
+    )
+
+
+def _run_interprocedural_trace_datalog(
+    paths: list[str],
+    config: TraceConfig,
+    label_filter: str | None = None,
+    language: str = "python",
+    max_iterations: int = 10,
+    project_path: str | None = None,
+) -> InterproceduralResult:
+    """Phase 11 parity adapter: Datalog summaries with public-style witnesses."""
+    if not config.sources or not config.sinks:
+        return InterproceduralResult(violations=[], summaries={}, iterations=0)
+
+    from emend.ast_utils import find_nested_definitions
+
+    func_info: dict[str, tuple[str, str, int, int, list[str]]] = {}
+    func_paths: dict[str, tuple[str, ...]] = {}
+    func_kinds: dict[str, str] = {}
+    file_sources: dict[str, str] = {}
+
+    for file_path in paths:
+        path_obj = Path(file_path)
+        if not path_obj.exists():
+            continue
+        try:
+            source = path_obj.read_text()
+        except Exception:
+            logger.debug("Could not read %s", file_path, exc_info=True)
+            continue
+
+        file_sources[file_path] = source
+
+        try:
+            symbols = find_nested_definitions(file_path)
+        except Exception:
+            logger.debug("Could not parse %s", file_path, exc_info=True)
+            continue
+
+        functions = _collect_function_descriptors(symbols)
+        for func_path, func_start, func_end, func_kind in functions:
+            params = _collect_function_params(source, func_start, func_end)
+            qn = _format_interprocedural_qn(file_path, func_path)
+            func_info[qn] = (file_path, source, func_start, func_end, params)
+            func_paths[qn] = func_path
+            func_kinds[qn] = func_kind
+
+    direct_summaries: dict[str, FunctionSummary] = {}
+    for qn, (fp, src, fs, fe, params) in func_info.items():
+        direct_summaries[qn] = _compute_function_summary(
+            file_path=fp,
+            source=src,
+            func_start=fs,
+            func_end=fe,
+            config=config,
+            func_qn=qn,
+            param_names=params,
+            language=language,
+        )
+
+    name_to_qn: dict[str, list[str]] = {}
+    for qn in func_info:
+        short_name = func_paths.get(qn, ())[-1]
+        if short_name not in name_to_qn:
+            name_to_qn[short_name] = []
+        name_to_qn[short_name].append(qn)
+
+    return_dependencies: list[tuple[str, str, str, str]] = []
+    for qn, (_fp, src, fs, fe, params) in func_info.items():
+        return_dependencies.extend(
+            _collect_param_to_return_dependencies(
+                source=src,
+                func_start=fs,
+                func_end=fe,
+                func_qn=qn,
+                param_names=params,
+                func_info=func_info,
+                name_to_qn=name_to_qn,
+                func_paths=func_paths,
+                func_kinds=func_kinds,
+            )
+        )
+
+    summaries = _run_interprocedural_return_datalog(
+        direct_summaries,
+        return_dependencies,
+        label_filter=label_filter,
+    )
+    violations: list[TraceViolation] = []
+
+    for file_path in paths:
+        if file_path not in file_sources:
+            continue
+        source = file_sources[file_path]
+        try:
+            symbols = find_nested_definitions(file_path)
+        except Exception:
+            continue
+
+        functions = _collect_functions(symbols)
+        module_ranges = _collect_module_level_ranges(symbols, len(source.split("\n")))
+        functions.extend(
+            ("__module__", module_start, module_end)
+            for module_start, module_end in module_ranges
+        )
+
+        for _func_name, func_start, func_end in functions:
+            func_violations = _analyze_function(
+                file_path=file_path,
+                source=source,
+                func_start=func_start,
+                func_end=func_end,
+                config=config,
+                label_filter=label_filter,
+                language=language,
+            )
+            violations.extend(func_violations)
+
+    import textwrap as _textwrap
+
+    for caller_qn, (fp, src, fs, fe, _caller_params) in func_info.items():
+        lines = src.split("\n")
+        body_start = fs + 1
+        if body_start > fe:
+            continue
+
+        taint_state: dict[str, dict[str, TraceStep]] = {}
+        sources_by_line: dict[int, list[tuple[TraceSource, int, set[str]]]] = {}
+        sanitizers_by_line: dict[int, list[tuple[TraceSanitizer, set[str]]]] = {}
+        sinks_by_line: dict[int, list[tuple[TraceSink, int, set[str]]]] = {}
+
+        for src_def in config.sources:
+            if label_filter and src_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    src_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+            for match in matches:
+                match_line = match.line or 1
+                match_col = match.col or 0
+                if not (fs <= match_line <= fe):
+                    continue
+                tainted_vars: set[str] = set()
+                stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
+                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                if assign_m:
+                    tainted_vars.add(assign_m.group(1))
+                for _cn, cv in (match.captures or {}).items():
+                    if cv and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cv):
+                        tainted_vars.add(cv)
+                if not tainted_vars and match.matched_text:
+                    tainted_vars |= _extract_identifiers(match.matched_text)
+                if tainted_vars:
+                    sources_by_line.setdefault(match_line, []).append(
+                        (src_def, match_col, tainted_vars)
+                    )
+
+        for san_def in config.sanitizers:
+            if label_filter and san_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    san_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+            for match in matches:
+                match_line = match.line or 1
+                if not (fs <= match_line <= fe):
+                    continue
+                stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
+                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                sanitized_vars: set[str] = set()
+                if assign_m:
+                    sanitized_vars.add(assign_m.group(1))
+                for _cn, cv in (match.captures or {}).items():
+                    if cv and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cv):
+                        sanitized_vars.add(cv)
+                if sanitized_vars:
+                    sanitizers_by_line.setdefault(match_line, []).append(
+                        (san_def, sanitized_vars)
+                    )
+
+        for sink_def in config.sinks:
+            if label_filter and sink_def.label != label_filter:
+                continue
+            try:
+                matches = find_pattern(
+                    sink_def.pattern, fp,
+                    source_override=src,
+                    language=language,
+                )
+            except Exception:
+                continue
+            for match in matches:
+                match_line = match.line or 1
+                match_col = match.col or 0
+                if not (fs <= match_line <= fe):
+                    continue
+                sink_idents: set[str] = set()
+                for _cn, cv in (match.captures or {}).items():
+                    if cv:
+                        sink_idents |= _extract_identifiers(cv)
+                if match.matched_text:
+                    sink_idents |= _extract_identifiers(match.matched_text)
+                if sink_idents:
+                    sinks_by_line.setdefault(match_line, []).append(
+                        (sink_def, match_col, sink_idents)
+                    )
+
+        body_text_lines = lines[body_start - 1 : fe]
+        body_text = "\n".join(body_text_lines) + "\n"
+        body_dedented = _textwrap.dedent(body_text)
+        body_assignments = _find_assignments_in_source(body_dedented)
+        assignments_by_line: dict[int, list[tuple[str, str]]] = {}
+        for stmt_line_rel, target, rhs in body_assignments:
+            stmt_line_abs = stmt_line_rel + body_start - 1
+            assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+
+        for line_idx in range(fs, fe + 1):
+            if line_idx - 1 >= len(lines):
+                break
+
+            for src_def, match_col, tainted_vars in sources_by_line.get(line_idx, []):
+                step = TraceStep(
+                    file_path=fp,
+                    line=line_idx,
+                    col=match_col,
+                    description=f"source: {src_def.label} via {src_def.pattern}",
+                    variable=", ".join(sorted(tainted_vars)) or "?",
+                )
+                for var in tainted_vars:
+                    taint_state.setdefault(var, {})[src_def.label] = step
+
+            for target, rhs in assignments_by_line.get(line_idx, []):
+                rhs_idents = _extract_identifiers(rhs)
+                propagated: dict[str, TraceStep] = {}
+                for ident in rhs_idents:
+                    if ident in taint_state:
+                        for lbl in taint_state[ident]:
+                            if label_filter and lbl != label_filter:
+                                continue
+                            propagated[lbl] = TraceStep(
+                                file_path=fp,
+                                line=line_idx,
+                                col=0,
+                                description=f"propagation: {target} = ... {ident} ...",
+                                variable=target,
+                            )
+
+                call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
+                if call_m:
+                    callee_name = call_m.group(1)
+                    args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
+                    if args_m:
+                        arg_strs = [a.strip() for a in args_m.group(1).split(",") if a.strip()]
+                        for callee_qn in _select_interprocedural_callee_qns(
+                            caller_qn,
+                            callee_name,
+                            name_to_qn=name_to_qn,
+                            func_paths=func_paths,
+                            func_kinds=func_kinds,
+                            include_methods=False,
+                        ):
+                            callee_summary = summaries.get(callee_qn)
+                            if not callee_summary:
+                                continue
+                            callee_params = func_info[callee_qn][4]
+                            for arg_idx, arg_str in enumerate(arg_strs):
+                                if arg_idx >= len(callee_params):
+                                    break
+                                callee_param = callee_params[arg_idx]
+                                if callee_param not in callee_summary.param_to_return:
+                                    continue
+                                arg_idents = _extract_identifiers(arg_str)
+                                for ai in arg_idents:
+                                    if ai not in taint_state:
+                                        continue
+                                    for lbl in taint_state[ai]:
+                                        if label_filter and lbl != label_filter:
+                                            continue
+                                        if lbl not in callee_summary.param_to_return[callee_param]:
+                                            continue
+                                        propagated[lbl] = TraceStep(
+                                            file_path=fp,
+                                            line=line_idx,
+                                            col=0,
+                                            description=(
+                                                f"propagation: {target} = {callee_name}(...) "
+                                                f"returns tainted '{ai}'"
+                                            ),
+                                            variable=target,
+                                        )
+                if propagated:
+                    for lbl, step in propagated.items():
+                        taint_state.setdefault(target, {})
+                        if lbl not in taint_state[target]:
+                            taint_state[target][lbl] = step
+
+            for san_def, sanitized_vars in sanitizers_by_line.get(line_idx, []):
+                for var in sanitized_vars:
+                    if var in taint_state and san_def.label in taint_state[var]:
+                        del taint_state[var][san_def.label]
+                        if not taint_state[var]:
+                            del taint_state[var]
+
+            for sink_def, match_col, sink_idents in sinks_by_line.get(line_idx, []):
+                for ident in sink_idents:
+                    if ident not in taint_state:
+                        continue
+                    if sink_def.label not in taint_state[ident]:
+                        continue
+                    origin_step = taint_state[ident][sink_def.label]
+                    violations.append(TraceViolation(
+                        file_path=fp,
+                        line=line_idx,
+                        col=match_col,
+                        label=sink_def.label,
+                        sink_pattern=sink_def.pattern,
+                        message=sink_def.message,
+                        trace=[
+                            origin_step,
+                            TraceStep(
+                                file_path=fp,
+                                line=line_idx,
+                                col=match_col,
+                                description=f"sink: {sink_def.label} via {sink_def.pattern}",
+                                variable=ident,
+                            ),
+                        ],
+                    ))
+                    break
+
+            line_text = lines[line_idx - 1]
+            for call_match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)", line_text):
+                callee_name = call_match.group(1)
+                arg_list = [a.strip() for a in call_match.group(2).split(",") if a.strip()]
+                callee_qns = _select_interprocedural_callee_qns(
+                    caller_qn,
+                    callee_name,
+                    name_to_qn=name_to_qn,
+                    func_paths=func_paths,
+                    func_kinds=func_kinds,
+                    include_methods=call_match.start() > 0 and line_text[call_match.start() - 1] == ".",
+                )
+                for callee_qn in callee_qns:
+                    callee_summary = summaries.get(callee_qn)
+                    if not callee_summary:
+                        continue
+                    callee_params = func_info[callee_qn][4]
+                    for arg_idx, arg_str in enumerate(arg_list):
+                        if arg_idx >= len(callee_params):
+                            break
+                        callee_param = callee_params[arg_idx]
+                        arg_idents = _extract_identifiers(arg_str)
+                        for ai in arg_idents:
+                            if ai not in taint_state:
+                                continue
+                            for lbl, origin_step in taint_state[ai].items():
+                                if label_filter and lbl != label_filter:
+                                    continue
+                                if callee_param not in callee_summary.param_to_sink:
+                                    continue
+                                for sink_label, sink_pat, sink_line in callee_summary.param_to_sink[callee_param]:
+                                    if sink_label != lbl:
+                                        continue
+                                    trace = [
+                                        origin_step,
+                                        TraceStep(
+                                            file_path=fp,
+                                            line=line_idx,
+                                            col=call_match.start(),
+                                            description=(
+                                                f"call: {callee_name}({arg_str}) passes tainted "
+                                                f"'{ai}' as param '{callee_param}'"
+                                            ),
+                                            variable=ai,
+                                        ),
+                                        TraceStep(
+                                            file_path=callee_summary.file_path,
+                                            line=sink_line,
+                                            col=0,
+                                            description=(
+                                                f"sink: {sink_label} via {sink_pat} "
+                                                f"(in callee {callee_name})"
+                                            ),
+                                            variable=callee_param,
+                                        ),
+                                    ]
+                                    sink_msg = "Traced value reaches sink via function call"
+                                    for sd in config.sinks:
+                                        if sd.pattern == sink_pat and sd.label == sink_label:
+                                            sink_msg = sd.message + f" (via {callee_name})"
+                                            break
+                                    violations.append(TraceViolation(
+                                        file_path=fp,
+                                        line=line_idx,
+                                        col=call_match.start(),
+                                        label=lbl,
+                                        sink_pattern=sink_pat,
+                                        message=sink_msg,
+                                        trace=trace,
+                                    ))
+
+    for violation in violations:
+        violation.engine = "datalog"
+    return InterproceduralResult(
+        violations=_deduplicate_violations(violations),
+        summaries=summaries,
+        iterations=1 if summaries else 0,
     )

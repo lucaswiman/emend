@@ -134,6 +134,15 @@ uv run emend trace path/to/project/package --config /tmp/manual-trace-rules.yaml
 
 ### During Parity Work
 
+Before broader CLI/manual runs, execute the focused parity corpus:
+
+```bash
+make test TESTS='tests/test_emend/test_phase11_differential.py tests/test_emend/test_interprocedural_trace.py -k "phase11 or interprocedural_datalog or callee_return_taint_reaches_caller_sink or cross_function_violation or nested_same_named_helpers_are_scoped_to_their_owner or late_sanitizer_does_not_erase_earlier_interprocedural_violation"'
+```
+
+That corpus compares the public Python engine against the private Phase 11
+Datalog adapter on curated interprocedural fixtures before any cutover work.
+
 When two engines are expected to match, compare:
 
 - finding count
