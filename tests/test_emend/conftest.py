@@ -4,6 +4,7 @@ import ast
 import sqlite3
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,44 @@ def make_sql_injection_config():
         ],
         sanitizers=[TraceSanitizer(pattern="escape($X)", label="user_input")],
     )
+
+
+SQL_INJECTION_CONFIG_YAML = textwrap.dedent("""\
+    trace:
+      labels:
+        - user_input
+      sources:
+        - pattern: "request.args.get($X)"
+          label: user_input
+      sinks:
+        - pattern: "cursor.execute($X)"
+          label: user_input
+          message: "SQL injection: user input reaches cursor.execute()"
+      sanitizers:
+        - pattern: "escape($X)"
+          label: user_input
+""")
+
+CROSS_FUNCTION_SOURCE = textwrap.dedent("""\
+    def run_query(cursor, query):
+        cursor.execute(query)
+
+    def handle_request(request, cursor):
+        name = request.args.get('name')
+        run_query(cursor, name)
+""")
+
+
+def setup_trace_fixture(tmp_path, source=None):
+    """Write *source* and the standard SQL-injection YAML config to *tmp_path*.
+
+    Returns ``(source_path, config_path)``.
+    """
+    src = tmp_path / "app.py"
+    src.write_text(source or CROSS_FUNCTION_SOURCE)
+    cfg = tmp_path / "rules.yaml"
+    cfg.write_text(SQL_INJECTION_CONFIG_YAML)
+    return src, cfg
 
 
 def run_both_interprocedural_engines(tmp_path, source, config=None):

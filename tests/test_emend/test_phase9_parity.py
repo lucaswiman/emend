@@ -289,4 +289,4 @@ class TestEngineFieldInJsonOutput:
 
         data = json.loads(result.stdout)
         assert len(data) >= 1
-        assert all(item["engine"] == "python" for item in data)
+        assert all(item["engine"] == "datalog" for item in data)

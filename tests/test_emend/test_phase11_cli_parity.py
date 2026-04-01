@@ -12,48 +12,23 @@ from __future__ import annotations
 
 import json
 import textwrap
-from pathlib import Path
-
-import pytest
 
 from typer.testing import CliRunner
 
 from emend.cli import app
+
+from conftest import (
+    CROSS_FUNCTION_SOURCE,
+    setup_trace_fixture,
+)
 
 
 runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# Fixture helpers
+# File-specific source fixtures (not shared because they are only used here)
 # ---------------------------------------------------------------------------
-
-_SQL_CONFIG = textwrap.dedent("""\
-    trace:
-      labels:
-        - user_input
-      sources:
-        - pattern: "request.args.get($X)"
-          label: user_input
-      sinks:
-        - pattern: "cursor.execute($X)"
-          label: user_input
-          message: "SQL injection: user input reaches cursor.execute()"
-      sanitizers:
-        - pattern: "escape($X)"
-          label: user_input
-""")
-
-
-_CROSS_FUNCTION_SOURCE = textwrap.dedent("""\
-    def run_query(cursor, query):
-        cursor.execute(query)
-
-    def handle_request(request, cursor):
-        name = request.args.get('name')
-        run_query(cursor, name)
-""")
-
 
 _RETURNED_TAINT_SOURCE = textwrap.dedent("""\
     def passthrough(value):
@@ -77,15 +52,6 @@ _LATE_SANITIZER_SOURCE = textwrap.dedent("""\
 """)
 
 
-def _setup_fixture(tmp_path: Path, source: str) -> tuple[Path, Path]:
-    """Write source and config to tmp_path, return (source_path, config_path)."""
-    src = tmp_path / "app.py"
-    src.write_text(source)
-    cfg = tmp_path / "rules.yaml"
-    cfg.write_text(_SQL_CONFIG)
-    return src, cfg
-
-
 # ---------------------------------------------------------------------------
 # Engine flag routing
 # ---------------------------------------------------------------------------
@@ -94,8 +60,8 @@ def _setup_fixture(tmp_path: Path, source: str) -> tuple[Path, Path]:
 class TestEngineFlag:
     """The ``--engine`` flag on ``trace --interprocedural`` selects the engine."""
 
-    def test_default_engine_is_python(self, tmp_path):
-        src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
+    def test_default_engine_is_datalog(self, tmp_path):
+        src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             ["trace", str(src), "--config", str(cfg), "--interprocedural", "--json"],
@@ -103,10 +69,10 @@ class TestEngineFlag:
         assert result.exit_code in (0, 1), result.output
         data = json.loads(result.output)
         assert len(data) > 0
-        assert all(v["engine"] == "python" for v in data)
+        assert all(v["engine"] == "datalog" for v in data)
 
     def test_engine_python_explicit(self, tmp_path):
-        src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
+        src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             [
@@ -120,7 +86,7 @@ class TestEngineFlag:
         assert all(v["engine"] == "python" for v in data)
 
     def test_engine_datalog(self, tmp_path):
-        src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
+        src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             [
@@ -143,7 +109,7 @@ class TestEngineInJsonOutput:
     """JSON output from ``trace --interprocedural`` always includes ``engine``."""
 
     def test_python_engine_in_json(self, tmp_path):
-        src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
+        src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             [
@@ -157,7 +123,7 @@ class TestEngineInJsonOutput:
             assert v["engine"] == "python"
 
     def test_datalog_engine_in_json(self, tmp_path):
-        src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
+        src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
             [
@@ -193,7 +159,7 @@ class TestResultEquivalence:
     """Both engines produce equivalent violations on CLI-level fixtures."""
 
     def _run_both_engines(self, tmp_path, source):
-        src, cfg = _setup_fixture(tmp_path, source)
+        src, cfg = setup_trace_fixture(tmp_path, source)
         py_result = runner.invoke(
             app,
             [
@@ -215,7 +181,7 @@ class TestResultEquivalence:
         return py_data, dl_data
 
     def test_cross_function_equivalence(self, tmp_path):
-        py, dl = self._run_both_engines(tmp_path, _CROSS_FUNCTION_SOURCE)
+        py, dl = self._run_both_engines(tmp_path, CROSS_FUNCTION_SOURCE)
         assert _normalize_violations(py) == _normalize_violations(dl)
 
     def test_returned_taint_equivalence(self, tmp_path):
