@@ -59,6 +59,7 @@ Run both intraprocedural and interprocedural modes on a targeted file first:
 ```bash
 uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --json
 uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --interprocedural --json
+uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --interprocedural --engine datalog --json
 ```
 
 Current known-good observations from the self-hosted baseline:
@@ -67,7 +68,9 @@ Current known-good observations from the self-hosted baseline:
 - current findings include:
   - `src/emend/lint.py:720` for `$P.read_text()`
   - `src/emend/lint.py:728` for `$P.write_text($DATA)`
-- both commands currently report `engine: "python"`
+- `--engine python` (the default) reports `engine: "python"`
+- `--engine datalog` reports `engine: "datalog"`
+- both engines should produce the same findings for these simple flows
 
 Those exact findings are not a contract forever, but major unexpected changes
 should be investigated.
@@ -79,6 +82,7 @@ After the file-level check is stable, try a directory slice:
 ```bash
 uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --json
 uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --interprocedural --json
+uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --interprocedural --engine datalog --json
 ```
 
 Current caveat:
@@ -137,11 +141,13 @@ uv run emend trace path/to/project/package --config /tmp/manual-trace-rules.yaml
 Before broader CLI/manual runs, execute the focused parity corpus:
 
 ```bash
-make test TESTS='tests/test_emend/test_phase11_differential.py tests/test_emend/test_interprocedural_trace.py -k "phase11 or interprocedural_datalog or callee_return_taint_reaches_caller_sink or cross_function_violation or nested_same_named_helpers_are_scoped_to_their_owner or late_sanitizer_does_not_erase_earlier_interprocedural_violation"'
+make test TESTS='tests/test_emend/test_phase11_differential.py tests/test_emend/test_phase11_cli_parity.py tests/test_emend/test_phase11_divergence.py tests/test_emend/test_interprocedural_trace.py -k "phase11 or interprocedural_datalog or callee_return_taint_reaches_caller_sink or cross_function_violation or nested_same_named_helpers_are_scoped_to_their_owner or late_sanitizer_does_not_erase_earlier_interprocedural_violation"'
 ```
 
 That corpus compares the public Python engine against the private Phase 11
 Datalog adapter on curated interprocedural fixtures before any cutover work.
+The CLI parity tests also verify that `--engine python` and `--engine datalog`
+route correctly and that JSON output includes the `engine` field.
 
 When two engines are expected to match, compare:
 
@@ -152,6 +158,20 @@ When two engines are expected to match, compare:
 - engine metadata
 
 Also manually inspect a few traces/witnesses, not just counts.
+
+### Accepted Divergences
+
+The following differences between the Python and Datalog engines are documented
+and accepted (see `tests/test_emend/test_phase11_divergence.py`):
+
+1. **Iteration count**: Datalog always reports `iterations=1` because it uses a
+   single transitive closure query. Python may report higher iteration counts
+   for multi-hop call chains. This is a representation difference, not a
+   semantic one.
+
+2. **Trace step descriptions**: The descriptive text in trace steps may use
+   slightly different phrasing between engines. The semantic content (file,
+   line, variable) matches; the description is informational only.
 
 ### During Cutover Work
 

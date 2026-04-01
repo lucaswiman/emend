@@ -26,6 +26,7 @@ def _trace_cmd_impl(
     interprocedural: bool,
     max_iterations: int,
     preset: str | None,
+    engine: str = "python",
 ) -> None:
     """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
@@ -60,18 +61,28 @@ def _trace_cmd_impl(
         _proj_root = project or str(Path(path).resolve())
 
         if interprocedural:
-            from emend.trace import run_interprocedural_trace_analysis
-            result = run_interprocedural_trace_analysis(
-                files, trace_config,
-                label_filter=label,
-                language=_lang,
-                max_iterations=max_iterations,
-                project_path=_proj_root,
-            )
+            if engine == "datalog":
+                from emend.trace import _run_interprocedural_trace_datalog
+                result = _run_interprocedural_trace_datalog(
+                    files, trace_config,
+                    label_filter=label,
+                    language=_lang,
+                    max_iterations=max_iterations,
+                    project_path=_proj_root,
+                )
+            else:
+                from emend.trace import run_interprocedural_trace_analysis
+                result = run_interprocedural_trace_analysis(
+                    files, trace_config,
+                    label_filter=label,
+                    language=_lang,
+                    max_iterations=max_iterations,
+                    project_path=_proj_root,
+                )
             violations = result.violations
             if not json_output:
                 print(
-                    f"Interprocedural analysis: {result.iterations} iteration(s), "
+                    f"Interprocedural analysis ({engine}): {result.iterations} iteration(s), "
                     f"{len(result.summaries)} function summary(ies)",
                     file=sys.stderr,
                 )
@@ -114,6 +125,7 @@ def trace_cmd(
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
+    engine: Annotated[str, typer.Option("--engine", help="Interprocedural engine: python or datalog")] = "python",
 ):
     """Run trace analysis to detect unsafe data flows.
 
@@ -123,6 +135,9 @@ def trace_cmd(
 
     With --interprocedural, tracks values across function boundaries using
     function summaries and fixed-point iteration.
+
+    Use --engine datalog to select the Datalog-backed interprocedural engine
+    (Phase 11 parity adapter).
 
     Configuration is read from .emend/rules.yaml by default, falling back to
     the legacy trace section in .emend/patterns.yaml. Use --preset to load
@@ -135,10 +150,11 @@ def trace_cmd(
         emend trace src/ --trace
         emend trace src/ --json
         emend trace src/ --interprocedural
+        emend trace src/ --interprocedural --engine datalog
         emend trace app.py --preset flask
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
-                    interprocedural, max_iterations, preset)
+                    interprocedural, max_iterations, preset, engine)
 
 
 import sys

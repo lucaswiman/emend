@@ -48,13 +48,13 @@ That keeps parity work observable without changing the public engine yet.
 
 - [x] Add differential tests that compare the public Python engine and the
   Phase 11 Datalog adapter on the same fixtures.
-- [ ] Enumerate every currently accepted divergence and either fix it or mark it
+- [x] Enumerate every currently accepted divergence and either fix it or mark it
   as intentional in tests/docs.
 - [x] Extend the Datalog path so it can reconstruct public-facing violations
   with parity on label, line, message, and sink pattern.
 - [x] Prove parity for nested functions, caller/callee scoping, late
   sanitizers, and statement-order cases already covered in the Python engine.
-- [ ] Add CLI/API tests that make engine choice and result equivalence
+- [x] Add CLI/API tests that make engine choice and result equivalence
   observable.
 - [ ] Run the manual commands in `docs/internal/manual-testing/trace-pipeline.md`
   on both `emend` itself and at least one external comparison target during
@@ -72,12 +72,24 @@ Done in this phase:
   - returned-taint reaching a caller-local sink
   - late sanitizer ordering
   - nested same-named helper scoping
+- CLI `trace --interprocedural --engine datalog` flag added to make engine
+  choice observable in both CLI output and JSON.
+- `tests/test_emend/test_phase11_cli_parity.py` locks CLI-level parity:
+  - default engine is Python
+  - explicit `--engine python` and `--engine datalog` route correctly
+  - JSON output includes `engine` field for both engines
+  - result equivalence (cross-function, returned taint, late sanitizer)
+- `tests/test_emend/test_phase11_divergence.py` enumerates divergences:
+  - 9 parity cases (must agree): empty config, intraprocedural, sanitizer
+    ordering, multi-label, call chains, label filtering, summary contents
+  - 2 accepted divergences (documented):
+    - iteration count: Datalog always reports 1 (transitive closure), Python
+      may iterate more — representation difference, not semantic
+    - trace step descriptions: wording may differ, but file/line/variable match
 
 Still required before cutover:
 
-- public CLI/API/MCP equivalence assertions for the Phase 11 adapter
 - manual parity runs from `docs/internal/manual-testing/trace-pipeline.md`
-- explicit documentation of any remaining accepted divergence
 
 ## Exit Criteria
 
