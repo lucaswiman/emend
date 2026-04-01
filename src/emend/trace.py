@@ -2223,14 +2223,11 @@ def run_interprocedural_trace_analysis(
     max_iterations: int = 10,
     project_path: str | None = None,
 ) -> InterproceduralResult:
-    """Run interprocedural taint analysis across the given files.
+    """Run interprocedural taint analysis using the Python fixed-point engine.
 
-    Uses the Python fixed-point summary engine as the canonical public
-    interprocedural trace implementation.
-
-    The lower-level ``FactGraph.interprocedural_trace_datalog()`` helper still
-    exists for direct graph queries and differential testing, but the public
-    API/CLI path does not route through it.
+    Since Phase 12, the Datalog engine is the default public interprocedural
+    path (via ``run_interprocedural_trace()``). This function is the legacy
+    Python engine, selectable via ``engine="python"``.
 
     Args:
         paths: List of source file paths to analyze.
@@ -2246,9 +2243,9 @@ def run_interprocedural_trace_analysis(
     if not config.sources or not config.sinks:
         return InterproceduralResult(violations=[], summaries={}, iterations=0)
 
-    # Phase 10 cleanup: public interprocedural trace is intentionally
-    # Python-canonical. Keep Datalog helpers out of this path until they are a
-    # tested semantic replacement rather than a partial alternative.
+    # Phase 12: the Datalog engine is now the default public interprocedural
+    # path. This Python fixed-point engine is retained as a fallback selectable
+    # via engine="python".
 
     from emend.ast_utils import find_nested_definitions
 
@@ -2819,7 +2816,7 @@ def _run_interprocedural_trace_datalog(
     max_iterations: int = 10,
     project_path: str | None = None,
 ) -> InterproceduralResult:
-    """Phase 11 parity adapter: Datalog summaries with public-style witnesses."""
+    """Datalog interprocedural trace engine with public-style witnesses."""
     if not config.sources or not config.sinks:
         return InterproceduralResult(violations=[], summaries={}, iterations=0)
 
@@ -3239,13 +3236,13 @@ def run_interprocedural_trace(
     language: str = "python",
     max_iterations: int = 10,
     project_path: str | None = None,
-    engine: str = "python",
+    engine: str = "datalog",
 ) -> InterproceduralResult:
     """Public dispatch for interprocedural trace with engine selection.
 
     Args:
-        engine: ``"python"`` (default) for the fixed-point engine, or
-            ``"datalog"`` for the Phase 11 Datalog parity adapter.
+        engine: ``"datalog"`` (default) for the Datalog engine, or
+            ``"python"`` for the legacy Python fixed-point engine.
 
     Raises:
         ValueError: If *engine* is not a recognised engine name.

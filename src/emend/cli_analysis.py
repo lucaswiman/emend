@@ -26,7 +26,7 @@ def _trace_cmd_impl(
     interprocedural: bool,
     max_iterations: int,
     preset: str | None,
-    engine: str = "python",
+    engine: str = "datalog",
 ) -> None:
     """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
@@ -122,7 +122,7 @@ def trace_cmd(
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
-    engine: Annotated[str, typer.Option("--engine", help="Interprocedural engine: python or datalog")] = "python",
+    engine: Annotated[str, typer.Option("--engine", help="Interprocedural engine: datalog (default) or python")] = "datalog",
 ):
     """Run trace analysis to detect unsafe data flows.
 
@@ -133,8 +133,8 @@ def trace_cmd(
     With --interprocedural, tracks values across function boundaries using
     function summaries and fixed-point iteration.
 
-    Use --engine datalog to select the Datalog-backed interprocedural engine
-    (Phase 11 parity adapter).
+    The Datalog engine is the default for interprocedural analysis. Use
+    --engine python to select the legacy Python fixed-point engine.
 
     Configuration is read from .emend/rules.yaml by default, falling back to
     the legacy trace section in .emend/patterns.yaml. Use --preset to load

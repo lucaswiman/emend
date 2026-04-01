@@ -94,7 +94,7 @@ def _setup_fixture(tmp_path: Path, source: str) -> tuple[Path, Path]:
 class TestEngineFlag:
     """The ``--engine`` flag on ``trace --interprocedural`` selects the engine."""
 
-    def test_default_engine_is_python(self, tmp_path):
+    def test_default_engine_is_datalog(self, tmp_path):
         src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
         result = runner.invoke(
             app,
@@ -103,7 +103,7 @@ class TestEngineFlag:
         assert result.exit_code in (0, 1), result.output
         data = json.loads(result.output)
         assert len(data) > 0
-        assert all(v["engine"] == "python" for v in data)
+        assert all(v["engine"] == "datalog" for v in data)
 
     def test_engine_python_explicit(self, tmp_path):
         src, cfg = _setup_fixture(tmp_path, _CROSS_FUNCTION_SOURCE)
