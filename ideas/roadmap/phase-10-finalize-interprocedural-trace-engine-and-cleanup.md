@@ -57,6 +57,8 @@ The migration is officially part of this roadmap:
 - `src/emend/trace.py`
 - `tests/test_emend/test_interprocedural_trace.py`
 - roadmap/docs for engine ownership
+- `docs/internal/manual-testing/README.md`
+- `docs/internal/manual-testing/trace-pipeline.md`
 
 ## Todo
 
@@ -69,6 +71,8 @@ The migration is officially part of this roadmap:
   longer implicit tribal knowledge.
 - [x] Split the remaining interprocedural Datalog migration into explicit
   follow-on roadmap phases.
+- [x] Add internal manual-testing docs so engine migration work has a stable
+  command-execution baseline outside unit tests.
 
 ## Exit Criteria
 

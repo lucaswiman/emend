@@ -17,6 +17,7 @@ until parity is explicit and regression-tested.
 - `src/emend/fact_graph.py`
 - interprocedural trace API tests
 - CLI/MCP engine-observable tests where interprocedural trace is surfaced
+- `docs/internal/manual-testing/trace-pipeline.md`
 
 ## Required Parity Areas
 
@@ -50,6 +51,9 @@ until parity is explicit and regression-tested.
   sanitizers, and statement-order cases already covered in the Python engine.
 - [ ] Add CLI/API tests that make engine choice and result equivalence
   observable.
+- [ ] Run the manual commands in `docs/internal/manual-testing/trace-pipeline.md`
+  on both `emend` itself and at least one external comparison target during
+  parity validation.
 
 ## Exit Criteria
 

@@ -15,6 +15,7 @@ preserves duplicate logic and keeps the migration incomplete.
 - `src/emend/trace.py`
 - CLI/MCP trace entry points
 - engine-reporting tests
+- `docs/internal/manual-testing/trace-pipeline.md`
 
 ## Todo
 
@@ -28,6 +29,9 @@ preserves duplicate logic and keeps the migration incomplete.
   violations after cutover.
 - [ ] Remove stale comments that still describe the Python engine as canonical.
 - [ ] Ensure failures are explicit rather than hidden behind fallback behavior.
+- [ ] Re-run the manual CLI commands in
+  `docs/internal/manual-testing/trace-pipeline.md` after cutover and record any
+  engine, finding, or performance drift that needs follow-up.
 
 ## Exit Criteria
 
