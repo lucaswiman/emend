@@ -23,7 +23,7 @@ cross-language support.
 ## Intraprocedural Datalog Migration
 
 - [x] [Phase 14: Fix Datalog Intraprocedural Trace for Small Projects](./phase-14-fix-datalog-intraprocedural-trace-for-small-projects.md)
-- [ ] [Phase 14a: Incremental Fact Updates and Builder Consolidation](./phase-14a-incremental-fact-updates.md)
+- [x] [Phase 14a: Incremental Fact Updates and Builder Consolidation](./phase-14a-incremental-fact-updates.md)
 - [ ] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
 - [ ] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
 - [ ] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
