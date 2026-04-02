@@ -25,18 +25,20 @@ The current plugin already has several useful pieces in place:
 - a completion path that already uses scope and import context
 
 This is a good foundation. The main issues are not missing infrastructure so
-much as interaction design, stale-state handling, and lack of a hot-buffer path.
+much as interaction design, lack of query-history support, and lack of a
+hot-buffer path.
 
 ## Problems To Fix
 
-### 1. Search responses can arrive out of order
+### 1. There is no good way to revisit previous picker queries
 
-Interactive search debounces requests, but the UI accepts any response and
-replaces the result list. A slower response for an older query can overwrite
-the results for a newer query.
+Interactive search is optimized for the current query only. If you want to
+re-run a recent search, compare adjacent queries, or bounce between a few
+common lookups, the picker does not help much.
 
-This is a correctness problem and also a perceived-latency problem because the
-picker can feel unstable while typing.
+For repeated navigation, query history is more useful than arrow-key style
+input history. The picker should make prior searches recallable with a single
+action and let the user select from them quickly.
 
 ### 2. The picker is optimized for browsing, not repeated action
 
@@ -51,29 +53,20 @@ several high-value actions that make a picker fast in practice:
 
 Quickfix export exists and is useful, but it is not a substitute for these.
 
-### 3. Preview work is too expensive
-
-The preview currently loads a large slice of the full file and recenters on
-every movement. That is acceptable for small files but unnecessary for a picker
-that is meant to support rapid result scanning.
-
-The right default is a small context window around the hit, with a fallback to
-the full buffer only when needed.
-
-### 4. Outline filtering is not actually local
+### 3. Outline filtering is not actually local
 
 `EmendOutlineFilter` fetches file symbols once, stores them, and then does not
 use that cached list for further filtering. That means a common current-file
 workflow still pays RPC and indexing costs that should be avoidable.
 
-### 5. Current-buffer operations are disk-backed, not editor-backed
+### 4. Current-buffer operations are disk-backed, not editor-backed
 
 Completion and `goto_definition` read the current file from disk and parse it
 on demand. This means unsaved edits are invisible to the server. That limits
 trust in completions and symbol navigation exactly where the editor should feel
 most responsive.
 
-### 6. No-index degradation is only partially intentional
+### 5. No-index degradation is only partially intentional
 
 The current unified search already includes file-path matching, which is the
 right instinct. But the graceful-degradation story should be explicit:
@@ -124,30 +117,28 @@ Still provide useful results quickly:
 The important point is that the user should not get "nothing" just because the
 index is missing or stale.
 
-## 2. Add request generations to interactive search
+## 2. Add query history recall to the picker
 
-Every search request from the plugin should include a client-side generation
-number. The callback should ignore responses whose generation is older than the
-most recently issued query.
+The picker should remember recent queries and make them easy to revisit
+without turning the prompt into shell-style input history.
 
-This is a small change with outsized UX impact.
+Recommended interface:
 
-Suggested shape:
+- `<C-r>` opens a compact "recent queries" overlay from inside the picker
+- entries show the query text plus lightweight context, such as result source
+  or top hit
+- selecting an entry re-runs that query immediately
+- `/` from the history overlay filters just the history list
 
-```vim
-let s:search_generation = 0
+This is better than binding up/down to prompt history because it scales beyond
+the immediately previous query and supports recognition rather than recall.
 
-function! s:trigger_search() abort
-  let s:search_generation += 1
-  let l:gen = s:search_generation
-  call emend#search(s:query, {'generation': l:gen})
-endfunction
-```
+Suggested behavior:
 
-Then reject stale results in `on_search_result()`.
-
-The server does not need to understand generation deeply; it can simply echo
-the field back in the result.
+- keep the last 20-50 queries in memory
+- optionally persist a shorter recent-query list across Vim sessions
+- de-duplicate consecutive identical queries
+- prefer recency, but boost queries that produced navigated-to results
 
 ## 3. Make the picker faster for common open workflows
 
@@ -165,26 +156,7 @@ Recommended bindings:
 The key point is not more features; it is reducing the number of keystrokes for
 the common case of opening several related results in succession.
 
-## 4. Make preview cheap by default
-
-Preview should use a small context window around the hit, for example:
-
-- 20 lines before
-- matched range
-- 40 lines after
-
-Then only fall back to full-buffer preview when:
-
-- the item is explicitly opened in preview mode
-- the result is itself a whole-file hit
-- the user toggles a "full file preview" mode
-
-This reduces file I/O, extmark churn, and render time during rapid navigation.
-
-For already-open buffers, prefer reading the live buffer contents from Vim
-instead of re-reading from disk.
-
-## 5. Make current-file navigation fully local when possible
+## 4. Make current-file navigation fully local when possible
 
 `EmendOutlineFilter` should become a true local filter:
 
@@ -197,7 +169,7 @@ This should feel instantaneous even with no project index.
 
 The same principle should apply to other current-file commands where feasible.
 
-## 6. Add a hot-buffer protocol for local operations
+## 5. Add a hot-buffer protocol for local operations
 
 This is the most important architectural change.
 
@@ -251,7 +223,7 @@ That is the wrong granularity. The project index should remain the backing store
 for whole-project queries. Hot buffers should only cover operations where the
 editor user expects unsaved edits to matter right now.
 
-## 7. Use analysis to improve ranking and quick actions, not the main loop
+## 6. Use analysis to improve ranking and quick actions, not the main loop
 
 Cozo, CFG, and trace analysis can afford useful editor features, but they
 should be carefully scoped so they do not harm typing latency.
@@ -274,30 +246,35 @@ symbol/type facts to rank likely members more accurately.
 
 This should stay lightweight and bounded.
 
-#### Sink-aware helper ranking
-
-If the cursor is at a known sink context, trace config could rank likely
-sanitizers or escaping helpers above generic completions.
-
-Examples:
-
-- SQL execution context -> escaping / parameterization helpers
-- HTML rendering context -> escaping helpers
-- shell command context -> quoting / safe wrapper helpers
-
-This is useful as a ranking nudge, not as a proof obligation.
-
 #### Quick actions from graph analysis
 
 The search UI could expose graph-aware next hops:
 
 - callers
 - callees
+- sinks
 - impact
 - semantic context
 
 These are already partly present and should be framed as fast follow-on actions,
 not part of the core typing loop.
+
+#### Hotkey-driven navigation interface
+
+The picker should also support a compact "next hop" interface for the selected
+symbol or result, driven by one keystroke per action.
+
+Recommended shape:
+
+- `g s`: goto symbol in current file or project
+- `g c`: show callers
+- `g e`: show callees
+- `g k`: show sinks or trace-relevant destinations when available
+- `g i`: show impact / reverse-dependency navigation
+
+This should feel like a navigation launcher, not a modal menu maze. The value
+is that the user can stay on one symbol and rapidly fan out through the most
+common semantic traversals.
 
 ### Bad uses
 
@@ -310,7 +287,7 @@ Do not run any of the following on every keystroke:
 
 These belong in explicit commands or side actions.
 
-## 8. Make no-index behavior explicit in the UI
+## 7. Make no-index behavior explicit in the UI
 
 When the index is unavailable, the plugin should avoid the current "cache
 warming or bust" feel.
@@ -331,11 +308,10 @@ able to act immediately on the cheap results.
 
 ## Recommended Implementation Order
 
-### Phase 1: Fast UX correctness wins
+### Phase 1: Fast workflow wins
 
-- add request generations and stale-result dropping
+- add recent-query recall in the picker
 - add split/tab/open-without-closing picker actions
-- make preview load a small context window
 - expose result provenance in the picker header
 
 These are high-value and low-risk.
@@ -343,8 +319,7 @@ These are high-value and low-risk.
 ### Phase 2: Local-first current-file workflows
 
 - make `EmendOutlineFilter` truly local
-- prefer open Vim buffer content for preview when available
-- add simple in-process caching for recent file previews
+- add hotkey-driven navigation for symbol/callers/callees/sinks/impact
 
 This improves current-buffer workflows even before hot-buffer RPC exists.
 
@@ -360,23 +335,30 @@ This is the step that makes the plugin feel much more editor-native.
 
 - CFG-informed local completion ranking
 - better dotted-member ranking
-- optional sink-aware ranking nudges
 - graph-aware quick actions from the picker
 
 These should only be added after Phases 1-3 make the baseline interaction
 reliable and fast.
 
+## Deferred / Future
+
+- sink-aware helper ranking near known sink contexts
+- trace-informed completion nudges for escaping, parameterization, or safe
+  wrappers
+- persisted cross-session query history with ranking heuristics
+- richer graph-action launchers once the basic hotkey navigation proves useful
+
 ## Trade-offs
 
 | Change | Value | Complexity | Risk |
 |--------|-------|------------|------|
-| Stale-response dropping | High | Low | Low |
+| Query history recall | High | Low | Low |
 | Better open actions | High | Low | Low |
-| Cheap preview | High | Low | Low |
 | Local outline filtering | High | Low | Low |
 | Hot-buffer protocol | Very high | Medium | Medium |
+| Hotkey navigation actions | High | Medium | Low |
 | CFG-informed ranking | Medium | Medium | Medium |
-| Trace-aware ranking hints | Medium | Medium | Medium |
+| Trace-aware ranking hints | Deferred | Medium | Medium |
 
 The hot-buffer work is the main structural change. Everything else should be
 evaluated in terms of whether it improves the common edit-search-jump-complete
@@ -389,8 +371,10 @@ Keep the unified search model.
 Do not introduce a separate file mode. Instead:
 
 - make unified search explicitly degrade to file hits and cheap fallbacks
+- add recent-query recall so frequent searches are easy to revisit
 - make current-buffer operations hot-buffer aware
 - make the picker optimized for repeated open/jump workflows
+- add one-keystroke navigation actions for callers/callees/sinks/impact
 - use Cozo/CFG/trace analysis sparingly to improve ranking and quick actions
 
 That keeps the product shape simple while making the editor experience much
