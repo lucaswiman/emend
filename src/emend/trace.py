@@ -2,9 +2,7 @@
 
 Tracks labeled value flow from sources to sinks within individual
 functions, with sanitizers and path traces.  Uses the Datalog/FactGraph
-engine by default for both intraprocedural and interprocedural analysis.
-The legacy Python engine is available as an escape hatch via
-``engine="python"`` and will be removed in Phase 17.
+engine for both intraprocedural and interprocedural analysis.
 
 Formerly named "taint analysis"; renamed to "trace" because the engine
 is a general labeled data-flow tracer — not only for security taint.
@@ -412,8 +410,6 @@ def load_trace_config(config_path: str) -> TraceConfig:
 # ---------------------------------------------------------------------------
 
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
-_QUALIFIED_IDENT_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b")
-
 # Augmented assignment regex: ``x += expr``, ``obj.field -= expr``, etc.
 _AUG_ASSIGN_RE = re.compile(
     r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*"
@@ -432,19 +428,6 @@ def _extract_identifiers(expr: str) -> set[str]:
         "return", "try", "while", "with", "yield",
     })
     return {m for m in _IDENT_RE.findall(expr) if m not in _KEYWORDS}
-
-
-def _extract_qualified_identifiers(expr: str) -> set[str]:
-    """Return both simple identifiers and dotted attribute access patterns in *expr*.
-
-    For example, ``obj.field`` and ``obj.field.subfield`` are returned as-is,
-    in addition to all simple identifiers found by ``_extract_identifiers``.
-    This enables field-sensitive taint tracking where ``obj.dirty`` is distinct
-    from ``obj.clean``.
-    """
-    simple = _extract_identifiers(expr)
-    qualified = set(_QUALIFIED_IDENT_RE.findall(expr))
-    return simple | qualified
 
 
 def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int, str, str]]:
@@ -500,56 +483,6 @@ def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int,
             assignments.append((start, target, rhs))
 
     return assignments
-
-
-# Regex for list/dict container mutations
-_CONTAINER_APPEND_RE = re.compile(
-    r"^\s*([A-Za-z_]\w*)\.(?:append|extend|update)\s*\((.+)\)\s*$"
-)
-_CONTAINER_SUBSCRIPT_ASSIGN_RE = re.compile(
-    r"^\s*([A-Za-z_]\w*)\s*\[.*?\]\s*=\s*(.+)$"
-)
-# Regex for subscript read on RHS: items[...] or d[...]
-_SUBSCRIPT_READ_RE = re.compile(r"^([A-Za-z_]\w*)\s*\[")
-# Regex for for-loop iteration
-_FOR_LOOP_RE = re.compile(r"^\s*for\s+([A-Za-z_]\w*)\s+in\s+(.+?)\s*:")
-
-
-def _find_container_mutations(source: str) -> list[tuple[int, str, str]]:
-    """Find container mutation statements in source.
-
-    Returns a list of (line, container_name, rhs_text) for:
-    - ``items.append(expr)``  -> container=items, rhs=expr
-    - ``items.extend(other)`` -> container=items, rhs=other
-    - ``d.update(other)``     -> container=d, rhs=other
-    - ``d[key] = expr``       -> container=d, rhs=expr
-
-    Line numbers are 1-based.
-    """
-    mutations: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(source.split("\n"), start=1):
-        m = _CONTAINER_APPEND_RE.match(line)
-        if m:
-            mutations.append((lineno, m.group(1), m.group(2).strip()))
-            continue
-        m = _CONTAINER_SUBSCRIPT_ASSIGN_RE.match(line)
-        if m:
-            mutations.append((lineno, m.group(1), m.group(2).strip()))
-    return mutations
-
-
-def _find_for_loops(source: str) -> list[tuple[int, str, str]]:
-    """Find for-loop iteration statements in source.
-
-    Returns a list of (line, loop_var, iterable_expr) for ``for VAR in EXPR:``.
-    Line numbers are 1-based.
-    """
-    loops: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(source.split("\n"), start=1):
-        m = _FOR_LOOP_RE.match(line)
-        if m:
-            loops.append((lineno, m.group(1), m.group(2).strip()))
-    return loops
 
 
 # ---------------------------------------------------------------------------
@@ -673,600 +606,16 @@ def _filter_by_receiver_type(
     return kept
 
 
-# ---------------------------------------------------------------------------
-# Core trace analysis
-# ---------------------------------------------------------------------------
-
-def _analyze_function(
-    file_path: str,
-    source: str,
-    func_start: int,
-    func_end: int,
-    config: TraceConfig,
-    label_filter: str | None = None,
-    language: str = "python",
-    type_oracle: Any | None = None,
-) -> list[TraceViolation]:
-    """Analyze a single function body for taint violations.
-
-    Args:
-        file_path: Path to the source file.
-        source: Full file source text.
-        func_start: 1-based start line of the function.
-        func_end: 1-based end line of the function.
-        config: Trace configuration with sources, sinks, sanitizers.
-        label_filter: If set, only check this specific taint label.
-        language: Source language.
-
-    Returns:
-        List of taint violations found in this function.
-    """
-    lines = source.split("\n")
-
-    # We use the full file source for find_pattern calls so tree-sitter can
-    # parse it correctly, then filter matches to the function's line range.
-    # For assignment analysis we extract the body (excluding the def line),
-    # dedent it, and parse that as top-level statements.
-    import textwrap
-
-    # Build dedented body for assignment analysis
-    body_start = func_start + 1  # skip the def line
-    if body_start > func_end:
-        body_start = func_start  # module-level scope, no def line to skip
-    body_text_lines = lines[body_start - 1 : func_end]
-    body_text = "\n".join(body_text_lines) + "\n"
-    body_dedented = textwrap.dedent(body_text)
-
-    def _in_range(match_line: int) -> bool:
-        """Check if a match line falls within this function."""
-        return func_start <= match_line <= func_end
-
-    # Taint state: variable_name -> {label: TraceStep (where it was tainted)}
-    taint_state: dict[str, dict[str, TraceStep]] = {}
-
-    # Step 1: Find source pattern matches and establish initial taint
-    for src_def in config.sources:
-        if label_filter and src_def.label != label_filter:
-            continue
-        try:
-            matches = find_pattern(
-                src_def.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            logger.debug("find_pattern failed for source pattern %s", src_def.pattern, exc_info=True)
-            continue
-
-        for match in matches:
-            match_line = match.line or 1
-            match_col = match.col or 0
-            if not _in_range(match_line):
-                continue
-
-            # Find the assignment target for this source match.
-            # Check if this match is on the RHS of an assignment.
-            # Also check captures for variables introduced by the pattern.
-            tainted_vars: set[str] = set()
-
-            # Look for assignments on this line in the original source
-            stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
-            assign_match = re.match(
-                r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
-                stmt_line,
-            )
-            if assign_match:
-                tainted_vars.add(assign_match.group(1))
-
-            # Also check captures - any metavar capture that looks like a
-            # variable is tainted at the source site
-            for cap_name, cap_val in (match.captures or {}).items():
-                if cap_val and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cap_val):
-                    tainted_vars.add(cap_val)
-
-            # If no assignment target found, the match text itself may name
-            # a variable or the whole expression is the source
-            if not tainted_vars and match.matched_text:
-                # Use identifiers from matched text as tainted
-                for ident in _extract_identifiers(match.matched_text):
-                    tainted_vars.add(ident)
-
-            # Type constraint check: skip this source if the assignment
-            # target's inferred type does not satisfy the constraint.
-            if src_def.type_constraint and type_oracle and tainted_vars:
-                tainted_vars = _filter_vars_by_type(
-                    tainted_vars, src_def.type_constraint,
-                    type_oracle, file_path, match_line,
-                )
-                if not tainted_vars:
-                    continue
-
-            step = TraceStep(
-                file_path=file_path,
-                line=match_line,
-                col=match_col,
-                description=f"source: {src_def.label} via {src_def.pattern}",
-                variable=", ".join(sorted(tainted_vars)) or "?",
-            )
-            for var in tainted_vars:
-                if var not in taint_state:
-                    taint_state[var] = {}
-                taint_state[var][src_def.label] = step
-
-    # Step 2: Propagate taint through assignments, container mutations, and
-    # for-loops in line order.  Merging all three into a single sorted pass
-    # ensures that a container mutated on line N is seen as tainted when a
-    # subscript read occurs on line N+1.
-
-    body_assignments = _find_assignments_in_source(body_dedented)
-    container_mutations = _find_container_mutations(body_dedented)
-    for_loops = _find_for_loops(body_dedented)
-
-    # Build unified (line, kind, payload) list sorted by line.
-    _ops: list[tuple[int, str, tuple]] = []
-    for line_rel, target, rhs in body_assignments:
-        _ops.append((line_rel, "assign", (target, rhs)))
-    for line_rel, container, rhs in container_mutations:
-        _ops.append((line_rel, "container", (container, rhs)))
-    for line_rel, loop_var, iterable_expr in for_loops:
-        _ops.append((line_rel, "for", (loop_var, iterable_expr)))
-    _ops.sort(key=lambda t: t[0])
-
-    for op_line_rel, op_kind, op_payload in _ops:
-        op_line_abs = op_line_rel + body_start - 1
-
-        if op_kind == "assign":
-            target, rhs = op_payload
-            rhs_idents = _extract_qualified_identifiers(rhs)
-
-            propagated_labels: dict[str, TraceStep] = {}
-            for ident in rhs_idents:
-                if ident in taint_state:
-                    for label, origin_step in taint_state[ident].items():
-                        if label_filter and label != label_filter:
-                            continue
-                        propagated_labels[label] = TraceStep(
-                            file_path=file_path,
-                            line=op_line_abs,
-                            col=0,
-                            description=f"propagation: {target} = ... {ident} ...",
-                            variable=target,
-                        )
-                elif "." in ident:
-                    base = ident.split(".")[0]
-                    if base in taint_state:
-                        for label, origin_step in taint_state[base].items():
-                            if label_filter and label != label_filter:
-                                continue
-                            propagated_labels[label] = TraceStep(
-                                file_path=file_path,
-                                line=op_line_abs,
-                                col=0,
-                                description=f"propagation: {target} = ... {ident} ...",
-                                variable=target,
-                            )
-
-            # Subscript reads: target = container[key]
-            rhs_stripped = rhs.strip()
-            subscript_m = _SUBSCRIPT_READ_RE.match(rhs_stripped)
-            if subscript_m:
-                container_name = subscript_m.group(1)
-                if container_name in taint_state:
-                    for label, origin_step in taint_state[container_name].items():
-                        if label_filter and label != label_filter:
-                            continue
-                        if label not in propagated_labels:
-                            propagated_labels[label] = TraceStep(
-                                file_path=file_path,
-                                line=op_line_abs,
-                                col=0,
-                                description=f"propagation: {target} = {container_name}[...]",
-                                variable=target,
-                            )
-
-            if propagated_labels:
-                if target not in taint_state:
-                    taint_state[target] = {}
-                for lbl, step in propagated_labels.items():
-                    if lbl not in taint_state[target]:
-                        taint_state[target][lbl] = step
-
-        elif op_kind == "container":
-            container, rhs = op_payload
-            rhs_idents = _extract_identifiers(rhs)
-            for ident in rhs_idents:
-                if ident in taint_state:
-                    for label, origin_step in taint_state[ident].items():
-                        if label_filter and label != label_filter:
-                            continue
-                        if container not in taint_state:
-                            taint_state[container] = {}
-                        if label not in taint_state[container]:
-                            taint_state[container][label] = TraceStep(
-                                file_path=file_path,
-                                line=op_line_abs,
-                                col=0,
-                                description=f"propagation: {container} mutated with tainted {ident}",
-                                variable=container,
-                            )
-
-        elif op_kind == "for":
-            loop_var, iterable_expr = op_payload
-            iterable_idents = _extract_identifiers(iterable_expr)
-            for ident in iterable_idents:
-                if ident in taint_state:
-                    for label, origin_step in taint_state[ident].items():
-                        if label_filter and label != label_filter:
-                            continue
-                        if loop_var not in taint_state:
-                            taint_state[loop_var] = {}
-                        if label not in taint_state[loop_var]:
-                            taint_state[loop_var][label] = TraceStep(
-                                file_path=file_path,
-                                line=op_line_abs,
-                                col=0,
-                                description=f"propagation: for {loop_var} in {ident}",
-                                variable=loop_var,
-                            )
-
-    # Step 3: Apply sanitizers to remove taint.
-    # Path-sensitive: only remove taint if sanitizer(s) cover all paths from
-    # the source to the function exit.  When a sanitizer is in a conditional
-    # branch but the other branch is uncovered, taint is preserved.
-
-    # Build CFG for path-sensitive sanitizer analysis.
-    _cfg_for_func = None
-    _cfg_edges: dict[int, list[int]] | None = None
-    try:
-        from emend.cfg import build_cfgs_for_source
-        func_source = "\n".join(lines[func_start - 1 : func_end])
-        cfgs = build_cfgs_for_source(func_source, ext="py")
-        if cfgs:
-            _cfg_for_func = cfgs[0]
-            # Build adjacency list for BFS
-            _cfg_edges = {}
-            for edge in _cfg_for_func.get_edges():
-                src_b = edge["from"]
-                _cfg_edges.setdefault(src_b, []).append(edge["to"])
-    except Exception:
-        logger.debug("CFG construction failed for sanitizer path analysis", exc_info=True)
-
-    def _find_block_for_line(match_line: int) -> int | None:
-        """Find the most specific CFG block containing match_line."""
-        if _cfg_for_func is None:
-            return None
-        rel_line = match_line - func_start
-        best_block_id = None
-        best_size = float("inf")
-        for block in _cfg_for_func.get_blocks():
-            if block["start_line"] <= rel_line <= block["end_line"]:
-                size = block["end_line"] - block["start_line"]
-                if size < best_size:
-                    best_size = size
-                    best_block_id = block["id"]
-        return best_block_id
-
-    def _source_to_sink_sanitized(
-        source_block: int | None,
-        sink_block: int | None,
-        san_blocks: set[int],
-        source_line: int = 0,
-        sink_line: int = 0,
-        san_lines_by_block: dict[int, int] | None = None,
-    ) -> bool:
-        """Check if all CFG paths from source_block to sink_block pass through
-        a sanitizer block.
-
-        Uses BFS from source_block avoiding sanitizer blocks. If the sink_block
-        is unreachable from source_block without passing through a sanitizer,
-        all paths are sanitized.
-
-        For same-block cases (source_block == sink_block), uses line-number
-        ordering as a tiebreaker: the sanitizer must appear between source_line
-        and sink_line.
-
-        Returns False (not sanitized = violation) when CFG is unavailable, so
-        that missing CFG info never silently suppresses violations (fail-closed).
-        """
-        if _cfg_for_func is None or _cfg_edges is None:
-            # Bug 2 fix: fail closed — report violation when CFG unavailable
-            logger.debug(
-                "CFG unavailable for source-to-sink sanitizer check; "
-                "assuming NOT sanitized (fail-closed)"
-            )
-            return False
-        if source_block is None or sink_block is None:
-            # Can't determine block positions — fail closed
-            return False
-
-        if source_block == sink_block:
-            # Intra-block: source and sink in same block.
-            # Sanitized only if a sanitizer is in the same block AND
-            # its line is between source_line and sink_line.
-            if source_block in san_blocks:
-                san_line = (san_lines_by_block or {}).get(source_block, 0)
-                if san_line == 0:
-                    # No line info for the sanitizer — conservatively sanitized
-                    return True
-                if source_line <= san_line <= sink_line:
-                    return True
-            return False
-
-        # Different blocks: BFS from source_block, avoiding sanitizer blocks,
-        # checking if sink_block is reachable without hitting a sanitizer.
-        visited: set[int] = set()
-        queue = [source_block]
-        while queue:
-            block = queue.pop(0)
-            if block in visited:
-                continue
-            visited.add(block)
-            if block == sink_block:
-                return False  # sink reachable without going through sanitizer
-            if block in san_blocks:
-                # If this sanitizer block is the same as the source block,
-                # only stop propagation if the sanitizer line is after the
-                # source line (otherwise the sanitizer precedes the source).
-                if block == source_block and san_lines_by_block:
-                    san_line = san_lines_by_block.get(block, source_line + 1)
-                    if san_line <= source_line:
-                        # Sanitizer before source in same block — doesn't help
-                        pass
-                    else:
-                        continue  # sanitizer after source, stops propagation
-                else:
-                    continue  # sanitizer in a later block, stops propagation
-            for succ in _cfg_edges.get(block, []):
-                if succ not in visited:
-                    queue.append(succ)
-        return True  # sink not reachable without going through sanitizers
-
-    # Collect source blocks: (var, label) -> block_id where taint was introduced.
-    # Used for source-to-sink path checking in Step 4.
-    _taint_source_blocks: dict[tuple[str, str], int | None] = {}
-    for var, labels in taint_state.items():
-        for label, step in labels.items():
-            src_line = step.line or 1
-            _taint_source_blocks[(var, label)] = _find_block_for_line(src_line)
-
-    # Step 3: Collect sanitizer info (lazy — applied during sink check in Step 4).
-    # Maps (var, label) -> (set of sanitizer block IDs, any_some_path flag,
-    #   block_id->min_line mapping for intra-block line ordering).
-    # Path-sensitive: only remove taint if sanitizer(s) cover all paths from
-    # the source to the sink.  When a sanitizer is in a conditional branch but
-    # the other branch is uncovered, taint is preserved.
-    _san_info: dict[tuple[str, str], tuple[set[int], bool, dict[int, int]]] = {}
-    # (var, label) -> (san_blocks, any_some_path, block_to_line)
-
-    for san_def in config.sanitizers:
-        if label_filter and san_def.label != label_filter:
-            continue
-        try:
-            matches = find_pattern(
-                san_def.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            logger.debug("find_pattern failed for sanitizer pattern %s", san_def.pattern, exc_info=True)
-            continue
-
-        for match in matches:
-            match_line = match.line or 1
-            if not _in_range(match_line):
-                continue
-
-            # Find assignment target on this line
-            stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
-            assign_match = re.match(
-                r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
-                stmt_line,
-            )
-            sanitized_vars: set[str] = set()
-            if assign_match:
-                sanitized_vars.add(assign_match.group(1))
-
-            for cap_name, cap_val in (match.captures or {}).items():
-                if cap_val and re.match(r"^[A-Za-z_][A-Za-z_0-9]*$", cap_val):
-                    sanitized_vars.add(cap_val)
-
-            block_id = _find_block_for_line(match_line)
-            for var in sanitized_vars:
-                key = (var, san_def.label)
-                if key not in _san_info:
-                    _san_info[key] = (set(), False, {})
-                san_blocks_set, any_some_path, block_to_line = _san_info[key]
-                if san_def.quantifier == "some_path":
-                    _san_info[key] = (san_blocks_set, True, block_to_line)
-                elif block_id is not None:
-                    san_blocks_set.add(block_id)
-                    # Track earliest sanitizer line per block for same-block ordering
-                    if block_id not in block_to_line or match_line < block_to_line[block_id]:
-                        block_to_line[block_id] = match_line
-
-    # Step 3b: Collect scope sanitizer blocks (lazy — applied during sink check in Step 4).
-    # Scope sanitizers (e.g. session.commit()) clear ALL taint for a label.
-    # Maps label -> (set of block IDs, block_id->min_line mapping).
-    _scope_kill_blocks: dict[str, tuple[set[int], dict[int, int]]] = {}
-
-    for scope_san in config.scope_sanitizers:
-        if label_filter and scope_san.label != label_filter:
-            continue
-        try:
-            matches = find_pattern(
-                scope_san.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            logger.debug("find_pattern failed for scope sanitizer %s", scope_san.pattern, exc_info=True)
-            continue
-
-        for match in matches:
-            match_line = match.line or 1
-            if not _in_range(match_line):
-                continue
-            block_id = _find_block_for_line(match_line)
-            if scope_san.label not in _scope_kill_blocks:
-                _scope_kill_blocks[scope_san.label] = (set(), {})
-            blocks_set, block_to_line = _scope_kill_blocks[scope_san.label]
-            if block_id is not None:
-                blocks_set.add(block_id)
-                # Track earliest scope kill line per block for same-block ordering
-                if block_id not in block_to_line or match_line < block_to_line[block_id]:
-                    block_to_line[block_id] = match_line
-            else:
-                # No CFG block found — use line-number fallback: record the
-                # match line so we can compare against sink lines later.
-                # Store as negative value as a sentinel for line-number mode.
-                blocks_set.add(-(match_line))
-
-    def _is_sanitized(
-        var: str, label: str, sink_block: int | None, sink_line: int
-    ) -> bool:
-        """Check whether the (var, label) taint is sanitized before reaching
-        the given sink_block/sink_line.
-
-        Uses the source-to-sink path check to ensure sanitizer blocks actually
-        cover all paths between the taint origin and the sink.  For same-block
-        cases (source, sanitizer, and sink in the same basic block), uses
-        line-number ordering instead of BFS.
-        """
-        source_block = _taint_source_blocks.get((var, label))
-        source_step = taint_state.get(var, {}).get(label)
-        source_line = source_step.line if source_step else 1
-
-        # Check regular sanitizers
-        if (var, label) in _san_info:
-            san_blocks_set, any_some_path, block_to_line = _san_info[(var, label)]
-            if any_some_path:
-                return True
-            # Same-block case: source and sink in same block — use line ordering
-            if (source_block is not None and source_block == sink_block
-                    and source_block in san_blocks_set):
-                san_line = block_to_line.get(source_block, 0)
-                if source_line <= san_line <= sink_line:
-                    return True
-            # Inter-block case: BFS from source to sink avoiding sanitizer blocks
-            elif _source_to_sink_sanitized(source_block, sink_block, san_blocks_set):
-                return True
-
-        # Check scope sanitizers (kill ALL taint for this label)
-        if label in _scope_kill_blocks:
-            scope_blocks_set, scope_block_to_line = _scope_kill_blocks[label]
-            # Separate real block IDs from line-number sentinels
-            real_scope_blocks = {b for b in scope_blocks_set if b >= 0}
-            line_sentinels = {-b for b in scope_blocks_set if b < 0}
-            if real_scope_blocks:
-                # Same-block case: use line ordering
-                if (source_block is not None and source_block == sink_block
-                        and source_block in real_scope_blocks):
-                    scope_line = scope_block_to_line.get(source_block, 0)
-                    if source_line <= scope_line <= sink_line:
-                        return True
-                # Inter-block case: BFS
-                elif _source_to_sink_sanitized(source_block, sink_block, real_scope_blocks):
-                    return True
-            # Line-number fallback: scope sanitizer must appear before sink line
-            if line_sentinels:
-                if any(source_line <= san_line <= sink_line for san_line in line_sentinels):
-                    return True
-
-        return False
-
-    violations: list[TraceViolation] = []
-
-    # Step 4: Check sinks for tainted values
-    for sink_def in config.sinks:
-        if label_filter and sink_def.label != label_filter:
-            continue
-        try:
-            matches = find_pattern(
-                sink_def.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            logger.debug("find_pattern failed for sink pattern %s", sink_def.pattern, exc_info=True)
-            continue
-
-        for match in matches:
-            match_line = match.line or 1
-            match_col = match.col or 0
-            if not _in_range(match_line):
-                continue
-
-            # Check if any variable in the sink match is tainted with the forbidden label.
-            # Use qualified identifiers so that obj.dirty in a sink is detected too.
-            sink_idents: set[str] = set()
-            for cap_name, cap_val in (match.captures or {}).items():
-                if cap_val:
-                    sink_idents |= _extract_qualified_identifiers(cap_val)
-            if match.matched_text:
-                sink_idents |= _extract_qualified_identifiers(match.matched_text)
-
-            # Type constraint on sink: filter idents by type
-            if sink_def.type_constraint and type_oracle and sink_idents:
-                sink_idents = _filter_vars_by_type(
-                    sink_idents, sink_def.type_constraint,
-                    type_oracle, file_path, match_line,
-                )
-
-            sink_block = _find_block_for_line(match_line)
-            for ident in sink_idents:
-                if ident in taint_state and sink_def.label in taint_state[ident]:
-                    # Check if all source-to-sink paths pass through a sanitizer
-                    if _is_sanitized(ident, sink_def.label, sink_block, match_line):
-                        continue
-
-                    # Build trace
-                    trace: list[TraceStep] = []
-                    origin = taint_state[ident].get(sink_def.label)
-                    if origin:
-                        trace.append(origin)
-
-                    # Add propagation steps by walking the chain
-                    # (simplified: just show origin and sink)
-                    trace.append(TraceStep(
-                        file_path=file_path,
-                        line=match_line,
-                        col=match_col,
-                        description=f"sink: {sink_def.label} via {sink_def.pattern}",
-                        variable=ident,
-                    ))
-
-                    violations.append(TraceViolation(
-                        file_path=file_path,
-                        line=match_line,
-                        col=match_col,
-                        label=sink_def.label,
-                        sink_pattern=sink_def.pattern,
-                        message=sink_def.message,
-                        trace=trace,
-                    ))
-                    # One violation per sink match is enough
-                    break
-
-    return violations
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def run_trace_analysis(
     paths: list[str],
     config: TraceConfig,
     label_filter: str | None = None,
     language: str = "python",
     project_path: str | None = None,
-    engine: str | None = None,
 ) -> list[TraceViolation]:
     """Run intraprocedural trace analysis on the given files.
 
-    Uses the Datalog/FactGraph engine by default.  Pass ``engine="python"``
-    to force the legacy Python taint engine (escape hatch during
-    stabilisation; will be removed in Phase 17).
+    Uses the Datalog/FactGraph engine.
 
     Args:
         paths: List of source file paths to analyze.
@@ -1274,8 +623,6 @@ def run_trace_analysis(
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
         project_path: Project root for FactGraph construction (optional).
-        engine: ``"datalog"`` (default) or ``"python"`` to force the
-            legacy engine.
 
     Returns:
         List of TraceViolation objects.
@@ -1283,92 +630,15 @@ def run_trace_analysis(
     if not config.sources or not config.sinks:
         return []
 
-    use_python = engine == "python"
-
-    if not use_python:
-        _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
-        logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
-        result = _run_trace_datalog(
-            paths, config,
-            label_filter=label_filter,
-            language=language,
-            project_path=_proj,
-        )
-        if result is not None:
-            return result
-        # Datalog engine returned None (unavailable) — fall back to Python
-        logger.warning(
-            "Datalog intraprocedural trace unavailable, falling back to Python engine"
-        )
-
-    return _run_trace_python(
+    _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
+    logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
+    result = _run_trace_datalog(
         paths, config,
         label_filter=label_filter,
         language=language,
+        project_path=_proj,
     )
-
-
-def _run_trace_python(
-    paths: list[str],
-    config: TraceConfig,
-    label_filter: str | None = None,
-    language: str = "python",
-) -> list[TraceViolation]:
-    """Legacy Python intraprocedural trace engine.
-
-    Retained as an escape hatch (``engine="python"``).  Will be removed
-    in Phase 17.
-    """
-    logger.debug("Using Python intraprocedural trace engine for %d files", len(paths))
-    from emend.ast_utils import find_nested_definitions
-
-    # Create type oracle if any rule has a type_constraint
-    type_oracle = _maybe_create_type_oracle(config)
-
-    violations: list[TraceViolation] = []
-
-    for file_path in paths:
-        path_obj = Path(file_path)
-        if not path_obj.exists():
-            continue
-
-        try:
-            source = path_obj.read_text()
-        except Exception:
-            logger.debug("Could not read %s", file_path, exc_info=True)
-            continue
-
-        # Collect all function definitions (including nested)
-        try:
-            symbols = find_nested_definitions(file_path)
-        except Exception:
-            logger.debug("Could not parse %s", file_path, exc_info=True)
-            continue
-
-        functions = _collect_functions(symbols)
-        module_ranges = _collect_module_level_ranges(symbols, len(source.split("\n")))
-        functions.extend(
-            ("__module__", module_start, module_end)
-            for module_start, module_end in module_ranges
-        )
-
-        for func_name, func_start, func_end in functions:
-            func_violations = _analyze_function(
-                file_path=str(path_obj),
-                source=source,
-                func_start=func_start,
-                func_end=func_end,
-                config=config,
-                label_filter=label_filter,
-                language=language,
-                type_oracle=type_oracle,
-            )
-            violations.extend(func_violations)
-
-    for v in violations:
-        if not v.engine:
-            v.engine = "python"
-    return _deduplicate_violations(violations)
+    return result if result is not None else []
 
 
 def _resolve_match_to_location(
@@ -2379,33 +1649,15 @@ def _run_interprocedural_trace_datalog(
     )
     violations: list[TraceViolation] = []
 
-    for file_path in paths:
-        if file_path not in file_sources:
-            continue
-        source = file_sources[file_path]
-        try:
-            symbols = find_nested_definitions(file_path)
-        except Exception:
-            continue
-
-        functions = _collect_functions(symbols)
-        module_ranges = _collect_module_level_ranges(symbols, len(source.split("\n")))
-        functions.extend(
-            ("__module__", module_start, module_end)
-            for module_start, module_end in module_ranges
-        )
-
-        for _func_name, func_start, func_end in functions:
-            func_violations = _analyze_function(
-                file_path=file_path,
-                source=source,
-                func_start=func_start,
-                func_end=func_end,
-                config=config,
-                label_filter=label_filter,
-                language=language,
-            )
-            violations.extend(func_violations)
+    # Collect intraprocedural violations via the Datalog engine.
+    intra_result = _run_trace_datalog(
+        paths, config,
+        label_filter=label_filter,
+        language=language,
+        project_path=project_path,
+    )
+    if intra_result:
+        violations.extend(intra_result)
 
     import textwrap as _textwrap
 

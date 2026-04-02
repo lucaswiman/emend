@@ -467,11 +467,11 @@ class TestScopeKillWithEffectSinks:
 # ---------------------------------------------------------------------------
 
 
-class TestPythonFallbackScopeSanitizer:
-    """Python fallback in _analyze_function() respects scope sanitizers."""
+class TestScopeSanitizerIntegration:
+    """Scope sanitizers work in the Datalog trace engine."""
 
-    def test_python_fallback_scope_sanitizer(self, tmp_path):
-        """Scope sanitizer clears ALL taint for a label in the fallback.
+    def test_scope_sanitizer_clears_taint(self, tmp_path):
+        """Scope sanitizer clears ALL taint for a label.
 
         Code:
             def process():
@@ -509,7 +509,7 @@ def process():
         )
         assert len(violations) == 0
 
-    def test_python_fallback_scope_sanitizer_only_kills_matching_label(self, tmp_path):
+    def test_scope_sanitizer_only_kills_matching_label(self, tmp_path):
         """Scope sanitizer kills only the targeted label, not other labels.
 
         Code:
@@ -552,7 +552,7 @@ def process():
         assert "lbl_a" not in fired_labels
         assert "lbl_b" in fired_labels
 
-    def test_python_fallback_scope_sanitizer_without_matching_pattern(self, tmp_path):
+    def test_scope_sanitizer_without_matching_pattern(self, tmp_path):
         """When scope sanitizer pattern does NOT appear, taint is NOT killed."""
         f = tmp_path / "app.py"
         f.write_text("""\

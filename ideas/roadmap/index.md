@@ -26,7 +26,7 @@ cross-language support.
 - [x] [Phase 14a: Incremental Fact Updates and Builder Consolidation](./phase-14a-incremental-fact-updates.md)
 - [x] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
 - [x] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
-- [ ] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
+- [x] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
 
 ## Cross-Language Extension
 
@@ -37,11 +37,11 @@ cross-language support.
 Status of known issues in the tracing and flow stack:
 
 - ~~The Python intraprocedural sanitizer check is sink-insensitive.~~
-  Addressed: the Datalog engine uses sink-scoped propagation rules.  The Python
-  engine retains this limitation but will be removed in Phase 17.
+  Addressed: the Datalog engine uses sink-scoped propagation rules.  The legacy
+  Python engine was removed in Phase 17.
 - ~~Python scope sanitizers are not path-sensitive.~~
-  Same status: Datalog handles this correctly; Python engine limitation remains
-  until Phase 17 removal.
+  Addressed: the Datalog engine handles this correctly.  The legacy Python engine
+  was removed in Phase 17.
 - ~~The Datalog trace path called undefined helpers and used stale field names.~~
   Fixed in Phases 5–6.
 - ~~Datalog trace entry points were incomplete (effect sinks, sanitizer

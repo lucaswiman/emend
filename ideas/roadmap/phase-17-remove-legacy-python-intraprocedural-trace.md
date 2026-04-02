@@ -20,12 +20,15 @@ canonical path.
 
 ## Todo
 
-- [ ] Remove `_analyze_function()` and all helpers it exclusively depends on.
-- [ ] Remove Python-specific keyword set (`_KEYWORDS`) if no longer referenced.
-- [ ] Keep or relocate any utility still needed by other subsystems (e.g.
+- [x] Remove `_analyze_function()` and all helpers it exclusively depends on.
+- [x] Remove Python-specific keyword set (`_KEYWORDS`) if no longer referenced.
+  (`_KEYWORDS` is defined inside `_extract_identifiers()` which is shared with
+  the Datalog engine and lint module — kept in place.)
+- [x] Keep or relocate any utility still needed by other subsystems (e.g.
   `_find_assignments_in_source()` if used outside trace).
-- [ ] Update CLAUDE.md and roadmap docs.
-- [ ] Run the full test suite.
+  Kept: `_extract_identifiers()`, `_find_assignments_in_source()`, `_AUG_ASSIGN_RE`.
+- [x] Update CLAUDE.md and roadmap docs.
+- [x] Run the full test suite.
 
 ## Exit Criteria
 
