@@ -410,6 +410,14 @@ def load_trace_config(config_path: str) -> TraceConfig:
 # ---------------------------------------------------------------------------
 
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
+# Matches dotted identifiers like "obj.field" or "a.b.c"
+_DOTTED_IDENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)+)\b"
+)
+# Matches subscript identifiers like "data['key']" or 'data["key"]'
+_SUBSCRIPT_IDENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z_0-9]*)\[(['\"])(.*?)\2\]"
+)
 # Augmented assignment regex: ``x += expr``, ``obj.field -= expr``, etc.
 _AUG_ASSIGN_RE = re.compile(
     r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*"
@@ -419,7 +427,11 @@ _AUG_ASSIGN_RE = re.compile(
 
 
 def _extract_identifiers(expr: str) -> set[str]:
-    """Return all simple identifiers appearing in *expr*."""
+    """Return identifiers appearing in *expr*.
+
+    Includes simple identifiers (``x``), dotted identifiers (``obj.field``),
+    and subscript identifiers (``data['key']``).
+    """
     _KEYWORDS = frozenset({
         "False", "None", "True", "and", "as", "assert", "async", "await",
         "break", "class", "continue", "def", "del", "elif", "else",
@@ -427,7 +439,19 @@ def _extract_identifiers(expr: str) -> set[str]:
         "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
         "return", "try", "while", "with", "yield",
     })
-    return {m for m in _IDENT_RE.findall(expr) if m not in _KEYWORDS}
+    result: set[str] = set()
+    # Dotted identifiers first (longer match takes priority)
+    for m in _DOTTED_IDENT_RE.findall(expr):
+        result.add(m)
+    # Subscript identifiers: data['key'] → data['key']
+    for base, quote, key in _SUBSCRIPT_IDENT_RE.findall(expr):
+        if base not in _KEYWORDS:
+            result.add(f"{base}[{quote}{key}{quote}]")
+    # Simple identifiers (always include as fallback)
+    for m in _IDENT_RE.findall(expr):
+        if m not in _KEYWORDS:
+            result.add(m)
+    return result
 
 
 def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int, str, str]]:

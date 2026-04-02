@@ -411,6 +411,13 @@ identifier_node = "identifier"
 skip_identifiers = ["True", "False", "None", "self", "cls"]
 destructure_nodes = ["tuple", "list", "pattern_list", "tuple_pattern"]
 attribute_access_nodes = ["subscript", "attribute"]
+attribute_node = "attribute"
+attribute_object_field = "object"
+attribute_name_field = "attribute"
+subscript_node = "subscript"
+subscript_value_field = "value"
+subscript_index_field = "subscript"
+string_nodes = ["string"]
 
 [[cfg.def_use_rules]]
 node = "assignment"

@@ -923,6 +923,32 @@ pub struct CfgSection {
     /// Node types for delete statements (e.g. Python's "delete_statement").
     #[serde(default)]
     pub delete_nodes: Vec<String>,
+
+    // -- Field-level / subscript tracking ------------------------------------
+    /// Node type for attribute access (e.g. "attribute" in Python).
+    /// When set, attribute access emits qualified defs/uses like "obj.field".
+    #[serde(default)]
+    pub attribute_node: String,
+    /// Tree-sitter field name for the object in attribute access (e.g. "object").
+    #[serde(default)]
+    pub attribute_object_field: String,
+    /// Tree-sitter field name for the attribute name (e.g. "attribute").
+    #[serde(default)]
+    pub attribute_name_field: String,
+    /// Node type for subscript access (e.g. "subscript" in Python).
+    /// When set, subscript access with string keys emits qualified defs/uses
+    /// like "data['key']".
+    #[serde(default)]
+    pub subscript_node: String,
+    /// Tree-sitter field name for the object in subscript access (e.g. "value").
+    #[serde(default)]
+    pub subscript_value_field: String,
+    /// Tree-sitter field name for the index in subscript access (e.g. "subscript").
+    #[serde(default)]
+    pub subscript_index_field: String,
+    /// Node types for string literals (e.g. ["string"]).
+    #[serde(default)]
+    pub string_nodes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2906,6 +2932,14 @@ impl LanguageConfig {
                 skip_identifiers: vec!["True".to_string(), "False".to_string(), "None".to_string(), "self".to_string(), "cls".to_string()],
                 destructure_nodes: vec!["tuple".to_string(), "list".to_string(), "pattern_list".to_string(), "tuple_pattern".to_string()],
                 attribute_access_nodes: vec!["subscript".to_string(), "attribute".to_string()],
+                delete_nodes: vec!["delete_statement".to_string()],
+                attribute_node: "attribute".to_string(),
+                attribute_object_field: "object".to_string(),
+                attribute_name_field: "attribute".to_string(),
+                subscript_node: "subscript".to_string(),
+                subscript_value_field: "value".to_string(),
+                subscript_index_field: "subscript".to_string(),
+                string_nodes: vec!["string".to_string()],
                 def_use_rules: vec![
                     DefUseRule { node: "assignment".to_string(), target: "left".to_string(), value: "right".to_string() },
                     DefUseRule { node: "augmented_assignment".to_string(), target: "left".to_string(), value: "right".to_string() },

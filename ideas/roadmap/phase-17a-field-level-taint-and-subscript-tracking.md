@@ -44,13 +44,14 @@ Datalog rules.
 
 ## Todo
 
-- [ ] Extend Rust scope resolver to emit qualified identifiers in def/use lists
-- [ ] Verify field-level taint propagation works end-to-end
-- [ ] Remove `xfail` from `test_trace_field_sensitivity_distinct_fields`
-- [ ] Add subscript tracking to Rust scope resolver
-- [ ] Add subscript fact model and Datalog rules
-- [ ] Remove `xfail` from `test_trace_container_dict_subscript`
-- [ ] Run full test suite
+- [x] Extend Rust CFG builder to emit qualified identifiers in def/use lists
+- [x] Verify field-level taint propagation works end-to-end
+- [x] Remove `xfail` from `test_trace_field_sensitivity_distinct_fields`
+- [x] Add subscript tracking to Rust CFG builder
+- [x] Update `_extract_identifiers()` to handle dotted and subscript names
+- [x] Add field/subscript cross-variable taint Datalog rules (column-ordered)
+- [x] Remove `xfail` from `test_trace_container_dict_subscript`
+- [x] Run full test suite (2363 passed, 0 failed)
 
 ## Exit Criteria
 

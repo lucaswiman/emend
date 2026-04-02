@@ -1809,6 +1809,19 @@ class FactGraph:
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "not str_includes(def_var, \".\"), "
+                "not str_includes(def_var, \"[\"), "
+                "not scope_kill[fp, fq, lbl, block]\n"
+
+                # Field/subscript assignment taint (some_path variant):
+                # ``obj.field = tainted_var`` where def_col < use_col ensures
+                # genuine LHS=RHS assignment rather than coincidental same-line.
+                "tainted[fp, fq, def_var, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "def_col < use_col, "
                 "not scope_kill[fp, fq, lbl, block]\n"
 
                 # Container mutation taint (some_path variant)
@@ -1893,6 +1906,18 @@ class FactGraph:
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "not str_includes(def_var, \".\"), "
+                "not str_includes(def_var, \"[\"), "
+                "unsanitized[fp, fq, use_var, lbl, block]\n"
+
+                # Field/subscript assignment taint (all_paths variant):
+                # ``obj.field = tainted_var`` with column ordering guard.
+                "tainted[fp, fq, def_var, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "def_col < use_col, "
                 "unsanitized[fp, fq, use_var, lbl, block]\n"
 
                 # Inherit unsanitized status for cross-variable taint:
@@ -1905,6 +1930,17 @@ class FactGraph:
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "not str_includes(def_var, \".\"), "
+                "not str_includes(def_var, \"[\"), "
+                "not sanitizer_var[fp, fq, def_var, block, lbl]\n"
+
+                # Inherit unsanitized for field/subscript assignments.
+                "unsanitized[fp, fq, def_var, lbl, block] := "
+                "unsanitized[fp, fq, use_var, lbl, block], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "def_col < use_col, "
                 "not sanitizer_var[fp, fq, def_var, block, lbl]\n"
 
                 # Container mutation taint: tainted var passed to method call
