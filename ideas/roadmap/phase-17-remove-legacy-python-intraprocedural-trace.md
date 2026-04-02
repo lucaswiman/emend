@@ -20,12 +20,34 @@ canonical path.
 
 ## Todo
 
-- [ ] Remove `_analyze_function()` and all helpers it exclusively depends on.
-- [ ] Remove Python-specific keyword set (`_KEYWORDS`) if no longer referenced.
-- [ ] Keep or relocate any utility still needed by other subsystems (e.g.
+- [x] Remove `_analyze_function()` and all helpers it exclusively depends on.
+- [x] Remove Python-specific keyword set (`_KEYWORDS`) if no longer referenced.
+  (`_KEYWORDS` is defined inside `_extract_identifiers()` which is shared with
+  the Datalog engine and lint module — kept in place.)
+- [x] Keep or relocate any utility still needed by other subsystems (e.g.
   `_find_assignments_in_source()` if used outside trace).
-- [ ] Update CLAUDE.md and roadmap docs.
-- [ ] Run the full test suite.
+  Kept: `_extract_identifiers()`, `_find_assignments_in_source()`, `_AUG_ASSIGN_RE`.
+- [x] Update CLAUDE.md and roadmap docs.
+- [x] Run the full test suite.
+
+## Additional Fixes (post-removal)
+
+After removing the legacy engine, three bugs were discovered and fixed:
+
+- **Per-variable sanitization**: The `sanitizer_var` relation now includes the
+  variable name so that sanitizing `a` does not suppress violations for `b`.
+  The `same_block_sanitized` and `unsanitized` relations were updated to be
+  per-variable.  Assignment targets on sanitizer lines (e.g. `clean = sanitize(x)`)
+  are also recorded as sanitized.
+- **Trace step population**: `TraceViolation.trace` now contains `TraceStep`
+  objects for source and sink locations instead of an empty list.
+- **Cross-variable unsanitized inheritance**: When taint flows across variables
+  (via assignment or container mutation), the target variable inherits the
+  source variable's unsanitized reachability status.
+
+Two limitations remain and are tracked in Phase 17a:
+- Field-level taint (requires Rust CFG builder changes)
+- Dict subscript taint propagation (requires new fact model)
 
 ## Exit Criteria
 

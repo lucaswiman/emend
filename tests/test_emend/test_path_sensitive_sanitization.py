@@ -280,7 +280,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 5)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 5)],
             sink_lines=[("app.py", "app.f", "lbl", 1, 8)],
         )
         assert len(flows) == 0
@@ -307,7 +307,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 8)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 8)],
             sink_lines=[("app.py", "app.f", "lbl", 1, 5)],
         )
         assert len(flows) >= 1
@@ -340,7 +340,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             effect_sinks=[("lbl", "writes")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 5)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 5)],
         )
         assert len(flows) == 0
 
@@ -506,11 +506,11 @@ class TestFlowRuleThroughParameter:
 # ---------------------------------------------------------------------------
 
 
-class TestPythonFallbackPerBlockTaint:
-    """Python fallback in _analyze_function() uses per-block taint state."""
+class TestPerBlockTaintState:
+    """Trace engine uses per-block taint state for path-sensitive analysis."""
 
-    def test_sanitizer_on_one_branch_still_fires_python(self, tmp_path):
-        """Python fallback: sanitizer on one branch of if/else still fires.
+    def test_sanitizer_on_one_branch_still_fires(self, tmp_path):
+        """Sanitizer on one branch of if/else still fires.
 
         Code:
             x = source()        # block 0: source
@@ -548,8 +548,8 @@ def handler():
         # Python fallback eagerly deletes taint.
         assert len(violations) >= 1
 
-    def test_sanitizer_on_all_branches_suppresses_python(self, tmp_path):
-        """Python fallback: sanitizer on all branches suppresses violation.
+    def test_sanitizer_on_all_branches_suppresses(self, tmp_path):
+        """Sanitizer on all branches suppresses violation.
 
         Code:
             x = source()
@@ -761,56 +761,6 @@ class TestCfgBuildFailureBehavior:
     silently suppressed violations.  The fix returns False (fail-closed),
     ensuring violations are always reported when the CFG is unavailable.
     """
-
-    def test_violation_reported_without_cfg(self, tmp_path, monkeypatch):
-        """Violations are reported even when CFG construction fails.
-
-        Monkeypatching build_cfgs_for_source to raise an exception simulates
-        a CFG build failure and verifies the fail-closed behavior.
-        """
-        f = tmp_path / "app.py"
-        f.write_text("""\
-def handler():
-    x = get_user_input()
-    x = sanitize(x)
-    execute(x)
-""")
-        config = TraceConfig(
-            labels=["sqli"],
-            sources=[TraceSource(pattern="get_user_input()", label="sqli")],
-            sinks=[TraceSink(
-                pattern="execute($X)", label="sqli",
-                message="SQL injection",
-            )],
-            sanitizers=[TraceSanitizer(
-                pattern="sanitize($X)", label="sqli",
-            )],
-        )
-        # Patch build_cfgs_for_source to simulate CFG construction failure
-        import emend.trace as trace_mod
-        original = getattr(trace_mod, "_build_cfgs_for_source_orig", None)
-
-        import emend.cfg as cfg_mod
-        original_build = cfg_mod.build_cfgs_for_source
-
-        def failing_build(*args, **kwargs):
-            raise RuntimeError("Simulated CFG build failure")
-
-        monkeypatch.setattr(cfg_mod, "build_cfgs_for_source", failing_build)
-
-        from emend.trace import run_trace_analysis
-        # With CFG unavailable and a sanitizer present, the fail-closed
-        # behavior means we still report the violation (can't prove sanitized).
-        # This tests the Python engine's resilience; the Datalog engine uses
-        # FactGraph which has its own CFG construction path.
-        violations = run_trace_analysis(
-            [str(f)], config, project_path=None, engine="python",
-        )
-        # Fail-closed: violation should be reported even though it would be
-        # suppressed if CFG were available and showed the sanitizer covers
-        # all paths.  This is intentional (prefer false positives over
-        # false negatives when CFG is unavailable).
-        assert len(violations) >= 1
 
     def test_taint_without_sanitizer_always_reports(self, tmp_path):
         """Without any sanitizer, violations are always reported regardless

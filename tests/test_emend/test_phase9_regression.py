@@ -283,12 +283,9 @@ class TestScopeSanitizerPathSensitivity:
         )
         assert len(flows) == 0
 
-    def test_python_engine_scope_sanitizer_one_branch_fires_violation(self, tmp_path):
-        """Python engine: scope sanitizer on only one branch should not suppress
-        the violation — taint still reaches the sink via the un-sanitized branch.
-
-        NOTE: the Python engine uses the same BFS path-sensitivity for scope
-        sanitizers as for regular sanitizers, so this is the expected behaviour.
+    def test_scope_sanitizer_one_branch_fires_violation(self, tmp_path):
+        """Scope sanitizer on only one branch should not suppress the
+        violation -- taint still reaches the sink via the un-sanitized branch.
         """
         test_file = tmp_path / "app.py"
         test_file.write_text(
@@ -318,9 +315,9 @@ class TestScopeSanitizerPathSensitivity:
             "Expected a violation because scope sanitizer is only on one branch"
         )
 
-    def test_python_engine_scope_sanitizer_before_sink_suppresses(self, tmp_path):
-        """Python engine: scope sanitizer that unconditionally precedes the sink
-        should suppress the violation (all paths to sink go through the sanitizer)."""
+    def test_scope_sanitizer_before_sink_suppresses(self, tmp_path):
+        """Scope sanitizer that unconditionally precedes the sink should
+        suppress the violation (all paths to sink go through the sanitizer)."""
         test_file = tmp_path / "app.py"
         test_file.write_text(
             "def process(request, session, cursor):\n"
@@ -673,9 +670,9 @@ class TestTraceViolationEngineField:
             label="sqli",
             sink_pattern="cursor.execute($X)",
             message="SQL injection",
-            engine="python",
+            engine="datalog",
         )
-        assert v.engine == "python"
+        assert v.engine == "datalog"
 
     def test_run_trace_analysis_tags_engine_datalog(self, tmp_path):
         """run_trace_analysis() sets engine='datalog' on all violations (Phase 16 cutover)."""

@@ -1,8 +1,7 @@
 """Phase 16: Cut Over Intraprocedural Trace to Datalog.
 
-Verifies that ``run_trace_analysis()`` now routes through the Datalog engine
-by default, that the ``--engine python`` escape hatch works, and that
-``TraceViolation`` output shape is preserved.
+Verifies that ``run_trace_analysis()`` routes through the Datalog engine
+and that ``TraceViolation`` output shape is preserved.
 """
 
 from __future__ import annotations
@@ -136,40 +135,6 @@ class TestDefaultEngineIsDatalog:
     def test_nonexistent_file(self, tmp_path):
         violations = run_trace_analysis(["/nonexistent/file.py"], _SQL_CONFIG)
         assert violations == []
-
-
-# ---------------------------------------------------------------------------
-# Tests: --engine escape hatch
-# ---------------------------------------------------------------------------
-
-class TestEngineEscapeHatch:
-    """The engine= parameter allows forcing python or datalog."""
-
-    def test_engine_python_forces_python(self, tmp_path):
-        """engine='python' forces the Python engine."""
-        test_file = tmp_path / "app.py"
-        test_file.write_text(_SIMPLE_APP)
-
-        violations = run_trace_analysis(
-            [str(test_file)], _SQL_CONFIG, engine="python",
-        )
-        assert len(violations) >= 1
-        for v in violations:
-            assert v.engine == "python", (
-                f"Expected engine='python', got {v.engine!r}"
-            )
-
-    def test_engine_datalog_forces_datalog(self, tmp_path):
-        """engine='datalog' explicitly selects Datalog (same as default)."""
-        test_file = tmp_path / "app.py"
-        test_file.write_text(_SIMPLE_APP)
-
-        violations = run_trace_analysis(
-            [str(test_file)], _SQL_CONFIG, engine="datalog",
-        )
-        assert len(violations) >= 1
-        for v in violations:
-            assert v.engine == "datalog"
 
 
 # ---------------------------------------------------------------------------
