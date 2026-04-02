@@ -541,6 +541,10 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm reference {sq, fp, line, col => }",
         "?[cqn, eqn, fp, line, col] := *call[cqn, eqn, fp, line, col, _, _], "
         "fp == $fp  :rm call {cqn, eqn, fp, line, col => }",
+        "?[eqn, cqn, fp, line, col] := *call_by_callee[eqn, cqn, fp, line, col, _, _], "
+        "fp == $fp  :rm call_by_callee {eqn, cqn, fp, line, col => }",
+        "?[fp, cqn, eqn, line, col] := *call_by_file[fp, cqn, eqn, line, col, _, _], "
+        "fp == $fp  :rm call_by_file {fp, cqn, eqn, line, col => }",
         "?[fp, fq, bid] := *cfg_block[fp, fq, bid, _, _], "
         "fp == $fp  :rm cfg_block {fp, fq, bid => }",
         "?[fp, fq, fb, tb, ek, fl, tl] := *cfg_edge[fp, fq, fb, tb, ek, fl, tl], "
@@ -557,6 +561,8 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm ref_by_block {fp, fq, bid, sq}",
         "?[fp, fq, bid] := *reachable_block[fp, fq, bid], "
         "fp == $fp  :rm reachable_block {fp, fq, bid}",
+        "?[sq, fp, line] := *module_level_ref[sq, fp, line], "
+        "fp == $fp  :rm module_level_ref {sq, fp, line}",
     ):
         try:
             fdb.run(query, {"fp": file_path})
@@ -706,11 +712,14 @@ def _build_facts_db(project_root: str) -> None:
         all_cfg_edges: list[list] = []
         all_fg_refs: list[list] = []
         all_calls: list[list] = []
+        all_calls_by_callee: list[list] = []
+        all_calls_by_file: list[list] = []
         all_def_uses: list[list] = []
         all_method_calls: list[list] = []
         all_source_locs: list[list] = []
         all_imports: list[list] = []
         all_ref_by_block: list[list] = []
+        all_module_level_refs: list[list] = []
 
         import_re = re.compile(
             r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
@@ -844,11 +853,15 @@ def _build_facts_db(project_root: str) -> None:
                 # ref_by_block: only for refs with real block data
                 if fq and bid >= 0:
                     all_ref_by_block.append([rel_path, fq, bid, tqn])
+                else:
+                    all_module_level_refs.append([tqn, rel_path, line])
 
                 if kind == "call":
                     caller = _enclosing_symbol(symbol_ranges, line)
                     caller_qn = caller if caller is not None else module_name
                     all_calls.append([caller_qn, tqn, rel_path, line, col, fq, bid])
+                    all_calls_by_callee.append([tqn, caller_qn, rel_path, line, col, fq, bid])
+                    all_calls_by_file.append([rel_path, caller_qn, tqn, line, col, fq, bid])
 
                     # method_call for dotted call refs
                     if "." in tqn:
@@ -967,6 +980,18 @@ def _build_facts_db(project_root: str) -> None:
         )
 
         fdb.run(
+            "?[callee_qn, caller_qn, fp, line, col, fq, bid] <- $rows "
+            ":replace call_by_callee {callee_qn, caller_qn, fp, line, col => fq, bid}",
+            {"rows": all_calls_by_callee},
+        )
+
+        fdb.run(
+            "?[fp, caller_qn, callee_qn, line, col, fq, bid] <- $rows "
+            ":replace call_by_file {fp, caller_qn, callee_qn, line, col => fq, bid}",
+            {"rows": all_calls_by_file},
+        )
+
+        fdb.run(
             "?[fp, fq, bid, is_entry, is_exit] <- $rows "
             ":replace cfg_block {fp, fq, bid => is_entry, is_exit}",
             {"rows": all_cfg_blocks},
@@ -1014,6 +1039,12 @@ def _build_facts_db(project_root: str) -> None:
             "?[fp, fq, bid] <- $rows "
             ":replace reachable_block {fp, fq, bid}",
             {"rows": all_reachable},
+        )
+
+        fdb.run(
+            "?[sq, fp, line] <- $rows "
+            ":replace module_level_ref {sq, fp, line}",
+            {"rows": all_module_level_refs},
         )
 
     except BaseException:

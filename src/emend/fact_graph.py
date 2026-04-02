@@ -263,6 +263,28 @@ _SCHEMA_INIT = """\
     block_id: Int default -1
 }}
 
+{:create call_by_callee {
+    callee_qn: String,
+    caller_qn: String,
+    file_path: String,
+    line: Int,
+    col: Int
+    =>
+    func_qn: String default "",
+    block_id: Int default -1
+}}
+
+{:create call_by_file {
+    file_path: String,
+    caller_qn: String,
+    callee_qn: String,
+    line: Int,
+    col: Int
+    =>
+    func_qn: String default "",
+    block_id: Int default -1
+}}
+
 {:create reference {
     symbol_qn: String,
     file_path: String,
@@ -385,6 +407,12 @@ _SCHEMA_INIT = """\
     func_qn: String,
     block_id: Int
 }}
+
+{:create module_level_ref {
+    symbol_qn: String,
+    file_path: String,
+    line: Int
+}}
 """
 
 
@@ -457,37 +485,57 @@ class FactGraph:
 
     def add_call(self, fact: CallFact) -> None:
         """Add a call relationship fact."""
+        params = {
+            "caller": fact.caller_qn,
+            "callee": fact.callee_qn,
+            "fp": fact.file_path,
+            "line": fact.line,
+            "col": fact.col,
+            "fq": fact.func_qn,
+            "bid": fact.block_id,
+        }
         self._client.run(
             "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] <- "
             "[[$caller, $callee, $fp, $line, $col, $fq, $bid]] "
             ":put call {caller_qn, callee_qn, file_path, line, col => func_qn, block_id}",
-            {
-                "caller": fact.caller_qn,
-                "callee": fact.callee_qn,
-                "fp": fact.file_path,
-                "line": fact.line,
-                "col": fact.col,
-                "fq": fact.func_qn,
-                "bid": fact.block_id,
-            },
+            params,
+        )
+        self._client.run(
+            "?[callee_qn, caller_qn, file_path, line, col, func_qn, block_id] <- "
+            "[[$callee, $caller, $fp, $line, $col, $fq, $bid]] "
+            ":put call_by_callee {callee_qn, caller_qn, file_path, line, col => func_qn, block_id}",
+            params,
+        )
+        self._client.run(
+            "?[file_path, caller_qn, callee_qn, line, col, func_qn, block_id] <- "
+            "[[$fp, $caller, $callee, $line, $col, $fq, $bid]] "
+            ":put call_by_file {file_path, caller_qn, callee_qn, line, col => func_qn, block_id}",
+            params,
         )
 
     def add_reference(self, fact: ReferenceFact) -> None:
         """Add a reference fact."""
+        params = {
+            "qn": fact.symbol_qn,
+            "fp": fact.file_path,
+            "line": fact.line,
+            "col": fact.col,
+            "kind": fact.ref_kind,
+            "fq": fact.func_qn,
+            "bid": fact.block_id,
+        }
         self._client.run(
             "?[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id] <- "
             "[[$qn, $fp, $line, $col, $kind, $fq, $bid]] "
             ":put reference {symbol_qn, file_path, line, col => ref_kind, func_qn, block_id}",
-            {
-                "qn": fact.symbol_qn,
-                "fp": fact.file_path,
-                "line": fact.line,
-                "col": fact.col,
-                "kind": fact.ref_kind,
-                "fq": fact.func_qn,
-                "bid": fact.block_id,
-            },
+            params,
         )
+        if fact.func_qn == "" and fact.block_id == -1:
+            self._client.run(
+                "?[symbol_qn, file_path, line] <- [[$qn, $fp, $line]] "
+                ":put module_level_ref {symbol_qn, file_path, line}",
+                params,
+            )
 
     def add_trace_flow(self, fact: TraceFlowFact) -> None:
         """Add a taint flow fact."""
@@ -608,10 +656,22 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.caller_qn, f.callee_qn, f.file_path, f.line, f.col, f.func_qn, f.block_id] for f in facts]
+        reverse_rows = [[f.callee_qn, f.caller_qn, f.file_path, f.line, f.col, f.func_qn, f.block_id] for f in facts]
+        file_rows = [[f.file_path, f.caller_qn, f.callee_qn, f.line, f.col, f.func_qn, f.block_id] for f in facts]
         self._client.run(
             "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] <- $rows "
             ":put call {caller_qn, callee_qn, file_path, line, col => func_qn, block_id}",
             {"rows": rows},
+        )
+        self._client.run(
+            "?[callee_qn, caller_qn, file_path, line, col, func_qn, block_id] <- $rows "
+            ":put call_by_callee {callee_qn, caller_qn, file_path, line, col => func_qn, block_id}",
+            {"rows": reverse_rows},
+        )
+        self._client.run(
+            "?[file_path, caller_qn, callee_qn, line, col, func_qn, block_id] <- $rows "
+            ":put call_by_file {file_path, caller_qn, callee_qn, line, col => func_qn, block_id}",
+            {"rows": file_rows},
         )
 
     def add_references_batch(self, facts: list[ReferenceFact]) -> None:
@@ -624,6 +684,13 @@ class FactGraph:
             ":put reference {symbol_qn, file_path, line, col => ref_kind, func_qn, block_id}",
             {"rows": rows},
         )
+        module_rows = [[f.symbol_qn, f.file_path, f.line] for f in facts if f.func_qn == "" and f.block_id == -1]
+        if module_rows:
+            self._client.run(
+                "?[symbol_qn, file_path, line] <- $rows "
+                ":put module_level_ref {symbol_qn, file_path, line}",
+                {"rows": module_rows},
+            )
 
     def add_imports_batch(self, facts: list[ImportFact]) -> None:
         """Bulk-insert import facts."""
@@ -855,7 +922,7 @@ class FactGraph:
         """Return all calls made by *caller_qn*."""
         result = self._client.run(
             "?[caller, callee, fp, line, col, fq, bid] := "
-            "*call[caller, callee, fp, line, col, fq, bid], caller == $qn",
+            "caller = $qn, *call[$qn, callee, fp, line, col, fq, bid]",
             {"qn": caller_qn},
         )
         return [
@@ -868,7 +935,7 @@ class FactGraph:
         """Return all call sites that invoke *callee_qn*."""
         result = self._client.run(
             "?[caller, callee, fp, line, col, fq, bid] := "
-            "*call[caller, callee, fp, line, col, fq, bid], callee == $qn",
+            "callee = $qn, *call_by_callee[$qn, caller, fp, line, col, fq, bid]",
             {"qn": callee_qn},
         )
         return [
@@ -881,7 +948,7 @@ class FactGraph:
         """Return all references to *symbol_qn*."""
         result = self._client.run(
             "?[qn, fp, line, col, kind, fq, bid] := "
-            "*reference[qn, fp, line, col, kind, fq, bid], qn == $qn",
+            "qn = $qn, *reference[$qn, fp, line, col, kind, fq, bid]",
             {"qn": symbol_qn},
         )
         return [
@@ -1134,8 +1201,8 @@ class FactGraph:
     def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
         """Compute the transitive set of callers of *symbol_qn* via Datalog."""
         result = self._client.run(
-            "reaches[a] := *call[a, b, _, _, _, _, _], b == $qn\n"
-            "reaches[a] := *call[a, mid, _, _, _, _, _], reaches[mid]\n"
+            "reaches[a] := *call_by_callee[$qn, a, _, _, _, _, _]\n"
+            "reaches[a] := reaches[mid], *call_by_callee[mid, a, _, _, _, _, _]\n"
             "?[a] := reaches[a]",
             {"qn": symbol_qn},
         )
@@ -1144,7 +1211,7 @@ class FactGraph:
     def transitive_callees(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
         """Compute the transitive set of callees of *symbol_qn* via Datalog."""
         result = self._client.run(
-            "reaches[b] := *call[a, b, _, _, _, _, _], a == $qn\n"
+            "reaches[b] := *call[$qn, b, _, _, _, _, _]\n"
             "reaches[b] := *call[mid, b, _, _, _, _, _], reaches[mid]\n"
             "?[b] := reaches[b]",
             {"qn": symbol_qn},
@@ -1240,8 +1307,7 @@ class FactGraph:
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
             'live_ref[sq] := '
-            '*reference[sq, ref_fp, ref_line, _, _, fq, bid], '
-            'fq == "", bid == -1, '
+            '*module_level_ref[sq, ref_fp, ref_line], '
             '*symbol[sq, sym_fp, _, _, sym_line, _, _], '
             f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses.replace("fp", "ref_fp") if excl_clauses else ""}\n'
 
@@ -1392,12 +1458,12 @@ class FactGraph:
         # This avoids unbounded recursion and respects max_depth exactly.
         rules = [f"changed[x] <- [{seed_rows}]\n"]
         rules.append(
-            "layer_0[caller] := *call[caller, callee, _, _, _, _, _], changed[callee]\n"
+            "layer_0[caller] := changed[callee], *call_by_callee[callee, caller, _, _, _, _, _]\n"
         )
         for i in range(1, max_depth):
             rules.append(
-                f"layer_{i}[caller] := *call[caller, mid, _, _, _, _, _], "
-                f"layer_{i - 1}[mid]\n"
+                f"layer_{i}[caller] := layer_{i - 1}[mid], "
+                f"*call_by_callee[mid, caller, _, _, _, _, _]\n"
             )
         # Union all layers into impacted_node
         for i in range(max_depth):
@@ -1454,11 +1520,11 @@ class FactGraph:
             f"to_delete[x] <- [{seed_rows}]\n"
             # A symbol has an external caller if called by something NOT
             # in the delete set.
-            "has_external_caller[qn] := *call[caller, qn, _, _, _, _, _], "
+            "has_external_caller[qn] := *call_by_callee[qn, caller, _, _, _, _, _], "
             "not to_delete[caller]\n"
             # Cascade targets: callees of deleted symbols with no external callers,
             # excluding the initial deletes themselves.
-            "callee_of_deleted[qn] := *call[caller, qn, _, _, _, _, _], to_delete[caller]\n"
+            "callee_of_deleted[qn] := *call_by_callee[qn, caller, _, _, _, _, _], to_delete[caller]\n"
             "cascade[qn] := callee_of_deleted[qn], "
             "not has_external_caller[qn], "
             "not to_delete[qn]\n"
@@ -1503,7 +1569,7 @@ class FactGraph:
             # reference facts (which don't).
             query = (
                 f"excluded[x] <- [{seed_rows}]\n"
-                "alive[qn] := *call[caller, qn, _, _, _, _, _], not excluded[caller]\n"
+                "alive[qn] := *call_by_callee[qn, caller, _, _, _, _, _], not excluded[caller]\n"
                 "dead[qn, fp, name, kind, line, end_line, parent] := "
                 "*symbol[qn, fp, name, kind, line, end_line, parent], "
                 "not alive[qn]\n"
@@ -1547,8 +1613,7 @@ class FactGraph:
 
         Replaces Python file traversal in find_references().
         """
-        clauses = ["*reference[sqn, fp, line, col, kind, fq, bid]"]
-        clauses.append("sqn == $qn")
+        clauses = ["*reference[$qn, fp, line, col, kind, fq, bid]"]
         params: dict[str, Any] = {"qn": symbol_qn}
 
         # Kind filtering
@@ -1581,8 +1646,8 @@ class FactGraph:
         """
         result = self._client.run(
             "?[caller_qn, callee_qn, fp, line, col, fq, bid] := "
-            "*call[caller_qn, callee_qn, fp, line, col, fq, bid], "
-            "callee_qn == $qn",
+            "callee_qn = $qn, "
+            "*call_by_callee[$qn, caller_qn, fp, line, col, fq, bid]",
             {"qn": symbol_qn},
         )
         return [
@@ -1601,8 +1666,8 @@ class FactGraph:
         """
         result = self._client.run(
             "?[caller_qn, callee_qn, fp, line, col, fq, bid] := "
-            "*call[caller_qn, callee_qn, fp, line, col, fq, bid], "
-            "caller_qn == $fqn",
+            "caller_qn = $fqn, "
+            "*call[$fqn, callee_qn, fp, line, col, fq, bid]",
             {"fqn": func_qn},
         )
         return [
@@ -1622,8 +1687,7 @@ class FactGraph:
         if file_path is not None:
             result = self._client.run(
                 "?[caller_qn, callee_qn] := "
-                "*call[caller_qn, callee_qn, fp, _, _, _, _], "
-                "fp == $fp",
+                "*call_by_file[$fp, caller_qn, callee_qn, _, _, _, _]",
                 {"fp": file_path},
             )
         else:
@@ -2594,6 +2658,14 @@ class FactGraph:
                 "?[caller_qn, callee_qn, file_path, line, col] := "
                 "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
                 "file_path == $fp  :rm call {caller_qn, callee_qn, file_path, line, col => }",
+                # call_by_callee
+                "?[callee_qn, caller_qn, file_path, line, col] := "
+                "*call_by_callee[callee_qn, caller_qn, file_path, line, col, _, _], "
+                "file_path == $fp  :rm call_by_callee {callee_qn, caller_qn, file_path, line, col => }",
+                # call_by_file
+                "?[file_path, caller_qn, callee_qn, line, col] := "
+                "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _], "
+                "file_path == $fp  :rm call_by_file {file_path, caller_qn, callee_qn, line, col => }",
                 # reference
                 "?[symbol_qn, file_path, line, col] := "
                 "*reference[symbol_qn, file_path, line, col, _, _, _], "
@@ -2639,6 +2711,10 @@ class FactGraph:
                 "?[file_path, func_qn, block_id] := "
                 "*reachable_block[file_path, func_qn, block_id], "
                 "file_path == $fp  :rm reachable_block {file_path, func_qn, block_id}",
+                # module_level_ref
+                "?[symbol_qn, file_path, line] := "
+                "*module_level_ref[symbol_qn, file_path, line], "
+                "file_path == $fp  :rm module_level_ref {symbol_qn, file_path, line}",
                 # import (uses importing_file, not file_path)
                 "?[importing_file, imported_module, imported_name, line] := "
                 "*import[importing_file, imported_module, imported_name, line, _], "

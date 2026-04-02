@@ -78,6 +78,8 @@ def collect_relation_stats(client) -> dict[str, int]:
     relations = {
         "symbol": "a, _, _, _, _, _, _",
         "call": "a, b, c, d, e, f, g",
+        "call_by_callee": "a, b, c, d, e, f, g",
+        "call_by_file": "a, b, c, d, e, f, g",
         "reference": "a, b, c, d, e, f, g",
         "cfg_block": "a, b, c, d, e",
         "cfg_edge": "a, b, c, d, e, f, g",
@@ -87,6 +89,7 @@ def collect_relation_stats(client) -> dict[str, int]:
         "import": "a, b, c, d, e",
         "ref_by_block": "a, b, c, d",
         "reachable_block": "a, b, c",
+        "module_level_ref": "a, b, c",
         "decorator_on": "a, b",
         "trace_flow": "a, b, c, d, e, f, g",
         "type_binding": "a, b, c, d, e",
@@ -280,16 +283,16 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
 
     benchmarks = [
         # High-level API (current implementation)
-        ("refs(QuerySet)", "refs_datalog — uses == filter", _refs_queryset),
-        ("refs(Model)", "refs_datalog — uses == filter", _refs_model),
-        ("callers(QS.filter)", "callers_datalog — 2nd key filter", _callers),
-        ("callees(QS.filter)", "callees_datalog — 1st key filter", _callees),
+        ("refs(QuerySet)", "refs_datalog — positional key lookup", _refs_queryset),
+        ("refs(Model)", "refs_datalog — positional key lookup", _refs_model),
+        ("callers(QS.filter)", "callers_datalog — reverse-index lookup", _callers),
+        ("callees(QS.filter)", "callees_datalog — positional key lookup", _callees),
         ("graph(full)", "graph_datalog — full scan", _graph_full),
-        ("graph(query.py)", "graph_datalog — 3rd key filter", _graph_file),
-        ("transitive_callers", "recursive Datalog", _transitive_callers),
-        ("transitive_callees", "recursive Datalog", _transitive_callees),
+        ("graph(query.py)", "graph_datalog — file-key lookup", _graph_file),
+        ("transitive_callers", "recursive Datalog via reverse index", _transitive_callers),
+        ("transitive_callees", "recursive Datalog via leading key", _transitive_callees),
         ("dead_code_simple", "no-ref check", _dead_code_simple),
-        ("dead_code_unified", "reachable+entry points", _dead_code_unified),
+        ("dead_code_unified", "reachable+entry points+module_level_ref", _dead_code_unified),
         ("unreachable_blocks", "CFG reachability", _unreachable_blocks),
         # Optimization comparison: positional vs == filter
         ("refs POSITIONAL", "positional $qn (OPTIMIZED)", _refs_positional),

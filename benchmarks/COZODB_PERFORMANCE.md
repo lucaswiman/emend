@@ -52,6 +52,148 @@ comparison rather than a noise-smoothed absolute benchmark.
 | scan: reference | 6.64s |
 | join: ref+reachable | 4.87s |
 
+## Optimization 1: Positional Binding For Leading-Key Lookups
+
+Changes:
+
+- `refs_datalog()` now binds `reference[$qn, ...]`
+- `callees_datalog()` now binds `call[$fqn, ...]`
+- `transitive_callees()` now seeds recursion from `call[$qn, ...]`
+
+Benchmark command:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --skip-index --json
+```
+
+`--skip-index` is intentional here: this optimization changes query shape only,
+not the physical schema or fact population.
+
+### Optimization 1: Before vs After
+
+| Metric | Before | After Opt 1 | Delta |
+|--------|-------:|------------:|------:|
+| refs(QuerySet) | 2.41s | 1ms | 2116x faster |
+| refs(Model) | 2.34s | 1ms | 3210x faster |
+| callees(QS.filter) | 936ms | 1ms | 779x faster |
+| transitive_callees | 6.15s | 5.90s | 1.04x faster |
+| callers(QS.filter) | 959ms | 948ms | no material change |
+| graph(query.py) | 953ms | 944ms | no material change |
+| dead_code_unified | 11.90s | 11.86s | no material change |
+
+## Optimization 2: Add `call_by_callee` Reverse Index
+
+Changes:
+
+- added stored relation `call_by_callee`
+- populated it in both full-build and incremental-update paths
+- switched reverse traversals to read from `call_by_callee`
+  - `callers_datalog()`
+  - `transitive_callers()`
+  - `impact_closure()`
+  - `cascade_dead()`
+  - `unreferenced_symbols(exclude_qns=...)`
+
+Benchmark commands:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --json
+.venv/bin/python benchmarks/bench_cozodb.py --quick --skip-index --json
+```
+
+The full rebuild run measures schema cost. The follow-up `--skip-index` run
+captures the final query numbers after switching the last direct caller lookup.
+
+### Optimization 2: Build Impact
+
+| Metric | Before | After Opt 2 | Delta |
+|--------|-------:|------------:|------:|
+| index_build | 118.78s | 127.76s | 8.98s slower |
+
+### Optimization 2: Previous vs Current Query Times
+
+| Metric | After Opt 1 | After Opt 2 | Delta |
+|--------|------------:|------------:|------:|
+| callers(QS.filter) | 948ms | 1ms | 1006x faster |
+| transitive_callers | 7.16s | 2ms | 4473x faster |
+| graph(query.py) | 944ms | 978ms | no material change |
+| transitive_callees | 5.90s | 6.39s | noise/regression |
+| dead_code_unified | 11.86s | 11.94s | no material change |
+
+## Optimization 3: Add `call_by_file` Reverse Index
+
+Changes:
+
+- added stored relation `call_by_file`
+- populated it in both full-build and incremental-update paths
+- switched `graph_datalog(file_path=...)` to read `call_by_file[$fp, ...]`
+
+Benchmark command:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --json
+```
+
+### Optimization 3: Build Impact
+
+| Metric | After Opt 2 | After Opt 3 | Delta |
+|--------|------------:|------------:|------:|
+| index_build | 127.76s | 134.90s | 7.14s slower |
+
+### Optimization 3: Previous vs Current Query Times
+
+| Metric | After Opt 2 | After Opt 3 | Delta |
+|--------|------------:|------------:|------:|
+| graph(query.py) | 978ms | 9ms | 109x faster |
+| graph(full) | 2.34s | 2.27s | no material change |
+| callers(QS.filter) | 1ms | 1ms | no material change |
+| dead_code_unified | 11.94s | 12.04s | no material change |
+
+## Optimization 4: Add `module_level_ref` For Dead-Code Liveness
+
+Changes:
+
+- added stored relation `module_level_ref`
+- populated it in both full-build and incremental-update paths
+- switched the module-level `live_ref` rule in `dead_code_unified()` to use
+  `module_level_ref` instead of filtering the full `reference` relation
+
+Benchmark command:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --json
+```
+
+### Optimization 4: Build Impact
+
+| Metric | After Opt 3 | After Opt 4 | Delta |
+|--------|------------:|------------:|------:|
+| index_build | 134.90s | 138.25s | 3.35s slower |
+
+### Optimization 4: Previous vs Current Query Times
+
+| Metric | After Opt 3 | After Opt 4 | Delta |
+|--------|------------:|------------:|------:|
+| dead_code_unified | 12.04s | 7.73s | 1.56x faster |
+| dead_code_simple | 5.59s | 5.65s | no material change |
+| graph(query.py) | 9ms | 9ms | no material change |
+| callers(QS.filter) | 1ms | 1ms | no material change |
+
+## Local End State
+
+After all four implemented optimizations in this environment:
+
+| Metric | Before | Final | Delta |
+|--------|-------:|------:|------:|
+| index_build | 118.78s | 138.25s | 19.47s slower |
+| refs(QuerySet) | 2.41s | 1ms | 2116x faster |
+| callers(QS.filter) | 959ms | 1ms | 1017x faster |
+| callees(QS.filter) | 936ms | 1ms | 780x faster |
+| graph(query.py) | 953ms | 9ms | 106x faster |
+| transitive_callers | 7.19s | 1ms | 7190x faster |
+| transitive_callees | 6.15s | 6.20s | no meaningful change |
+| dead_code_unified | 11.90s | 7.73s | 1.54x faster |
+
 ## Executive Summary
 
 CozoDB's query planner has a critical behavior: **B-tree index lookups only occur
