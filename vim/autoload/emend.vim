@@ -12,6 +12,7 @@ let s:channel = v:null        " Vim-only; Neovim uses s:job as channel
 let s:req_id = 0
 let s:callbacks = {}          " id → Funcref
 let s:ready = 0
+let s:indexing = 0            " 1 while background reindex is running
 let s:buf = ''                " partial read buffer
 let s:detected_emend = ''     " cached executable path
 
@@ -79,6 +80,7 @@ function! emend#start(...) abort
   let l:root = g:emend_project_root !=# '' ? g:emend_project_root : getcwd()
 
   let s:ready = 0
+  let s:indexing = 0
   let s:buf = ''
   let s:callbacks = {}
   let s:req_id = 0
@@ -144,6 +146,10 @@ endfunction
 
 function! emend#is_ready() abort
   return s:ready
+endfunction
+
+function! emend#is_indexing() abort
+  return s:indexing
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -228,6 +234,7 @@ function! s:on_server_exit() abort
   let s:job = v:null
   let s:channel = v:null
   let s:ready = 0
+  let s:indexing = 0
   " Notify pending callbacks of server exit, then clear.
   for [l:id, l:Cb] in items(s:callbacks)
     try
@@ -267,6 +274,11 @@ function! s:handle_message(msg) abort
   if !has_key(a:msg, 'id') && has_key(a:msg, 'method')
     if a:msg.method ==# 'ready'
       let s:ready = 1
+    elseif a:msg.method ==# 'indexing_started'
+      let s:indexing = 1
+    elseif a:msg.method ==# 'indexing_complete'
+      let s:indexing = 0
+      call emend#ui#on_indexing_complete()
     endif
     return
   endif

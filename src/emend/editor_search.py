@@ -46,6 +46,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,16 +68,20 @@ class SearchResult:
     mode: str  # "symbol", "pattern", "selector", "reference", "file_symbols"
     truncated: bool = False
     query: str = ""
+    indexing: bool = False
 
     def to_dict(self) -> dict:
         """Lightweight serialization (avoids ``dataclasses.asdict`` deep-copy)."""
-        return {
+        d: dict = {
             "items": self.items,
             "elapsed_ms": self.elapsed_ms,
             "mode": self.mode,
             "truncated": self.truncated,
             "query": self.query,
         }
+        if self.indexing:
+            d["indexing"] = True
+        return d
 
 
 def _timed(method):
@@ -391,6 +396,12 @@ class EditorSearchEngine:
         self._fts_ready = False
         self._fts_available: bool | None = None
 
+        # Background reindex state
+        self._indexing = False
+        self._index_complete_pending = False
+        self._index_thread: threading.Thread | None = None
+        self._index_lock = threading.Lock()
+
     # -- connection ---------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -453,6 +464,72 @@ class EditorSearchEngine:
         self._fts_ready = True
         return True
 
+    # -- background reindex -------------------------------------------------
+
+    @property
+    def is_indexing(self) -> bool:
+        """True while a background reindex is running."""
+        return self._indexing
+
+    def start_background_reindex(self) -> bool:
+        """Start a background reindex thread.
+
+        Returns True if a new reindex was started, False if one is already
+        running or the index is already fresh.
+        """
+        with self._index_lock:
+            if self._indexing:
+                return False
+            self._indexing = True
+            self._index_complete_pending = False
+
+        thread = threading.Thread(
+            target=self._background_reindex_worker,
+            daemon=True,
+            name="emend-reindex",
+        )
+        self._index_thread = thread
+        thread.start()
+        return True
+
+    def _background_reindex_worker(self) -> None:
+        """Worker that runs in a background thread.
+
+        Uses ``_ensure_index_fresh`` which opens its own SQLite connection,
+        so there is no contention with the main-thread connection.
+        """
+        try:
+            from emend.transform import _ensure_index_fresh
+
+            _ensure_index_fresh(self.project_root)
+        except Exception:
+            logger.debug("Background reindex failed", exc_info=True)
+        finally:
+            with self._index_lock:
+                self._indexing = False
+                self._index_complete_pending = True
+
+    def check_index_complete(self) -> bool:
+        """Check if a background reindex just completed.
+
+        Returns True (exactly once per reindex) when the background thread
+        finished.  The caller should rebuild FTS and notify the client.
+        """
+        with self._index_lock:
+            if self._index_complete_pending:
+                self._index_complete_pending = False
+                return True
+        return False
+
+    def finalize_reindex(self) -> None:
+        """Rebuild FTS after a background reindex completed.
+
+        Must be called from the main thread (uses the engine's connection).
+        """
+        conn = self._get_conn()
+        rebuild_fts(conn)
+        self._fts_ready = True
+
     # -- unified search -----------------------------------------------------
 
     def search(
@@ -501,6 +578,7 @@ class EditorSearchEngine:
 
         result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
         result.query = query
+        result.indexing = self._indexing
         return result
 
     # -- symbol search ------------------------------------------------------
@@ -1826,6 +1904,9 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.status().to_dict()
     elif method == "reindex":
         return engine.reindex().to_dict()
+    elif method == "reindex_async":
+        started = engine.start_background_reindex()
+        return {"started": started, "indexing": engine.is_indexing}
     elif method in ("goto_definition", "goto_local"):
         file = params.pop("file", "")
         line = int(params.pop("line", 1))
@@ -2126,8 +2207,18 @@ def run_editor_server(project_path: str = ".") -> None:
     - ``selector``       — resolve a selector (``file.py::Class.method``)
     - ``file_symbols``   — file outline
     - ``status``         — index status
-    - ``reindex``        — refresh stale files + rebuild FTS
+    - ``reindex``        — refresh stale files + rebuild FTS (blocking)
+    - ``reindex_async``  — start background reindex (non-blocking)
     - ``shutdown``       — clean exit
+
+    Notifications (server → client)
+    --------------------------------
+    - ``indexing_started``   — background reindex has begun
+    - ``indexing_complete``  — background reindex finished, results are fresh
+
+    The server automatically starts a background reindex on startup so
+    the first search returns results from the existing (possibly stale)
+    index while fresh data is being prepared.
     """
     engine = EditorSearchEngine(project_path)
 
@@ -2137,11 +2228,27 @@ def run_editor_server(project_path: str = ".") -> None:
         "db_path": str(engine.db_path),
     }})
 
+    # Auto-start background reindex so searches return immediately
+    # from the existing index while it refreshes.
+    if engine.db_path.exists():
+        started = engine.start_background_reindex()
+        if started:
+            _write_json({"jsonrpc": "2.0", "method": "indexing_started", "params": {}})
+
     try:
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
+
+            # Check if background reindex completed between requests.
+            if engine.check_index_complete():
+                engine.finalize_reindex()
+                _write_json({
+                    "jsonrpc": "2.0",
+                    "method": "indexing_complete",
+                    "params": {},
+                })
 
             try:
                 request = json.loads(line)
@@ -2169,6 +2276,16 @@ def run_editor_server(project_path: str = ".") -> None:
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "error": {"code": -32603, "message": str(exc)},
+                })
+
+            # Also check after dispatching (the reindex may have
+            # completed while we were processing the request).
+            if engine.check_index_complete():
+                engine.finalize_reindex()
+                _write_json({
+                    "jsonrpc": "2.0",
+                    "method": "indexing_complete",
+                    "params": {},
                 })
     finally:
         engine.close()
