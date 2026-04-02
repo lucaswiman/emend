@@ -26,6 +26,7 @@ def _trace_cmd_impl(
     interprocedural: bool,
     max_iterations: int,
     preset: str | None,
+    engine: str | None = None,
 ) -> None:
     """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
@@ -81,6 +82,7 @@ def _trace_cmd_impl(
                 label_filter=label,
                 language=_lang,
                 project_path=_proj_root,
+                engine=engine,
             )
 
         output = format_violations(violations, show_trace=trace, json_output=json_output)
@@ -114,6 +116,7 @@ def trace_cmd(
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
+    engine: Annotated[Optional[str], typer.Option("--engine", help="Force trace engine: 'datalog' (default) or 'python' (legacy escape hatch)")] = None,
 ):
     """Run trace analysis to detect unsafe data flows.
 
@@ -136,9 +139,10 @@ def trace_cmd(
         emend trace src/ --json
         emend trace src/ --interprocedural
         emend trace app.py --preset flask
+        emend trace src/ --engine python
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
-                    interprocedural, max_iterations, preset)
+                    interprocedural, max_iterations, preset, engine=engine)
 
 
 import sys

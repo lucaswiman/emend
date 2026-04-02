@@ -801,8 +801,10 @@ def handler():
         from emend.trace import run_trace_analysis
         # With CFG unavailable and a sanitizer present, the fail-closed
         # behavior means we still report the violation (can't prove sanitized).
+        # This tests the Python engine's resilience; the Datalog engine uses
+        # FactGraph which has its own CFG construction path.
         violations = run_trace_analysis(
-            [str(f)], config, project_path=None,
+            [str(f)], config, project_path=None, engine="python",
         )
         # Fail-closed: violation should be reported even though it would be
         # suppressed if CFG were available and showed the sanitizer covers

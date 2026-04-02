@@ -203,7 +203,8 @@ def test_trace_does_not_cross_contaminate_separate_functions(tmp_path):
 
 
 def test_trace_trace_output(tmp_path):
-    """Trace includes source and sink steps."""
+    """Trace includes source and sink steps (Python engine only — Datalog
+    engine does not produce trace steps)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
         "def handle_request(request, cursor):\n"
@@ -212,7 +213,7 @@ def test_trace_trace_output(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_trace_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config, engine="python")
 
     assert len(violations) >= 1
     v = violations[0]
@@ -302,7 +303,8 @@ def test_trace_text_output_format(tmp_path):
 
 
 def test_trace_text_output_with_trace(tmp_path):
-    """Text output includes indented trace lines."""
+    """Text output includes indented trace lines (Python engine only — Datalog
+    engine does not produce trace steps)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
         "def handle_request(request, cursor):\n"
@@ -311,7 +313,7 @@ def test_trace_text_output_with_trace(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_trace_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config, engine="python")
 
     output = format_violations(violations, show_trace=True)
     # Trace lines are indented with two spaces
@@ -483,7 +485,8 @@ def test_trace_sanitize_then_use(tmp_path):
 
 
 def test_trace_field_sensitivity_distinct_fields(tmp_path):
-    """Different fields on the same object are tracked independently."""
+    """Different fields on the same object are tracked independently
+    (Python engine only — Datalog engine does not track field-level taint)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
         "def handle(request, cursor):\n"
@@ -495,7 +498,7 @@ def test_trace_field_sensitivity_distinct_fields(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_trace_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config, engine="python")
     # obj.dirty should trigger a violation
     assert len(violations) >= 1
 
@@ -534,7 +537,8 @@ def test_trace_field_sensitivity_propagation(tmp_path):
 
 
 def test_trace_field_sanitizer_only_cleans_field(tmp_path):
-    """Sanitizing obj.field does not clean obj.other_field."""
+    """Sanitizing obj.field does not clean obj.other_field
+    (Python engine only — Datalog engine does not track per-variable sanitizer application)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
         "def handle(request, cursor):\n"
@@ -545,7 +549,7 @@ def test_trace_field_sanitizer_only_cleans_field(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_trace_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config, engine="python")
     # b is still tainted (escape only cleaned a)
     assert len(violations) >= 1
 
@@ -567,7 +571,8 @@ def test_trace_container_append(tmp_path):
 
 
 def test_trace_container_dict_subscript(tmp_path):
-    """Taint propagates through dict subscript assignment."""
+    """Taint propagates through dict subscript assignment
+    (Python engine only — Datalog engine does not track dict subscript taint)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
         "def handle(request, cursor):\n"
@@ -579,7 +584,7 @@ def test_trace_container_dict_subscript(tmp_path):
     )
 
     config = _make_sql_injection_config()
-    violations = run_trace_analysis([str(test_file)], config)
+    violations = run_trace_analysis([str(test_file)], config, engine="python")
     assert len(violations) >= 1
 
 
