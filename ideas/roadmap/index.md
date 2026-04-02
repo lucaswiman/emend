@@ -53,10 +53,13 @@ Status of known issues in the tracing and flow stack:
   file sets because FactGraph construction requires a full project build.~~
   Fixed in Phase 14: `FactGraph.build_from_files()` builds facts directly from
   an explicit file list; `_run_trace_datalog()` uses this path automatically.
-- **Open:** Fact graph updates are not incremental — `_ensure_index_fresh()`
-  calls `_build_facts_db()` for a full CozoDB rebuild even when one file
-  changes, and there are four separate build/load paths for FactGraph.
-  Tracked in Phase 14a.
+- ~~Fact graph updates are not incremental.~~
+  Addressed in Phase 14a: `_ensure_index_fresh()` now calls
+  `FactGraph.update_files()` for changed files (incremental) instead of
+  `_build_facts_db()` (full rebuild).  `_get_or_build_fact_graph()`
+  simplified from 4 fallback levels to 2.  `build_from_project()` and
+  `_build_facts_db()` consolidation deferred pending legacy relation
+  removal.
 
 ## Intended End State
 
