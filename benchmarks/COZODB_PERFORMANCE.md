@@ -4,6 +4,54 @@
 **Codebase**: Django 5.2 (883 Python files)
 **Author**: Claude Code (benchmark analysis)
 
+## Local Benchmark Baseline ("Before")
+
+These numbers were collected on 2026-04-02 in the current Docker-on-macOS
+Codex environment via:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --json
+```
+
+This is a single-iteration run, so treat it as a local baseline for relative
+comparison rather than a noise-smoothed absolute benchmark.
+
+### Before: Build And Query Times
+
+| Metric | Local Before |
+|--------|-------------:|
+| index_build | 118.78s |
+| refs(QuerySet) | 2.41s |
+| refs(Model) | 2.34s |
+| callers(QS.filter) | 959ms |
+| callees(QS.filter) | 936ms |
+| graph(full) | 2.23s |
+| graph(query.py) | 953ms |
+| transitive_callers | 7.19s |
+| transitive_callees | 6.15s |
+| dead_code_simple | 5.56s |
+| dead_code_unified | 11.90s |
+| unreachable_blocks | 2.86s |
+
+### Before: Diagnostic Query Shapes
+
+| Diagnostic Query | Local Before |
+|------------------|-------------:|
+| refs POSITIONAL | 1ms |
+| refs == FILTER | 2.39s |
+| callees POSITIONAL | 1ms |
+| callees == FILTER | 955ms |
+| call 1st-key bind | 1ms |
+| call 2nd-key bind | 1.97s |
+| ref 1st-key bind | 1ms |
+| ref 2nd-key bind | 5.55s |
+| cfg 1st-key bind | 7ms |
+| cfg 2nd-key bind | 441ms |
+| scan: symbol | 354ms |
+| scan: call | 2.29s |
+| scan: reference | 6.64s |
+| join: ref+reachable | 4.87s |
+
 ## Executive Summary
 
 CozoDB's query planner has a critical behavior: **B-tree index lookups only occur
