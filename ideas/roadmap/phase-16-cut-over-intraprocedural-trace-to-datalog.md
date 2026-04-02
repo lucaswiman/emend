@@ -20,16 +20,16 @@ Datalog rules are language-agnostic.
 
 ## Todo
 
-- [ ] Route `run_trace_analysis()` through `_run_trace_datalog()` by default.
-- [ ] Preserve `TraceViolation` output shape, engine metadata, message/sink
+- [x] Route `run_trace_analysis()` through `_run_trace_datalog()` by default.
+- [x] Preserve `TraceViolation` output shape, engine metadata, message/sink
   fidelity, and trace/witness formatting.
-- [ ] Update tests to assert `engine == "datalog"` for intraprocedural
+- [x] Update tests to assert `engine == "datalog"` for intraprocedural
   violations after cutover.
-- [ ] Remove stale comments describing the Python engine as canonical for
+- [x] Remove stale comments describing the Python engine as canonical for
   intraprocedural analysis.
-- [ ] Add an `--engine` escape hatch (like Phase 12 did) if a temporary
+- [x] Add an `--engine` escape hatch (like Phase 12 did) if a temporary
   fallback is needed during stabilisation.
-- [ ] Run the full trace/flow/policy/lint regression slices.
+- [x] Run the full trace/flow/policy/lint regression slices.
 
 ## Exit Criteria
 

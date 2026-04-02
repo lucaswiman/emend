@@ -293,7 +293,7 @@ def _check_flow_rule(
     """Check a flow-based lint rule within each function in the file.
 
     For each function body, finds source and sink pattern matches, then
-    propagates taint using the Python intraprocedural flow analysis engine.
+    propagates taint using the intraprocedural flow analysis engine.
     """
     from emend import emend_core
     from emend.ast_utils import _rust_dict_to_nested_symbol
@@ -332,7 +332,7 @@ def _check_flow_rule(
             source_override=source, language=language
         )
 
-    # Python intraprocedural flow analysis (canonical engine)
+    # Intraprocedural flow analysis
     all_lines = source.splitlines()
 
     for sym in _all_functions(symbols):

@@ -633,7 +633,8 @@ class TestFlowRuleBlockerSemantics:
 
 class TestTraceViolationEngineField:
     """Regression: TraceViolation must have an ``engine`` field and
-    run_trace_analysis() must set it to ``"python"`` for all violations.
+    run_trace_analysis() must set it to ``"datalog"`` for all violations
+    (after Phase 16 cutover).
 
     The field was introduced in Phase 8 to distinguish which analysis engine
     produced a violation (useful for differential testing and debugging).
@@ -676,8 +677,8 @@ class TestTraceViolationEngineField:
         )
         assert v.engine == "python"
 
-    def test_run_trace_analysis_tags_engine_python(self, tmp_path):
-        """run_trace_analysis() sets engine='python' on all violations."""
+    def test_run_trace_analysis_tags_engine_datalog(self, tmp_path):
+        """run_trace_analysis() sets engine='datalog' on all violations (Phase 16 cutover)."""
         test_file = tmp_path / "app.py"
         test_file.write_text(
             "def handle(request, cursor):\n"
@@ -698,8 +699,8 @@ class TestTraceViolationEngineField:
         violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
         for v in violations:
-            assert v.engine == "python", (
-                f"Expected engine='python', got {v.engine!r}"
+            assert v.engine == "datalog", (
+                f"Expected engine='datalog', got {v.engine!r}"
             )
 
     def test_format_violations_json_includes_engine(self, tmp_path):
@@ -730,11 +731,10 @@ class TestTraceViolationEngineField:
         assert len(data) >= 1
         # All violations with engine set must include "engine" in JSON output
         for entry in data:
-            # engine is "python" so it should appear in the JSON
             assert "engine" in entry, (
                 f"Expected 'engine' key in JSON output, got: {entry}"
             )
-            assert entry["engine"] == "python"
+            assert entry["engine"] == "datalog"
 
     def test_format_violations_json_omits_engine_when_empty(self):
         """format_violations JSON omits 'engine' key when engine is empty string."""

@@ -52,6 +52,7 @@ def _run_both_engines(
         label_filter=None,
         language="python",
         project_path=project_path,
+        engine="python",
     )
     for v in python_violations:
         assert v.engine == "python", f"Expected engine='python', got {v.engine!r}"

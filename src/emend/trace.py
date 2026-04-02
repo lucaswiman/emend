@@ -1,10 +1,10 @@
 """Intraprocedural trace (data-flow) analysis engine for emend.
 
 Tracks labeled value flow from sources to sinks within individual
-functions, with sanitizers and path traces.  Supports Datalog-based
-propagation via :class:`~emend.fact_graph.FactGraph` when
-``use_datalog=True`` (the default), falling back to the regex-based
-Python simulation when fact graph construction fails or is unavailable.
+functions, with sanitizers and path traces.  Uses the Datalog/FactGraph
+engine by default for both intraprocedural and interprocedural analysis.
+The legacy Python engine is available as an escape hatch via
+``engine="python"`` and will be removed in Phase 17.
 
 Formerly named "taint analysis"; renamed to "trace" because the engine
 is a general labeled data-flow tracer — not only for security taint.
@@ -1260,8 +1260,13 @@ def run_trace_analysis(
     label_filter: str | None = None,
     language: str = "python",
     project_path: str | None = None,
+    engine: str | None = None,
 ) -> list[TraceViolation]:
-    """Run taint analysis on the given files using the Python intraprocedural engine.
+    """Run intraprocedural trace analysis on the given files.
+
+    Uses the Datalog/FactGraph engine by default.  Pass ``engine="python"``
+    to force the legacy Python taint engine (escape hatch during
+    stabilisation; will be removed in Phase 17).
 
     Args:
         paths: List of source file paths to analyze.
@@ -1269,6 +1274,8 @@ def run_trace_analysis(
         label_filter: If set, only check this specific taint label.
         language: Source language (default: "python").
         project_path: Project root for FactGraph construction (optional).
+        engine: ``"datalog"`` (default) or ``"python"`` to force the
+            legacy engine.
 
     Returns:
         List of TraceViolation objects.
@@ -1276,7 +1283,42 @@ def run_trace_analysis(
     if not config.sources or not config.sinks:
         return []
 
-    # Python intraprocedural trace analysis
+    use_python = engine == "python"
+
+    if not use_python:
+        _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
+        logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
+        result = _run_trace_datalog(
+            paths, config,
+            label_filter=label_filter,
+            language=language,
+            project_path=_proj,
+        )
+        if result is not None:
+            return result
+        # Datalog engine returned None (unavailable) — fall back to Python
+        logger.warning(
+            "Datalog intraprocedural trace unavailable, falling back to Python engine"
+        )
+
+    return _run_trace_python(
+        paths, config,
+        label_filter=label_filter,
+        language=language,
+    )
+
+
+def _run_trace_python(
+    paths: list[str],
+    config: TraceConfig,
+    label_filter: str | None = None,
+    language: str = "python",
+) -> list[TraceViolation]:
+    """Legacy Python intraprocedural trace engine.
+
+    Retained as an escape hatch (``engine="python"``).  Will be removed
+    in Phase 17.
+    """
     logger.debug("Using Python intraprocedural trace engine for %d files", len(paths))
     from emend.ast_utils import find_nested_definitions
 

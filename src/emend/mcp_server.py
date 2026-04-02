@@ -952,6 +952,7 @@ def trace_analysis(
     label: Annotated[str | None, Field(description="Only check a specific trace label.")] = None,
     trace: Annotated[bool, Field(description="Include propagation traces in output.")] = False,
     interprocedural: Annotated[bool, Field(description="Enable cross-function analysis with fixed-point iteration.")] = False,
+    engine: Annotated[str | None, Field(description="Force trace engine: 'datalog' (default) or 'python' (legacy escape hatch).")] = None,
 ) -> str:
     """Run trace analysis to detect unsafe data flows. Returns JSON.
 
@@ -1031,7 +1032,7 @@ def trace_analysis(
         }
         return json.dumps(data, indent=2)
 
-    violations = run_trace_analysis(files, trace_config, label_filter=label)
+    violations = run_trace_analysis(files, trace_config, label_filter=label, engine=engine)
     return format_violations(violations, show_trace=trace, json_output=True)
 
 
