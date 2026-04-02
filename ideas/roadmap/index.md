@@ -24,7 +24,7 @@ cross-language support.
 
 - [x] [Phase 14: Fix Datalog Intraprocedural Trace for Small Projects](./phase-14-fix-datalog-intraprocedural-trace-for-small-projects.md)
 - [x] [Phase 14a: Incremental Fact Updates and Builder Consolidation](./phase-14a-incremental-fact-updates.md)
-- [ ] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
+- [x] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
 - [ ] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
 - [ ] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
 
@@ -60,6 +60,12 @@ Status of known issues in the tracing and flow stack:
   simplified from 4 fallback levels to 2.  `build_from_project()` and
   `_build_facts_db()` consolidation deferred pending legacy relation
   removal.
+- ~~Datalog intraprocedural engine missing container mutation, module-level,
+  and scope-sanitizer support.~~
+  Fixed in Phase 15: container mutation taint via `method_call` facts,
+  module-level def-use synthesis from scope resolver, scope-kill same-block
+  line-ordering suppression.  Three accepted divergences documented where
+  the Datalog engine is more correct than the Python engine.
 
 ## Intended End State
 
