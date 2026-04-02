@@ -11,14 +11,10 @@ Key design choices:
 - Comparison uses ``(file_path, line, label, sink_pattern)`` tuples so engine
   metadata and trace steps do not cause false mismatches.
 
-Known divergence (as of Phase 9):
-  The Datalog engine requires a pre-built FactGraph with populated CFG/symbol facts
-  (produced by ``warm_caches`` / ``FactGraph.build_from_project``).  For tiny
-  one-file ``tmp_path`` fixtures the FactGraph has no inter-block def-use edges,
-  so taint propagation through assignments is invisible to it.  As a result the
-  Datalog engine currently returns fewer violations than the Python engine for most
-  single-function fixtures.  Tests that call ``_assert_engines_agree`` document
-  this by xfailing when the engines diverge, rather than hard-failing.
+As of Phase 14, the Datalog engine uses ``FactGraph.build_from_files()`` to build
+facts directly from the given file list, so small tmp_path fixtures now work
+correctly.  The only remaining accepted divergence is nested-function closure
+taint which requires interprocedural analysis.
 """
 
 from __future__ import annotations
@@ -135,13 +131,7 @@ def _sqli_sanitized_config() -> TraceConfig:
 # ---------------------------------------------------------------------------
 
 class TestDifferentialBasicFlow:
-    """Both engines on simple, unambiguous taint flows.
-
-    The Datalog engine requires pre-populated CFG/def-use facts which are not
-    present for tiny tmp_path fixtures, so it returns [] rather than the
-    expected violations.  Tests that compare engines are therefore marked
-    xfail to document the known divergence without blocking CI.
-    """
+    """Both engines on simple, unambiguous taint flows."""
 
     def test_simple_source_to_sink_python_engine(self, tmp_path):
         """Python engine alone: simple linear taint source -> variable -> sink."""
@@ -157,15 +147,8 @@ def handler():
         assert python_v[0].label == "sqli"
         assert python_v[0].line == 3  # cursor.execute is on line 3
 
-    @pytest.mark.xfail(
-        reason=(
-            "Datalog engine returns [] for tmp_path fixtures: FactGraph lacks "
-            "CFG/def-use facts needed for taint propagation through assignments."
-        ),
-        strict=True,
-    )
     def test_simple_source_to_sink_both_engines(self, tmp_path):
-        """Both engines: simple linear taint.  Xfail until Datalog catches up."""
+        """Both engines: simple linear taint."""
         source = """\
 def handler():
     user_input = request.args.get("name")
@@ -230,19 +213,6 @@ def handler():
 # TestDifferentialEdgeCases
 # ---------------------------------------------------------------------------
 
-# The Datalog engine requires pre-populated CFG/def-use facts from FactGraph.
-# For tiny one-file tmp_path fixtures those facts are absent, so the Datalog
-# engine returns [] even when the Python engine finds violations.  Each test
-# that compares both engines for a case where the Python engine finds something
-# is therefore marked xfail(strict=True) — it documents the known gap and will
-# start passing automatically once the gap is closed.
-
-_DATALOG_NO_FACTS_REASON = (
-    "Datalog engine returns [] for tmp_path fixtures: FactGraph lacks "
-    "CFG/def-use facts needed for taint propagation through assignments."
-)
-
-
 class TestDifferentialEdgeCases:
     """Edge cases — each test has a Python-only assertion and a cross-engine comparison."""
 
@@ -263,9 +233,16 @@ def outer():
         # It may or may not detect the cross-scope flow; just verify it does not crash.
         assert isinstance(python_v, list)
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=False)
+    @pytest.mark.xfail(
+        reason=(
+            "Nested function closure taint is cross-scope (outer→inner), "
+            "which requires interprocedural analysis not yet wired for "
+            "intraprocedural trace."
+        ),
+        strict=False,
+    )
     def test_nested_function_both_engines(self, tmp_path):
-        """Both engines: nested function.  Xfail until Datalog catches up."""
+        """Both engines: nested function.  Xfail — cross-scope closure taint."""
         source = """\
 def outer():
     user_input = request.args.get("name")
@@ -291,9 +268,8 @@ cursor.execute(user_input)
         assert python_v, "Python engine should detect module-level source->sink"
         assert python_v[0].line == 2
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_module_level_code_both_engines(self, tmp_path):
-        """Both engines: module-level code.  Xfail on known divergence."""
+        """Both engines: module-level code."""
         source = """\
 user_input = request.args.get("name")
 cursor.execute(user_input)
@@ -317,9 +293,8 @@ def handler():
         assert 4 in python_lines, "Python engine should flag line 4 (sink after source)"
         assert 2 not in python_lines, "Python engine must NOT flag line 2 (sink before source)"
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_same_block_ordering_both_engines(self, tmp_path):
-        """Both engines: intra-block line-ordering.  Xfail on known divergence."""
+        """Both engines: intra-block line-ordering."""
         source = """\
 def handler():
     cursor.execute("static")
@@ -343,9 +318,8 @@ def handler():
         assert python_v, "Python engine must flag sink that appears after source"
         assert 3 in {v.line for v in python_v}
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_sink_after_source_both_engines(self, tmp_path):
-        """Both engines: sink after source.  Xfail on known divergence."""
+        """Both engines: sink after source."""
         source = """\
 def handler():
     user_input = request.args.get("name")
@@ -361,12 +335,7 @@ def handler():
 # ---------------------------------------------------------------------------
 
 class TestDifferentialCorpus:
-    """Curated corpus exercising common edge cases.
-
-    Each test has an independent Python-engine assertion plus a cross-engine
-    comparison.  Cross-engine comparisons are xfail where the Datalog engine
-    is known to return [] due to missing FactGraph facts in tmp_path fixtures.
-    """
+    """Curated corpus exercising common edge cases."""
 
     def test_corpus_reassignment_python_engine(self, tmp_path):
         """Python engine: variable reassigned to literal clears taint."""
@@ -383,9 +352,8 @@ def handler():
         # heuristics for "safe" literals may evolve.
         assert isinstance(python_v, list)
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=False)
     def test_corpus_reassignment_both_engines(self, tmp_path):
-        """Both engines: reassignment.  Xfail until Datalog catches up."""
+        """Both engines: reassignment."""
         source = """\
 def handler():
     user_input = request.args.get("name")
@@ -420,9 +388,8 @@ def handler():
         assert "sqli" in python_labels, "sqli taint should be detected"
         assert "xss" not in python_labels, "xss taint should not fire (no xss source match)"
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_corpus_multiple_labels_both_engines(self, tmp_path):
-        """Both engines: multiple labels.  Xfail on known divergence."""
+        """Both engines: multiple labels."""
         source = """\
 def handler():
     sql_input = request.args.get("q")
@@ -458,9 +425,8 @@ def handler(condition):
         # It should flag line 6 (cursor.execute after the merge point).
         assert isinstance(python_v, list)
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_corpus_branch_sensitive_both_engines(self, tmp_path):
-        """Both engines: branch-sensitive taint.  Xfail on known divergence."""
+        """Both engines: branch-sensitive taint."""
         source = """\
 def handler(condition):
     if condition:
@@ -486,9 +452,8 @@ def handler():
         python_v, _ = _run_both_engines(tmp_path, source, config)
         assert python_v, "Python engine should track taint through intermediate variables"
 
-    @pytest.mark.xfail(reason=_DATALOG_NO_FACTS_REASON, strict=True)
     def test_corpus_intermediate_variables_both_engines(self, tmp_path):
-        """Both engines: taint through intermediates.  Xfail on known divergence."""
+        """Both engines: taint through intermediates."""
         source = """\
 def handler():
     raw = request.args.get("data")

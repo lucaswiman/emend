@@ -1352,6 +1352,26 @@ def _resolve_match_to_location(
     return MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK
 
 
+def _build_trace_fact_graph(
+    paths: list[str],
+    language: str,
+    project_path: str,
+) -> "FactGraph":  # type: ignore[name-defined]
+    """Build a FactGraph for trace analysis from the given file list.
+
+    Prefers ``build_from_files`` so small file sets (e.g. single-file test
+    fixtures) get fully populated CFG/def-use facts.  Falls back to the
+    project-wide ``_get_or_build_fact_graph`` when the direct build fails.
+    """
+    from emend.fact_graph import FactGraph
+    from emend.transform import _get_or_build_fact_graph
+
+    try:
+        return FactGraph.build_from_files(paths, language=language)
+    except Exception:
+        return _get_or_build_fact_graph(project_path)
+
+
 def _run_trace_datalog(
     paths: list[str],
     config: TraceConfig,
@@ -1364,9 +1384,7 @@ def _run_trace_datalog(
     Returns None if the FactGraph is unavailable or the Datalog query fails,
     signalling the caller to fall back to Python simulation.
     """
-    from emend.transform import _get_or_build_fact_graph
-
-    graph = _get_or_build_fact_graph(project_path)
+    graph = _build_trace_fact_graph(paths, language, project_path)
 
     # Create type oracle for Python-side type constraint filtering
     type_oracle = _maybe_create_type_oracle(config)
@@ -1395,6 +1413,7 @@ def _run_trace_datalog(
             if label_filter and src_def.label != label_filter:
                 continue
             matched_sources: list[tuple[str, str, str, int, str]] = []
+            source_lines = source_text.split("\n")
             matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
@@ -1402,6 +1421,18 @@ def _run_trace_datalog(
                     var_names: set[str] = set()
                     for _cn, ct in m.captures.items():
                         var_names |= _extract_identifiers(ct)
+                    # Also extract the assignment target on the same line,
+                    # mirroring the Python engine's behaviour: for
+                    # ``user_input = request.args.get("name")``, the
+                    # tainted variable is ``user_input``, not ``name``.
+                    if m.line <= len(source_lines):
+                        stmt_line = source_lines[m.line - 1]
+                        assign_match = re.match(
+                            r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
+                            stmt_line,
+                        )
+                        if assign_match:
+                            var_names.add(assign_match.group(1))
                     # Type constraint filtering on sources
                     if src_def.type_constraint and type_oracle and var_names:
                         var_names = _filter_vars_by_type(
