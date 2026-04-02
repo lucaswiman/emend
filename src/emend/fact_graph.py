@@ -1665,7 +1665,7 @@ class FactGraph:
         sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same as sources
         sanitizer_quantifier: str = "all_paths",  # "all_paths" or "some_path"
         source_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
-        sanitizer_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
+        sanitizer_lines: list[tuple[str, str, str, str, int, int]] | None = None,  # (fp, fq, var, lbl, block_id, line)
         sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
         scope_kill_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
@@ -1705,9 +1705,17 @@ class FactGraph:
         # Insert source/sink/sanitizer matches as inline relations
         src_rule = _ir("trace_source", _5cols, sources)
         sink_rule = _ir("trace_sink", _5cols, sinks or [])
-        sanitizer_block_rule = _ir(
-            "sanitizer_block", ["fp", "fq", "lbl", "bid"],
-            [(fp, fq, lbl, bid) for fp, fq, _var, bid, lbl in (sanitizers or [])],
+        # Per-variable sanitizer relation: includes the variable name so that
+        # sanitizing `a` does not clear taint on `b` in the same block.
+        sanitizer_var_rule = _ir(
+            "sanitizer_var", _5cols,
+            sanitizers or [],
+        )
+        # Block-level sanitizer (derived): a block has ANY sanitizer for a label.
+        # Used for scope-kill-style checks and some_path quantifier.
+        sanitizer_block_rule = (
+            "sanitizer_block[fp, fq, lbl, bid] := "
+            "sanitizer_var[fp, fq, _, bid, lbl]\n"
         )
 
         # Effect sink rules
@@ -1719,8 +1727,9 @@ class FactGraph:
 
         # Intra-block line-ordering
         _5line = ["fp", "fq", "lbl", "bid", "line"]
+        _6line = ["fp", "fq", "var", "lbl", "bid", "line"]
         source_line_rule = _ir("source_in_block", _5line, source_lines or [])
-        san_line_rule = _ir("sanitizer_in_block", _5line, sanitizer_lines or [])
+        san_line_rule = _ir("sanitizer_in_block", _6line, sanitizer_lines or [])
         sink_line_rule = _ir("sink_in_block", _5line, sink_lines or [])
 
         # Scope kills
@@ -1753,9 +1762,11 @@ class FactGraph:
             # some_path: sanitizer on ANY path suppresses.
             # If source can reach a sanitizer block, and that sanitizer block
             # can reach the sink, the violation is suppressed.
+            # Per-variable: only suppresses taint for the specific sanitized variable.
             query = (
                 f"{src_rule}"
                 f"{sink_rule}"
+                f"{sanitizer_var_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
                 f"{source_line_rule}"
@@ -1772,10 +1783,10 @@ class FactGraph:
                 "cfg_reaches[fp, fq, from_b, mid], "
                 "*cfg_edge[fp, fq, mid, to_b, _, _, _]\n"
 
-                # A sink block is sanitized if source→sanitizer→sink via CFG
-                "sink_sanitized[fp, fq, lbl, sink_block] := "
-                f"{source_relation}[fp, fq, _, src_block, lbl], "
-                "sanitizer_block[fp, fq, lbl, san_block], "
+                # Per-variable: a sink var is sanitized if source→sanitizer(var)→sink via CFG
+                "sink_sanitized[fp, fq, var, lbl, sink_block] := "
+                f"{source_relation}[fp, fq, var, src_block, lbl], "
+                "sanitizer_var[fp, fq, var, san_block, lbl], "
                 "cfg_reaches[fp, fq, src_block, san_block], "
                 "cfg_reaches[fp, fq, san_block, sink_block]\n"
 
@@ -1810,19 +1821,21 @@ class FactGraph:
                 "not scope_kill[fp, fq, lbl, block]\n"
 
                 # Pattern-based violations: taint reaches sink, not sanitized
+                # Per-variable: only suppress if THIS sink_var was sanitized
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
                 "trace_sink[fp, fq, sink_var, sink_block, lbl], "
                 f"{source_relation}[fp, fq, src_var, src_block, lbl], "
-                "not sink_sanitized[fp, fq, lbl, sink_block]\n"
+                "not sink_sanitized[fp, fq, sink_var, lbl, sink_block]\n"
             )
         else:
             # all_paths (default): sanitizer must be on EVERY path.
-            # Use CFG-edge reachability: taint only reaches blocks that are
-            # unsanitized-reachable from the source.
+            # Per-variable: unsanitized reachability is tracked per (var, label)
+            # so that sanitizing variable `a` does not clear taint on variable `b`.
             query = (
                 f"{src_rule}"
                 f"{sink_rule}"
+                f"{sanitizer_var_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
                 f"{source_line_rule}"
@@ -1836,47 +1849,43 @@ class FactGraph:
                 f"{source_relation}[fp, fq, _, _, _], "
                 "*cfg_edge[fp, fq, _, _, _, _, _]\n"
 
-                # Base case: source block is unsanitized-reachable
-                "unsanitized[fp, fq, lbl, block] := "
-                f"{source_relation}[fp, fq, _, block, lbl]\n"
+                # Per-variable unsanitized reachability.
+                # Base case: source variable is unsanitized at its source block
+                "unsanitized[fp, fq, var, lbl, block] := "
+                f"{source_relation}[fp, fq, var, block, lbl]\n"
 
-                # With CFG: propagate along CFG edges, blocked by sanitizer blocks
-                "unsanitized[fp, fq, lbl, to_block] := "
-                "unsanitized[fp, fq, lbl, from_block], "
+                # With CFG: propagate along CFG edges, blocked by sanitizer for
+                # this specific variable (not all variables in the block)
+                "unsanitized[fp, fq, var, lbl, to_block] := "
+                "unsanitized[fp, fq, var, lbl, from_block], "
                 "has_cfg[fp, fq], "
                 "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
-                "not sanitizer_block[fp, fq, lbl, from_block], "
+                "not sanitizer_var[fp, fq, var, from_block, lbl], "
                 "not scope_kill[fp, fq, lbl, from_block]\n"
 
-                # Without CFG (fallback): propagate unsanitized via def-use,
-                # still blocking at sanitizer blocks (no path sensitivity,
-                # but sanitizers still work).
-                "unsanitized[fp, fq, lbl, use_block] := "
-                "unsanitized[fp, fq, lbl, def_block], "
+                # Without CFG (fallback): propagate unsanitized via def-use
+                "unsanitized[fp, fq, var, lbl, use_block] := "
+                "unsanitized[fp, fq, var, lbl, def_block], "
                 "not has_cfg[fp, fq], "
                 "*def_use[fp, fq, _, _, def_block, use_block, _, _, _, _], "
-                "not sanitizer_block[fp, fq, lbl, def_block], "
+                "not sanitizer_var[fp, fq, var, def_block, lbl], "
                 "not scope_kill[fp, fq, lbl, def_block]\n"
 
                 # A variable is tainted in a block if:
                 #   (a) it's a source in that block, OR
-                #   (b) taint propagates via def-use AND block is unsanitized-reachable
-                #   (c) taint flows across variable names via assignment:
-                #       when tainted var X is used on line L and var Y is defined
-                #       on the same line L (same block), Y becomes tainted.
+                #   (b) taint propagates via def-use AND var is unsanitized at use block
+                #   (c) taint flows across variable names via assignment
                 "tainted[fp, fq, var, block, lbl] := "
                 f"{source_relation}[fp, fq, var, block, lbl]\n"
 
                 "tainted[fp, fq, var, use_block, lbl] := "
                 "tainted[fp, fq, var, def_block, lbl], "
                 "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
-                "unsanitized[fp, fq, lbl, use_block]\n"
+                "unsanitized[fp, fq, var, lbl, use_block]\n"
 
                 # Cross-variable taint via assignment: ``y = f(x)`` where x is
-                # tainted means y is tainted.  Detected when a tainted var has a
-                # use on the same line as another var's def (same block).
-                # Only applies to simple names (no dots) to avoid false positives
-                # from attribute writes like ``x.value = ...``.
+                # tainted means y is tainted.  Uses use_var's unsanitized state
+                # to determine whether its taint should propagate.
                 "tainted[fp, fq, def_var, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
                 "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
@@ -1884,19 +1893,37 @@ class FactGraph:
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "not str_includes(def_var, \".\"), "
-                "unsanitized[fp, fq, lbl, block]\n"
+                "unsanitized[fp, fq, use_var, lbl, block]\n"
 
-                # Container mutation taint: when a tainted variable is passed
-                # as an argument to a method call (e.g. ``items.append(x)``),
-                # the receiver becomes tainted.  Detected when a tainted var
-                # has a use on the same line as a method call on a different var.
+                # Inherit unsanitized status for cross-variable taint:
+                # when def_var gets tainted from use_var, def_var is also
+                # unsanitized (unless it has its own sanitizer).
+                "unsanitized[fp, fq, def_var, lbl, block] := "
+                "unsanitized[fp, fq, use_var, lbl, block], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
+                "use_var != def_var, "
+                "use_line == def_line, "
+                "not str_includes(def_var, \".\"), "
+                "not sanitizer_var[fp, fq, def_var, block, lbl]\n"
+
+                # Container mutation taint: tainted var passed to method call
                 "tainted[fp, fq, receiver, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
                 "*method_call[fp, fq, receiver, _method, block, call_line], "
                 "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
                 "use_line == call_line, "
                 "receiver != use_var, "
-                "unsanitized[fp, fq, lbl, block]\n"
+                "unsanitized[fp, fq, use_var, lbl, block]\n"
+
+                # Inherit unsanitized for container mutation
+                "unsanitized[fp, fq, receiver, lbl, block] := "
+                "unsanitized[fp, fq, use_var, lbl, block], "
+                "*method_call[fp, fq, receiver, _method, block, call_line], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "use_line == call_line, "
+                "receiver != use_var, "
+                "not sanitizer_var[fp, fq, receiver, block, lbl]\n"
 
                 # Pattern-based violations: taint reaches sink
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
@@ -1942,12 +1969,12 @@ class FactGraph:
             )
 
         # Same-block suppression: if sanitizer precedes sink in the same block,
-        # filter out those violations.
-        # For pattern-based sinks: use sink_in_block line info.
+        # filter out those violations.  Per-variable: only suppress when the
+        # sanitized variable matches the sink variable.
         query += (
             f"{scope_kill_line_rule}"
-            "same_block_sanitized[fp, fq, lbl, block] := "
-            "sanitizer_in_block[fp, fq, lbl, block, san_line], "
+            "same_block_sanitized[fp, fq, var, lbl, block] := "
+            "sanitizer_in_block[fp, fq, var, lbl, block, san_line], "
             "sink_in_block[fp, fq, lbl, block, sink_line], "
             "san_line < sink_line\n"
         )
@@ -1956,20 +1983,25 @@ class FactGraph:
         # The kill must be after the source (otherwise it kills taint
         # that doesn't exist yet) and before the sink.
         # All three line values use 1-based pattern-match line numbers.
+        # Scope kill same-block: applies to ALL variables for the label
+        # (scope kills are not per-variable), so we need a sink_var wildcard.
         query += (
-            "same_block_sanitized[fp, fq, lbl, block] := "
+            "same_block_sanitized[fp, fq, sink_var, lbl, block] := "
             "scope_kill_in_block[fp, fq, lbl, block, kill_line], "
             "sink_in_block[fp, fq, lbl, block, sink_line], "
             "source_in_block[fp, fq, lbl, block, src_line], "
+            "trace_sink[fp, fq, sink_var, block, lbl], "
             "kill_line > src_line, "
             "kill_line < sink_line\n"
         )
         # For effect-based sinks: the mutation line is the def_line in def_use.
         if effect_sinks:
-            # Exact var write
+            # The sanitizer variable (e.g. "x") must match or be a prefix of
+            # the written variable (e.g. "x" or "x.dirty").  The violation's
+            # sink_var comes from the tainted relation and is the base variable.
             query += (
-                "same_block_sanitized[fp, fq, lbl, block] := "
-                "sanitizer_in_block[fp, fq, lbl, block, san_line], "
+                "same_block_sanitized[fp, fq, san_var, lbl, block] := "
+                "sanitizer_in_block[fp, fq, san_var, lbl, block, san_line], "
                 "effect_sink_label[lbl], "
                 "*def_use[fp, fq, _, kind, block, _, write_line, _, _, _], "
                 "mutate_kind[kind], "
@@ -1979,7 +2011,7 @@ class FactGraph:
         query += (
             "?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
             "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block], "
-            "not same_block_sanitized[fp, fq, lbl, sink_block]"
+            "not same_block_sanitized[fp, fq, sink_var, lbl, sink_block]"
         )
 
         result = self._client.run(query)

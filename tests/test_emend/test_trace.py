@@ -202,7 +202,6 @@ def test_trace_does_not_cross_contaminate_separate_functions(tmp_path):
     assert violations == []
 
 
-@pytest.mark.xfail(reason="Datalog engine does not produce trace steps (Phase 17: Python engine removed)")
 def test_trace_trace_output(tmp_path):
     """Trace includes source and sink steps."""
     test_file = tmp_path / "app.py"
@@ -302,7 +301,6 @@ def test_trace_text_output_format(tmp_path):
     assert "SQL injection" in output
 
 
-@pytest.mark.xfail(reason="Datalog engine does not produce trace steps (Phase 17: Python engine removed)")
 def test_trace_text_output_with_trace(tmp_path):
     """Text output includes indented trace lines."""
     test_file = tmp_path / "app.py"
@@ -536,7 +534,6 @@ def test_trace_field_sensitivity_propagation(tmp_path):
     assert len(violations) >= 1
 
 
-@pytest.mark.xfail(reason="Datalog engine does not track per-variable sanitizer application (Phase 17: Python engine removed)")
 def test_trace_field_sanitizer_only_cleans_field(tmp_path):
     """Sanitizing obj.field does not clean obj.other_field."""
     test_file = tmp_path / "app.py"

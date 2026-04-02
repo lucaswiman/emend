@@ -280,7 +280,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 5)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 5)],
             sink_lines=[("app.py", "app.f", "lbl", 1, 8)],
         )
         assert len(flows) == 0
@@ -307,7 +307,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             sinks=[("app.py", "app.f", "x", 1, "lbl")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 8)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 8)],
             sink_lines=[("app.py", "app.f", "lbl", 1, 5)],
         )
         assert len(flows) >= 1
@@ -340,7 +340,7 @@ class TestIntraBlockLineOrdering:
             sources=[("app.py", "app.f", "x", 0, "lbl")],
             effect_sinks=[("lbl", "writes")],
             sanitizers=[("app.py", "app.f", "x", 1, "lbl")],
-            sanitizer_lines=[("app.py", "app.f", "lbl", 1, 5)],
+            sanitizer_lines=[("app.py", "app.f", "x", "lbl", 1, 5)],
         )
         assert len(flows) == 0
 

@@ -711,7 +711,7 @@ def _run_trace_datalog(
 
     # For intra-block line ordering
     matched_source_lines: list[tuple[str, str, str, int, int]] = []
-    sanitizer_lines: list[tuple[str, str, str, int, int]] = []
+    sanitizer_lines: list[tuple[str, str, str, str, int, int]] = []
     sink_lines: list[tuple[str, str, str, int, int]] = []
 
     for file_path in paths:
@@ -810,16 +810,27 @@ def _run_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
+            san_source_lines = source_text.split("\n")
             matches = find_pattern(san_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
                         var_names |= _extract_identifiers(ct)
+                    # Also sanitize the assignment target on the same line:
+                    # ``clean = sanitize(name)`` means ``clean`` is safe too.
+                    if m.line <= len(san_source_lines):
+                        san_stmt = san_source_lines[m.line - 1]
+                        san_assign = re.match(
+                            r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
+                            san_stmt,
+                        )
+                        if san_assign:
+                            var_names.add(san_assign.group(1))
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
                         sanitizers.append((file_path, fq, var, bid, san_def.label))
-                        sanitizer_lines.append((file_path, fq, san_def.label, bid, m.line))
+                        sanitizer_lines.append((file_path, fq, var, san_def.label, bid, m.line))
 
         # Scope sanitizers: match patterns and record (fp, fq, lbl, block_id)
         for scope_san in config.scope_sanitizers:
@@ -892,7 +903,7 @@ def _run_trace_datalog(
         group_sanitizer_lines = [
             sanitizer_line
             for sanitizer_line in sanitizer_lines
-            if sanitizer_line[2] in group_labels
+            if sanitizer_line[3] in group_labels
         ]
         group_sink_lines = [
             sink_line for sink_line in sink_lines if sink_line[2] in group_labels
@@ -956,6 +967,12 @@ def _run_trace_datalog(
             )
         return 0
 
+    # Build source line lookup: (fp, fq, label, block_id) -> line number
+    source_line_lookup: dict[tuple[str, str, str, int], int] = {}
+    for sl in matched_source_lines:
+        key = (sl[0], sl[1], sl[2], sl[3])  # fp, fq, label, bid
+        source_line_lookup[key] = sl[4]  # line
+
     # Convert TraceFlowFact -> TraceViolation
     violations: list[TraceViolation] = []
     for tf in taint_facts:
@@ -984,6 +1001,29 @@ def _run_trace_datalog(
                         sink_block,
                         effect_kind,
                     )
+
+        # Build trace steps: source → sink
+        trace_steps: list[TraceStep] = []
+        src_line = source_line_lookup.get(
+            (tf.file_path, tf.func_qn, tf.label, tf.source_line), 0
+        )
+        if src_line:
+            trace_steps.append(TraceStep(
+                file_path=tf.file_path,
+                line=src_line,
+                col=0,
+                description=f"source: {tf.label} via {tf.source_var}",
+                variable=tf.source_var,
+            ))
+        if line:
+            trace_steps.append(TraceStep(
+                file_path=tf.file_path,
+                line=line,
+                col=0,
+                description=f"sink: {tf.label} via {sink_pattern}",
+                variable=tf.sink_var,
+            ))
+
         violations.append(TraceViolation(
             file_path=tf.file_path,
             line=line,
@@ -991,7 +1031,7 @@ def _run_trace_datalog(
             label=tf.label,
             sink_pattern=sink_pattern,
             message=msg,
-            trace=[],
+            trace=trace_steps,
             engine="datalog",
         ))
     return _deduplicate_violations(violations)

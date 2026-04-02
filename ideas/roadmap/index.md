@@ -27,6 +27,7 @@ cross-language support.
 - [x] [Phase 15: Reach Intraprocedural Datalog Parity](./phase-15-reach-intraprocedural-datalog-parity.md)
 - [x] [Phase 16: Cut Over Intraprocedural Trace to Datalog](./phase-16-cut-over-intraprocedural-trace-to-datalog.md)
 - [x] [Phase 17: Remove Legacy Python Intraprocedural Trace](./phase-17-remove-legacy-python-intraprocedural-trace.md)
+- [ ] [Phase 17a: Field-Level Taint and Subscript Tracking](./phase-17a-field-level-taint-and-subscript-tracking.md)
 
 ## Cross-Language Extension
 

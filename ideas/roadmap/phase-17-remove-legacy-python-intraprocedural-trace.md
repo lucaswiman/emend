@@ -30,6 +30,25 @@ canonical path.
 - [x] Update CLAUDE.md and roadmap docs.
 - [x] Run the full test suite.
 
+## Additional Fixes (post-removal)
+
+After removing the legacy engine, three bugs were discovered and fixed:
+
+- **Per-variable sanitization**: The `sanitizer_var` relation now includes the
+  variable name so that sanitizing `a` does not suppress violations for `b`.
+  The `same_block_sanitized` and `unsanitized` relations were updated to be
+  per-variable.  Assignment targets on sanitizer lines (e.g. `clean = sanitize(x)`)
+  are also recorded as sanitized.
+- **Trace step population**: `TraceViolation.trace` now contains `TraceStep`
+  objects for source and sink locations instead of an empty list.
+- **Cross-variable unsanitized inheritance**: When taint flows across variables
+  (via assignment or container mutation), the target variable inherits the
+  source variable's unsanitized reachability status.
+
+Two limitations remain and are tracked in Phase 17a:
+- Field-level taint (requires Rust CFG builder changes)
+- Dict subscript taint propagation (requires new fact model)
+
 ## Exit Criteria
 
 - There is one canonical intraprocedural trace implementation.
