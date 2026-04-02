@@ -1212,7 +1212,7 @@ class FactGraph:
         """Compute the transitive set of callees of *symbol_qn* via Datalog."""
         result = self._client.run(
             "reaches[b] := *call[$qn, b, _, _, _, _, _]\n"
-            "reaches[b] := *call[mid, b, _, _, _, _, _], reaches[mid]\n"
+            "reaches[b] := reaches[mid], *call[mid, b, _, _, _, _, _]\n"
             "?[b] := reaches[b]",
             {"qn": symbol_qn},
         )

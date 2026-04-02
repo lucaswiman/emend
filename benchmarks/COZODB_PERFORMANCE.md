@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-02
 **Codebase**: Django 5.2 (883 Python files)
-**Author**: Claude Code (benchmark analysis)
+**Author**: Codex
 
 ## Local Benchmark Baseline ("Before")
 
@@ -179,9 +179,37 @@ Benchmark command:
 | graph(query.py) | 9ms | 9ms | no material change |
 | callers(QS.filter) | 1ms | 1ms | no material change |
 
+## Optimization 5: Reorder The Recursive `transitive_callees()` Rule
+
+Changes:
+
+- kept the same relation and same leading-key access path
+- reordered the recursive rule body from:
+  - `*call[mid, b, ...], reaches[mid]`
+- to:
+  - `reaches[mid], *call[mid, b, ...]`
+
+Benchmark command:
+
+```bash
+.venv/bin/python benchmarks/bench_cozodb.py --quick --skip-index --json
+```
+
+`--skip-index` is intentional here: this is a query-planning change only.
+
+### Optimization 5: Previous vs Current Query Times
+
+| Metric | After Opt 4 | After Opt 5 | Delta |
+|--------|------------:|------------:|------:|
+| transitive_callees | 6.20s | 1ms | 6200x faster |
+| callees(QS.filter) | 1ms | 2ms | no material change |
+| transitive_callers | 1ms | 1ms | no material change |
+| dead_code_unified | 7.73s | 7.58s | no material change |
+| graph(query.py) | 9ms | 9ms | no material change |
+
 ## Local End State
 
-After all four implemented optimizations in this environment:
+After all five implemented optimizations in this environment:
 
 | Metric | Before | Final | Delta |
 |--------|-------:|------:|------:|
@@ -191,28 +219,76 @@ After all four implemented optimizations in this environment:
 | callees(QS.filter) | 936ms | 1ms | 780x faster |
 | graph(query.py) | 953ms | 9ms | 106x faster |
 | transitive_callers | 7.19s | 1ms | 7190x faster |
-| transitive_callees | 6.15s | 6.20s | no meaningful change |
-| dead_code_unified | 11.90s | 7.73s | 1.54x faster |
+| transitive_callees | 6.15s | 1ms | 6150x faster |
+| dead_code_unified | 11.90s | 7.58s | 1.57x faster |
 
 ## Executive Summary
 
-CozoDB's query planner has a critical behavior: **B-tree index lookups only occur
-when key values are bound directly in the relation pattern position** (e.g.,
-`*call[$qn, callee, ...]`), not when filtered via a separate `==` clause (e.g.,
-`*call[caller, callee, ...], callee == $qn`). The latter always performs a **full
-table scan** regardless of which key column is filtered.
+The local benchmark results support keeping CozoDB.
 
-This single insight explains most performance issues and yields **1000x speedups**
-for point queries by switching from `==` filters to positional parameter binding.
+The large wins came from aligning query shape with relation layout:
 
-## Relation Statistics (Django 5.2)
+- positional binding on leading keys for `reference[...]` and `call[...]`
+- mirrored stored relations for alternate access paths
+- a dedicated `module_level_ref` relation for the dead-code module-level case
+- correct body ordering in the recursive `transitive_callees()` rule
+
+The last point matters because it invalidates the strongest earlier claim in
+this memo: the remaining recursive hotspot was not proof that Cozo could not
+use index lookups inside recursion. In this case the recursive clause order was
+the problem.
+
+## What The Benchmarks Now Show
+
+### 1. Leading-key positional binding matters
+
+The baseline measurements still clearly show that:
+
+- `*reference[$qn, ...]` is effectively instant
+- `*reference[sqn, ...], sqn == $qn` is a full scan
+- `*call[$fqn, ...]` is effectively instant
+- `*call[caller, $qn, ...]` is still a scan because it binds a non-leading key
+
+That remains the main Cozo performance rule for this schema.
+
+### 2. Recursive queries can be fast when the recursive step is shaped correctly
+
+Measured against the same local `facts.db` and the same start symbol
+`django.db.models.query.QuerySet.filter`:
+
+- old recursive clause order: `*call[mid, b, ...], reaches[mid]` -> `6.29s`
+- reordered clause: `reaches[mid], *call[mid, b, ...]` -> `~1-2ms`
+- result size in both cases: 3 reachable callees
+
+So the previous explanation, "Cozo does not use index lookups on recursive
+queries", was wrong for `transitive_callees()`. The engine can evaluate this
+recursively and still be fast when the already-bound recursive frontier is
+introduced before the indexed relation probe.
+
+### 3. The remaining build-time increase is real work, not planner confusion
+
+The extra ~19.5s of build time mostly comes from writing three additional
+stored relations:
+
+- `call_by_callee`
+- `call_by_file`
+- `module_level_ref`
+
+That is a reasonable trade given the query wins. The build is slower because it
+is doing more work and persisting more rows, not because the query fixes
+themselves made indexing worse.
+
+## Relation Statistics (Django 5.2, Local End State)
 
 | Relation         |     Rows | Notes                              |
 |------------------|---------:|------------------------------------|
 | reference        |  736,297 | Largest relation (dominant cost)    |
 | ref_by_block     |  348,637 | Block-tagged references             |
 | call             |  275,298 | Call edges (with position info)     |
+| call_by_callee   |  275,298 | Reverse call index by callee        |
+| call_by_file     |  275,298 | Call index by file                  |
 | method_call      |  269,352 | Receiver.method calls               |
+| module_level_ref |  154,785 | Module-level references only        |
 | source_loc       |   94,888 | Source location metadata            |
 | cfg_block        |   86,852 | CFG basic blocks                    |
 | reachable_block  |   86,284 | Pre-computed reachable blocks       |
@@ -222,196 +298,61 @@ for point queries by switching from `==` filters to positional parameter binding
 | import           |   18,068 | Import facts                        |
 | decorator_on     |    7,098 | Decorator associations              |
 
-**Total**: ~2.1M facts
+**Total**: ~2.8M facts
 
-## Key Finding: Positional Binding vs `==` Filter
+## Build-Time Parallelism: What Still Looks Worth Doing
 
-CozoDB stores relations in a B-tree keyed on the declared key columns. However,
-the query planner **only uses this index when the key value is a constant or
-parameter placed directly in the relation pattern position**.
+The current full-build path in [`transform.py`](/Users/lucaswiman/personal/emend/src/emend/transform.py)
+still leaves parallelism on the table.
 
-### Benchmark Evidence
+The high-value serial section is the per-file extraction loop inside
+[`_build_facts_db()`](/Users/lucaswiman/personal/emend/src/emend/transform.py#L637),
+which currently does, per file:
 
-| Query Pattern                                    | Time      | Speedup |
-|--------------------------------------------------|-----------|---------|
-| `*symbol[$qn, fp, ...]` (positional)             | **1.3ms** | —       |
-| `*symbol[qn, fp, ...], qn == $qn` (== filter)   | 263ms     | 200x    |
-| `*reference[$qn, fp, ...]` (positional)          | **1.5ms** | —       |
-| `*reference[sqn, fp, ...], sqn == $qn` (filter)  | 3,853ms   | 2,500x  |
-| `*call[$fqn, callee, ...]` (positional)           | **1.5ms** | —       |
-| `*call[caller, callee, ...], caller == $fqn`     | 1,533ms   | 1,000x  |
-| `*cfg_edge["path", fq, ...]` (positional)        | **12ms**  | —       |
-| `*cfg_edge[fp, fq, ...], fp == "path"` (filter)  | 323ms     | 27x     |
-| `*def_use["path", "func", ...]` (positional 1+2) | **2ms**   | —       |
-| `*def_use[fp, fq, ...], fp == ..., fq == ...`    | 487ms     | 244x    |
+- file read
+- Rust symbol extraction
+- scope-resolver reference extraction
+- import extraction
+- CFG build
+- block/range assembly
+- call/reference/def-use/source-loc row generation
 
-### Leading vs Non-Leading Key (Positional Binding)
+That work is embarrassingly parallel across files once the project-level scope
+resolver has been populated.
 
-| Query                                            | Time      |
-|--------------------------------------------------|-----------|
-| `*call[bound_1st, callee, ...]` (1st key)        | **1.6ms** |
-| `*call[caller, bound_2nd, ...]` (2nd key)        | 3,296ms   |
-| `*call[caller, callee, bound_3rd, ...]` (3rd key)| 3,580ms   |
-| `*cfg_edge[bound_1st, fq, ...]` (1st key)        | **12ms**  |
-| `*cfg_edge[fp, bound_2nd, ...]` (2nd key)        | 668ms     |
-| `*cfg_edge[bound_1st, bound_2nd, ...]` (1+2)     | **1.6ms** |
+### Likely best next build optimizations
 
-**Conclusion**: Positional binding only helps on **leading key prefix** — binding
-the 2nd key without binding the 1st is equivalent to a full table scan (as
-expected for a B-tree).
+1. Parallelize the per-file extraction loop.
+   Use worker processes or threads to build the row batches for each file, then
+   merge into the final `all_*` lists before the `:replace` phase.
 
-## Index Building Performance
+2. Keep Cozo writes batched and serialized.
+   The `:replace` calls are large relation swaps. Parallelizing them is less
+   attractive than reducing time spent before them.
 
-**Full index build**: ~191 seconds (Django, 883 files)
+3. Avoid duplicate row materialization where possible.
+   The extra access-path relations are useful, but they also mean more Python
+   list building and more Cozo writes. If build time becomes a priority, this
+   is where to look for compaction or more direct bulk-write paths.
 
-### Build Phase Breakdown
+### Constraints
 
-| Phase                                   | Time     | % of total |
-|-----------------------------------------|----------|------------|
-| File I/O + Rust extraction              | ~130s    | 68%        |
-| `reference :replace` (736K rows)        | 33s      | 17%        |
-| `ref_by_block :replace` (349K rows)     | 12s      | 6%         |
-| `call :replace` (275K rows)             | 11s      | 6%         |
-| `symbol :replace` (40K rows)            | 1.5s     | <1%        |
-| Other relations                         | ~3s      | 2%         |
+- The project-level `PyScopeResolver.index_file()` pass is still serialized.
+- The final Cozo `:replace` sequence is still serialized.
+- In this container only 2 CPUs are visible, so local speedup from additional
+  parallelism will understate what developer machines can achieve.
 
-The CozoDB insert phase accounts for ~32% of total build time (~60s for
-`:replace` operations). The dominant cost is `reference` at 33s.
+## Recommendation
 
-## Current Query Performance
+Keep CozoDB.
 
-| Query                          | Time     | Notes                          |
-|--------------------------------|----------|--------------------------------|
-| `refs_datalog()`               | 3,853ms  | Uses `==` filter (table scan!) |
-| `callers_datalog()`            | 1,533ms  | Filters on 2nd key (scan)      |
-| `callees_datalog()`            | 1,533ms  | Uses `==` filter (scan!)       |
-| `graph_datalog()` (full)       | 3,746ms  | Full scan of call relation     |
-| `graph_datalog(file=...)`      | 1,604ms  | Filter on 3rd key (scan)       |
-| `dead_code_simple()`           | 8,218ms  | Join reference + symbol        |
-| `dead_code_unified()`          | 19,539ms | Dominant: ref_by_block join    |
-| `transitive_callers()`         | 16,041ms | Recursive with == filters      |
-| `transitive_callees()`         | 14,155ms | Recursive with == filters      |
-| `unreachable_blocks()`         | 5,220ms  | CFG reachability               |
+The current local results show that the previous pain points were mostly query
+shape and access-path issues, not a fundamental mismatch between Cozo and the
+workload.
 
-## Recommended Optimizations
+If you want another pass after this, the best target is build throughput:
 
-### 1. Switch `==` Filters to Positional `$param` Binding (HIGH IMPACT)
-
-**Estimated improvement: 200-2500x for point queries**
-
-Every query method that currently uses `sqn == $qn` or `callee_qn == $qn` should
-instead use positional parameter binding:
-
-```python
-# BEFORE (table scan — 3.8s on reference):
-"?[fp, line, col, kind, fq, bid] := "
-"*reference[sqn, fp, line, col, kind, fq, bid], sqn == $qn"
-
-# AFTER (index lookup — 1.5ms on reference):
-"?[fp, line, col, kind, fq, bid] := "
-"*reference[$qn, fp, line, col, kind, fq, bid]"
-```
-
-**Affected methods** (all in `fact_graph.py`):
-- `refs_datalog()` — filter on `symbol_qn` (1st key of reference) → positional `$qn`
-- `callees_datalog()` — filter on `caller_qn` (1st key of call) → positional `$fqn`
-- `callers_datalog()` — filter on `callee_qn` (**2nd key** of call — see #2)
-- `graph_datalog(file=...)` — filter on `file_path` (3rd key of call — see #2)
-- `transitive_callers()` — base case uses `b == $qn` on 2nd key
-- `transitive_callees()` — base case uses `a == $qn` on 1st key → positional `$qn`
-- `dead_code()` — join pattern (needs structural change)
-
-### 2. Add Reverse-Index Relations (HIGH IMPACT for callers)
-
-**Estimated improvement: 1000x for `callers_datalog()`**
-
-The `call` relation is keyed `(caller_qn, callee_qn, ...)`. Finding callers
-requires filtering on `callee_qn` (2nd key), which cannot use B-tree prefix scan.
-
-**Solution**: Add a `call_by_callee` stored relation with reversed key order:
-
-```
-{:create call_by_callee {
-    callee_qn: String,
-    caller_qn: String,
-    file_path: String,
-    line: Int,
-    col: Int
-    =>
-    func_qn: String default "",
-    block_id: Int default -1
-}}
-```
-
-Populate during index build alongside the `call` relation. Cost: ~10s extra for
-275K rows (negligible vs. 191s total build time).
-
-Similarly, consider `ref_by_file` for queries that filter references by file path.
-
-### 3. Re-Order Tuple Keys for Common Access Patterns (MEDIUM IMPACT)
-
-Some relations have key orderings that don't match the most common query patterns:
-
-**`call` relation** — current: `(caller_qn, callee_qn, file_path, line, col)`
-- `callers_datalog()` filters on `callee_qn` (2nd) — very common
-- `callees_datalog()` filters on `caller_qn` (1st) — common
-- `graph_datalog(file=...)` filters on `file_path` (3rd) — occasional
-
-Since both caller and callee queries are equally common, keeping the current order
-plus adding a reverse index (recommendation #2) is the best approach.
-
-**`cfg_edge` relation** — current: `(file_path, func_qn, from_block, to_block, ...)`
-- Trace queries scope by `(file_path, func_qn)` — aligned ✓
-- Good key ordering for current access patterns
-
-**`def_use` relation** — current: `(file_path, func_qn, var_name, kind, def_block, use_block)`
-- Trace queries scope by `(file_path, func_qn)` — aligned ✓
-- Good key ordering for current access patterns
-
-### 4. Optimize Join Patterns in Complex Queries (MEDIUM IMPACT)
-
-**`dead_code_unified`**: The dominant cost is the `ref_by_block JOIN reachable_block`
-(~8.6s). Both relations share the key prefix `(file_path, func_qn, block_id)`, so
-the join should be efficient in principle. The cost comes from materializing 206K
-result rows. Consider:
-
-- Pre-computing `live_ref` during index build as a stored relation
-- Using `:limit` or early termination if only checking existence
-
-**`live_ref` from module-level references**: The second `live_ref` rule scans the
-full `reference` relation (736K rows) with `fq == "", bid == -1` filter — this is
-a table scan. Consider adding a `module_level_ref` stored relation.
-
-### 5. Batch Index Insertion Optimization (LOW-MEDIUM IMPACT)
-
-The `:replace` operations for large relations are slow (33s for 736K reference rows).
-Possible improvements:
-
-- **Chunked inserts**: Break large `:replace` into smaller batches to reduce peak
-  memory usage
-- **Parallel extraction**: Use Rust-level parallelism for per-file fact extraction
-  (currently single-threaded Python loop)
-- **Incremental updates**: Use `update_files()` for changed files only instead of
-  full rebuild (already implemented but not always used)
-
-### 6. Avoid Full Scans in Recursive Queries (LOW IMPACT, HARD)
-
-Recursive Datalog queries (transitive callers/callees) currently scan the full
-`call` relation on each iteration. CozoDB doesn't appear to push index lookups
-into recursive rule bodies when the bound variable comes from the recursive
-relation. Using the reverse index (#2) helps the base case but not recursive steps.
-
-**Possible mitigations**:
-- Depth-bounded iteration (already used in `impact_closure_datalog`)
-- Pre-compute transitive closure during index build for common entry points
-- Use Python-side BFS with indexed point queries instead of Datalog recursion
-
-## Quick Win Summary
-
-| Change | Effort | Impact | Queries Affected |
-|--------|--------|--------|------------------|
-| Positional `$param` binding | Low | **1000x** for point queries | refs, callees, transitive_callees |
-| `call_by_callee` reverse index | Low | **1000x** for callers | callers, transitive_callers |
-| Pre-compute `live_ref` | Medium | **10x** for dead_code | dead_code_unified |
-| `ref_by_file` reverse index | Low | **2500x** for file-scoped refs | graph(file=...) |
-| Python-side BFS for transitive | Medium | **~2x** for recursive | transitive_callers/callees |
+1. parallelize `_build_facts_db()` per-file extraction
+2. re-measure build time on a wider-core developer machine
+3. only then revisit whether the extra mirrored relations should be made
+   optional for lighter-weight indexing modes
