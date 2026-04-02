@@ -101,6 +101,18 @@ function! emend#ui#search(query, ...) abort
 endfunction
 
 " ---------------------------------------------------------------------------
+" Indexing-complete notification handler
+" ---------------------------------------------------------------------------
+
+function! emend#ui#on_indexing_complete() abort
+  " If the search UI is open and we have a query, auto-refresh results
+  " now that the index is fresh.
+  if s:ui_is_open() && s:query !=# ''
+    call emend#search(s:query)
+  endif
+endfunction
+
+" ---------------------------------------------------------------------------
 " Callback from emend#search
 " ---------------------------------------------------------------------------
 
@@ -705,12 +717,16 @@ function! s:render_list() abort
   let l:lines = []
   let l:elapsed = get(s:last_result, 'elapsed_ms', 0)
   let l:mode = get(s:last_result, 'mode', '?')
+  let l:indexing = get(s:last_result, 'indexing', 0)
 
   let l:header = '  ' . len(s:results) . ' results'
   if l:elapsed > 0
     let l:header .= printf(' [%gms]', l:elapsed)
   endif
   let l:header .= '  (' . l:mode . ')'
+  if l:indexing || emend#is_indexing()
+    let l:header .= '  [indexing...]'
+  endif
   call add(l:lines, l:header)
   call add(l:lines, repeat('─', 40))
 
@@ -727,6 +743,14 @@ function! s:render_list() abort
   call s:set_buf_lines(s:list_buf, l:lines)
   call s:apply_list_highlights(s:all_line_hl)
   call s:highlight_selected()
+
+  " Update window title to reflect indexing state (Neovim ≥0.9).
+  if has('nvim-0.9') && s:list_win >= 0 && nvim_win_is_valid(s:list_win)
+    let l:title = (l:indexing || emend#is_indexing())
+          \ ? ' results (indexing...) '
+          \ : ' results '
+    call nvim_win_set_config(s:list_win, {'title': l:title, 'title_pos': 'center'})
+  endif
 endfunction
 
 function! s:format_result_line(item, index, cwd) abort

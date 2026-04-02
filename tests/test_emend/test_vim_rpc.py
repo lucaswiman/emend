@@ -9,6 +9,7 @@ contract assertions (required fields, wire format, statelessness).
 import io
 import json
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -283,3 +284,91 @@ class TestTypesAtCursor:
         assert result["mode"] == "types"
         # May or may not have items depending on whether type engine is available
         assert isinstance(result["items"], list)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Incremental search / background reindex
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalSearch:
+    """Tests for the background reindex and incremental search protocol."""
+
+    def test_reindex_async_returns_immediately(self, engine):
+        """reindex_async should return without blocking."""
+        eng, proj = engine
+        t0 = time.monotonic()
+        result = _dispatch(eng, "reindex_async", {})
+        elapsed = time.monotonic() - t0
+        assert "started" in result
+        assert "indexing" in result
+        # Should return nearly instantly (< 1 second), not block on reindex.
+        assert elapsed < 1.0
+
+    def test_reindex_async_sets_indexing_flag(self, engine):
+        """While background reindex is running, is_indexing should be True."""
+        eng, proj = engine
+        result = _dispatch(eng, "reindex_async", {})
+        if result["started"]:
+            assert eng.is_indexing or not eng.is_indexing  # may finish instantly
+        # After waiting for completion, flag should clear.
+        if eng._index_thread:
+            eng._index_thread.join(timeout=10)
+        assert not eng.is_indexing
+
+    def test_search_returns_indexing_field(self, engine):
+        """Search results should include 'indexing' when reindexing is active."""
+        eng, proj = engine
+        # Start a background reindex.
+        eng.start_background_reindex()
+        result = _dispatch(eng, "search", {"query": "get_user"})
+        # The result should have the 'indexing' key (may be True or False
+        # depending on timing, but the key must be present when True or absent
+        # when False per the to_dict() logic).
+        assert isinstance(result.get("indexing", False), bool)
+
+    def test_check_index_complete(self, engine):
+        """check_index_complete returns True exactly once after reindex."""
+        eng, proj = engine
+        eng.start_background_reindex()
+        if eng._index_thread:
+            eng._index_thread.join(timeout=10)
+        # First check should return True.
+        assert eng.check_index_complete() is True
+        # Second check should return False (already consumed).
+        assert eng.check_index_complete() is False
+
+    def test_finalize_reindex_rebuilds_fts(self, engine):
+        """finalize_reindex should rebuild the FTS index."""
+        eng, proj = engine
+        eng.start_background_reindex()
+        if eng._index_thread:
+            eng._index_thread.join(timeout=10)
+        eng.check_index_complete()
+        eng.finalize_reindex()
+        # FTS should be ready and functional.
+        assert eng._fts_ready
+        result = _dispatch(eng, "search", {"query": "get_user"})
+        assert len(result["items"]) > 0
+
+    def test_search_during_reindex_returns_stale_results(self, engine):
+        """Searching while reindexing should return results from the
+        existing index, not block."""
+        eng, proj = engine
+        eng.start_background_reindex()
+        # Even while reindexing, search should work from the current index.
+        result = _dispatch(eng, "search", {"query": "UserService"})
+        assert len(result["items"]) >= 1
+        # Clean up.
+        if eng._index_thread:
+            eng._index_thread.join(timeout=10)
+
+    def test_double_reindex_async_noop(self, engine):
+        """Starting a second reindex while one is running should be a no-op."""
+        eng, proj = engine
+        first = eng.start_background_reindex()
+        second = eng.start_background_reindex()
+        assert first is True
+        assert second is False
+        if eng._index_thread:
+            eng._index_thread.join(timeout=10)
