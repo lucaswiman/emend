@@ -482,7 +482,6 @@ def test_trace_sanitize_then_use(tmp_path):
     assert len(violations) == 0
 
 
-@pytest.mark.xfail(reason="Datalog engine does not track field-level taint (Phase 17: Python engine removed)")
 def test_trace_field_sensitivity_distinct_fields(tmp_path):
     """Different fields on the same object are tracked independently."""
     test_file = tmp_path / "app.py"
@@ -567,7 +566,6 @@ def test_trace_container_append(tmp_path):
     assert len(violations) >= 1
 
 
-@pytest.mark.xfail(reason="Datalog engine does not track dict subscript taint (Phase 17: Python engine removed)")
 def test_trace_container_dict_subscript(tmp_path):
     """Taint propagates through dict subscript assignment."""
     test_file = tmp_path / "app.py"

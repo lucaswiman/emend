@@ -391,6 +391,82 @@ impl<'a> CfgBuilder<'a> {
         }
     }
 
+    /// Build a dotted qualified name from an attribute access node (e.g. "obj.field").
+    /// Returns None if the object is too complex (e.g. a function call).
+    fn collect_dotted_name(&self, node: tree_sitter::Node) -> Option<String> {
+        let kind = node.kind();
+        let id_node = &self.cfg_sec.identifier_node;
+        let attr_node = &self.cfg_sec.attribute_node;
+
+        if !id_node.is_empty() && kind == id_node {
+            let name = self.node_text(node);
+            if self.cfg_sec.skip_identifiers.iter().any(|s| s == name) {
+                return None;
+            }
+            return Some(name.to_string());
+        }
+        if !attr_node.is_empty() && kind == attr_node {
+            let obj_field = &self.cfg_sec.attribute_object_field;
+            let name_field = &self.cfg_sec.attribute_name_field;
+            if let (Some(obj), Some(attr)) = (
+                node.child_by_field_name(obj_field.as_str()),
+                node.child_by_field_name(name_field.as_str()),
+            ) {
+                let prefix = self.collect_dotted_name(obj)?;
+                let attr_name = self.node_text(attr);
+                return Some(format!("{}.{}", prefix, attr_name));
+            }
+        }
+        None
+    }
+
+    /// Build a subscript qualified name like "data['key']" from a subscript node.
+    /// Returns None if the index is not a simple string literal.
+    fn collect_subscript_name(&self, node: tree_sitter::Node) -> Option<String> {
+        let sub_node = &self.cfg_sec.subscript_node;
+        if sub_node.is_empty() || node.kind() != sub_node {
+            return None;
+        }
+        let val_field = &self.cfg_sec.subscript_value_field;
+        let idx_field = &self.cfg_sec.subscript_index_field;
+        if val_field.is_empty() || idx_field.is_empty() {
+            return None;
+        }
+        let obj = node.child_by_field_name(val_field.as_str())?;
+        let idx = node.child_by_field_name(idx_field.as_str())?;
+        // Only handle string literal keys
+        if !self.cfg_sec.string_nodes.iter().any(|s| s == idx.kind()) {
+            return None;
+        }
+        // Get the base name (identifier or dotted attribute)
+        let base = if !self.cfg_sec.identifier_node.is_empty() && obj.kind() == self.cfg_sec.identifier_node {
+            let name = self.node_text(obj);
+            if self.cfg_sec.skip_identifiers.iter().any(|s| s == name) {
+                return None;
+            }
+            name.to_string()
+        } else {
+            self.collect_dotted_name(obj)?
+        };
+        let key_text = self.node_text(idx);
+        Some(format!("{}[{}]", base, key_text))
+    }
+
+    /// Get the base object node from an attribute or subscript access node.
+    /// Uses pre-copied field names to avoid borrow conflicts with mutable self.
+    fn find_access_base<'b>(&self, node: tree_sitter::Node<'b>) -> Option<tree_sitter::Node<'b>> {
+        let kind = node.kind();
+        let attr_node = &self.cfg_sec.attribute_node;
+        let sub_node = &self.cfg_sec.subscript_node;
+        if !attr_node.is_empty() && kind == attr_node {
+            return node.child_by_field_name(self.cfg_sec.attribute_object_field.as_str());
+        }
+        if !sub_node.is_empty() && kind == sub_node {
+            return node.child_by_field_name(self.cfg_sec.subscript_value_field.as_str());
+        }
+        None
+    }
+
     fn collect_defs_from_target(&mut self, block_id: BlockId, node: tree_sitter::Node, def_kind: &str) {
         let kind = node.kind();
         let id_node = &self.cfg_sec.identifier_node;
@@ -414,9 +490,25 @@ impl<'a> CfgBuilder<'a> {
             return;
         }
 
-        // Attribute/subscript access on LHS → use, not def
+        // Attribute access on LHS → emit qualified name as def, base as use
         if self.cfg_sec.attribute_access_nodes.iter().any(|n| n == kind) {
-            self.collect_uses_from_expr(block_id, node);
+            // Try to build a qualified name for field-level / subscript tracking
+            let qualified = self.collect_dotted_name(node)
+                .or_else(|| self.collect_subscript_name(node));
+            if let Some(qname) = qualified {
+                let line = node.start_position().row as u32;
+                let col = node.start_position().column as u32;
+                // Find base object node before mutable borrow
+                let base_node = self.find_access_base(node);
+                self.block_mut(block_id).defs.push((qname, line, col, def_kind.to_string()));
+                // Also emit the base object as a use (reading obj to set obj.field)
+                if let Some(base) = base_node {
+                    self.collect_uses_from_expr(block_id, base);
+                }
+            } else {
+                // Fallback: treat as pure uses (complex expressions)
+                self.collect_uses_from_expr(block_id, node);
+            }
             return;
         }
     }
@@ -434,6 +526,22 @@ impl<'a> CfgBuilder<'a> {
             let col = node.start_position().column as u32;
             self.block_mut(block_id).uses.push((name, line, col, "read".to_string()));
             return;
+        }
+        // Attribute/subscript access → emit qualified name as use
+        if self.cfg_sec.attribute_access_nodes.iter().any(|n| n == kind) {
+            let qualified = self.collect_dotted_name(node)
+                .or_else(|| self.collect_subscript_name(node));
+            if let Some(qname) = qualified {
+                let line = node.start_position().row as u32;
+                let col = node.start_position().column as u32;
+                let base_node = self.find_access_base(node);
+                self.block_mut(block_id).uses.push((qname, line, col, "read".to_string()));
+                // Also emit the base object as a use for backward compat
+                if let Some(base) = base_node {
+                    self.collect_uses_from_expr(block_id, base);
+                }
+                return;
+            }
         }
         // Recurse into children
         let mut cursor = node.walk();
@@ -1502,5 +1610,60 @@ fn collect_functions(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_functions(child, source, cfg_sec, cfgs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scope::config_for_ext;
+
+    #[test]
+    fn test_field_level_defs() {
+        let src = "def f():\n    obj.dirty = 1\n    obj.clean = 'safe'\n";
+        let cfgs = build_cfgs_for_source(src, "py");
+        assert_eq!(cfgs.len(), 1, "Expected 1 CFG");
+        let cfg = &cfgs[0];
+        let all_defs: Vec<&str> = cfg.blocks.iter()
+            .flat_map(|b| b.defs.iter().map(|(name, _, _, _)| name.as_str()))
+            .collect();
+        assert!(all_defs.contains(&"obj.dirty"), "Expected obj.dirty in defs, got {:?}", all_defs);
+        assert!(all_defs.contains(&"obj.clean"), "Expected obj.clean in defs, got {:?}", all_defs);
+    }
+
+    #[test]
+    fn test_field_level_uses() {
+        let src = "def f():\n    x = obj.dirty\n";
+        let cfgs = build_cfgs_for_source(src, "py");
+        assert_eq!(cfgs.len(), 1);
+        let all_uses: Vec<&str> = cfgs[0].blocks.iter()
+            .flat_map(|b| b.uses.iter().map(|(name, _, _, _)| name.as_str()))
+            .collect();
+        assert!(all_uses.contains(&"obj.dirty"), "Expected obj.dirty in uses, got {:?}", all_uses);
+        assert!(all_uses.contains(&"obj"), "Expected obj in uses, got {:?}", all_uses);
+    }
+
+    #[test]
+    fn test_subscript_defs() {
+        let src = "def f():\n    data['key'] = 1\n";
+        let cfgs = build_cfgs_for_source(src, "py");
+        assert_eq!(cfgs.len(), 1);
+        let all_defs: Vec<&str> = cfgs[0].blocks.iter()
+            .flat_map(|b| b.defs.iter().map(|(name, _, _, _)| name.as_str()))
+            .collect();
+        assert!(all_defs.iter().any(|d| d.contains("data[") && d.contains("key")),
+                "Expected data['key'] in defs, got {:?}", all_defs);
+    }
+
+    #[test]
+    fn test_subscript_uses() {
+        let src = "def f():\n    x = data['key']\n";
+        let cfgs = build_cfgs_for_source(src, "py");
+        assert_eq!(cfgs.len(), 1);
+        let all_uses: Vec<&str> = cfgs[0].blocks.iter()
+            .flat_map(|b| b.uses.iter().map(|(name, _, _, _)| name.as_str()))
+            .collect();
+        assert!(all_uses.iter().any(|u| u.contains("data[") && u.contains("key")),
+                "Expected data['key'] in uses, got {:?}", all_uses);
     }
 }
