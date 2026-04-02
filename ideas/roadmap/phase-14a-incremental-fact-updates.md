@@ -94,24 +94,63 @@ full facts.db rebuild.  After this phase:
 
 ## Todo
 
-- [ ] Implement `FactGraph.update_files(file_list)`: delete-then-insert
+- [x] Implement `FactGraph.update_files(file_list)`: delete-then-insert
   for a list of files, using the same extraction logic as
   `_build_facts_db()` / `build_from_project()`.
-- [ ] Implement `FactGraph.remove_files(file_list)`: delete all facts
+- [x] Implement `FactGraph.remove_files(file_list)`: delete all facts
   for the given files.
 - [ ] Refactor `build_from_project()` to call `update_files()`.
+  Deferred: `build_from_project()` uses relative paths and project-level
+  scope resolver (cross-file references), while `update_files()` uses
+  absolute paths and per-file resolvers.  Unifying the path/module
+  semantics is a separate concern.
 - [ ] Refactor `_build_facts_db()` to call `update_files()` on the
   existing facts.db rather than rebuilding from scratch.
-- [ ] Fix `_ensure_index_fresh()` to call `update_files()` with only
+  Deferred: `_build_facts_db()` also populates legacy `fact_symbol`,
+  `fact_reference`, `fact_import` relations and computes reachable
+  blocks.  Full consolidation requires removing those legacy relations.
+- [x] Fix `_ensure_index_fresh()` to call `update_files()` with only
   the changed files instead of `_build_facts_db()` (full rebuild).
-- [ ] Simplify `_get_or_build_fact_graph()` to two paths: load existing
+- [x] Simplify `_get_or_build_fact_graph()` to two paths: load existing
   facts.db, or create and populate via `update_files(all_files)`.
-- [ ] Wire editor-server `reindex` to the incremental CozoDB path.
-- [ ] Add tests: modify one file in a multi-file project, verify only
+- [x] Wire editor-server `reindex` to the incremental CozoDB path.
+  (Already wired: `reindex` calls `_ensure_index_fresh` which now uses
+  `update_files()` for changed files.)
+- [x] Add tests: modify one file in a multi-file project, verify only
   that file's facts change, verify derived queries (callers, trace)
   reflect the update.
-- [ ] Add tests: delete a file, verify its facts are removed and
+- [x] Add tests: delete a file, verify its facts are removed and
   derived queries no longer reference it.
+
+## Current Status
+
+Done in this phase:
+
+- `FactGraph.update_files()` — per-file delete-then-insert using CozoDB
+  `:rm` queries followed by batch `:put` inserts.  Extracts symbols, CFG,
+  references, calls, def-use, method calls, imports, source locations, and
+  decorator facts using the same Rust extractors as `build_from_files()`.
+- `FactGraph.remove_files()` — deletes all 15 stored relations for given
+  file paths, including join-based removal for `decorator_on` and
+  `func_summary` (which key on symbol QN, not file path).
+- `build_from_files()` refactored to delegate to `update_files()`.
+- `_ensure_index_fresh()` now calls `FactGraph.update_files()` for changed
+  files instead of `_build_facts_db()` (full CozoDB rebuild).  Deleted
+  files are handled by `FactGraph.remove_files()`.
+- `_get_or_build_fact_graph()` simplified from 4 fallback levels to 2:
+  load existing facts.db, or build via `warm_caches()` + load.
+- Editor-server `reindex` benefits automatically via `_ensure_index_fresh()`.
+- `tests/test_emend/test_incremental_facts.py` — 12 tests covering:
+  initial population, stale fact replacement, file isolation, CFG/source-loc
+  updates, file removal, parity with `build_from_files()`, and derived
+  query correctness after updates.
+
+Still deferred:
+
+- `build_from_project()` consolidation: uses different path/module semantics
+  (relative paths, project-level scope resolver).
+- `_build_facts_db()` consolidation: populates legacy `fact_symbol` /
+  `fact_reference` / `fact_import` relations and computes reachable blocks.
 
 ## Relationship to Other Phases
 

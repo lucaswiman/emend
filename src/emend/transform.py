@@ -1648,11 +1648,23 @@ def _ensure_index_fresh(
         if files_to_index:
             _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
-            # Build CozoDB facts.db directly from source files.
+            # Incrementally update CozoDB facts for changed files only.
             try:
-                _build_facts_db(project_root)
+                fdb = _get_facts_db(project_root)
+                if fdb is not None:
+                    from emend.fact_graph import FactGraph
+                    fg = FactGraph(db_path=str(cache_dir / "facts.db"))
+                    fg.update_files(files_to_index)
+                    fg.close()
+                else:
+                    # No existing facts.db — fall back to full build.
+                    _build_facts_db(project_root)
             except BaseException:
-                pass
+                logger.debug("incremental facts update failed, falling back to full rebuild", exc_info=True)
+                try:
+                    _build_facts_db(project_root)
+                except BaseException:
+                    pass
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
@@ -1707,6 +1719,22 @@ def _ensure_index_fresh(
                 if fdb is not None:
                     for dp in scan.deleted:
                         _delete_facts_for_file(fdb, dp)
+                # Also clean FactGraph-style relations
+                from emend.fact_graph import FactGraph
+                fg = FactGraph(db_path=str(cache_dir / "facts.db"))
+                # _delete_facts_for_file uses short column names from
+                # _FACTS_SCHEMA; FactGraph.remove_files handles the
+                # full-column-name schema.
+                rel_deleted = []
+                for dp in scan.deleted:
+                    try:
+                        rel_deleted.append(
+                            str(Path(dp).relative_to(Path(project_root).resolve()))
+                        )
+                    except ValueError:
+                        rel_deleted.append(dp)
+                fg.remove_files(rel_deleted)
+                fg.close()
             except BaseException:
                 pass
 
@@ -4675,8 +4703,9 @@ def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: 
 def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     """Get or build a FactGraph for the project.
 
-    Tries to load a persisted facts.db first, falls back to building
-    from scratch via build_from_project().
+    Two paths:
+    1. Load existing facts.db if it has data.
+    2. Build via warm_caches() (which calls _build_facts_db), then load.
     """
     from .fact_graph import FactGraph
 
@@ -4685,10 +4714,10 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     emend_dir.mkdir(parents=True, exist_ok=True)
     facts_db = emend_dir / "facts.db"
 
+    # Path 1: load existing facts.db
     if facts_db.exists():
         try:
             graph = FactGraph(db_path=str(facts_db))
-            # Verify the index populated FactGraph-style relations.
             count = graph._client.run(
                 "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
             )["rows"][0][0]
@@ -4698,24 +4727,16 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         except Exception:
             logger.debug("Failed to load facts.db, rebuilding", exc_info=True)
 
-    # No usable facts.db — run indexing to create it, then load.
+    # Path 2: build via warm_caches, then load
     logger.info("Building index for %s (first run may be slow)", project_path)
     warm_caches(project_path)
-    if facts_db.exists():
-        try:
-            return FactGraph(db_path=str(facts_db))
-        except Exception:
-            logger.debug("Failed to load facts.db after indexing", exc_info=True)
-
-    # If indexing still didn't leave a usable facts.db, persist one directly
-    # so fact-dependent commands bootstrap the cache instead of falling back
-    # to an ephemeral in-memory graph.
     try:
-        return FactGraph.build_from_project(project_path, db_path=str(facts_db))
+        graph = FactGraph(db_path=str(facts_db))
+        return graph
     except Exception:
-        logger.debug("Failed to persist facts.db directly, using in-memory graph", exc_info=True)
+        logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Final fallback: build in-memory (mainly for tests)
+    # Fallback: build in-memory (mainly for tests)
     return FactGraph.build_from_project(project_path)
 
 

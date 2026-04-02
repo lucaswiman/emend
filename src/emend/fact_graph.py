@@ -2452,38 +2452,117 @@ class FactGraph:
             adder(fact_cls(**entry))
         return graph
 
-    # -- File-list builder ------------------------------------------------
+    # -- Incremental update / removal -------------------------------------
 
-    @classmethod
-    def build_from_files(
-        cls,
-        file_paths: list[str],
+    def remove_files(self, file_paths: list[str]) -> None:
+        """Delete all facts for the given files.
+
+        Removes rows from every stored relation that references any of the
+        supplied file paths.  Relations that key on ``file_path`` directly
+        use a simple filter; relations keyed on ``symbol_qn`` or
+        ``func_qn`` join through the ``symbol`` relation first.
+        """
+        if not file_paths:
+            return
+
+        # CozoDB `:rm` requires that the query variable names in `?[...]`
+        # and `:rm relation { }` match the actual column names in the
+        # stored relation schema.
+        for fp in file_paths:
+            for query in (
+                # decorator_on/func_summary join through symbol — remove first
+                "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
+                "*symbol[symbol_qn, file_path, _, _, _, _, _], "
+                "file_path == $fp  :rm decorator_on {symbol_qn, decorator}",
+                "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
+                "*symbol[func_qn, file_path, _, _, _, _, _], "
+                "file_path == $fp  :rm func_summary {func_qn, param_name => }",
+                # symbol
+                "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
+                "file_path == $fp  :rm symbol {qualified_name => }",
+                # call
+                "?[caller_qn, callee_qn, file_path, line, col] := "
+                "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
+                "file_path == $fp  :rm call {caller_qn, callee_qn, file_path, line, col => }",
+                # reference
+                "?[symbol_qn, file_path, line, col] := "
+                "*reference[symbol_qn, file_path, line, col, _, _, _], "
+                "file_path == $fp  :rm reference {symbol_qn, file_path, line, col => }",
+                # trace_flow (all keys)
+                "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] := "
+                "*trace_flow[source_var, sink_var, label, file_path, func_qn, source_line, sink_line], "
+                "file_path == $fp  :rm trace_flow "
+                "{source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
+                # type_binding
+                "?[symbol_qn, file_path, line, binding_kind] := "
+                "*type_binding[symbol_qn, file_path, line, binding_kind, _], "
+                "file_path == $fp  :rm type_binding {symbol_qn, file_path, line, binding_kind => }",
+                # cfg_edge (all keys)
+                "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] := "
+                "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
+                "file_path == $fp  :rm cfg_edge "
+                "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+                # def_use
+                "?[file_path, func_qn, var_name, kind, def_block, use_block] := "
+                "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, _, _, _, _], "
+                "file_path == $fp  :rm def_use "
+                "{file_path, func_qn, var_name, kind, def_block, use_block => }",
+                # method_call (all keys)
+                "?[file_path, func_qn, receiver, method, block_id, line] := "
+                "*method_call[file_path, func_qn, receiver, method, block_id, line], "
+                "file_path == $fp  :rm method_call "
+                "{file_path, func_qn, receiver, method, block_id, line}",
+                # cfg_block
+                "?[file_path, func_qn, block_id] := "
+                "*cfg_block[file_path, func_qn, block_id, _, _], "
+                "file_path == $fp  :rm cfg_block {file_path, func_qn, block_id => }",
+                # source_loc
+                "?[file_path, loc_kind, loc_id] := "
+                "*source_loc[file_path, loc_kind, loc_id, _, _, _, _], "
+                "file_path == $fp  :rm source_loc {file_path, loc_kind, loc_id => }",
+                # ref_by_block (all keys)
+                "?[file_path, func_qn, block_id, symbol_qn] := "
+                "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
+                "file_path == $fp  :rm ref_by_block "
+                "{file_path, func_qn, block_id, symbol_qn}",
+                # reachable_block (all keys)
+                "?[file_path, func_qn, block_id] := "
+                "*reachable_block[file_path, func_qn, block_id], "
+                "file_path == $fp  :rm reachable_block {file_path, func_qn, block_id}",
+                # import (uses importing_file, not file_path)
+                "?[importing_file, imported_module, imported_name, line] := "
+                "*import[importing_file, imported_module, imported_name, line, _], "
+                "importing_file == $fp  :rm import "
+                "{importing_file, imported_module, imported_name, line => }",
+            ):
+                try:
+                    self._client.run(query, {"fp": fp})
+                except Exception:
+                    pass
+
+    def update_files(
+        self,
+        file_list: list[tuple[str, str]],
         language: str = "python",
-        db_path: str | None = None,
-    ) -> FactGraph:
-        """Populate a fact graph from an explicit list of source files.
+    ) -> None:
+        """Incrementally update facts for a set of files.
 
-        Unlike ``build_from_project`` this does not require a project
-        directory — it builds symbol, CFG, def-use, and import facts
-        directly from the given files.  This is the lightweight path
-        needed for small file sets (e.g. single-file test fixtures) where
-        a full project build is unnecessary or impossible.
+        Takes a list of ``(file_path, source_content)`` pairs.  For each
+        file, all existing facts are deleted and fresh facts are extracted
+        from the provided content.  Files not in *file_list* are untouched.
+
+        This is the single primitive on which ``build_from_files()``,
+        ``build_from_project()``, and ``_build_facts_db()`` should be
+        built.
         """
         from emend import emend_core as _rust
         from emend.cfg import build_cfgs_for_source
 
-        graph = cls(db_path=db_path)
+        # 1. Delete existing facts for all files in the batch.
+        self.remove_files([str(Path(fp).resolve()) for fp, _ in file_list])
 
-        for abs_file_path in file_paths:
-            try:
-                content = Path(abs_file_path).read_text(encoding="utf-8")
-            except Exception:
-                logger.debug("Could not read %s", abs_file_path, exc_info=True)
-                continue
-
-            # Use the absolute path as the fact key so callers that pass
-            # absolute paths (e.g. _run_trace_datalog) can look up facts
-            # directly.  Derive a module name from the stem.
+        # 2. Extract and insert new facts per file.
+        for abs_file_path, content in file_list:
             rel_path = str(Path(abs_file_path).resolve())
             module_name = Path(abs_file_path).stem
 
@@ -2498,8 +2577,8 @@ class FactGraph:
             sym_facts: list[SymbolFact] = []
             dec_facts: list[DecoratorOnFact] = []
             _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
-            graph.add_symbols_batch(sym_facts)
-            graph.add_decorator_on_batch(dec_facts)
+            self.add_symbols_batch(sym_facts)
+            self.add_decorator_on_batch(dec_facts)
 
             # -- Source location facts for symbols --------------------------
             source_loc_facts: list[SourceLocFact] = []
@@ -2511,7 +2590,7 @@ class FactGraph:
                     line=sf.line,
                     end_line=sf.end_line,
                 ))
-            graph.add_source_locs_batch(source_loc_facts)
+            self.add_source_locs_batch(source_loc_facts)
 
             # -- CFG blocks and edges ---------------------------------------
             try:
@@ -2561,8 +2640,8 @@ class FactGraph:
                         to_line=0,
                     ))
 
-            graph.add_cfg_blocks_batch(cfg_block_facts)
-            graph.add_cfg_edges_batch(cfg_edge_facts)
+            self.add_cfg_blocks_batch(cfg_block_facts)
+            self.add_cfg_edges_batch(cfg_edge_facts)
 
             # Source-loc entries for blocks
             block_loc_facts: list[SourceLocFact] = []
@@ -2575,7 +2654,7 @@ class FactGraph:
                         line=start_line_br,
                         end_line=end_line_br,
                     ))
-            graph.add_source_locs_batch(block_loc_facts)
+            self.add_source_locs_batch(block_loc_facts)
 
             block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
 
@@ -2615,8 +2694,8 @@ class FactGraph:
                             file_path=rel_path, line=line, col=col,
                             func_qn=fq, block_id=bid,
                         ))
-                graph.add_references_batch(ref_facts)
-                graph.add_calls_batch(call_facts)
+                self.add_references_batch(ref_facts)
+                self.add_calls_batch(call_facts)
 
             # -- Def-use facts ----------------------------------------------
             def_use_facts: list[DefUseFact] = []
@@ -2678,12 +2757,41 @@ class FactGraph:
                                 line=line,
                             ))
 
-            graph.add_def_uses_batch(def_use_facts)
-            graph.add_method_calls_batch(method_call_facts)
+            self.add_def_uses_batch(def_use_facts)
+            self.add_method_calls_batch(method_call_facts)
 
             # -- Import facts -----------------------------------------------
             import_facts = _extract_imports(rel_path, content)
-            graph.add_imports_batch(import_facts)
+            self.add_imports_batch(import_facts)
+
+    # -- File-list builder ------------------------------------------------
+
+    @classmethod
+    def build_from_files(
+        cls,
+        file_paths: list[str],
+        language: str = "python",
+        db_path: str | None = None,
+    ) -> FactGraph:
+        """Populate a fact graph from an explicit list of source files.
+
+        Unlike ``build_from_project`` this does not require a project
+        directory — it builds symbol, CFG, def-use, and import facts
+        directly from the given files.  Delegates to ``update_files()``.
+        """
+        graph = cls(db_path=db_path)
+
+        file_list: list[tuple[str, str]] = []
+        for abs_file_path in file_paths:
+            try:
+                content = Path(abs_file_path).read_text(encoding="utf-8")
+            except Exception:
+                logger.debug("Could not read %s", abs_file_path, exc_info=True)
+                continue
+            file_list.append((abs_file_path, content))
+
+        if file_list:
+            graph.update_files(file_list, language=language)
 
         return graph
 
