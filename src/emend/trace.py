@@ -1394,9 +1394,11 @@ def _run_trace_datalog(
     sinks: list[tuple[str, str, str, int, str]] = []
     sanitizers: list[tuple[str, str, str, int, str]] = []
     scope_kills: list[tuple[str, str, str, int]] = []
+    scope_kill_lines: list[tuple[str, str, str, int, int]] = []
     sink_metadata: dict[tuple[str, str, str, str, int], tuple[int, str, str]] = {}
 
     # For intra-block line ordering
+    matched_source_lines: list[tuple[str, str, str, int, int]] = []
     sanitizer_lines: list[tuple[str, str, str, int, int]] = []
     sink_lines: list[tuple[str, str, str, int, int]] = []
 
@@ -1442,6 +1444,7 @@ def _run_trace_datalog(
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
                         matched_sources.append((file_path, fq, var, bid, src_def.label))
+                        matched_source_lines.append((file_path, fq, src_def.label, bid, m.line))
             if src_def.type_constraint and matched_sources:
                 matched_sources = _filter_by_receiver_type(
                     matched_sources,
@@ -1515,6 +1518,7 @@ def _run_trace_datalog(
                 if m.line is not None:
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     scope_kills.append((file_path, fq, scope_san.label, bid))
+                    scope_kill_lines.append((file_path, fq, scope_san.label, bid, m.line))
 
     if not sources:
         return []
@@ -1584,6 +1588,12 @@ def _run_trace_datalog(
         group_scope_kills = [
             scope_kill for scope_kill in scope_kills if scope_kill[2] in group_labels
         ]
+        group_scope_kill_lines = [
+            skl for skl in scope_kill_lines if skl[2] in group_labels
+        ]
+        group_source_lines = [
+            sl for sl in matched_source_lines if sl[2] in group_labels
+        ]
 
         taint_facts.extend(graph.trace_propagation_datalog(
             sources=group_sources,
@@ -1591,9 +1601,11 @@ def _run_trace_datalog(
             sanitizers=group_sanitizers if group_sanitizers else None,
             effect_sinks=group_effect_sinks if group_effect_sinks else None,
             sanitizer_quantifier=san_quantifier,
+            source_lines=group_source_lines if group_source_lines else None,
             sanitizer_lines=group_sanitizer_lines if group_sanitizer_lines else None,
             sink_lines=group_sink_lines if group_sink_lines else None,
             scope_kills=group_scope_kills if group_scope_kills else None,
+            scope_kill_lines=group_scope_kill_lines if group_scope_kill_lines else None,
         ))
 
     def _resolve_effect_sink_line(

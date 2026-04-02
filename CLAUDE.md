@@ -93,6 +93,7 @@
 | `test_interprocedural_trace.py` | Interprocedural trace: function summaries, param-to-return/sink flow, fixed-point convergence, cross-function violations |
 | `test_fact_graph.py` | `FactGraph`: symbol/call/reference/trace/type/import queries, transitive closures, JSON serialization, predicate helpers; Phase 1-5 Datalog tests: CFG blocks, decorators, source locations, block-tagged refs, refs/callers/callees/graph Datalog queries, unified dead code, unreachable blocks, trace propagation, interprocedural trace, flow rule checks |
 | `test_incremental_facts.py` | Phase 14a: `FactGraph.update_files()` and `remove_files()`: incremental fact population, stale fact replacement, file isolation, CFG/source-loc updates, file removal, parity with `build_from_files()`, derived query correctness after updates |
+| `test_phase15_intraprocedural_parity.py` | Phase 15: Intraprocedural Datalog parity differential tests — container mutations, for-loop iteration taint, augmented assignment, module-level code, scope sanitizers, path-sensitive sanitizers |
 | `test_policy.py` | Policy engine: YAML loading, validation, structural checks, flow checks, formatting |
 | `test_rewrite_engine.py` | Rewrite engine: union-find, e-graph, expression parsing, rule loading, saturation |
 | `test_effect_predicates.py` | Phase 1 Trace-CFG: `DefUseFact.kind`, `MethodCallFact`, effect-based sinks (`writes($X)`), augmented assignment, `is_var_or_attr` dotted-name matching, `TraceSink.effect` config |

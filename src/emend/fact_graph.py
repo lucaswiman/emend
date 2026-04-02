@@ -1664,9 +1664,11 @@ class FactGraph:
         effect_sinks: list[tuple[str, str]] | None = None,  # (label, effect_kind) e.g. [("toctou", "writes")]
         sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same as sources
         sanitizer_quantifier: str = "all_paths",  # "all_paths" or "some_path"
+        source_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         sanitizer_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
+        scope_kill_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
         scalar_types: list[str] | None = None,  # type names to filter out from sources (e.g. ["int", "float"])
     ) -> list[TraceFlowFact]:
         """Intraprocedural taint propagation via Datalog over def_use facts.
@@ -1717,12 +1719,15 @@ class FactGraph:
 
         # Intra-block line-ordering
         _5line = ["fp", "fq", "lbl", "bid", "line"]
+        source_line_rule = _ir("source_in_block", _5line, source_lines or [])
         san_line_rule = _ir("sanitizer_in_block", _5line, sanitizer_lines or [])
         sink_line_rule = _ir("sink_in_block", _5line, sink_lines or [])
 
         # Scope kills
         scope_kill_rule = _ir("scope_kill", ["fp", "fq", "lbl", "bid"],
                               scope_kills or [])
+        scope_kill_line_rule = _ir("scope_kill_in_block", _5line,
+                                   scope_kill_lines or [])
 
         # -- Phase 4: type-conditioned filtering --
         if scalar_types:
@@ -1753,6 +1758,7 @@ class FactGraph:
                 f"{sink_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
+                f"{source_line_rule}"
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
                 f"{scope_kill_rule}"
@@ -1794,6 +1800,15 @@ class FactGraph:
                 "not str_includes(def_var, \".\"), "
                 "not scope_kill[fp, fq, lbl, block]\n"
 
+                # Container mutation taint (some_path variant)
+                "tainted[fp, fq, receiver, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*method_call[fp, fq, receiver, _method, block, call_line], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "use_line == call_line, "
+                "receiver != use_var, "
+                "not scope_kill[fp, fq, lbl, block]\n"
+
                 # Pattern-based violations: taint reaches sink, not sanitized
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
@@ -1810,6 +1825,7 @@ class FactGraph:
                 f"{sink_rule}"
                 f"{sanitizer_block_rule}"
                 f"{effect_rules}"
+                f"{source_line_rule}"
                 f"{san_line_rule}"
                 f"{sink_line_rule}"
                 f"{scope_kill_rule}"
@@ -1870,6 +1886,18 @@ class FactGraph:
                 "not str_includes(def_var, \".\"), "
                 "unsanitized[fp, fq, lbl, block]\n"
 
+                # Container mutation taint: when a tainted variable is passed
+                # as an argument to a method call (e.g. ``items.append(x)``),
+                # the receiver becomes tainted.  Detected when a tainted var
+                # has a use on the same line as a method call on a different var.
+                "tainted[fp, fq, receiver, block, lbl] := "
+                "tainted[fp, fq, use_var, block, lbl], "
+                "*method_call[fp, fq, receiver, _method, block, call_line], "
+                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "use_line == call_line, "
+                "receiver != use_var, "
+                "unsanitized[fp, fq, lbl, block]\n"
+
                 # Pattern-based violations: taint reaches sink
                 "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
                 "tainted[fp, fq, sink_var, sink_block, lbl], "
@@ -1917,10 +1945,24 @@ class FactGraph:
         # filter out those violations.
         # For pattern-based sinks: use sink_in_block line info.
         query += (
+            f"{scope_kill_line_rule}"
             "same_block_sanitized[fp, fq, lbl, block] := "
             "sanitizer_in_block[fp, fq, lbl, block, san_line], "
             "sink_in_block[fp, fq, lbl, block, sink_line], "
             "san_line < sink_line\n"
+        )
+        # Scope kill same-block suppression: if scope sanitizer appears
+        # BETWEEN a source and a sink in the same block, suppress.
+        # The kill must be after the source (otherwise it kills taint
+        # that doesn't exist yet) and before the sink.
+        # All three line values use 1-based pattern-match line numbers.
+        query += (
+            "same_block_sanitized[fp, fq, lbl, block] := "
+            "scope_kill_in_block[fp, fq, lbl, block, kill_line], "
+            "sink_in_block[fp, fq, lbl, block, sink_line], "
+            "source_in_block[fp, fq, lbl, block, src_line], "
+            "kill_line > src_line, "
+            "kill_line < sink_line\n"
         )
         # For effect-based sinks: the mutation line is the def_line in def_use.
         if effect_sinks:
@@ -2741,20 +2783,68 @@ class FactGraph:
                                     use_col=ucol,
                                 ))
 
-            # Method call facts from dotted-name call references
+            # -- Module-level def-use facts ---------------------------------
+            # The Rust CFG builder only produces CFGs for functions, so
+            # module-level code has no def-use facts.  Synthesise them from
+            # scope-resolver references that fall outside any function block.
             if resolver is not None:
+                from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
+                # Scope resolver uses 1-based lines; CFG uses 0-based.
+                # Convert to 0-based for consistency with CFG def-use facts.
+                mod_defs: dict[str, list[tuple[int, int]]] = {}  # var -> [(line, col)]
+                mod_uses: dict[str, list[tuple[int, int]]] = {}
+                for qn, line, col, _offset, _end_offset, kind in refs:
+                    fq_check, bid_check = _find_containing_block(block_ranges, line)
+                    if fq_check != "" or bid_check != -1:
+                        continue  # inside a function — already handled
+                    # Extract simple variable name (last segment of qn)
+                    var_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
+                    rk = _map_ref_kind(kind)
+                    line0 = line - 1  # convert to 0-based
+                    if rk == "write":
+                        mod_defs.setdefault(var_name, []).append((line0, col))
+                    elif rk in ("read", "call"):
+                        mod_uses.setdefault(var_name, []).append((line0, col))
+
+                for var_name, use_entries in mod_uses.items():
+                    if var_name in mod_defs:
+                        for dl, dc in mod_defs[var_name]:
+                            for ul, uc in use_entries:
+                                def_use_facts.append(DefUseFact(
+                                    file_path=rel_path,
+                                    func_qn=MODULE_LEVEL_FUNC,
+                                    var_name=var_name,
+                                    kind="write",
+                                    def_block=MODULE_LEVEL_BLOCK,
+                                    use_block=MODULE_LEVEL_BLOCK,
+                                    def_line=dl,
+                                    def_col=dc,
+                                    use_line=ul,
+                                    use_col=uc,
+                                ))
+
+            # Method call facts from dotted-name call references.
+            # The scope resolver uses 1-based line numbers, but CFG
+            # def-use facts use 0-based line numbers.  Convert method
+            # call lines to 0-based to match def-use for same-line
+            # comparisons in Datalog taint rules.
+            if resolver is not None:
+                from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
+                from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
                 for qn, line, col, _offset, _end_offset, kind in refs:
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
                             fq, bid = _find_containing_block(block_ranges, line)
+                            if fq == "" and bid == -1:
+                                fq, bid = _MLF, _MLB
                             method_call_facts.append(MethodCallFact(
                                 file_path=rel_path,
                                 func_qn=fq,
                                 receiver=parts[0].rsplit(".", 1)[-1],
                                 method=parts[1],
                                 block_id=bid,
-                                line=line,
+                                line=line - 1,
                             ))
 
             self.add_def_uses_batch(def_use_facts)
@@ -3199,7 +3289,7 @@ def _find_containing_block(
 ) -> tuple[str, int]:
     """Find the (func_qn, block_id) containing a given line.
 
-    Returns ("", -1) for module-level code.
+    Returns ``("", -1)`` for module-level code.
     """
     best_func_qn = ""
     best_block_id = -1
