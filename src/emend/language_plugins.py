@@ -592,34 +592,40 @@ class TreeSitterPatternCompiler(PatternCompiler):
 # Plugin registry and loader
 # ---------------------------------------------------------------------------
 
-# Hardcoded fallback comment prefixes, used when config.toml is unavailable.
-_COMMENT_PREFIXES_FALLBACK: dict[str, str] = {
-    "python": "#",
-    "typescript": "//",
-    "rust": "//",
-    "go": "//",
-}
-
-
 def _get_comment_prefix(language: str) -> str:
     """Return the line-comment prefix for *language*.
 
-    Reads from the language's ``config.toml`` (``[language].comment_prefix``
-    field) if available, falling back to the hardcoded table for known
-    languages, and finally to ``"#"`` as a last resort.
+    Delegates to ``language_registry.get_comment_prefix``, which reads from
+    the language's ``config.toml`` and falls back to ``"#"``.
     """
     try:
-        from emend.language_registry import load_config
-        config = load_config(language)
-        prefix = config.get("language", {}).get("comment_prefix")
-        if prefix:
-            return prefix
+        from emend.language_registry import get_comment_prefix
+        return get_comment_prefix(language)
     except Exception:
-        pass
-    return _COMMENT_PREFIXES_FALLBACK.get(language, "#")
+        return "#"
 
 
-def load_plugin(language: str) -> LanguagePlugin:
+def _load_plugin_file(language: str, plugin_py: "Path") -> "LanguagePlugin | None":
+    """Try to load a ``LanguagePlugin`` from a ``plugin.py`` path.
+
+    Returns ``None`` if the file does not exist or has no ``create_plugin``
+    function.
+    """
+    import importlib.util
+    if not plugin_py.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        f"emend.plugins.{language}", plugin_py
+    )
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if hasattr(mod, "create_plugin"):
+            return mod.create_plugin()
+    return None
+
+
+def load_plugin(language: str) -> "LanguagePlugin":
     """Return a ``LanguagePlugin`` for *language*.
 
     Returns the full Python plugin for ``"python"``; for other languages,
@@ -631,35 +637,20 @@ def load_plugin(language: str) -> LanguagePlugin:
         return create_python_plugin()
 
     from emend.language_registry import _find_languages_dir, _discover_entry_point_languages
-    import importlib.util
 
     # 1. Check built-in languages directory
     lang_dir = _find_languages_dir()
     if lang_dir:
-        plugin_py = lang_dir / language / "plugin.py"
-        if plugin_py.is_file():
-            spec = importlib.util.spec_from_file_location(
-                f"emend.plugins.{language}", plugin_py
-            )
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                if hasattr(mod, "create_plugin"):
-                    return mod.create_plugin()
+        plugin = _load_plugin_file(language, lang_dir / language / "plugin.py")
+        if plugin is not None:
+            return plugin
 
     # 2. Check entry-point plugins from third-party packages
     ep_langs = _discover_entry_point_languages()
     if language in ep_langs:
-        plugin_py = ep_langs[language] / "plugin.py"
-        if plugin_py.is_file():
-            spec = importlib.util.spec_from_file_location(
-                f"emend.plugins.{language}", plugin_py
-            )
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                if hasattr(mod, "create_plugin"):
-                    return mod.create_plugin()
+        plugin = _load_plugin_file(language, ep_langs[language] / "plugin.py")
+        if plugin is not None:
+            return plugin
 
     prefix = _get_comment_prefix(language)
     return LanguagePlugin(

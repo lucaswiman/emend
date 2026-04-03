@@ -1,7 +1,20 @@
+import json as _json
+import os
+import sys
+from typing import Annotated, Optional
+
 import typer
-from typing import Annotated
 
 from emend.cli_base import app
+from emend.component_selector import parse_extended_selector
+from emend.knowledge import (
+    IdentifierMapping,
+    MappingStore,
+    ModuleMapping,
+    make_resolve_module_cb,
+    mapping_to_dict,
+    module_mapping_to_dict,
+)
 
 map_app = typer.Typer(help="Identifier and module mappings.")
 app.add_typer(map_app, name="map")
@@ -21,9 +34,6 @@ def map_add_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Add a cross-service identifier mapping."""
-    import json as _json
-    from emend.knowledge import MappingStore, IdentifierMapping, mapping_to_dict
-
     store = MappingStore(".")
     m = IdentifierMapping(
         source_project=source_project,
@@ -44,9 +54,6 @@ def map_add_cmd(
         print(f"Added mapping: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("search")
 def map_search_cmd(
@@ -58,8 +65,6 @@ def map_search_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Search identifier mappings (substring match)."""
-    import json as _json
-    from emend.knowledge import MappingStore, mapping_to_dict
 
     store = MappingStore(".")
     results = store.search_mappings(
@@ -76,9 +81,6 @@ def map_search_cmd(
             print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]{conf}")
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("lookup")
 def map_lookup_cmd(
@@ -88,9 +90,6 @@ def map_lookup_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Look up mappings for a specific identifier."""
-    import json as _json
-    from emend.knowledge import MappingStore, mapping_to_dict
-
     store = MappingStore(".")
     results = store.find_mappings_for(identifier, project=project, direction=direction)
     if json_output:

@@ -56,26 +56,6 @@ def load_rules_document(
     return data, resolved
 
 
-def resolve_rules_path(
-    config_path: str | Path | None = None,
-    *,
-    fallbacks: Iterable[str | Path] = (),
-) -> Path:
-    """Resolve the active rules path without loading the file."""
-    if config_path is None:
-        candidates = [DEFAULT_RULES_PATH, *[Path(p) for p in fallbacks]]
-    else:
-        candidates = [Path(config_path)]
-        if candidates[0].name != DEFAULT_RULES_PATH.name:
-            candidates.append(DEFAULT_RULES_PATH)
-        candidates.extend(Path(p) for p in fallbacks)
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return Path(config_path) if config_path is not None else DEFAULT_RULES_PATH
-
-
 def load_yaml_config_with_fallback(
     config_path: str | Path,
     *,
@@ -174,3 +154,17 @@ def expand_pattern_macros(pattern: str | None, macros: dict[str, str]) -> str | 
 def expand_macros(pattern: str, macros: dict[str, str]) -> str:
     """Expand macros in a required pattern string."""
     return expand_pattern_macros(pattern, macros) or ""
+
+
+def expand_not_through(not_through: Any, macros: dict[str, str]) -> str | None:
+    """Expand and join a ``not_through`` value (string or list) with macros.
+
+    Returns a single pipe-joined pattern string, or ``None`` if *not_through*
+    is falsy.
+    """
+    if not not_through:
+        return None
+    if isinstance(not_through, list):
+        expanded = [expand_macros(str(item), macros) for item in not_through]
+        return " | ".join(item for item in expanded if item) or None
+    return expand_macros(str(not_through), macros) or None

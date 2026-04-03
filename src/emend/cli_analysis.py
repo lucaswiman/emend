@@ -12,7 +12,17 @@ from emend.cli_base import (
     app,
     resolve_files,
 )
+from emend.component_selector import parse_extended_selector
 from emend.rules_config import LEGACY_PATTERNS_PATH, resolve_rules_path
+from emend.transform import (
+    DeadBlock,
+    DeadModule,
+    find_callers,
+    find_dead_code,
+    find_impact,
+    find_references,
+    generate_graph,
+)
 
 logger = logging.getLogger("emend.cli.analysis")
 
@@ -99,9 +109,6 @@ def _trace_cmd_impl(
         raise typer.Exit(1)
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("trace", hidden=True)
 def trace_cmd(
@@ -141,11 +148,6 @@ def trace_cmd(
                     interprocedural, max_iterations, preset)
 
 
-import sys
-from pathlib import Path
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("dsl-debug", hidden=True)
 def dsl_debug_cmd(
@@ -224,13 +226,6 @@ def dsl_debug_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from pathlib import Path
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import find_references, find_callers
 
 @app.command("refs", hidden=True)
 def refs_cmd(
@@ -385,11 +380,6 @@ def refs_cmd(
 
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.transform import generate_graph
 
 @app.command("graph", hidden=True)
 def graph_cmd(
@@ -423,11 +413,6 @@ def graph_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.transform import DeadBlock, DeadModule, find_dead_code
 
 @app.command("deadcode", hidden=True)
 def dead_code_cmd(
@@ -577,12 +562,6 @@ def dead_code_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import find_impact
 
 @app.command("impact", hidden=True)
 def impact_cmd(
@@ -702,11 +681,6 @@ def impact_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from pathlib import Path
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("types", hidden=True)
 def types_cmd(
@@ -806,10 +780,6 @@ def types_cmd(
         raise typer.Exit(2)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("facts", hidden=True)
 def facts_cmd(
@@ -917,10 +887,6 @@ def facts_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("cfg", hidden=True)
 def cfg_cmd(

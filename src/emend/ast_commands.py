@@ -6,13 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 from emend.component_selector import parse_extended_selector, ExtendedSelector
-from emend.transform import (
-    get_component, set_component, add_to_component,
-    remove_symbol, copy_symbol, replace_pattern
-)
+from emend.transform import copy_symbol
 from emend.ast_utils import (
     find_nested_definitions,
-    find_symbol_by_path,
     find_symbol_by_line,
 )
 
@@ -25,9 +21,6 @@ def cmd_copy_to(
     apply: bool = False,
 ):
     """Copy a symbol to another file using copy_symbol primitive."""
-    from emend.component_selector import ExtendedSelector, parse_extended_selector
-    from emend.transform import copy_symbol
-
     ext_selector = parse_extended_selector(selector)
 
     # Handle line-based selectors
@@ -116,27 +109,29 @@ class TreeSymbol:
     path: list[str] = field(default_factory=list)
 
 
+_KIND_KEYWORD = {
+    "function": "def",
+    "async_function": "async def",
+    "method": "def",
+    "async_method": "async def",
+    "class": "class",
+    "variable": "var",
+    "reference": "ref",
+}
+
+
 def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0, max_depth: int | None = None, current_display_depth: int = 1):
     """Print symbols in tree format with full Python keywords.
-    
+
     current_display_depth starts at 1 for top-level symbols.
     max_depth is the limit on current_display_depth.
     """
     if max_depth is not None and current_display_depth > max_depth:
         return
 
-    KIND_KEYWORD = {
-        "function": "def",
-        "async_function": "async def",
-        "method": "def",
-        "async_method": "async def",
-        "class": "class",
-        "variable": "var",
-        "reference": "ref",
-    }
     for sym in symbols:
         prefix = "  " * indent
-        kind_keyword = KIND_KEYWORD.get(sym.kind, sym.kind[:3])
+        kind_keyword = _KIND_KEYWORD.get(sym.kind, sym.kind[:3])
 
         if sym.line and sym.end_line and sym.line != sym.end_line:
             line_suffix = f"  [L{sym.line}-L{sym.end_line}]"
@@ -168,18 +163,9 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
     if max_depth is not None and current_display_depth > max_depth:
         return
 
-    KIND_KEYWORD = {
-        "function": "def",
-        "async_function": "async def",
-        "method": "def",
-        "async_method": "async def",
-        "class": "class",
-        "variable": "var",
-        "reference": "ref",
-    }
     for sym in symbols:
         full_path = f"{parent_path}{separator}{sym.name}" if parent_path else sym.name
-        kind_keyword = KIND_KEYWORD.get(sym.kind, sym.kind[:3])
+        kind_keyword = _KIND_KEYWORD.get(sym.kind, sym.kind[:3])
 
         if sym.line and sym.end_line and sym.line != sym.end_line:
             line_suffix = f"  [L{sym.line}-L{sym.end_line}]"

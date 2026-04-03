@@ -1198,7 +1198,7 @@ class FactGraph:
 
     # -- Transitive closures (Datalog! No more Python BFS) ---------------
 
-    def transitive_callers(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
+    def transitive_callers(self, symbol_qn: str) -> set[str]:
         """Compute the transitive set of callers of *symbol_qn* via Datalog."""
         result = self._client.run(
             "reaches[a] := *call_by_callee[$qn, a, _, _, _, _, _]\n"
@@ -1208,7 +1208,7 @@ class FactGraph:
         )
         return {r[0] for r in result["rows"]} - {symbol_qn}
 
-    def transitive_callees(self, symbol_qn: str, max_depth: int = 10) -> set[str]:
+    def transitive_callees(self, symbol_qn: str) -> set[str]:
         """Compute the transitive set of callees of *symbol_qn* via Datalog."""
         result = self._client.run(
             "reaches[b] := *call[$qn, b, _, _, _, _, _]\n"
@@ -2785,64 +2785,12 @@ class FactGraph:
                 logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
                 cfgs = []
 
-            block_ranges: list[tuple[str, int, int, int, bool]] = []
-            cfg_block_facts: list[CfgBlockFact] = []
-            cfg_edge_facts: list[CfgEdgeFact] = []
-
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                func_qn = ""
-                for sf in sym_facts:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    cfg_block_facts.append(CfgBlockFact(
-                        file_path=rel_path,
-                        func_qn=func_qn,
-                        block_id=bid,
-                        is_entry=(bid == cfg.entry),
-                        is_exit=(bid == cfg.exit),
-                    ))
-                    has_content = bool(
-                        block.get("statements")
-                        or block.get("defs")
-                        or block.get("uses")
-                    )
-                    block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
-
-                for edge in cfg.get_edges():
-                    cfg_edge_facts.append(CfgEdgeFact(
-                        file_path=rel_path,
-                        func_qn=func_qn,
-                        from_block=edge["from"],
-                        to_block=edge["to"],
-                        edge_kind=edge["kind"],
-                        from_line=0,
-                        to_line=0,
-                    ))
-
+            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
+                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
+            )
             self.add_cfg_blocks_batch(cfg_block_facts)
             self.add_cfg_edges_batch(cfg_edge_facts)
-
-            # Source-loc entries for blocks
-            block_loc_facts: list[SourceLocFact] = []
-            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
-                if start_line_br > 0 and has_content_br:
-                    block_loc_facts.append(SourceLocFact(
-                        file_path=rel_path,
-                        loc_kind="block",
-                        loc_id=f"{func_qn_br}:{bid_br}",
-                        line=start_line_br,
-                        end_line=end_line_br,
-                    ))
             self.add_source_locs_batch(block_loc_facts)
-
-            block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
 
             # -- Reference and call facts (scope resolver) ------------------
             resolver = None
@@ -2884,48 +2832,10 @@ class FactGraph:
                 self.add_calls_batch(call_facts)
 
             # -- Def-use facts ----------------------------------------------
-            def_use_facts: list[DefUseFact] = []
+            def_use_facts: list[DefUseFact] = _build_def_use_facts(
+                cfgs, sym_facts, rel_path, module_name
+            )
             method_call_facts: list[MethodCallFact] = []
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                func_qn = ""
-                for sf in sym_facts:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for d in block.get("defs", []) or []:
-                        var_name = d[0] if isinstance(d, (list, tuple)) else d
-                        dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
-                        dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
-                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
-
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for u in block.get("uses", []) or []:
-                        var_name = u[0] if isinstance(u, (list, tuple)) else u
-                        uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
-                        ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
-                        if var_name in defs_map:
-                            for def_bid, dl, dc, dk in defs_map[var_name]:
-                                def_use_facts.append(DefUseFact(
-                                    file_path=rel_path,
-                                    func_qn=func_qn,
-                                    var_name=var_name,
-                                    kind=dk,
-                                    def_block=def_bid,
-                                    use_block=bid,
-                                    def_line=dl,
-                                    def_col=dc,
-                                    use_line=uline,
-                                    use_col=ucol,
-                                ))
 
             # -- Module-level def-use facts ---------------------------------
             # The Rust CFG builder only produces CFGs for functions, so
@@ -3118,68 +3028,12 @@ class FactGraph:
                 cfgs = []
 
             # Build block line ranges for block-tagging references
-            block_ranges: list[tuple[str, int, int, int, bool]] = []
-            cfg_block_facts: list[CfgBlockFact] = []
-            cfg_edge_facts: list[CfgEdgeFact] = []
-
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                # Find the matching symbol QN
-                func_qn = ""
-                for sf in sym_facts:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    cfg_block_facts.append(CfgBlockFact(
-                        file_path=rel_path,
-                        func_qn=func_qn,
-                        block_id=bid,
-                        is_entry=(bid == cfg.entry),
-                        is_exit=(bid == cfg.exit),
-                    ))
-                    has_content = bool(
-                        block.get("statements")
-                        or block.get("defs")
-                        or block.get("uses")
-                    )
-                    # Tree-sitter lines are 0-indexed; convert to 1-indexed.
-                    block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
-
-                for edge in cfg.get_edges():
-                    cfg_edge_facts.append(CfgEdgeFact(
-                        file_path=rel_path,
-                        func_qn=func_qn,
-                        from_block=edge["from"],
-                        to_block=edge["to"],
-                        edge_kind=edge["kind"],
-                        from_line=0,
-                        to_line=0,
-                    ))
-
+            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
+                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
+            )
             graph.add_cfg_blocks_batch(cfg_block_facts)
             graph.add_cfg_edges_batch(cfg_edge_facts)
-
-            # Store source_loc entries for blocks so unreachable block reporting
-            # can look up start/end lines without scanning file content again.
-            block_loc_facts: list[SourceLocFact] = []
-            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
-                if start_line_br > 0 and has_content_br:
-                    block_loc_facts.append(SourceLocFact(
-                        file_path=rel_path,
-                        loc_kind="block",
-                        loc_id=f"{func_qn_br}:{bid_br}",
-                        line=start_line_br,
-                        end_line=end_line_br,
-                    ))
             graph.add_source_locs_batch(block_loc_facts)
-
-            # Sort block_ranges for lookup: innermost (smallest range) first
-            block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
 
             # -- Reference and call facts (via scope resolver) ------------
             try:
@@ -3228,51 +3082,10 @@ class FactGraph:
                 graph.add_calls_batch(call_facts)
 
             # -- Def-use facts with block IDs ----------------------------
-            def_use_facts: list[DefUseFact] = []
+            def_use_facts: list[DefUseFact] = _build_def_use_facts(
+                cfgs, sym_facts, rel_path, module_name
+            )
             method_call_facts: list[MethodCallFact] = []
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                func_qn = ""
-                for sf in sym_facts:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                # Build def map: var_name -> [(block_id, line, col, kind)]
-                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for d in block.get("defs", []) or []:
-                        var_name = d[0] if isinstance(d, (list, tuple)) else d
-                        dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
-                        dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
-                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
-
-                # Build use map and create def-use pairs
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for u in block.get("uses", []) or []:
-                        var_name = u[0] if isinstance(u, (list, tuple)) else u
-                        uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
-                        ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
-                        ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
-                        if var_name in defs_map:
-                            for def_bid, dl, dc, dk in defs_map[var_name]:
-                                def_use_facts.append(DefUseFact(
-                                    file_path=rel_path,
-                                    func_qn=func_qn,
-                                    var_name=var_name,
-                                    kind=dk,
-                                    def_block=def_bid,
-                                    use_block=bid,
-                                    def_line=dl,
-                                    def_col=dc,
-                                    use_line=uline,
-                                    use_col=ucol,
-                                ))
 
             # -- Method call facts (from call references with dotted names) --
             if resolver is not None:
@@ -3482,6 +3295,135 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
                     line=node.lineno,
                 ))
     return facts
+
+
+def _build_cfg_facts(
+    cfgs: list[Any],
+    sym_facts: list[SymbolFact],
+    rel_path: str,
+    module_name: str,
+) -> tuple[
+    list[CfgBlockFact],
+    list[CfgEdgeFact],
+    list[SourceLocFact],
+    list[tuple[str, int, int, int, bool]],  # block_ranges
+]:
+    """Build CFG block/edge/source-loc facts from a list of PyCfg objects.
+
+    Returns ``(cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges)``
+    where *block_ranges* is sorted for ``_find_containing_block`` lookups.
+    """
+    block_ranges: list[tuple[str, int, int, int, bool]] = []
+    cfg_block_facts: list[CfgBlockFact] = []
+    cfg_edge_facts: list[CfgEdgeFact] = []
+
+    for cfg in cfgs:
+        func_name = cfg.func_name
+        func_qn = ""
+        for sf in sym_facts:
+            if sf.name == func_name and sf.file_path == rel_path:
+                func_qn = sf.qualified_name
+                break
+        if not func_qn:
+            func_qn = f"{module_name}.{func_name}"
+
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            cfg_block_facts.append(CfgBlockFact(
+                file_path=rel_path,
+                func_qn=func_qn,
+                block_id=bid,
+                is_entry=(bid == cfg.entry),
+                is_exit=(bid == cfg.exit),
+            ))
+            has_content = bool(
+                block.get("statements")
+                or block.get("defs")
+                or block.get("uses")
+            )
+            block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
+
+        for edge in cfg.get_edges():
+            cfg_edge_facts.append(CfgEdgeFact(
+                file_path=rel_path,
+                func_qn=func_qn,
+                from_block=edge["from"],
+                to_block=edge["to"],
+                edge_kind=edge["kind"],
+                from_line=0,
+                to_line=0,
+            ))
+
+    block_loc_facts: list[SourceLocFact] = []
+    for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
+        if start_line_br > 0 and has_content_br:
+            block_loc_facts.append(SourceLocFact(
+                file_path=rel_path,
+                loc_kind="block",
+                loc_id=f"{func_qn_br}:{bid_br}",
+                line=start_line_br,
+                end_line=end_line_br,
+            ))
+
+    block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
+    return cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges
+
+
+def _build_def_use_facts(
+    cfgs: list[Any],
+    sym_facts: list[SymbolFact],
+    rel_path: str,
+    module_name: str,
+) -> list[DefUseFact]:
+    """Extract def-use facts from CFG blocks.
+
+    Covers only intra-function code; module-level def-use facts must be
+    synthesised separately from scope-resolver references.
+    """
+    def_use_facts: list[DefUseFact] = []
+
+    for cfg in cfgs:
+        func_name = cfg.func_name
+        func_qn = ""
+        for sf in sym_facts:
+            if sf.name == func_name and sf.file_path == rel_path:
+                func_qn = sf.qualified_name
+                break
+        if not func_qn:
+            func_qn = f"{module_name}.{func_name}"
+
+        defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            for d in block.get("defs", []) or []:
+                var_name = d[0] if isinstance(d, (list, tuple)) else d
+                dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
+                dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
+                dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
+
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            for u in block.get("uses", []) or []:
+                var_name = u[0] if isinstance(u, (list, tuple)) else u
+                uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
+                ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
+                if var_name in defs_map:
+                    for def_bid, dl, dc, dk in defs_map[var_name]:
+                        def_use_facts.append(DefUseFact(
+                            file_path=rel_path,
+                            func_qn=func_qn,
+                            var_name=var_name,
+                            kind=dk,
+                            def_block=def_bid,
+                            use_block=bid,
+                            def_line=dl,
+                            def_col=dc,
+                            use_line=uline,
+                            use_col=ucol,
+                        ))
+
+    return def_use_facts
 
 
 # ---------------------------------------------------------------------------

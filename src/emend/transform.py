@@ -2014,7 +2014,7 @@ def _lookup_via_modmap(
         return []
     finally:
         try:
-            kb.close()
+            store.close()
         except Exception:
             pass
 
@@ -2826,7 +2826,7 @@ def find_pattern_in_project(
                         ProjectPatternMatch(
                             file_path=fp,
                             match=PatternMatch(
-                                node=None, captures={},
+                                node_text=text, captures={},
                                 line=line, end_line=end_line,
                                 col=col, end_col=end_col,
                                 matched_text=text,

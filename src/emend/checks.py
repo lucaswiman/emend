@@ -122,7 +122,7 @@ def _policy_violations_to_checks(violations: list[PolicyViolation]) -> list[Chec
             file_path=v.file_path,
             line=v.line,
             col=v.col,
-            witness=v.witness or None,
+            witness=v.witness,
         )
         for v in violations
     ]

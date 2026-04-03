@@ -161,6 +161,32 @@ def _count_newlines_before(text: str, pos: int) -> int:
     return text[:pos].count('\n')
 
 
+def _make_region(
+    dsl: DslKind,
+    stripped: str,
+    file_path: str,
+    source: str,
+    match_start: int,
+    match_end: int,
+    trigger: str,
+) -> DslRegion:
+    """Build a DslRegion from a match span inside *source*."""
+    start_line = _count_newlines_before(source, match_start) + 1
+    start_col = match_start - source.rfind('\n', 0, match_start) - 1
+    end_line = _count_newlines_before(source, match_end) + 1
+    end_col = match_end - source.rfind('\n', 0, match_end) - 1
+    return DslRegion(
+        dsl=dsl,
+        content=stripped,
+        host_file=file_path,
+        host_start_line=start_line,
+        host_start_col=max(0, start_col),
+        host_end_line=end_line,
+        host_end_col=max(0, end_col),
+        trigger=trigger,
+    )
+
+
 def detect_dsl_regions(
     file_path: str,
     source: str | None = None,
@@ -247,46 +273,22 @@ def _detect_sql_regions(file_path: str, source: str) -> list[DslRegion]:
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
-    def _add_region(content: str, match_start: int, match_end: int, trigger: str) -> None:
-        stripped = content.strip()
-        if not stripped or stripped in seen_contents:
-            return
-        if not _SQL_KEYWORD_RE.search(stripped):
-            return
-        seen_contents.add(stripped)
-
-        start_line = _count_newlines_before(source, match_start) + 1
-        start_col = match_start - source.rfind('\n', 0, match_start) - 1
-        end_line = _count_newlines_before(source, match_end) + 1
-        end_col = match_end - source.rfind('\n', 0, match_end) - 1
-
-        regions.append(DslRegion(
-            dsl=DslKind.SQL,
-            content=stripped,
-            host_file=file_path,
-            host_start_line=start_line,
-            host_start_col=max(0, start_col),
-            host_end_line=end_line,
-            host_end_col=max(0, end_col),
-            trigger=trigger,
-        ))
-
     # Check for magic comment presence to determine trigger type
     magic_comment_active = bool(_MAGIC_COMMENT_RE.search(source))
     trigger = "magic_comment" if magic_comment_active else "literal"
 
-    # Scan triple-quoted strings first (they have priority)
-    for pattern in (_TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE):
+    for pattern in (
+        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
+        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
+    ):
         for m in pattern.finditer(source):
-            content = m.group(1)
-            _add_region(content, m.start(), m.end(), trigger)
-
-    # Scan single-line strings
-    for pattern in (_SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE):
-        for m in pattern.finditer(source):
-            content = m.group(1)
-            # Skip if already captured as part of triple-quoted
-            _add_region(content, m.start(), m.end(), trigger)
+            stripped = m.group(1).strip()
+            if not stripped or stripped in seen_contents:
+                continue
+            if not _SQL_KEYWORD_RE.search(stripped):
+                continue
+            seen_contents.add(stripped)
+            regions.append(_make_region(DslKind.SQL, stripped, file_path, source, m.start(), m.end(), trigger))
 
     return regions
 
@@ -300,44 +302,22 @@ def _detect_jinja_regions(file_path: str, source: str) -> list[DslRegion]:
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
-    def _add_jinja_region(content: str, match_start: int, match_end: int, trigger: str) -> None:
-        stripped = content.strip()
-        if not stripped or stripped in seen_contents:
-            return
-        # Must contain Jinja2 syntax
-        if not (_JINJA_EXPR_RE.search(stripped) or _JINJA_TAG_RE.search(stripped)):
-            return
-        seen_contents.add(stripped)
-
-        start_line = _count_newlines_before(source, match_start) + 1
-        start_col = match_start - source.rfind('\n', 0, match_start) - 1
-        end_line = _count_newlines_before(source, match_end) + 1
-        end_col = match_end - source.rfind('\n', 0, match_end) - 1
-
-        regions.append(DslRegion(
-            dsl=DslKind.JINJA,
-            content=stripped,
-            host_file=file_path,
-            host_start_line=start_line,
-            host_start_col=max(0, start_col),
-            host_end_line=end_line,
-            host_end_col=max(0, end_col),
-            trigger=trigger,
-        ))
-
     # Check for magic comment: # language=jinja or # language=jinja2
     magic_jinja = bool(re.search(r'#\s*language\s*=\s*jinja2?\b', source, re.IGNORECASE))
     trigger = "magic_comment" if magic_jinja else "literal"
 
-    # Scan triple-quoted strings first
-    for pattern in (_TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE):
+    for pattern in (
+        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
+        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
+    ):
         for m in pattern.finditer(source):
-            _add_jinja_region(m.group(1), m.start(), m.end(), trigger)
-
-    # Scan single-line strings
-    for pattern in (_SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE):
-        for m in pattern.finditer(source):
-            _add_jinja_region(m.group(1), m.start(), m.end(), trigger)
+            stripped = m.group(1).strip()
+            if not stripped or stripped in seen_contents:
+                continue
+            if not (_JINJA_EXPR_RE.search(stripped) or _JINJA_TAG_RE.search(stripped)):
+                continue
+            seen_contents.add(stripped)
+            regions.append(_make_region(DslKind.JINJA, stripped, file_path, source, m.start(), m.end(), trigger))
 
     return regions
 
@@ -351,40 +331,21 @@ def _detect_graphql_regions(file_path: str, source: str) -> list[DslRegion]:
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
-    def _add_gql_region(content: str, match_start: int, match_end: int, trigger: str) -> None:
-        stripped = content.strip()
-        if not stripped or stripped in seen_contents:
-            return
-        if not _GRAPHQL_KEYWORD_RE.search(stripped):
-            return
-        seen_contents.add(stripped)
-
-        start_line = _count_newlines_before(source, match_start) + 1
-        start_col = match_start - source.rfind('\n', 0, match_start) - 1
-        end_line = _count_newlines_before(source, match_end) + 1
-        end_col = match_end - source.rfind('\n', 0, match_end) - 1
-
-        regions.append(DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content=stripped,
-            host_file=file_path,
-            host_start_line=start_line,
-            host_start_col=max(0, start_col),
-            host_end_line=end_line,
-            host_end_col=max(0, end_col),
-            trigger=trigger,
-        ))
-
     magic_gql = bool(re.search(r'#\s*language\s*=\s*graphql\b', source, re.IGNORECASE))
     trigger = "magic_comment" if magic_gql else "literal"
 
-    for pattern in (_TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE):
+    for pattern in (
+        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
+        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
+    ):
         for m in pattern.finditer(source):
-            _add_gql_region(m.group(1), m.start(), m.end(), trigger)
-
-    for pattern in (_SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE):
-        for m in pattern.finditer(source):
-            _add_gql_region(m.group(1), m.start(), m.end(), trigger)
+            stripped = m.group(1).strip()
+            if not stripped or stripped in seen_contents:
+                continue
+            if not _GRAPHQL_KEYWORD_RE.search(stripped):
+                continue
+            seen_contents.add(stripped)
+            regions.append(_make_region(DslKind.GRAPHQL, stripped, file_path, source, m.start(), m.end(), trigger))
 
     return regions
 
@@ -812,7 +773,7 @@ def _find_tablename_mapping(file_path: str) -> dict[str, tuple[str, int]]:
     lines = source.split('\n')
     current_class: str | None = None
     for i, line in enumerate(lines, start=1):
-        class_match = re.match(r'^class\s+(\w+)\s*[\(:]', line)
+        class_match = _CLASS_DEF_RE.match(line)
         if class_match:
             current_class = class_match.group(1)
         if current_class:
@@ -1502,7 +1463,7 @@ def find_dsl_impact(
     class_to_tables: dict[str, set[str]] = {}
     for cls in changed_classes:
         # Convention: PascalCase -> snake_case plural
-        snake = re.sub(r'(?<!^)(?=[A-Z])', '_', cls).lower()
+        snake = _to_snake_case(cls)
         tables = {snake, snake + "s", snake + "es"}
         # Also check __tablename__ in project files
         for py_file in root.rglob("*.py"):

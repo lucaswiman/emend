@@ -1318,45 +1318,36 @@ class EditorSearchEngine:
 
     # -- hot buffer protocol ---------------------------------------------------
 
-    def buffer_open(self, file: str, content: str, version: int = 0) -> SearchResult:
-        """Register an open buffer with its current content."""
-        import time as _time
-        t0 = _time.monotonic()
+    def _buffer_store(self, file: str, content: str, version: int, op: str) -> SearchResult:
+        """Store buffer content and return a buffer SearchResult."""
+        t0 = time.monotonic()
         resolved = str(Path(file).resolve())
         self._hot_buffers[resolved] = content
         self._hot_buffer_versions[resolved] = version
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
             items=[{"file": resolved, "version": version}],
             elapsed_ms=elapsed,
             mode="buffer",
-            query=f"buffer_open {file}",
+            query=f"{op} {file}",
         )
+
+    def buffer_open(self, file: str, content: str, version: int = 0) -> SearchResult:
+        """Register an open buffer with its current content."""
+        return self._buffer_store(file, content, version, "buffer_open")
 
     def buffer_update(self, file: str, content: str, version: int = 0) -> SearchResult:
         """Update the content of an open buffer."""
-        import time as _time
-        t0 = _time.monotonic()
-        resolved = str(Path(file).resolve())
-        self._hot_buffers[resolved] = content
-        self._hot_buffer_versions[resolved] = version
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(
-            items=[{"file": resolved, "version": version}],
-            elapsed_ms=elapsed,
-            mode="buffer",
-            query=f"buffer_update {file}",
-        )
+        return self._buffer_store(file, content, version, "buffer_update")
 
     def buffer_close(self, file: str) -> SearchResult:
         """Remove a buffer from the hot buffer cache."""
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         resolved = str(Path(file).resolve())
         removed = resolved in self._hot_buffers
         self._hot_buffers.pop(resolved, None)
         self._hot_buffer_versions.pop(resolved, None)
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
             items=[{"file": resolved, "removed": removed}],
             elapsed_ms=elapsed,
@@ -1390,8 +1381,7 @@ class EditorSearchEngine:
         Works for local variables, parameters, loop variables, etc.
         """
         from emend.transform import _rust
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         logger.debug(f"goto_definition: file={file}, line={line}, col={col}")
 
@@ -1528,7 +1518,7 @@ class EditorSearchEngine:
             # string), resolve table/column names to host-language definitions.
             dsl_result = self._goto_dsl_fallback(str(file_path), line)
             if dsl_result.items:
-                dsl_result.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
+                dsl_result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
                 return dsl_result
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
@@ -1561,7 +1551,7 @@ class EditorSearchEngine:
                 "qualified_name": resolved_qn,
             }
             res = SearchResult(items=[item], elapsed_ms=0, mode="symbol")
-            res.elapsed_ms = round((_time.monotonic() - t0) * 1000, 2)
+            res.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
             return res
 
         # 2. Cross-file definition: resolve target_qn via symbol index
@@ -1590,144 +1580,78 @@ class EditorSearchEngine:
             query="reindex",
         )
 
-    def rename_preview(self, qualified_name: str, new_name: str, file: str = "") -> SearchResult:
-        """Dry-run rename, return list of changes."""
+    def _rename(self, qualified_name: str, new_name: str, file: str, apply: bool) -> SearchResult:
         from emend.transform import rename_symbol
         from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
-
+        t0 = time.monotonic()
         selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
-        diffs = rename_symbol(selector, new_name, project_path=str(self.project_root), apply=False)
-
-        items = []
-        for fp, diff in diffs.items():
-            items.append({
-                "file_path": fp,
-                "diff": diff,
-            })
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        diffs = rename_symbol(selector, new_name, project_path=str(self.project_root), apply=apply)
+        items = [{"file_path": fp, "diff": diff} for fp, diff in diffs.items()]
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
+
+    def rename_preview(self, qualified_name: str, new_name: str, file: str = "") -> SearchResult:
+        """Dry-run rename, return list of changes."""
+        return self._rename(qualified_name, new_name, file, apply=False)
 
     def rename_apply(self, qualified_name: str, new_name: str, file: str = "") -> SearchResult:
         """Apply rename across the project."""
-        from emend.transform import rename_symbol
-        from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
+        return self._rename(qualified_name, new_name, file, apply=True)
 
-        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
-        diffs = rename_symbol(selector, new_name, project_path=str(self.project_root), apply=True)
-
-        items = []
-        for fp, diff in diffs.items():
-            items.append({
-                "file_path": fp,
-                "diff": diff,
-            })
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="symbol", query=f"rename {qualified_name}")
+    def _replace(self, pattern: str, replacement: str, file: str, inside: str | None, not_inside: str | None, apply: bool) -> SearchResult:
+        from emend.transform import replace_pattern
+        from emend.cli import resolve_files
+        t0 = time.monotonic()
+        items: list[dict] = []
+        search_path = file if file else str(self.project_root)
+        files, _ = resolve_files(search_path)
+        for fp in (str(f) for f in files):
+            try:
+                diff, count = replace_pattern(
+                    pattern, replacement, fp,
+                    inside=inside, not_inside=not_inside,
+                    apply=apply,
+                )
+                if count > 0:
+                    items.append({"file_path": fp, "diff": diff, "count": count})
+            except Exception:
+                continue
+        mode = "replace_apply" if apply else "replace_preview"
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode=mode, query=f"{pattern} -> {replacement}")
 
     def replace_preview(self, pattern: str, replacement: str, file: str = "", inside: str | None = None, not_inside: str | None = None) -> SearchResult:
         """Dry-run pattern replace, return diffs."""
-        from emend.transform import replace_pattern
-        from emend.cli import resolve_files
-        import time as _time
-        t0 = _time.monotonic()
-
-        items: list[dict] = []
-        search_path = file if file else str(self.project_root)
-        files, is_multi = resolve_files(search_path)
-        file_strs = [str(f) for f in files]
-
-        total_count = 0
-        for fp in file_strs:
-            try:
-                diff, count = replace_pattern(
-                    pattern, replacement, fp,
-                    inside=inside, not_inside=not_inside,
-                    apply=False,
-                )
-                if count > 0:
-                    items.append({"file_path": fp, "diff": diff, "count": count})
-                    total_count += count
-            except Exception:
-                continue
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="replace_preview", query=f"{pattern} -> {replacement}")
+        return self._replace(pattern, replacement, file, inside, not_inside, apply=False)
 
     def replace_apply(self, pattern: str, replacement: str, file: str = "", inside: str | None = None, not_inside: str | None = None) -> SearchResult:
         """Apply pattern replace, return diffs of applied changes."""
-        from emend.transform import replace_pattern
-        from emend.cli import resolve_files
-        import time as _time
-        t0 = _time.monotonic()
+        return self._replace(pattern, replacement, file, inside, not_inside, apply=True)
 
-        items: list[dict] = []
-        search_path = file if file else str(self.project_root)
-        files, is_multi = resolve_files(search_path)
-        file_strs = [str(f) for f in files]
-
-        total_count = 0
-        for fp in file_strs:
-            try:
-                diff, count = replace_pattern(
-                    pattern, replacement, fp,
-                    inside=inside, not_inside=not_inside,
-                    apply=True,
-                )
-                if count > 0:
-                    items.append({"file_path": fp, "diff": diff, "count": count})
-                    total_count += count
-            except Exception:
-                continue
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="replace_apply", query=f"{pattern} -> {replacement}")
+    def _move(self, qualified_name: str, dest_file: str, file: str, apply: bool) -> SearchResult:
+        from emend.transform import move_symbol
+        from emend.component_selector import ExtendedSelector
+        t0 = time.monotonic()
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        diffs = move_symbol(selector, dest_file, project_path=str(self.project_root), apply=apply)
+        items = [{"file_path": fp, "diff": diff} for fp, diff in diffs.items()]
+        mode = "move_apply" if apply else "move_preview"
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items, elapsed_ms=elapsed, mode=mode, query=f"move {qualified_name}")
 
     def move_preview(self, qualified_name: str, dest_file: str, file: str = "") -> SearchResult:
         """Dry-run move, return diffs."""
-        from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
-
-        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
-        diffs = move_symbol(selector, dest_file, project_path=str(self.project_root), apply=False)
-
-        items: list[dict] = []
-        for fp, diff in diffs.items():
-            items.append({"file_path": fp, "diff": diff})
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="move_preview", query=f"move {qualified_name}")
+        return self._move(qualified_name, dest_file, file, apply=False)
 
     def move_apply(self, qualified_name: str, dest_file: str, file: str = "") -> SearchResult:
         """Apply move across the project."""
-        from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
-
-        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
-        diffs = move_symbol(selector, dest_file, project_path=str(self.project_root), apply=True)
-
-        items: list[dict] = []
-        for fp, diff in diffs.items():
-            items.append({"file_path": fp, "diff": diff})
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
-        return SearchResult(items=items, elapsed_ms=elapsed, mode="move_apply", query=f"move {qualified_name}")
+        return self._move(qualified_name, dest_file, file, apply=True)
 
     def callers(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
         """Find call sites for a symbol."""
         from emend.transform import find_callers
         from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
         refs = list(find_callers(selector, project_path=str(self.project_root)))
@@ -1742,15 +1666,14 @@ class EditorSearchEngine:
                 "end_line": ref.line,
             })
 
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="callers", query=f"callers of {qualified_name}")
 
     def callees(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
         """Find functions called by a symbol."""
         from emend.transform import find_callees
         from emend.component_selector import ExtendedSelector
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
         callee_list = find_callees(selector, project_path=str(self.project_root))
@@ -1766,7 +1689,7 @@ class EditorSearchEngine:
                 "qualified_name": callee.qualified_name or callee.name,
             })
 
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="callees", query=f"callees of {qualified_name}")
 
     def impact(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
@@ -1775,7 +1698,7 @@ class EditorSearchEngine:
         from emend.component_selector import ExtendedSelector
         import time as _time
 
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
         result = find_impact(selectors=[selector], project_path=str(self.project_root))
@@ -1810,7 +1733,7 @@ class EditorSearchEngine:
                 "qualified_name": sym_part,
             })
 
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
             items=items,
             elapsed_ms=elapsed,
@@ -1820,8 +1743,7 @@ class EditorSearchEngine:
 
     def types_at_cursor(self, file: str, line: int = 0, col: int = 0) -> SearchResult:
         """Return type information for the symbol at cursor position."""
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
 
         items: list[dict] = []
         try:
@@ -1853,7 +1775,7 @@ class EditorSearchEngine:
             import logging
             logging.getLogger("emend.editor").debug(f"types_at_cursor failed: {e}")
 
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="types", query=f"types at {file}:{line}")
 
     def complete(self, prefix: str, limit: int = 20, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
@@ -1865,8 +1787,7 @@ class EditorSearchEngine:
         When *line* and *col* are provided, local variables from the
         enclosing scopes are ranked first.
         """
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         conn = self._get_conn()
         seen: set[str] = set()
         items: list[dict] = []
@@ -1899,7 +1820,7 @@ class EditorSearchEngine:
                 cfg_func_range: tuple[int, int] | None = None
                 try:
                     from emend.cfg import build_cfgs_for_source
-                    cfg_t0 = _time.monotonic()
+                    cfg_t0 = time.monotonic()
                     cfgs = build_cfgs_for_source(source)
                     # Find the CFG for the function containing the cursor (prefer innermost)
                     cursor_cfg = None
@@ -1940,7 +1861,7 @@ class EditorSearchEngine:
                                         # Only count defs on lines before cursor
                                         if d_line <= zero_based_line:
                                             cfg_defs_before_cursor.add(d_name)
-                    cfg_elapsed = (_time.monotonic() - cfg_t0) * 1000
+                    cfg_elapsed = (time.monotonic() - cfg_t0) * 1000
                     if cfg_elapsed > 50:
                         logger.debug("CFG analysis took %.1fms (slow)", cfg_elapsed)
                 except Exception as exc:
@@ -2100,17 +2021,16 @@ class EditorSearchEngine:
         # Sort by score (desc) and word length (asc)
         items.sort(key=lambda x: (-x.get("score", 0), len(x["word"])))
 
-        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items[:limit], elapsed_ms=elapsed, mode="complete", query=prefix)
 
     def complete_diagnostics(self, prefix: str, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
         """Return completion candidates with detailed timing breakdown."""
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         timings: dict[str, float] = {}
 
         result = self.complete(prefix, file=file, line=line, col=col)
-        timings["total_ms"] = round((_time.monotonic() - t0) * 1000, 2)
+        timings["total_ms"] = round((time.monotonic() - t0) * 1000, 2)
         timings["item_count"] = len(result.items)
 
         # Report which signals were used
@@ -2374,16 +2294,15 @@ def _get_store(engine: EditorSearchEngine):
 
 def _mapping_lookup(engine: EditorSearchEngine, params: dict) -> dict:
     """Look up identifier mappings for a symbol."""
-    import time as _time
     from emend.knowledge import mapping_to_dict
-    t0 = _time.monotonic()
+    t0 = time.monotonic()
     store = _get_store(engine)
     identifier = params.get("identifier", params.get("query", ""))
     project = params.get("project")
     direction = params.get("direction", "both")
     results = store.find_mappings_for(identifier, project=project, direction=direction)
     items = [mapping_to_dict(m) for m in results]
-    elapsed = (_time.monotonic() - t0) * 1000
+    elapsed = (time.monotonic() - t0) * 1000
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_lookup"}
 
 
@@ -2451,8 +2370,7 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
     2. If no local results, check the identifier mappings and resolve
        targets to local paths (cloning external repos via gh if needed).
     """
-    import time as _time
-    t0 = _time.monotonic()
+    t0 = time.monotonic()
     identifier = params.get("identifier", params.get("query", ""))
 
     # --- 1. Local in-repo symbol lookup (fast, common case) ---
@@ -2466,7 +2384,7 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
             local_items.append(item)
 
     if local_items:
-        elapsed = (_time.monotonic() - t0) * 1000
+        elapsed = (time.monotonic() - t0) * 1000
         return {
             "items": local_items,
             "elapsed_ms": round(elapsed, 2),
@@ -2511,7 +2429,7 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
                 if item:
                     items.append(item)
 
-    elapsed = (_time.monotonic() - t0) * 1000
+    elapsed = (time.monotonic() - t0) * 1000
     return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto", "source": "kb"}
 
 
@@ -2520,21 +2438,20 @@ def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:
 
     Clones the repo via gh if needed.
     """
-    import time as _time
     from emend.knowledge import module_mapping_to_dict
-    t0 = _time.monotonic()
+    t0 = time.monotonic()
     store = _get_store(engine)
     module_name = params.get("module", params.get("query", ""))
     mm = store.resolve_module(module_name)
     if mm is None:
-        elapsed = (_time.monotonic() - t0) * 1000
+        elapsed = (time.monotonic() - t0) * 1000
         return {"items": [], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
 
     resolved_path = store.resolve_module_to_path(module_name)
     item = module_mapping_to_dict(mm)
     if resolved_path:
         item["resolved_path"] = resolved_path
-    elapsed = (_time.monotonic() - t0) * 1000
+    elapsed = (time.monotonic() - t0) * 1000
     return {"items": [item], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
 
 
