@@ -268,11 +268,36 @@ class EGraph:
         return self.add(ENode(op=pattern.op, children=children))
 
     def _find_match_root(self, pattern: ENode, subst: dict[str, int]) -> int | None:
-        """Find the e-class ID that the LHS pattern root matched."""
+        """Find the e-class ID that the LHS pattern root matched.
+
+        For metavariable roots the answer is in *subst*.  For concrete roots
+        we must also verify that each child matches the current substitution
+        so that we select the specific e-class that produced *subst*, not
+        just the first e-node with the right operator and arity.
+        """
         if pattern.op.startswith("$"):
             return subst.get(pattern.op)
         for canonical_eid, node in self._all_enodes():
-            if node.op == pattern.op and len(node.children) == len(pattern.children):
+            if node.op != pattern.op or len(node.children) != len(pattern.children):
+                continue
+            # Confirm every child is consistent with the current substitution.
+            children_ok = True
+            for p_child_id, n_child_id in zip(pattern.children, node.children):
+                p_child = self._get_pattern_for_eclass(p_child_id)
+                if p_child is None:
+                    children_ok = False
+                    break
+                n_child_canonical = self._uf.find(n_child_id)
+                if p_child.op.startswith("$"):
+                    expected = subst.get(p_child.op)
+                    if expected is None or self._uf.find(expected) != n_child_canonical:
+                        children_ok = False
+                        break
+                else:
+                    if self._get_op_for_eclass(n_child_canonical) != p_child.op:
+                        children_ok = False
+                        break
+            if children_ok:
                 return canonical_eid
         return None
 

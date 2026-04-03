@@ -74,6 +74,47 @@ class TestEGraph:
         assert node is not None
         assert node.op == "x"
 
+    def test_apply_rules_uses_correct_root_eclass(self):
+        """apply_rules must merge each matched e-class independently.
+
+        With two 'add' nodes in the e-graph — add(a, b) and add(c, d) —
+        applying the rule  add($X, $Y) → $X  should produce:
+          add(a, b) ≡ a
+          add(c, d) ≡ c
+        and  a ≢ c  (distinct atoms must stay distinct).
+
+        The bug in _find_match_root was returning the *first* e-node that
+        has op=='add' regardless of which substitution is active, causing
+        the wrong root to be merged for the second match.
+        """
+        eg = EGraph()
+        # Data nodes
+        e_a = eg.add(ENode(op="name:a"))
+        e_b = eg.add(ENode(op="name:b"))
+        e_ab = eg.add(ENode(op="add", children=(e_a, e_b)))   # add(a, b)
+        e_c = eg.add(ENode(op="name:c"))
+        e_d = eg.add(ENode(op="name:d"))
+        e_cd = eg.add(ENode(op="add", children=(e_c, e_d)))   # add(c, d)
+
+        # Pattern nodes live in the same e-graph
+        p_x = eg.add(ENode(op="$X"))
+        p_y = eg.add(ENode(op="$Y"))
+        p_lhs = eg.add(ENode(op="add", children=(p_x, p_y)))  # add($X, $Y)
+
+        lhs_node = eg._get_pattern_for_eclass(p_lhs)   # ENode(op="add", …)
+        rhs_node = eg._get_pattern_for_eclass(p_x)     # ENode(op="$X")
+
+        assert lhs_node is not None and rhs_node is not None
+        eg.apply_rules([(lhs_node, rhs_node)], limit=1)
+
+        # Each add-node should be equivalent to its first argument…
+        assert eg.find(e_ab) == eg.find(e_a), "add(a,b) should merge with a"
+        assert eg.find(e_cd) == eg.find(e_c), "add(c,d) should merge with c"
+        # …but the two atoms themselves must remain distinct.
+        assert eg.find(e_a) != eg.find(e_c), (
+            "a and c must stay distinct; _find_match_root returned the wrong root"
+        )
+
 
 class TestParseExpr:
     def test_identifier(self):
