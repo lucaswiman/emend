@@ -9,10 +9,11 @@ CONTENTS                                                      *emend-contents*
     1. Introduction ........................ |emend-introduction|
     2. Installation ........................ |emend-installation|
     3. Commands ............................ |emend-commands|
-    4. Configuration ....................... |emend-configuration|
-    5. Key mappings ........................ |emend-keymaps|
-    6. Project configuration ............... |emend-project-config|
-    7. Architecture ........................ |emend-architecture|
+    4. Hot Buffers ......................... |emend-hot-buffers|
+    5. Configuration ....................... |emend-configuration|
+    6. Key mappings ........................ |emend-keymaps|
+    7. Project configuration ............... |emend-project-config|
+    8. Architecture ........................ |emend-architecture|
 
 ==============================================================================
 1. INTRODUCTION                                           *emend-introduction*
@@ -130,7 +131,35 @@ After installing, run `:helptags ALL` to index this help file.
 :EmendReindex           Re-index changed files and rebuild the FTS index.
 
 ==============================================================================
-4. CONFIGURATION                                       *emend-configuration*
+4. HOT BUFFERS                                            *emend-hot-buffers*
+
+Hot buffers allow the editor-server to see the current contents of open
+buffers, including unsaved edits.  When hot buffers are active, local
+operations such as file outline (|:EmendOutline|), go-to-definition, and
+completion reflect the latest in-memory buffer state rather than the last
+saved file on disk.
+
+                                                    *:EmendHotBuffersEnable*
+:EmendHotBuffersEnable  Register all currently open buffers with the server
+                        and begin syncing edits as you type.  The server
+                        receives the full buffer text on activation and
+                        incremental updates thereafter.
+
+                                                   *:EmendHotBuffersDisable*
+:EmendHotBuffersDisable Stop syncing buffer contents with the server.  The
+                        server reverts to reading saved files from disk.
+
+                                                        *g:emend_hot_buffers*
+g:emend_hot_buffers     Boolean.  When 1, hot buffers are enabled
+                        automatically as soon as the editor-server starts.
+                        Default: 0 (hot buffers must be enabled manually
+                        with |:EmendHotBuffersEnable|).
+>
+                        let g:emend_hot_buffers = 1
+<
+
+==============================================================================
+5. CONFIGURATION                                       *emend-configuration*
 
                                                            *g:emend_command*
 g:emend_command         String.  Path to the emend executable.  When empty
@@ -181,7 +210,7 @@ g:emend_default_mappings
                         |emend-project-config|).
 
 ==============================================================================
-5. KEY MAPPINGS                                             *emend-keymaps*
+6. KEY MAPPINGS                                             *emend-keymaps*
 
 Inside the search results window:
 
@@ -239,7 +268,7 @@ This makes it obvious whether results came from the index, a pattern
 search, or a fallback mode.
 
 ==============================================================================
-6. PROJECT CONFIGURATION                              *emend-project-config*
+7. PROJECT CONFIGURATION                              *emend-project-config*
 
 Plugin behavior can also be configured per-project via configuration files,
 which override the Vim global defaults.
@@ -265,7 +294,7 @@ The `limit` and `preview_height` keys correspond to |g:emend_limit| and
 |g:emend_default_mappings|.
 
 ==============================================================================
-7. ARCHITECTURE                                         *emend-architecture*
+8. ARCHITECTURE                                         *emend-architecture*
 
 The plugin spawns `emend editor-server` as a child process and communicates
 via newline-delimited JSON-RPC over stdin/stdout pipes.
