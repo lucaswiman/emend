@@ -345,7 +345,6 @@ def map_resolve_cmd(
     resolved_sel = store.resolve_selector(selector)
     if resolved_sel:
         if json_output:
-            from emend.component_selector import parse_extended_selector
             sel = parse_extended_selector(resolved_sel)
             print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
         else:

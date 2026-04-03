@@ -1,9 +1,7 @@
 import logging
 import sys
 from pathlib import Path
-
-from typing import Optional
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 
@@ -27,6 +25,18 @@ _ANSI_MAGENTA = "\033[35m"
 _ANSI_GREEN = "\033[32m"
 _ANSI_CYAN = "\033[36m"
 _ANSI_RED_BOLD = "\033[1;31m"
+
+
+def _extract_dsl_symbols_from_region(region):
+    """Extract DSL symbols from a single region based on its DSL type."""
+    from emend.dsl import DslKind, extract_graphql_symbols, extract_jinja_symbols, extract_sql_symbols
+    if region.dsl == DslKind.SQL:
+        return extract_sql_symbols(region)
+    elif region.dsl == DslKind.JINJA:
+        return extract_jinja_symbols(region)
+    elif region.dsl == DslKind.GRAPHQL:
+        return extract_graphql_symbols(region)
+    return []
 
 
 def _print_pattern_match_code(
@@ -665,7 +675,7 @@ def search(
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
 
             # ---- DSL symbols in scanned files ----
-            from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
+            from emend.dsl import detect_dsl_regions
             _lang = _state["language"]
             if explicit_files:
                 _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
@@ -675,14 +685,7 @@ def search(
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
-                    _dsl_syms = []
-                    if region.dsl == DslKind.SQL:
-                        _dsl_syms = extract_sql_symbols(region)
-                    elif region.dsl == DslKind.JINJA:
-                        _dsl_syms = extract_jinja_symbols(region)
-                    elif region.dsl == DslKind.GRAPHQL:
-                        _dsl_syms = extract_graphql_symbols(region)
-                    for sym in _dsl_syms:
+                    for sym in _extract_dsl_symbols_from_region(region):
                         print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
 
             return
@@ -728,9 +731,8 @@ def search(
         if result:
             print(result, end='')
 
-        # ---- DSL SYMBOL OVERLAY ----
         # ---- DSL symbol overlay ----
-        from emend.dsl import detect_dsl_regions, extract_sql_symbols, extract_jinja_symbols, extract_graphql_symbols, DslKind
+        from emend.dsl import detect_dsl_regions
         _lang = _state["language"]
         if explicit_files:
             _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
@@ -742,14 +744,7 @@ def search(
             for _dsl_f in _dsl_files:
                 regions = detect_dsl_regions(str(_dsl_f))
                 for region in regions:
-                    _dsl_syms = []
-                    if region.dsl == DslKind.SQL:
-                        _dsl_syms = extract_sql_symbols(region)
-                    elif region.dsl == DslKind.JINJA:
-                        _dsl_syms = extract_jinja_symbols(region)
-                    elif region.dsl == DslKind.GRAPHQL:
-                        _dsl_syms = extract_graphql_symbols(region)
-                    for sym in _dsl_syms:
+                    for sym in _extract_dsl_symbols_from_region(region):
                         if _search_term in sym.name or sym.name in _search_term:
                             print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
 

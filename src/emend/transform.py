@@ -7501,48 +7501,12 @@ def cmd_edit(
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)
 
-    # When returns_filter is specified, expand the selector to only include
-    # symbols that match the return type constraint.
-    if returns_filter:
-        files = (
-            selector.expand_file_glob()
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            matching = _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle,
-            )
-            for concrete in matching:
-                try:
-                    result = _cmd_edit_single(concrete, value=value, rm=rm, apply=apply)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    def _single(sel: ExtendedSelector) -> str:
+        return _cmd_edit_single(sel, value=value, rm=rm, apply=apply)
 
-    # Multi-file dispatch for file globs
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob()
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
-            try:
-                result = _cmd_edit_single(concrete, value=value, rm=rm, apply=apply)
-                if result:
-                    all_results.append(result)
-            except (ValueError, FileNotFoundError):
-                continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return _cmd_edit_single(selector, value=value, rm=rm, apply=apply)
+    return _dispatch_with_returns_filter(
+        selector_str, selector, returns_filter, type_oracle, _single
+    )
 
 
 def _cmd_add_single(
@@ -7590,45 +7554,9 @@ def cmd_add(
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)
 
-    # When returns_filter is specified, expand the selector to only include
-    # symbols that match the return type constraint.
-    if returns_filter:
-        files = (
-            selector.expand_file_glob()
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            matching = _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle,
-            )
-            for concrete in matching:
-                try:
-                    result = _cmd_add_single(concrete, value=value, before=before, after=after, at=at, apply=apply)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    def _single(sel: ExtendedSelector) -> str:
+        return _cmd_add_single(sel, value=value, before=before, after=after, at=at, apply=apply)
 
-    # Multi-file dispatch for file globs
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob()
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
-            try:
-                result = _cmd_add_single(concrete, value=value, before=before, after=after, at=at, apply=apply)
-                if result:
-                    all_results.append(result)
-            except (ValueError, FileNotFoundError):
-                continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return _cmd_add_single(selector, value=value, before=before, after=after, at=at, apply=apply)
+    return _dispatch_with_returns_filter(
+        selector_str, selector, returns_filter, type_oracle, _single
+    )
