@@ -388,17 +388,26 @@ endfunction
 
 
 function! s:apply_default_mappings() abort
-  nnoremap <silent> <Leader>es <Cmd>Emend<CR>
-  nnoremap <silent> <Leader>eo <Cmd>EmendOutline<CR>
-  nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
-  nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
-  nnoremap <silent> <Leader>ek <Cmd>EmendKB<CR>
-  nnoremap <silent> <Leader>eR <Cmd>EmendReplace<CR>
-  nnoremap <silent> <Leader>em <Cmd>EmendMove<CR>
-  nnoremap <silent> <Leader>ec <Cmd>EmendCallers<CR>
-  nnoremap <silent> <Leader>eC <Cmd>EmendCallees<CR>
-  nnoremap <silent> <Leader>et <Cmd>EmendTypeHover<CR>
-  nnoremap <silent> <Leader>eO <Cmd>EmendOutlineFilter<CR>
+  call emend#map_if_free('n', '<Leader>es', '<Cmd>Emend<CR>')
+  call emend#map_if_free('n', '<Leader>eo', '<Cmd>EmendOutline<CR>')
+  call emend#map_if_free('n', '<Leader>er', '<Cmd>EmendRefs<CR>')
+  call emend#map_if_free('n', '<Leader>eg', '<Cmd>EmendGoto<CR>')
+  call emend#map_if_free('n', '<Leader>ek', '<Cmd>EmendKB<CR>')
+  call emend#map_if_free('n', '<Leader>eR', '<Cmd>EmendReplace<CR>')
+  call emend#map_if_free('n', '<Leader>em', '<Cmd>EmendMove<CR>')
+  call emend#map_if_free('n', '<Leader>ec', '<Cmd>EmendCallers<CR>')
+  call emend#map_if_free('n', '<Leader>eC', '<Cmd>EmendCallees<CR>')
+  call emend#map_if_free('n', '<Leader>et', '<Cmd>EmendTypeHover<CR>')
+  call emend#map_if_free('n', '<Leader>eO', '<Cmd>EmendOutlineFilter<CR>')
+endfunction
+
+function! emend#map_if_free(mode, lhs, rhs) abort
+  let l:existing = maparg(a:lhs, a:mode, 0, 1)
+  if !empty(l:existing)
+    return 0
+  endif
+  execute a:mode . 'noremap <silent> ' . a:lhs . ' ' . a:rhs
+  return 1
 endfunction
 
 " ---------------------------------------------------------------------------

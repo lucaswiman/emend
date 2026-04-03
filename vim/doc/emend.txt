@@ -207,7 +207,8 @@ g:emend_default_mappings
 
                         These mappings are also enabled when the project
                         configuration sets `default_mappings = true` (see
-                        |emend-project-config|).
+                        |emend-project-config|).  Existing mappings are left
+                        alone so user keymaps are not overwritten.
 
 ==============================================================================
 6. KEY MAPPINGS                                             *emend-keymaps*

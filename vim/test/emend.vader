@@ -20,6 +20,10 @@ Execute (commands are defined):
   Assert exists(':EmendStatus'), ':EmendStatus command should exist'
   Assert exists(':EmendReindex'), ':EmendReindex command should exist'
 
+Execute (mapping helper exists):
+  runtime autoload/emend.vim
+  Assert exists('*emend#map_if_free'), 'emend#map_if_free should be callable'
+
 " ===========================================================================
 " Configuration defaults
 " ===========================================================================
@@ -214,6 +218,22 @@ Execute (history overlay caps visible entries at 20):
   let lines = emend#ui#history_overlay_lines(history)
   AssertEqual 22, len(lines)
   AssertEqual '  Recent queries  (j/k navigate, Enter select, Esc cancel)', lines[0]
+
+" ===========================================================================
+" Default mapping validation
+" ===========================================================================
+
+Execute (conflicting default mappings are preserved):
+  nnoremap <buffer> <Leader>es <Cmd>echo "user mapping"<CR>
+  AssertEqual 0, emend#map_if_free('n', '<Leader>es', '<Cmd>Emend<CR>')
+  let mapping = maparg('<Leader>es', 'n', 0, 1)
+  AssertEqual '<Cmd>echo "user mapping"<CR>', mapping.rhs
+
+Execute (free mappings can still be installed):
+  execute 'nunmap <buffer> <Leader>es'
+  AssertEqual 1, emend#map_if_free('n', '<Leader>es', '<Cmd>Emend<CR>')
+  let mapping = maparg('<Leader>es', 'n', 0, 1)
+  AssertEqual '<Cmd>Emend<CR>', mapping.rhs
 
 " ===========================================================================
 " Phase 2: Local outline filtering

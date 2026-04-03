@@ -117,14 +117,14 @@ inoremap <silent> <C-Space> <Cmd>call emend#complete_at_cursor()<CR>
 inoremap <silent> <C-@> <Cmd>call emend#complete_at_cursor()<CR>
 
 if get(g:, 'emend_default_mappings', 0)
-  nnoremap <silent> <Leader>es <Cmd>Emend<CR>
-  nnoremap <silent> <Leader>eo <Cmd>EmendOutline<CR>
-  nnoremap <silent> <Leader>er <Cmd>EmendRefs<CR>
-  nnoremap <silent> <Leader>eg <Cmd>EmendGoto<CR>
-  nnoremap <silent> <Leader>eR <Cmd>EmendReplace<CR>
-  nnoremap <silent> <Leader>em <Cmd>EmendMove<CR>
-  nnoremap <silent> <Leader>ec <Cmd>EmendCallers<CR>
-  nnoremap <silent> <Leader>eC <Cmd>EmendCallees<CR>
-  nnoremap <silent> <Leader>et <Cmd>EmendTypeHover<CR>
-  nnoremap <silent> <Leader>eO <Cmd>EmendOutlineFilter<CR>
+  call emend#map_if_free('n', '<Leader>es', '<Cmd>Emend<CR>')
+  call emend#map_if_free('n', '<Leader>eo', '<Cmd>EmendOutline<CR>')
+  call emend#map_if_free('n', '<Leader>er', '<Cmd>EmendRefs<CR>')
+  call emend#map_if_free('n', '<Leader>eg', '<Cmd>EmendGoto<CR>')
+  call emend#map_if_free('n', '<Leader>eR', '<Cmd>EmendReplace<CR>')
+  call emend#map_if_free('n', '<Leader>em', '<Cmd>EmendMove<CR>')
+  call emend#map_if_free('n', '<Leader>ec', '<Cmd>EmendCallers<CR>')
+  call emend#map_if_free('n', '<Leader>eC', '<Cmd>EmendCallees<CR>')
+  call emend#map_if_free('n', '<Leader>et', '<Cmd>EmendTypeHover<CR>')
+  call emend#map_if_free('n', '<Leader>eO', '<Cmd>EmendOutlineFilter<CR>')
 endif

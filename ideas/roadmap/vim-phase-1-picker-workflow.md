@@ -12,7 +12,7 @@ the unified search model.
 - [ ] Decide whether query history should be session-only or partially persisted
 - [ ] Expose result provenance in the picker header
 - [ ] Keep file-path hits visible when richer index-backed results are unavailable
-- [ ] Validate that the new actions do not conflict with existing keymaps
+- [x] Validate that the new actions do not conflict with existing keymaps
 
 ## Notes
 
