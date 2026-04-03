@@ -7,13 +7,13 @@ actions without harming typing latency.
 
 ## TODO
 
-- [ ] Add CFG-informed completion ranking for locals in scope
-- [ ] Avoid ranking obviously unavailable or uninitialized names too highly
-- [ ] Improve dotted-member completion using imports, bases, and cached facts
-- [ ] Add graph-aware quick actions from the picker
-- [ ] Keep expensive graph and trace work out of the keystroke path
-- [ ] Measure latency impact before enabling any ranking changes by default
-- [ ] Define which signals are safe for synchronous completion use
+- [x] Add CFG-informed completion ranking for locals in scope
+- [x] Avoid ranking obviously unavailable or uninitialized names too highly
+- [x] Improve dotted-member completion using imports, bases, and cached facts
+- [x] Add graph-aware quick actions from the picker
+- [x] Keep expensive graph and trace work out of the keystroke path
+- [x] Measure latency impact before enabling any ranking changes by default
+- [x] Define which signals are safe for synchronous completion use
 
 ## Notes
 
