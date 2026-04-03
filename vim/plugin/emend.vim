@@ -89,6 +89,9 @@ command! -nargs=0 EmendTypeHover call emend#type_hover()
 " Show symbols in the current file with interactive filtering.
 command! -nargs=0 EmendOutlineFilter call emend#outline_filter()
 
+" Show transitive impact of changing the symbol under cursor.
+command! -nargs=? EmendImpact call emend#impact(<q-args> ==# '' ? expand('<cword>') : <q-args>)
+
 " ---------------------------------------------------------------------------
 " Auto-start server (opt-out via g:emend_auto_start = 0)
 " ---------------------------------------------------------------------------

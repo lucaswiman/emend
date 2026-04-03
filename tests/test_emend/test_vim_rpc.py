@@ -287,6 +287,28 @@ class TestTypesAtCursor:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Impact
+# ---------------------------------------------------------------------------
+
+
+class TestImpact:
+    def test_impact_mode(self, engine):
+        eng, proj = engine
+        result = _dispatch(eng, "impact", {
+            "qualified_name": "parse_request",
+            "file": str(proj / "app.py"),
+        })
+        assert result["mode"] == "impact"
+        assert isinstance(result["items"], list)
+
+    def test_impact_unknown_method(self, engine):
+        eng, proj = engine
+        import pytest
+        with pytest.raises(ValueError, match="Unknown method"):
+            _dispatch(eng, "nonexistent_method", {})
+
+
+# ---------------------------------------------------------------------------
 # Tests: Incremental search / background reindex
 # ---------------------------------------------------------------------------
 
