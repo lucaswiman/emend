@@ -21,3 +21,4 @@ uv.lock
 *dylib*
 .claude/
 docs/_static/mcp_schema.json
+vim/test/vader.vim/

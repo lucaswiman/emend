@@ -506,6 +506,7 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('n', '/',         '<Cmd>call emend#ui#new_search()<CR>')
     call s:map_current_buf('n', '<Tab>',     '<Cmd>call emend#ui#toggle_focus()<CR>')
     call s:map_current_buf('n', '<C-q>',     '<Cmd>call emend#ui#send_to_quickfix()<CR>')
+    call s:map_current_buf('n', '<C-h>',     '<Cmd>call emend#ui#show_history_overlay()<CR>')
 
     " Result actions
     call s:map_current_buf('n', 'r',         '<Cmd>call emend#ui#action_rename()<CR>')
@@ -544,6 +545,7 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('i', '<C-q>',     '<Esc><Cmd>call emend#ui#send_to_quickfix()<CR>')
     call s:map_current_buf('i', '<C-r>',     '<Cmd>call emend#ui#history(1)<CR>')
     call s:map_current_buf('i', '<C-f>',     '<Cmd>call emend#ui#history(-1)<CR>')
+    call s:map_current_buf('i', '<C-h>',     '<Esc><Cmd>call emend#ui#show_history_overlay()<CR>')
     call s:map_current_buf('i', '<C-Space>', '<Cmd>call emend#ui#complete()<CR>')
 
     " Trigger search on change
@@ -719,11 +721,16 @@ function! s:render_list() abort
   let l:mode = get(s:last_result, 'mode', '?')
   let l:indexing = get(s:last_result, 'indexing', 0)
 
+  let l:provenance = get(s:last_result, 'provenance', '')
+
   let l:header = '  ' . len(s:results) . ' results'
   if l:elapsed > 0
     let l:header .= printf(' [%gms]', l:elapsed)
   endif
   let l:header .= '  (' . l:mode . ')'
+  if l:provenance !=# ''
+    let l:header .= '  [' . l:provenance . ']'
+  endif
   if l:indexing || emend#is_indexing()
     let l:header .= '  [indexing...]'
   endif
@@ -1413,8 +1420,143 @@ endfunction
 function! s:on_complete(result, prefix) abort
   let l:items = get(a:result, 'items', [])
   if empty(l:items) | return | endif
-  
+
   " Format for complete()
   let l:start_col = col('.') - len(a:prefix)
   call complete(l:start_col, l:items)
+endfunction
+
+" ---------------------------------------------------------------------------
+" Query history overlay
+" ---------------------------------------------------------------------------
+
+let s:history_buf = -1
+let s:history_win = -1
+let s:history_selected = 0
+
+function! emend#ui#show_history_overlay() abort
+  if empty(s:search_history)
+    echo 'emend: no query history'
+    return
+  endif
+
+  " Close any existing overlay first.
+  call s:close_history_overlay()
+
+  if !has('nvim')
+    " Fallback for classic Vim: use inputlist.
+    let l:choices = ['  Recent queries:']
+    for l:i in range(min([len(s:search_history), 20]))
+      call add(l:choices, printf('  %d. %s', l:i + 1, s:search_history[l:i]))
+    endfor
+    let l:pick = inputlist(l:choices)
+    if l:pick > 0 && l:pick <= len(s:search_history)
+      let s:query = s:search_history[l:pick - 1]
+      call emend#ui#search(s:query)
+    endif
+    return
+  endif
+
+  " Neovim: compact floating overlay.
+  let l:max_items = min([len(s:search_history), 20])
+  let l:width = 50
+  let l:height = l:max_items + 2  " +2 for header + separator
+
+  " Center the overlay over the current editor.
+  let l:row = (&lines - l:height) / 2
+  let l:col = (&columns - l:width) / 2
+
+  let s:history_buf = nvim_create_buf(v:false, v:true)
+  let s:history_win = nvim_open_win(s:history_buf, v:true, {
+        \ 'relative': 'editor',
+        \ 'width': l:width,
+        \ 'height': l:height,
+        \ 'row': l:row,
+        \ 'col': l:col,
+        \ 'style': 'minimal',
+        \ 'border': 'rounded',
+        \ 'title': ' recent queries ',
+        \ 'title_pos': 'center',
+        \ })
+
+  " Render history lines.
+  let l:lines = ['  Recent queries  (j/k navigate, Enter select, Esc cancel)']
+  call add(l:lines, repeat('─', l:width))
+  for l:i in range(l:max_items)
+    let l:prefix = l:i == 0 ? '> ' : '  '
+    call add(l:lines, l:prefix . s:search_history[l:i])
+  endfor
+
+  call nvim_buf_set_lines(s:history_buf, 0, -1, v:false, l:lines)
+  call nvim_buf_set_option(s:history_buf, 'modifiable', v:false)
+  call nvim_buf_set_option(s:history_buf, 'bufhidden', 'wipe')
+
+  " Set cursor to first item (line 3 = index 0).
+  let s:history_selected = 0
+  call cursor(3, 1)
+
+  " Apply highlight for selected row.
+  call s:highlight_history_selected()
+
+  " Map keys for navigation in the history overlay.
+  call s:map_current_buf('n', 'j',     '<Cmd>call emend#ui#history_move(1)<CR>')
+  call s:map_current_buf('n', 'k',     '<Cmd>call emend#ui#history_move(-1)<CR>')
+  call s:map_current_buf('n', '<Down>', '<Cmd>call emend#ui#history_move(1)<CR>')
+  call s:map_current_buf('n', '<Up>',   '<Cmd>call emend#ui#history_move(-1)<CR>')
+  call s:map_current_buf('n', '<CR>',   '<Cmd>call emend#ui#history_accept()<CR>')
+  call s:map_current_buf('n', '<Esc>',  '<Cmd>call emend#ui#history_dismiss()<CR>')
+  call s:map_current_buf('n', 'q',      '<Cmd>call emend#ui#history_dismiss()<CR>')
+endfunction
+
+function! emend#ui#history_move(delta) abort
+  if s:history_buf < 0 | return | endif
+  let l:max = min([len(s:search_history), 20]) - 1
+  let s:history_selected = max([0, min([s:history_selected + a:delta, l:max])])
+  " Cursor: line = selected + 3 (header + separator = 2 lines offset, 1-indexed)
+  call cursor(s:history_selected + 3, 1)
+  call s:highlight_history_selected()
+endfunction
+
+function! emend#ui#history_accept() abort
+  if s:history_selected >= 0 && s:history_selected < len(s:search_history)
+    let l:query = s:search_history[s:history_selected]
+    call s:close_history_overlay()
+    let s:query = l:query
+    call emend#ui#search(l:query)
+  endif
+endfunction
+
+function! emend#ui#history_dismiss() abort
+  call s:close_history_overlay()
+  " Return focus to the picker if it's open.
+  if s:is_interactive && s:input_win >= 0
+    call win_gotoid(s:input_win)
+    startinsert
+  elseif s:list_win >= 0
+    call win_gotoid(s:list_win)
+  endif
+endfunction
+
+function! s:close_history_overlay() abort
+  if s:history_win >= 0
+    if has('nvim') && nvim_win_is_valid(s:history_win)
+      call nvim_win_close(s:history_win, v:true)
+    endif
+    let s:history_win = -1
+  endif
+  if s:history_buf >= 0
+    if bufexists(s:history_buf)
+      execute 'bwipeout! ' . s:history_buf
+    endif
+    let s:history_buf = -1
+  endif
+endfunction
+
+function! s:highlight_history_selected() abort
+  if !has('nvim') || s:history_buf < 0 | return | endif
+  let l:ns = s:get_ns()
+  call nvim_buf_clear_namespace(s:history_buf, l:ns, 0, -1)
+  " Selected line = s:history_selected + 2 (0-indexed: header=0, separator=1)
+  let l:line = s:history_selected + 2
+  call nvim_buf_add_highlight(s:history_buf, l:ns, 'EmendSelected', l:line, 0, -1)
 endfunction
