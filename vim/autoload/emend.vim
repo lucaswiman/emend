@@ -194,6 +194,78 @@ function! emend#send(method, params, Callback) abort
   endif
 endfunction
 
+" -- Hot Buffer Protocol ---------------------------------------------------
+
+function! emend#buffer_open(file, content, ...) abort
+  let l:version = a:0 > 0 ? a:1 : 0
+  let l:params = {'file': a:file, 'content': a:content, 'version': l:version}
+  call emend#send('buffer_open', l:params, function('s:on_buffer_ack'))
+endfunction
+
+function! emend#buffer_update(file, content, ...) abort
+  let l:version = a:0 > 0 ? a:1 : 0
+  let l:params = {'file': a:file, 'content': a:content, 'version': l:version}
+  call emend#send('buffer_update', l:params, function('s:on_buffer_ack'))
+endfunction
+
+function! emend#buffer_close(file) abort
+  call emend#send('buffer_close', {'file': a:file}, function('s:on_buffer_ack'))
+endfunction
+
+function! s:on_buffer_ack(result) abort
+  " Silent acknowledgement — no UI feedback needed.
+endfunction
+
+function! emend#send_current_buffer() abort
+  if !s:ready | return | endif
+  let l:file = expand('%:p')
+  if empty(l:file) | return | endif
+  let l:content = join(getline(1, '$'), "\n")
+  let l:version = b:changedtick
+  call emend#buffer_update(l:file, l:content, l:version)
+endfunction
+
+function! emend#enable_hot_buffers() abort
+  augroup EmendHotBuffers
+    autocmd!
+    autocmd BufReadPost,BufNewFile * call s:hot_buffer_open()
+    autocmd TextChanged,TextChangedI * call s:hot_buffer_changed()
+    autocmd BufDelete,BufWipeout * call s:hot_buffer_close()
+  augroup END
+endfunction
+
+function! emend#disable_hot_buffers() abort
+  augroup EmendHotBuffers
+    autocmd!
+  augroup END
+endfunction
+
+function! s:hot_buffer_open() abort
+  if !s:ready | return | endif
+  let l:file = expand('%:p')
+  if empty(l:file) | return | endif
+  " Only track normal file buffers
+  if &buftype !=# '' | return | endif
+  let l:content = join(getline(1, '$'), "\n")
+  call emend#buffer_open(l:file, l:content, b:changedtick)
+endfunction
+
+function! s:hot_buffer_changed() abort
+  if !s:ready | return | endif
+  let l:file = expand('%:p')
+  if empty(l:file) | return | endif
+  if &buftype !=# '' | return | endif
+  let l:content = join(getline(1, '$'), "\n")
+  call emend#buffer_update(l:file, l:content, b:changedtick)
+endfunction
+
+function! s:hot_buffer_close() abort
+  if !s:ready | return | endif
+  let l:file = expand('<afile>:p')
+  if empty(l:file) | return | endif
+  call emend#buffer_close(l:file)
+endfunction
+
 " ---------------------------------------------------------------------------
 " Callbacks — Neovim
 " ---------------------------------------------------------------------------
@@ -274,6 +346,19 @@ function! s:handle_message(msg) abort
   if !has_key(a:msg, 'id') && has_key(a:msg, 'method')
     if a:msg.method ==# 'ready'
       let s:ready = 1
+      if get(g:, 'emend_hot_buffers', 0)
+        call emend#enable_hot_buffers()
+        " Send any already-open buffers
+        for l:bnr in range(1, bufnr('$'))
+          if buflisted(l:bnr) && getbufvar(l:bnr, '&buftype') ==# ''
+            let l:bfile = fnamemodify(bufname(l:bnr), ':p')
+            if !empty(l:bfile)
+              let l:bcontent = join(getbufline(l:bnr, 1, '$'), "\n")
+              call emend#buffer_open(l:bfile, l:bcontent, getbufvar(l:bnr, 'changedtick'))
+            endif
+          endif
+        endfor
+      endif
     elseif a:msg.method ==# 'indexing_started'
       let s:indexing = 1
     elseif a:msg.method ==# 'indexing_complete'

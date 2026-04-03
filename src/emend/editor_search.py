@@ -409,6 +409,10 @@ class EditorSearchEngine:
         self._query_history: list[dict] = []
         self._query_history_max = 100
 
+        # Hot buffer snapshots (unsaved editor content)
+        self._hot_buffers: dict[str, str] = {}  # resolved file_path -> content
+        self._hot_buffer_versions: dict[str, int] = {}  # resolved file_path -> version
+
     # -- connection ---------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -1202,27 +1206,66 @@ class EditorSearchEngine:
 
     # -- file symbols (outline) ---------------------------------------------
 
+    def _symbols_from_source(
+        self, file_path: str, source: str, limit: int = 500
+    ) -> list[dict]:
+        """Parse symbols from source text using the Rust extension."""
+        from emend.transform import _rust
+        ext = Path(file_path).suffix.lstrip('.') or 'py'
+        items: list[dict] = []
+        try:
+            raw_symbols = _rust.collect_symbols_from_str(source, ext=ext)
+            for sym in raw_symbols:
+                if sym.get("kind") in ("variable", "reference"):
+                    continue
+                item = {
+                    "name": sym.get("name", ""),
+                    "qualified_name": sym.get("qualified_name", sym.get("name", "")),
+                    "kind": sym.get("kind", ""),
+                    "file_path": file_path,
+                    "line": sym.get("line", 0),
+                    "end_line": sym.get("end_line", sym.get("line", 0)),
+                    "signature": sym.get("signature", ""),
+                    "returns": sym.get("returns"),
+                    "depth": sym.get("depth", 0),
+                    "parent": sym.get("parent"),
+                }
+                items.append(item)
+                if len(items) >= limit:
+                    break
+        except Exception as exc:
+            logger.debug("_symbols_from_source failed: %s", exc)
+        return items
+
     def file_symbols(
-        self, file_path: str, *, limit: int = 500
+        self, file_path: str, *, content: str | None = None, limit: int = 500
     ) -> SearchResult:
         t0 = time.monotonic()
-        conn = self._get_conn()
 
         # Resolve to absolute path for matching
         resolved = str(Path(file_path).resolve())
 
+        # Prefer: explicit content param > hot buffer > persistent index
+        source = content if content is not None else self._hot_buffers.get(resolved)
+
         items: list[dict] = []
-        try:
-            for row in conn.execute(
-                "SELECT name, qualified_name, kind, file_path, "
-                "line, end_line, signature, returns, depth, parent "
-                "FROM symbol_index WHERE file_path = ? "
-                "ORDER BY line",
-                (resolved,),
-            ):
-                items.append(_row_to_symbol_dict(row, has_rowid=False))
-        except Exception as exc:
-            logger.debug("File symbols query failed: %s", exc)
+        if source is not None:
+            # Parse symbols directly from source text
+            items = self._symbols_from_source(resolved, source, limit)
+        else:
+            # Fall back to persistent index
+            conn = self._get_conn()
+            try:
+                for row in conn.execute(
+                    "SELECT name, qualified_name, kind, file_path, "
+                    "line, end_line, signature, returns, depth, parent "
+                    "FROM symbol_index WHERE file_path = ? "
+                    "ORDER BY line",
+                    (resolved,),
+                ):
+                    items.append(_row_to_symbol_dict(row, has_rowid=False))
+            except Exception as exc:
+                logger.debug("File symbols query failed: %s", exc)
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
@@ -1273,6 +1316,73 @@ class EditorSearchEngine:
             query="status",
         )
 
+    # -- hot buffer protocol ---------------------------------------------------
+
+    def buffer_open(self, file: str, content: str, version: int = 0) -> SearchResult:
+        """Register an open buffer with its current content."""
+        import time as _time
+        t0 = _time.monotonic()
+        resolved = str(Path(file).resolve())
+        self._hot_buffers[resolved] = content
+        self._hot_buffer_versions[resolved] = version
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(
+            items=[{"file": resolved, "version": version}],
+            elapsed_ms=elapsed,
+            mode="buffer",
+            query=f"buffer_open {file}",
+        )
+
+    def buffer_update(self, file: str, content: str, version: int = 0) -> SearchResult:
+        """Update the content of an open buffer."""
+        import time as _time
+        t0 = _time.monotonic()
+        resolved = str(Path(file).resolve())
+        self._hot_buffers[resolved] = content
+        self._hot_buffer_versions[resolved] = version
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(
+            items=[{"file": resolved, "version": version}],
+            elapsed_ms=elapsed,
+            mode="buffer",
+            query=f"buffer_update {file}",
+        )
+
+    def buffer_close(self, file: str) -> SearchResult:
+        """Remove a buffer from the hot buffer cache."""
+        import time as _time
+        t0 = _time.monotonic()
+        resolved = str(Path(file).resolve())
+        removed = resolved in self._hot_buffers
+        self._hot_buffers.pop(resolved, None)
+        self._hot_buffer_versions.pop(resolved, None)
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(
+            items=[{"file": resolved, "removed": removed}],
+            elapsed_ms=elapsed,
+            mode="buffer",
+            query=f"buffer_close {file}",
+        )
+
+    def get_hot_content(self, file_path: str) -> str | None:
+        """Return hot buffer content for a file, or None if not buffered."""
+        resolved = str(Path(file_path).resolve())
+        return self._hot_buffers.get(resolved)
+
+    def _read_file_or_hot(self, file_path: str) -> str | None:
+        """Read file content, preferring hot buffer over disk.
+
+        Returns None if file doesn't exist and has no hot buffer.
+        """
+        resolved = str(Path(file_path).resolve())
+        hot = self._hot_buffers.get(resolved)
+        if hot is not None:
+            return hot
+        p = Path(resolved)
+        if p.exists():
+            return p.read_text()
+        return None
+
     def goto_definition(self, file: str, line: int, col: int) -> SearchResult:
         """Find the definition of the symbol at the given position.
 
@@ -1286,7 +1396,7 @@ class EditorSearchEngine:
         logger.debug(f"goto_definition: file={file}, line={line}, col={col}")
 
         file_path = Path(file).resolve()
-        if not file_path.exists():
+        if not file_path.exists() and str(file_path) not in self._hot_buffers:
             logger.debug(f"goto_definition: file not found: {file_path}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
@@ -1294,8 +1404,9 @@ class EditorSearchEngine:
         try:
             ext = file_path.suffix.lstrip('.')
             resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
-            with open(file_path, "r") as f:
-                content = f.read()
+            content = self._read_file_or_hot(str(file_path))
+            if content is None:
+                return SearchResult(items=[], elapsed_ms=0, mode="symbol")
             resolver.index_file(str(file_path), content)
             refs = resolver.references_in_file(str(file_path))
             logger.debug(f"goto_definition: found {len(refs)} references in file")
@@ -1764,7 +1875,7 @@ class EditorSearchEngine:
             try:
                 from emend.transform import _rust
                 resolver = _rust.PyScopeResolver(str(self.project_root))
-                source = Path(file).read_text()
+                source = self._read_file_or_hot(file) or ""
                 resolver.index_file(str(file), source)
                 # scopes_in_file returns (kind, start_line, end_line, [(name, kind, line, col)])
                 # Note: Rust uses 0-based line numbers, Vim uses 1-based, so subtract 1
@@ -1995,7 +2106,8 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.resolve_selector(sel, **params).to_dict()
     elif method == "file_symbols":
         fp = params.pop("file", params.pop("file_path", ""))
-        return engine.file_symbols(fp, **params).to_dict()
+        content = params.pop("content", None)
+        return engine.file_symbols(fp, content=content, **params).to_dict()
     elif method == "status":
         return engine.status().to_dict()
     elif method == "reindex":
@@ -2098,6 +2210,19 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             file=params.get("file", ""),
             limit=int(params.get("limit", 50)),
         ).to_dict()
+    elif method == "buffer_open":
+        fp = params.pop("file", "")
+        content = params.pop("content", "")
+        version = int(params.pop("version", 0))
+        return engine.buffer_open(fp, content, version).to_dict()
+    elif method == "buffer_update":
+        fp = params.pop("file", "")
+        content = params.pop("content", "")
+        version = int(params.pop("version", 0))
+        return engine.buffer_update(fp, content, version).to_dict()
+    elif method == "buffer_close":
+        fp = params.pop("file", "")
+        return engine.buffer_close(fp).to_dict()
     else:
         raise ValueError(f"Unknown method: {method!r}")
 

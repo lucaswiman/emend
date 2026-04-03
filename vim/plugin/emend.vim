@@ -92,6 +92,10 @@ command! -nargs=0 EmendOutlineFilter call emend#outline_filter()
 " Show transitive impact of changing the symbol under cursor.
 command! -nargs=? EmendImpact call emend#impact(<q-args> ==# '' ? expand('<cword>') : <q-args>)
 
+" Hot buffer protocol — keep the server in sync with unsaved buffer contents.
+command! -nargs=0 EmendHotBuffersEnable call emend#enable_hot_buffers()
+command! -nargs=0 EmendHotBuffersDisable call emend#disable_hot_buffers()
+
 " ---------------------------------------------------------------------------
 " Auto-start server (opt-out via g:emend_auto_start = 0)
 " ---------------------------------------------------------------------------
