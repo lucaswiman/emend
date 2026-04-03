@@ -1696,8 +1696,6 @@ class EditorSearchEngine:
         """Compute transitive impact of a symbol change."""
         from emend.transform import find_impact
         from emend.component_selector import ExtendedSelector
-        import time as _time
-
         t0 = time.monotonic()
 
         selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))

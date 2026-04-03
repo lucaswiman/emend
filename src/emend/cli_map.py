@@ -101,10 +101,6 @@ def map_lookup_cmd(
             print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]")
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("rm")
 def map_rm_cmd(
@@ -113,8 +109,6 @@ def map_rm_cmd(
     target_identifier: Annotated[Optional[str], typer.Option("--target-identifier")] = None,
 ):
     """Delete identifier mappings matching the given source identifier."""
-    from emend.knowledge import MappingStore
-
     store = MappingStore(".")
     ok = store.delete_mapping(
         source_identifier,
@@ -128,9 +122,6 @@ def map_rm_cmd(
         raise typer.Exit(1)
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("add-module")
 def map_add_module_cmd(
@@ -149,9 +140,6 @@ def map_add_module_cmd(
         emend map add-module shared.utils --path /home/user/shared-utils
         emend map add-module gateway --repo org/gateway --subpath src/gateway
     """
-    import json as _json
-    from emend.knowledge import MappingStore, ModuleMapping, module_mapping_to_dict
-
     if not repo and not path:
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
@@ -169,17 +157,12 @@ def map_add_module_cmd(
         print(f"Added module mapping: {module_prefix} -> {target}")
 
 
-import typer
-from typing import Annotated
 
 @map_app.command("list-modules")
 def map_list_modules_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """List all module mappings."""
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-
     store = MappingStore(".")
     results = store.list_module_mappings()
     if json_output:
@@ -193,9 +176,6 @@ def map_list_modules_cmd(
             print(f"{m.module_prefix} -> {target}{sub}")
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("update-module")
 def map_update_module_cmd(
@@ -215,9 +195,6 @@ def map_update_module_cmd(
         emend map update-module gateway --branch v2 --subpath src/gw
         emend map update-module payments --fetch
     """
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-
     store = MappingStore(".")
     mm = store.get_module_mapping_by_prefix(module_prefix)
     if mm is None:

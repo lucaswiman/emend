@@ -3360,6 +3360,36 @@ def _add_import_text(
     return diff
 
 
+def _raise_component_not_found(
+    selector: ExtendedSelector,
+    source_code: str,
+    _ext: str,
+    message: str | None = None,
+) -> None:
+    """Raise a descriptive ValueError when a component lookup returns None.
+
+    Checks whether the symbol itself is missing (raises "Symbol not found")
+    or whether the component is invalid for the symbol kind (raises a
+    specific type-mismatch error), falling back to the generic
+    "Component not found" message.
+    """
+    syms = _rust.collect_symbols_from_str(
+        source_code, selector=".".join(selector.symbol_path), ext=_ext
+    )
+    if not syms:
+        raise ValueError(
+            f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}"
+        )
+    kind = syms[0]["kind"]
+    if kind == "class" and selector.component in ("params", "returns"):
+        raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+    if kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+        raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+    raise ValueError(
+        message or f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}"
+    )
+
+
 def get_component(selector: ExtendedSelector) -> str:
     """Get value of component.
 
@@ -3404,19 +3434,7 @@ def get_component(selector: ExtendedSelector) -> str:
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Symbol exists but component not found
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
 
@@ -3467,19 +3485,7 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Match old error messages for invalid components
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
 
@@ -3566,19 +3572,7 @@ def add_to_component(
     )
 
     if items_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-        
-        # Symbol exists but component not found
-        sym_kind = syms[0]["kind"]
-        if sym_kind == "class" and selector.component == "params":
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-        
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     # Calculate insertion index in the items list
     items = [item[0] for item in items_info]
