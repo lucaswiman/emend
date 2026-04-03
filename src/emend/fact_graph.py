@@ -1281,19 +1281,31 @@ class FactGraph:
             except Exception:
                 pass
 
-        # Build excluded-path filter clauses for CozoDB
+        # Build excluded-path filter clauses for CozoDB.
+        # We need two variants: one using the variable "fp" (for the
+        # ref_by_block rule) and one using "ref_fp" (for the module_level_ref
+        # rule).  Building them separately avoids the brittle
+        # `.replace("fp", "ref_fp")` which would mangle path strings that
+        # happen to contain the substring "fp".
         excl_clauses = ""
+        excl_clauses_ref = ""
         excl_parts: list[str] = []
+        excl_parts_ref: list[str] = []
         if exclude_reference_paths:
             for ep in exclude_reference_paths:
                 excl_parts.append(f'not starts_with(fp, "{ep}")')
+                excl_parts_ref.append(f'not starts_with(ref_fp, "{ep}")')
         if exclude_reference_segments:
             for seg in exclude_reference_segments:
                 # Match paths containing this directory segment
                 excl_parts.append(f'not str_includes(fp, "{seg}/")')
                 excl_parts.append(f'not str_includes(fp, "{seg}\\\\")')
+                excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}/")')
+                excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}\\\\")')
         if excl_parts:
             excl_clauses = ", " + ", ".join(excl_parts)
+        if excl_parts_ref:
+            excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
         query = (
             # Live references: from reachable code via pre-computed relations
@@ -1309,7 +1321,7 @@ class FactGraph:
             'live_ref[sq] := '
             '*module_level_ref[sq, ref_fp, ref_line], '
             '*symbol[sq, sym_fp, _, _, sym_line, _, _], '
-            f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses.replace("fp", "ref_fp") if excl_clauses else ""}\n'
+            f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses_ref}\n'
 
             # Entry points: dunder methods
             'entry_point[qn] := '
@@ -3089,18 +3101,22 @@ class FactGraph:
 
             # -- Method call facts (from call references with dotted names) --
             if resolver is not None:
+                from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
+                from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
                 for qn, line, col, _offset, _end_offset, kind in refs:
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
                             fq, bid = _find_containing_block(block_ranges, line)
+                            if fq == "" and bid == -1:
+                                fq, bid = _MLF, _MLB
                             method_call_facts.append(MethodCallFact(
                                 file_path=rel_path,
                                 func_qn=fq,
                                 receiver=parts[0].rsplit(".", 1)[-1],
                                 method=parts[1],
                                 block_id=bid,
-                                line=line,
+                                line=line - 1,
                             ))
 
             graph.add_def_uses_batch(def_use_facts)

@@ -15,6 +15,7 @@ from emend.fact_graph import (
     FactGraph,
     FuncSummaryFact,
     ImportFact,
+    MethodCallFact,
     ReferenceFact,
     SourceLocFact,
     SymbolFact,
@@ -994,3 +995,140 @@ class TestSerializationWithNewFacts:
         assert len(g2.decorators_on("a.foo")) == 1
         assert len(g2.source_locs(loc_id="a.foo")) == 1
         assert len(g2.func_summaries(func_qn="a.foo")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug regression: build_from_project MethodCallFact line numbers and
+# MODULE_LEVEL fallback.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFromProjectMethodCallFacts:
+    """build_from_project() must produce MethodCallFacts with 0-based lines
+    (matching DefUseFact convention) and must apply the MODULE_LEVEL sentinel
+    for method calls that occur outside any function."""
+
+    def test_method_call_lines_are_zero_based(self, tmp_path):
+        """MethodCallFact.line from build_from_project should be 0-based.
+
+        The scope resolver returns 1-based line numbers.  build_from_project
+        must subtract 1 before storing the fact, exactly as update_files does.
+        """
+        src = tmp_path / "app.py"
+        # Method call obj.method() is on line 2 (1-based) / line 1 (0-based)
+        src.write_text(
+            "def foo(obj):\n"
+            "    obj.method()\n"
+            "    return 1\n"
+        )
+        graph = FactGraph.build_from_project(str(tmp_path))
+        mc_facts = graph.method_calls()
+        method_facts = [m for m in mc_facts if m.method == "method"]
+        assert method_facts, "Expected a MethodCallFact for obj.method()"
+        for mf in method_facts:
+            # Line 2 in the file (1-based) → should be stored as 1 (0-based)
+            assert mf.line == 1, (
+                f"MethodCallFact.line should be 0-based (1) but got {mf.line}. "
+                "build_from_project is not subtracting 1 from the scope resolver line."
+            )
+
+    def test_method_call_lines_consistent_with_update_files(self, tmp_path):
+        """build_from_project and update_files must produce identical MethodCallFact lines."""
+        src = tmp_path / "app.py"
+        src.write_text(
+            "def foo(obj):\n"
+            "    obj.method()\n"
+            "    return 1\n"
+        )
+        graph_bfp = FactGraph.build_from_project(str(tmp_path))
+        graph_ufl = FactGraph()
+        graph_ufl.update_files([(str(src), src.read_text())])
+
+        mc_bfp = {(m.receiver, m.method, m.line) for m in graph_bfp.method_calls()}
+        mc_ufl = {(m.receiver, m.method, m.line) for m in graph_ufl.method_calls()}
+        assert mc_bfp == mc_ufl, (
+            f"build_from_project produced {mc_bfp} but update_files produced {mc_ufl}. "
+            "MethodCallFact line numbers are inconsistent between the two builders."
+        )
+
+    def test_module_level_method_call_has_sentinel_func_qn(self, tmp_path):
+        """Module-level method calls must use the MODULE_LEVEL_FUNC sentinel.
+
+        When a method call occurs outside any function, build_from_project must
+        fall back to MODULE_LEVEL_FUNC / MODULE_LEVEL_BLOCK rather than storing
+        ("", -1).
+        """
+        from emend.location_resolver import MODULE_LEVEL_FUNC
+        src = tmp_path / "app.py"
+        # Module-level method call (not inside any function)
+        src.write_text("import os\nos.getcwd()\n")
+        graph = FactGraph.build_from_project(str(tmp_path))
+        mc_facts = graph.method_calls()
+        getcwd_facts = [m for m in mc_facts if m.method == "getcwd"]
+        assert getcwd_facts, "Expected a MethodCallFact for os.getcwd()"
+        for mf in getcwd_facts:
+            assert mf.func_qn == MODULE_LEVEL_FUNC, (
+                f"Module-level method call should have func_qn={MODULE_LEVEL_FUNC!r} "
+                f"but got {mf.func_qn!r}. build_from_project is missing the MODULE_LEVEL fallback."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Bug regression: dead_code_unified excl_clauses string replacement mangles
+# path strings that contain "fp".
+# ---------------------------------------------------------------------------
+
+
+class TestDeadCodeExcludePathsWithFp:
+    """dead_code_unified must not mangle exclude_reference_paths that contain
+    the substring 'fp', which was corrupted by a naive .replace('fp','ref_fp')
+    on the Datalog query string."""
+
+    def test_exclude_path_containing_fp_substring(self):
+        """A symbol referenced only from a path containing 'fp' should be
+        treated as dead when that path is excluded.
+
+        The bug: excl_clauses.replace('fp', 'ref_fp') would turn the literal
+        path 'tests_fp/' into 'tests_ref_fp/' in the module_level_ref rule,
+        causing the exclusion to silently fail.
+        """
+        g = FactGraph()
+        # Symbol in lib.py with no other callers
+        g.add_symbol(SymbolFact("lib.py", "unused_fn", "lib.unused_fn", "function", 1, 3, None))
+        # The only reference is a module-level import/call from a file whose
+        # path contains "fp" — exactly the substring that the buggy replace mangled.
+        g.add_reference(ReferenceFact(
+            symbol_qn="lib.unused_fn",
+            file_path="tests_fp/test_lib.py",
+            line=1, col=0, ref_kind="read",
+        ))
+
+        dead, _ = g.dead_code_unified(
+            exclude_reference_paths=["tests_fp/"],
+        )
+        dead_qns = {s.qualified_name for s in dead}
+        assert "lib.unused_fn" in dead_qns, (
+            "lib.unused_fn should be dead: its only reference is from tests_fp/, "
+            "which is in the exclusion list. The bug caused the path 'tests_fp/' "
+            "to be mangled to 'tests_ref_fp/' so the exclusion did not apply."
+        )
+
+    def test_exclude_segment_containing_fp_substring(self):
+        """Exclusion by segment name containing 'fp' must not corrupt the path."""
+        g = FactGraph()
+        g.add_symbol(SymbolFact("lib.py", "helper", "lib.helper", "function", 1, 3, None))
+        g.add_reference(ReferenceFact(
+            symbol_qn="lib.helper",
+            file_path="fp_tests/test_lib.py",
+            line=1, col=0, ref_kind="read",
+        ))
+
+        dead, _ = g.dead_code_unified(
+            exclude_reference_segments=["fp_tests"],
+        )
+        dead_qns = {s.qualified_name for s in dead}
+        assert "lib.helper" in dead_qns, (
+            "lib.helper should be dead: its only reference is from fp_tests/, "
+            "which is in the exclusion segment list. The buggy .replace('fp','ref_fp') "
+            "corrupted 'fp_tests/' to 'ref_fp_tests/'."
+        )
