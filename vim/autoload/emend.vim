@@ -580,23 +580,64 @@ function! s:on_type_hover(result) abort
 endfunction
 
 " ---------------------------------------------------------------------------
-" Outline Filter (interactive outline)
+" Impact analysis
+" ---------------------------------------------------------------------------
+
+function! emend#impact(name) abort
+  let [l:line, l:col] = getpos('.')[1:2]
+  call emend#send('goto_definition', {
+        \ 'file': expand('%:p'),
+        \ 'line': l:line,
+        \ 'col': l:col,
+        \ }, {res -> s:on_impact_resolve(res)})
+endfunction
+
+function! s:on_impact_resolve(result) abort
+  if has_key(a:result, 'error')
+    echohl ErrorMsg | echom 'emend: ' . a:result.error.message | echohl None
+    return
+  endif
+  let l:items = get(a:result, 'items', [])
+  if empty(l:items)
+    echohl ErrorMsg | echom 'emend: could not resolve symbol at cursor' | echohl None
+    return
+  endif
+  let l:item = l:items[0]
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+
+  call emend#send('impact', {
+        \ 'qualified_name': l:qn,
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
+endfunction
+
+" ---------------------------------------------------------------------------
+" Outline Filter (interactive outline with local filtering)
 " ---------------------------------------------------------------------------
 
 function! emend#outline_filter() abort
-  call emend#ui#interactive()
-  " Pre-populate with file symbols, then allow filtering
-  call emend#file_symbols(expand('%:p'), function('s:on_outline_filter_result'))
-endfunction
+  let l:file = expand('%:p')
+  let l:tick = getbufvar('%', 'changedtick', -1)
 
-function! s:on_outline_filter_result(result) abort
-  if has_key(a:result, 'error')
-    call emend#ui#on_search_result(a:result)
+  " Enter outline mode UI (sets s:outline_mode = 1 in ui.vim)
+  call emend#ui#enter_outline(l:file)
+
+  " Reuse cached symbols if the file hasn't changed.
+  " enter_outline already shows cached items when available,
+  " so we only need to fetch if the cache is stale.
+  if emend#ui#has_outline_cache(l:file, l:tick)
+    call emend#ui#show_cached_outline()
     return
   endif
-  " Store original outline items for filtering
-  let s:outline_items = get(a:result, 'items', [])
-  call emend#ui#on_search_result(a:result)
+
+  " Fetch fresh symbols from the server
+  call emend#file_symbols(l:file, function('s:on_outline_filter_result', [l:tick]))
+endfunction
+
+function! s:on_outline_filter_result(changedtick, result) abort
+  call emend#ui#set_outline_items(a:result)
+  call emend#ui#set_outline_changedtick(a:changedtick)
 endfunction
 
 " ---------------------------------------------------------------------------

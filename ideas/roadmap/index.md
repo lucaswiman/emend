@@ -7,7 +7,7 @@ constraints.
 ## Phases
 
 - [x] [Phase 1: Picker Workflow](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-1-picker-workflow.md)
-- [ ] [Phase 2: Local Navigation](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-2-local-navigation.md)
+- [x] [Phase 2: Local Navigation](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-2-local-navigation.md)
 - [ ] [Phase 3: Hot Buffer Protocol](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-3-hot-buffer.md)
 - [ ] [Phase 4: Analysis-Aware Intelligence](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-4-analysis-aware.md)
 - [ ] [Deferred / Future](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-deferred-future.md)

@@ -23,6 +23,13 @@ let s:is_interactive = 0
 let s:search_timer = -1
 let s:focus = 'list'
 
+" Outline mode state: when active, typing filters cached file symbols locally
+" instead of sending RPC search queries.
+let s:outline_mode = 0
+let s:outline_items = []        " cached file symbols for local filtering
+let s:outline_file = ''         " file path whose symbols are cached
+let s:outline_changedtick = -1  " b:changedtick when symbols were fetched
+
 " Namespace for extmark highlights in the result list.
 let s:ns_id = -1
 
@@ -442,6 +449,7 @@ endfunction
 function! s:close_ui() abort
   call s:close_ui_silent()
   let s:is_interactive = 0
+  let s:outline_mode = 0
 endfunction
 
 function! s:close_ui_silent() abort
@@ -515,6 +523,8 @@ function! s:setup_keymaps() abort
     call s:map_current_buf('n', 'C',         '<Cmd>call emend#ui#action_callees()<CR>')
     call s:map_current_buf('n', 't',         '<Cmd>call emend#ui#action_type()<CR>')
     call s:map_current_buf('n', 'm',         '<Cmd>call emend#ui#action_move()<CR>')
+    call s:map_current_buf('n', 'gd',        '<Cmd>call emend#ui#action_goto_symbol()<CR>')
+    call s:map_current_buf('n', 'I',         '<Cmd>call emend#ui#action_impact()<CR>')
   endif
 
   " Preview buffer maps
@@ -571,22 +581,37 @@ function! emend#ui#on_input_change() abort
   if l:query ==# s:query
     return
   endif
-  
+
   let s:query = l:query
-  
+
   if s:search_timer >= 0
     call timer_stop(s:search_timer)
     let s:search_timer = -1
   endif
-  
+
   if l:query ==# ''
-    let s:results = []
-    call s:render_list()
-    call s:render_preview()
+    if s:outline_mode
+      " Show all outline items when query is cleared
+      let s:results = copy(s:outline_items)
+      let s:selected = 0
+      let s:last_result = {'items': s:results, 'mode': 'file_symbols',
+            \ 'elapsed_ms': 0, 'query': s:outline_file, 'truncated': v:false}
+      call s:render_list()
+      call s:render_preview()
+    else
+      let s:results = []
+      call s:render_list()
+      call s:render_preview()
+    endif
     return
   endif
-  
-  let s:search_timer = timer_start(100, {t -> s:trigger_search()})
+
+  if s:outline_mode
+    " Filter locally — no RPC, no debounce needed
+    call s:filter_outline(l:query)
+  else
+    let s:search_timer = timer_start(100, {t -> s:trigger_search()})
+  endif
 endfunction
 
 function! s:trigger_search() abort
@@ -594,6 +619,139 @@ function! s:trigger_search() abort
   if s:is_interactive && s:query !=# ''
     call emend#search(s:query)
   endif
+endfunction
+
+" ---------------------------------------------------------------------------
+" Outline mode — public API
+" ---------------------------------------------------------------------------
+
+" Enter outline mode: sets up interactive UI with local filtering.
+function! emend#ui#enter_outline(file_path) abort
+  let s:outline_mode = 1
+  let s:outline_file = a:file_path
+  let s:is_interactive = 1
+  let s:query = ''
+  let s:results = []
+  let s:selected = 0
+
+  call s:ensure_ui_open()
+
+  " Update input window title for outline mode
+  if has('nvim-0.9') && s:input_win >= 0 && nvim_win_is_valid(s:input_win)
+    call nvim_win_set_config(s:input_win, {'title': ' outline filter ', 'title_pos': 'left'})
+  endif
+
+  if s:input_win >= 0
+    call win_gotoid(s:input_win)
+    startinsert
+  endif
+endfunction
+
+" Populate outline items from a file_symbols RPC result.
+" Called after the initial fetch; subsequent typing filters locally.
+function! emend#ui#set_outline_items(result) abort
+  if has_key(a:result, 'error')
+    call emend#ui#on_search_result(a:result)
+    return
+  endif
+  let s:outline_items = get(a:result, 'items', [])
+  " Show all items initially
+  let s:results = copy(s:outline_items)
+  let s:selected = 0
+  let s:last_result = a:result
+  if s:ui_is_open()
+    call s:render_list()
+    call s:render_preview()
+  endif
+endfunction
+
+" Check if we have a valid cache for the given file and changedtick.
+function! emend#ui#has_outline_cache(file_path, changedtick) abort
+  return s:outline_file ==# a:file_path
+        \ && s:outline_changedtick == a:changedtick
+        \ && !empty(s:outline_items)
+endfunction
+
+" Re-display cached outline items (cache hit path).
+function! emend#ui#show_cached_outline() abort
+  let s:results = copy(s:outline_items)
+  let s:selected = 0
+  let s:last_result = {'items': s:results, 'mode': 'file_symbols',
+        \ 'elapsed_ms': 0, 'query': s:outline_file, 'truncated': v:false}
+  if s:ui_is_open()
+    call s:render_list()
+    call s:render_preview()
+  endif
+endfunction
+
+" Store the changedtick after a successful fetch.
+function! emend#ui#set_outline_changedtick(tick) abort
+  let s:outline_changedtick = a:tick
+endfunction
+
+" ---------------------------------------------------------------------------
+" Local outline filtering
+" ---------------------------------------------------------------------------
+
+function! s:filter_outline(query) abort
+  let l:q = tolower(a:query)
+  let l:scored = []
+
+  for l:item in s:outline_items
+    let l:name = tolower(get(l:item, 'name', ''))
+    let l:qn = tolower(get(l:item, 'qualified_name', ''))
+    let l:score = s:outline_match_score(l:q, l:name, l:qn)
+    if l:score > 0
+      call add(l:scored, [l:score, l:item])
+    endif
+  endfor
+
+  " Sort descending by score
+  call sort(l:scored, {a, b -> b[0] - a[0]})
+
+  let s:results = map(l:scored, 'v:val[1]')
+  let s:selected = 0
+  let s:last_result = {'items': s:results, 'mode': 'file_symbols',
+        \ 'elapsed_ms': 0, 'query': a:query, 'truncated': v:false}
+  call s:render_list()
+  call s:render_preview()
+endfunction
+
+function! s:outline_match_score(query, name, qn) abort
+  " Exact match
+  if a:name ==# a:query
+    return 1000
+  endif
+  " Prefix match
+  if stridx(a:name, a:query) == 0
+    return 900
+  endif
+  " Substring match on name
+  if stridx(a:name, a:query) >= 0
+    return 700
+  endif
+  " Substring match on qualified name
+  if stridx(a:qn, a:query) >= 0
+    return 500
+  endif
+  " Fuzzy: all query chars appear in order in name
+  let l:ni = 0
+  for l:ci in range(len(a:query))
+    let l:ch = a:query[l:ci]
+    let l:found = 0
+    while l:ni < len(a:name)
+      if a:name[l:ni] ==# l:ch
+        let l:ni += 1
+        let l:found = 1
+        break
+      endif
+      let l:ni += 1
+    endwhile
+    if !l:found
+      return 0
+    endif
+  endfor
+  return 300
 endfunction
 
 function! s:map_current_buf(mode, lhs, rhs) abort
@@ -1319,6 +1477,28 @@ function! s:on_action_type(result) abort
     call add(l:parts, get(l:item, 'name', '?') . ': ' . get(l:item, 'type', '?'))
   endfor
   echo join(l:parts, '  |  ')
+endfunction
+
+function! emend#ui#action_goto_symbol() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  if empty(l:qn) | return | endif
+  " Search for the symbol definition — reuses the picker UI
+  call emend#search(l:qn)
+endfunction
+
+function! emend#ui#action_impact() abort
+  let l:item = s:get_selected_item()
+  if empty(l:item) | return | endif
+  let l:qn = get(l:item, 'qualified_name', get(l:item, 'name', ''))
+  let l:file = get(l:item, 'file_path', '')
+  if empty(l:qn) | return | endif
+  call s:close_ui()
+  call emend#send('impact', {
+        \ 'qualified_name': l:qn,
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
 endfunction
 
 function! emend#ui#action_move() abort

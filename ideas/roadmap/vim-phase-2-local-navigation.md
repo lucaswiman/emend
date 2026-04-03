@@ -7,15 +7,15 @@ fan-out from the current selection.
 
 ## TODO
 
-- [ ] Turn `EmendOutlineFilter` into a true local filter
-- [ ] Fetch file symbols once and reuse them during local filtering
-- [ ] Re-fetch only on explicit refresh or meaningful buffer change
-- [ ] Add a hotkey-driven navigation interface for semantic next hops
-- [ ] Define goto-symbol navigation from the current result
-- [ ] Define callers navigation from the current result
-- [ ] Define callees navigation from the current result
-- [ ] Define impact navigation from the current result
-- [ ] Ensure the interface feels like a small launcher, not a deep modal flow
+- [x] Turn `EmendOutlineFilter` into a true local filter
+- [x] Fetch file symbols once and reuse them during local filtering
+- [x] Re-fetch only on explicit refresh or meaningful buffer change
+- [x] Add a hotkey-driven navigation interface for semantic next hops
+- [x] Define goto-symbol navigation from the current result
+- [x] Define callers navigation from the current result
+- [x] Define callees navigation from the current result
+- [x] Define impact navigation from the current result
+- [x] Ensure the interface feels like a small launcher, not a deep modal flow
 
 ## Notes
 

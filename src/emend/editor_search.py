@@ -1658,6 +1658,55 @@ class EditorSearchEngine:
         elapsed = round((_time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="callees", query=f"callees of {qualified_name}")
 
+    def impact(self, qualified_name: str, file: str = "", limit: int = 50) -> SearchResult:
+        """Compute transitive impact of a symbol change."""
+        from emend.transform import find_impact
+        from emend.component_selector import ExtendedSelector
+        import time as _time
+
+        t0 = _time.monotonic()
+
+        selector = ExtendedSelector(file_path=file, symbol_path=qualified_name.split("."))
+        result = find_impact(selectors=[selector], project_path=str(self.project_root))
+
+        items: list[dict] = []
+        # impacted_symbols are selector strings like "file.py::Class.method"
+        for sel_str in result.impacted_symbols[:limit]:
+            parts = sel_str.split("::", 1)
+            fp = parts[0] if parts else ""
+            sym_part = parts[1] if len(parts) > 1 else sel_str
+            name = sym_part.rsplit(".", 1)[-1] if sym_part else sel_str
+            items.append({
+                "name": name,
+                "kind": "function",
+                "file_path": fp,
+                "line": 1,
+                "end_line": 1,
+                "qualified_name": sym_part,
+            })
+        # Also include impacted tests
+        for test_str in result.impacted_tests[:limit]:
+            parts = test_str.split("::", 1)
+            fp = parts[0] if parts else ""
+            sym_part = parts[1] if len(parts) > 1 else test_str
+            name = sym_part.rsplit(".", 1)[-1] if sym_part else test_str
+            items.append({
+                "name": name,
+                "kind": "function",
+                "file_path": fp,
+                "line": 1,
+                "end_line": 1,
+                "qualified_name": sym_part,
+            })
+
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(
+            items=items,
+            elapsed_ms=elapsed,
+            mode="impact",
+            query=f"impact of {qualified_name}",
+        )
+
     def types_at_cursor(self, file: str, line: int = 0, col: int = 0) -> SearchResult:
         """Return type information for the symbol at cursor position."""
         import time as _time
@@ -2042,6 +2091,12 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             file=params.get("file", ""),
             line=int(params.get("line", 0)),
             col=int(params.get("col", 0)),
+        ).to_dict()
+    elif method == "impact":
+        return engine.impact(
+            qualified_name=params.get("qualified_name", ""),
+            file=params.get("file", ""),
+            limit=int(params.get("limit", 50)),
         ).to_dict()
     else:
         raise ValueError(f"Unknown method: {method!r}")

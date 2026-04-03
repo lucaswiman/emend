@@ -208,3 +208,70 @@ Execute (history overlay function exists):
 Execute (show_history_overlay handles empty history gracefully):
   " This should echo a message, not crash.
   call emend#ui#show_history_overlay()
+
+" ===========================================================================
+" Phase 2: Local outline filtering
+" ===========================================================================
+
+Execute (outline mode functions exist):
+  Assert exists('*emend#ui#enter_outline'), 'enter_outline should exist'
+  Assert exists('*emend#ui#set_outline_items'), 'set_outline_items should exist'
+  Assert exists('*emend#ui#has_outline_cache'), 'has_outline_cache should exist'
+  Assert exists('*emend#ui#show_cached_outline'), 'show_cached_outline should exist'
+
+Execute (enter_outline opens UI in outline mode):
+  call emend#ui#enter_outline('/tmp/test_outline.py')
+  " UI should be open; close it to clean up.
+  call emend#ui#close()
+
+Execute (set_outline_items populates results and renders):
+  " Open outline mode first
+  call emend#ui#enter_outline('/tmp/test_outline.py')
+
+  " Populate with file symbols
+  let outline_result = {
+        \ 'items': [
+        \   {'name': 'MyClass', 'kind': 'class', 'file_path': '/tmp/test_outline.py',
+        \    'line': 1, 'end_line': 20, 'qualified_name': 'MyClass'},
+        \   {'name': 'helper', 'kind': 'function', 'file_path': '/tmp/test_outline.py',
+        \    'line': 22, 'end_line': 30, 'qualified_name': 'helper'},
+        \   {'name': 'process', 'kind': 'function', 'file_path': '/tmp/test_outline.py',
+        \    'line': 32, 'end_line': 40, 'qualified_name': 'process'},
+        \ ],
+        \ 'mode': 'file_symbols',
+        \ 'elapsed_ms': 1.0,
+        \ 'query': '/tmp/test_outline.py',
+        \ 'truncated': v:false,
+        \ }
+  call emend#ui#set_outline_items(outline_result)
+  call emend#ui#close()
+
+Execute (outline cache invalidates on different changedtick):
+  " No cache initially for this file
+  Assert !emend#ui#has_outline_cache('/tmp/fresh.py', 42), 'should not have cache for new file'
+
+Execute (set_outline_items handles error result):
+  call emend#ui#enter_outline('/tmp/err.py')
+  " Error results should not crash
+  call emend#ui#set_outline_items({'error': {'code': -1, 'message': 'test'}})
+  call emend#ui#close()
+
+" ===========================================================================
+" Phase 2: Navigation hotkeys
+" ===========================================================================
+
+Execute (navigation action functions exist):
+  Assert exists('*emend#ui#action_goto_symbol'), 'action_goto_symbol should exist'
+  Assert exists('*emend#ui#action_impact'), 'action_impact should exist'
+  Assert exists('*emend#ui#action_callers'), 'action_callers should exist'
+  Assert exists('*emend#ui#action_callees'), 'action_callees should exist'
+
+Execute (EmendImpact command exists):
+  Assert exists(':EmendImpact'), ':EmendImpact command should exist'
+
+Execute (action_goto_symbol does not crash with no results):
+  " With empty results, should just return without error
+  call emend#ui#action_goto_symbol()
+
+Execute (action_impact does not crash with no results):
+  call emend#ui#action_impact()
