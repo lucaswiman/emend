@@ -654,7 +654,7 @@ def extract_graphql_symbols(region: DslRegion) -> list[DslSymbol]:
     # Extract field definitions (only inside type bodies)
     # Simple heuristic: lines starting with whitespace + identifier + colon
     current_type: str | None = None
-    for line in content.split('\n'):
+    for line_offset, line in enumerate(content.split('\n')):
         type_match = _GQL_TYPE_DEF_RE.search(line)
         if type_match:
             current_type = type_match.group(1)
@@ -666,8 +666,9 @@ def extract_graphql_symbols(region: DslRegion) -> list[DslSymbol]:
             field_match = _GQL_FIELD_DEF_RE.match(line)
             if field_match:
                 field_name = field_match.group(1)
-                if field_name.lower() in _GQL_BUILTINS:
-                    continue
+                # Note: do NOT filter field names against _GQL_BUILTINS — that
+                # set is for scalar *type* names (String, Int, ID…) and must
+                # not suppress perfectly-valid field names like "id".
                 field_key = f"{current_type}.{field_name}"
                 if field_key in seen_fields:
                     continue
@@ -677,7 +678,7 @@ def extract_graphql_symbols(region: DslRegion) -> list[DslSymbol]:
                     kind=DslSymbolKind.GRAPHQL_FIELD,
                     dsl=region.dsl,
                     host_file=region.host_file,
-                    host_line=region.host_start_line,
+                    host_line=region.host_start_line + line_offset,
                     host_col=region.host_start_col,
                     link_hints=[
                         LinkHint(
@@ -723,9 +724,9 @@ def _singularize(name: str) -> str:
     """Naive singularization for table-to-class mapping."""
     if name.endswith("ies"):
         return name[:-3] + "y"
-    # "sses"/"xes"/"zes" → strip only the trailing "s"
+    # "sses"/"xes"/"zes" → plural suffix is "es"; strip both chars
     if name.endswith("sses") or name.endswith("xes") or name.endswith("zes"):
-        return name[:-1]
+        return name[:-2]
     # "ses" (e.g. "buses") → strip "es"
     if name.endswith("ses"):
         return name[:-2]

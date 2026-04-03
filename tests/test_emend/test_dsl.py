@@ -40,8 +40,19 @@ class TestNamingHelpers:
         assert _singularize("entries") == "entry"
 
     def test_singularize_ses(self):
-        assert _singularize("addresses") == "addresse"  # naive, ok
+        assert _singularize("addresses") == "address"
         assert _singularize("buses") == "bus"
+
+    def test_singularize_xes_zes_sses(self):
+        """Words ending in xes/zes/sses should strip 'es', not just 's'.
+
+        English plurals: box→boxes, buzz→buzzes, class→classes.
+        The plural suffix is 'es', so singularizing must remove 2 chars.
+        Removing only 1 char ('s') produces wrong stems like 'boxe', 'buzze', 'classe'.
+        """
+        assert _singularize("boxes") == "box"
+        assert _singularize("classes") == "class"
+        assert _singularize("buzzes") == "buzz"
 
     def test_singularize_already_singular(self):
         assert _singularize("user") == "user"
@@ -1244,6 +1255,60 @@ class TestExtractGraphqlSymbols:
         fields = [s for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
         assert len(fields) >= 1
         assert any(h.strategy == "graphql_field" and h.module_hint == "User" for h in fields[0].link_hints)
+
+    def test_field_line_numbers_offset_from_region_start(self):
+        """GraphQL field host_line should reflect actual position within region.
+
+        When a region starts at line 5 of the host file, a field on the 2nd
+        line of the region content should report host_line=6, not 5.
+        """
+        # Region starts at line 5: "type User {" is at offset 0 (line 5),
+        # "  name: String!" is at offset 1 (line 6), "  email: String!" at offset 2 (line 7)
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  name: String!\n  email: String!\n}',
+            host_file="schema.graphql",
+            host_start_line=5,
+            host_start_col=0,
+            host_end_line=8,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        fields_by_name = {s.name: s for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD}
+        assert "name" in fields_by_name
+        assert "email" in fields_by_name
+        # "name" is on line 2 of content (offset 1), so host_line should be 5+1=6
+        assert fields_by_name["name"].host_line == 6, (
+            f"Expected name field at line 6, got {fields_by_name['name'].host_line}"
+        )
+        # "email" is on line 3 of content (offset 2), so host_line should be 5+2=7
+        assert fields_by_name["email"].host_line == 7, (
+            f"Expected email field at line 7, got {fields_by_name['email'].host_line}"
+        )
+
+    def test_field_named_id_is_not_filtered_as_builtin(self):
+        """A GraphQL field named 'id' should not be filtered out.
+
+        The _GQL_BUILTINS set contains 'id' to prevent the scalar type 'ID'
+        from being extracted as a user-defined type. But a *field* named 'id'
+        is perfectly valid and must not be silently dropped.
+        """
+        region = DslRegion(
+            dsl=DslKind.GRAPHQL,
+            content='type User {\n  id: ID!\n  name: String!\n}',
+            host_file="schema.graphql",
+            host_start_line=1,
+            host_start_col=0,
+            host_end_line=4,
+            host_end_col=0,
+            trigger="file_extension",
+        )
+        symbols = extract_graphql_symbols(region)
+        field_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
+        assert "id" in field_names, (
+            f"Field 'id' was incorrectly filtered out; got fields: {field_names}"
+        )
 
 
 class TestResolveGraphqlLinks:
