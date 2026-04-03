@@ -7,6 +7,8 @@ path traversal, SSRF).
 
 from __future__ import annotations
 
+from typing import Callable
+
 from emend.trace import TraceConfig, TraceSanitizer, TraceScopeSanitizer, TraceSink, TraceSource
 
 
@@ -285,7 +287,7 @@ def _fastapi_preset() -> TraceConfig:
 
 
 # Registry of available presets
-_PRESETS: dict[str, object] = {
+_PRESETS: dict[str, Callable[[], TraceConfig]] = {
     "flask": _flask_preset,
     "django": _django_preset,
     "sqlalchemy": _sqlalchemy_preset,
@@ -311,17 +313,12 @@ def get_preset(name: str) -> TraceConfig:
         ValueError: If the preset name is unknown.
     """
     if name == "all":
-        return merge_configs(
-            _flask_preset(),
-            _django_preset(),
-            _sqlalchemy_preset(),
-            _fastapi_preset(),
-        )
+        return merge_configs(*[factory() for factory in _PRESETS.values()])
     factory = _PRESETS.get(name)
     if factory is None:
         known = ", ".join(sorted(_PRESETS.keys()) + ["all"])
         raise ValueError(f"Unknown preset: {name!r}. Available presets: {known}")
-    return factory()  # type: ignore[operator]
+    return factory()
 
 
 def merge_configs(*configs: TraceConfig) -> TraceConfig:

@@ -489,72 +489,56 @@ def parse_type_string(raw: str) -> TypeDescriptor:
     return TypeDescriptor.named(raw)
 
 
-def _split_union(raw: str) -> list[str]:
-    """Split a union type string on ' | ' respecting bracket nesting."""
-    parts = []
+def _split_balanced(raw: str, delimiter: str) -> list[str]:
+    """Split *raw* on *delimiter* respecting bracket/paren nesting.
+
+    Handles ``[...]`` and ``(...)`` nesting.  The final token is always
+    appended (stripped) even if *delimiter* is not found.
+    """
+    parts: list[str] = []
     depth = 0
     paren_depth = 0
     current: list[str] = []
     i = 0
+    dlen = len(delimiter)
     while i < len(raw):
         ch = raw[i]
         if ch == "[":
             depth += 1
             current.append(ch)
+            i += 1
         elif ch == "]":
             depth -= 1
             current.append(ch)
+            i += 1
         elif ch == "(":
             paren_depth += 1
             current.append(ch)
+            i += 1
         elif ch == ")":
             paren_depth -= 1
             current.append(ch)
-        elif ch == "|" and depth == 0 and paren_depth == 0:
-            # Check for " | " pattern
-            if i > 0 and raw[i-1] == " " and i + 1 < len(raw) and raw[i+1] == " ":
-                part = "".join(current).rstrip()
-                parts.append(part)
-                current = []
-                i += 2  # skip "| "
-                continue
-            else:
-                current.append(ch)
+            i += 1
+        elif depth == 0 and paren_depth == 0 and raw[i:i + dlen] == delimiter:
+            parts.append("".join(current).strip())
+            current = []
+            i += dlen
         else:
             current.append(ch)
-        i += 1
+            i += 1
     if current:
         parts.append("".join(current).strip())
     return parts
+
+
+def _split_union(raw: str) -> list[str]:
+    """Split a union type string on ' | ' respecting bracket nesting."""
+    return _split_balanced(raw, " | ")
 
 
 def _split_params(raw: str) -> list[str]:
     """Split comma-separated type parameters respecting bracket nesting."""
-    parts = []
-    depth = 0
-    paren_depth = 0
-    current: list[str] = []
-    for ch in raw:
-        if ch == "[":
-            depth += 1
-            current.append(ch)
-        elif ch == "]":
-            depth -= 1
-            current.append(ch)
-        elif ch == "(":
-            paren_depth += 1
-            current.append(ch)
-        elif ch == ")":
-            paren_depth -= 1
-            current.append(ch)
-        elif ch == "," and depth == 0 and paren_depth == 0:
-            parts.append("".join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    if current:
-        parts.append("".join(current).strip())
-    return parts
+    return _split_balanced(raw, ",")
 
 
 def _parse_callable(raw: str) -> TypeDescriptor:
@@ -1091,38 +1075,43 @@ class PyreflyAdapter(TypeOracle):
 
 
 # ---------------------------------------------------------------------------
-# Pyright adapter
+# Shared LSP-based TypeOracle base class
 # ---------------------------------------------------------------------------
 
-class PyrightAdapter(TypeOracle):
-    """TypeOracle implementation backed by the Pyright LSP.
+class _LSPTypeOracle(TypeOracle):
+    """Base class for LSP-backed TypeOracle implementations.
 
-    Starts a pyright-langserver instance and queries individual symbols
-    via textDocument/hover to build a comprehensive type index for a file.
+    Subclasses provide ``_tool_name``, ``_lsp_command()``, and
+    ``_parse_hover_type()``.  Everything else — LSP lifecycle, caching,
+    and symbol iteration — is shared here.
     """
+
+    _tool_name: str = ""  # For logging and error messages
 
     def __init__(
         self,
-        pyright_path: str | None = None,
+        tool_path: str,
         cache_size: int = 256,
         extra_args: list[str] | None = None,
         db_path: str | None = None,
     ):
-        self._pyright = pyright_path or shutil.which("pyright-langserver") or "pyright-langserver"
+        self._tool = tool_path
         self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
 
     def is_available(self) -> bool:
-        return shutil.which(self._pyright) is not None
+        return shutil.which(self._tool) is not None
+
+    def _lsp_command(self) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
 
     def _get_lsp(self, project_root: Path) -> LSPClient | None:
         with self._lsp_lock:
             if self._lsp is None:
-                logger.info("Starting pyright LSP server…")
-                cmd = [self._pyright, "--stdio", *self._extra_args]
-                self._lsp = LSPClient(cmd, project_root)
+                logger.info("Starting %s LSP server…", self._tool_name)
+                self._lsp = LSPClient(self._lsp_command(), project_root)
                 if not self._lsp.start():
                     self._lsp = None
             return self._lsp
@@ -1145,7 +1134,7 @@ class PyrightAdapter(TypeOracle):
             return ft
 
         try:
-            logger.info("Building type index for %s via pyright", path)
+            logger.info("Building type index for %s via %s", path, self._tool_name)
             source = path.read_text(encoding="utf-8")
             lsp.did_open(path, source)
 
@@ -1157,8 +1146,6 @@ class PyrightAdapter(TypeOracle):
                 if not hover_text:
                     continue
 
-                # Extract type from pyright hover: "```python\n(variable) x: int\n```"
-                # or "```python\n(function) f: (int) -> str\n```"
                 raw_type = self._parse_hover_type(hover_text)
                 if not raw_type:
                     continue
@@ -1177,24 +1164,14 @@ class PyrightAdapter(TypeOracle):
 
             ft.build_index()
         except Exception:
-            logger.debug("pyright infer_file failed for %s", path, exc_info=True)
+            logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
             ft = FileTypes(path=str(path))
 
         self._cache.put(content_hash, ft)
         return ft
 
-    def _parse_hover_type(self, hover_text: str) -> str | None:
-        """Extract the type part from Pyright's hover markdown."""
-        # Find the code block
-        match = re.search(r"```python\n(.*?)\n```", hover_text, re.DOTALL)
-        if not match:
-            return None
-        
-        line = match.group(1).strip()
-        # line is often "(variable) name: type" or "(function) name: type"
-        if ": " in line:
-            return line.split(": ", 1)[1].strip()
-        return None
+    def _parse_hover_type(self, hover_text: str) -> str | None:  # pragma: no cover
+        raise NotImplementedError
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
@@ -1216,15 +1193,57 @@ class PyrightAdapter(TypeOracle):
 
 
 # ---------------------------------------------------------------------------
+# Pyright adapter
+# ---------------------------------------------------------------------------
+
+class PyrightAdapter(_LSPTypeOracle):
+    """TypeOracle implementation backed by the Pyright LSP.
+
+    Starts a pyright-langserver instance and queries individual symbols
+    via textDocument/hover to build a comprehensive type index for a file.
+    """
+
+    _tool_name = "pyright"
+
+    def __init__(
+        self,
+        pyright_path: str | None = None,
+        cache_size: int = 256,
+        extra_args: list[str] | None = None,
+        db_path: str | None = None,
+    ):
+        tool = pyright_path or shutil.which("pyright-langserver") or "pyright-langserver"
+        super().__init__(tool, cache_size=cache_size, extra_args=extra_args, db_path=db_path)
+
+    def _lsp_command(self) -> list[str]:
+        return [self._tool, "--stdio", *self._extra_args]
+
+    def _parse_hover_type(self, hover_text: str) -> str | None:
+        """Extract the type part from Pyright's hover markdown."""
+        # Find the code block
+        match = re.search(r"```python\n(.*?)\n```", hover_text, re.DOTALL)
+        if not match:
+            return None
+
+        line = match.group(1).strip()
+        # line is often "(variable) name: type" or "(function) name: type"
+        if ": " in line:
+            return line.split(": ", 1)[1].strip()
+        return None
+
+
+# ---------------------------------------------------------------------------
 # ty adapter
 # ---------------------------------------------------------------------------
 
-class TyAdapter(TypeOracle):
+class TyAdapter(_LSPTypeOracle):
     """TypeOracle implementation backed by the ty LSP.
 
     Starts a ty lsp instance and queries individual symbols
     via textDocument/hover to build a comprehensive type index for a file.
     """
+
+    _tool_name = "ty"
 
     def __init__(
         self,
@@ -1233,78 +1252,11 @@ class TyAdapter(TypeOracle):
         extra_args: list[str] | None = None,
         db_path: str | None = None,
     ):
-        self._ty = ty_path or shutil.which("ty") or "ty"
-        self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
-        self._extra_args = extra_args or []
-        self._lsp: LSPClient | None = None
-        self._lsp_lock = threading.Lock()
+        tool = ty_path or shutil.which("ty") or "ty"
+        super().__init__(tool, cache_size=cache_size, extra_args=extra_args, db_path=db_path)
 
-    def is_available(self) -> bool:
-        return shutil.which(self._ty) is not None
-
-    def _get_lsp(self, project_root: Path) -> LSPClient | None:
-        with self._lsp_lock:
-            if self._lsp is None:
-                logger.info("Starting ty LSP server…")
-                cmd = [self._ty, "lsp", *self._extra_args]
-                self._lsp = LSPClient(cmd, project_root)
-                if not self._lsp.start():
-                    self._lsp = None
-            return self._lsp
-
-    def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
-        path = path.resolve()
-        if not path.exists():
-            return FileTypes(path=str(path))
-
-        content_hash = _content_hash(path)
-        cached = self._cache.get(content_hash)
-        if cached is not None:
-            return cached
-
-        root = project_root or path.parent
-        lsp = self._get_lsp(root)
-        if not lsp:
-            ft = FileTypes(path=str(path))
-            self._cache.put(content_hash, ft)
-            return ft
-
-        try:
-            logger.info("Building type index for %s via ty", path)
-            source = path.read_text(encoding="utf-8")
-            lsp.did_open(path, source)
-
-            symbols = _collect_symbols(source)
-            ft = FileTypes(path=str(path))
-
-            for name, line, col_start, col_end in symbols:
-                hover_text = lsp.hover(path, line, col_start)
-                if not hover_text:
-                    continue
-
-                raw_type = self._parse_hover_type(hover_text)
-                if not raw_type:
-                    continue
-
-                type_desc = parse_type_string(raw_type)
-                binding = TypeBinding(
-                    name=name,
-                    line=line,
-                    col_start=col_start,
-                    col_end=col_end,
-                    type_descriptor=type_desc,
-                    raw_type=raw_type,
-                    binding_kind="inferred",
-                )
-                ft.bindings.append(binding)
-
-            ft.build_index()
-        except Exception:
-            logger.debug("ty infer_file failed for %s", path, exc_info=True)
-            ft = FileTypes(path=str(path))
-
-        self._cache.put(content_hash, ft)
-        return ft
+    def _lsp_command(self) -> list[str]:
+        return [self._tool, "lsp", *self._extra_args]
 
     def _parse_hover_type(self, hover_text: str) -> str | None:
         """Extract the type part from ty's hover markdown."""
@@ -1324,24 +1276,6 @@ class TyAdapter(TypeOracle):
         # Plain text — return it if non-empty, otherwise None
         stripped = hover_text.strip()
         return stripped or None
-
-    def type_at(self, path: Path, line: int, col: int,
-                project_root: Path | None = None) -> TypeBinding | None:
-        ft = self.infer_file(path, project_root)
-        return ft.type_at(line, col)
-
-    def clear_cache(self) -> None:
-        self._cache.clear()
-        with self._lsp_lock:
-            if self._lsp:
-                self._lsp.stop()
-                self._lsp = None
-
-    def __del__(self):
-        with self._lsp_lock:
-            if self._lsp:
-                self._lsp.stop()
-                self._lsp = None
 
 
 # ---------------------------------------------------------------------------

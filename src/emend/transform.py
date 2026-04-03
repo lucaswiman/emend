@@ -2014,7 +2014,7 @@ def _lookup_via_modmap(
         return []
     finally:
         try:
-            kb.close()
+            store.close()
         except Exception:
             pass
 
@@ -2826,7 +2826,7 @@ def find_pattern_in_project(
                         ProjectPatternMatch(
                             file_path=fp,
                             match=PatternMatch(
-                                node=None, captures={},
+                                node_text=text, captures={},
                                 line=line, end_line=end_line,
                                 col=col, end_col=end_col,
                                 matched_text=text,
@@ -3360,6 +3360,36 @@ def _add_import_text(
     return diff
 
 
+def _raise_component_not_found(
+    selector: ExtendedSelector,
+    source_code: str,
+    _ext: str,
+    message: str | None = None,
+) -> None:
+    """Raise a descriptive ValueError when a component lookup returns None.
+
+    Checks whether the symbol itself is missing (raises "Symbol not found")
+    or whether the component is invalid for the symbol kind (raises a
+    specific type-mismatch error), falling back to the generic
+    "Component not found" message.
+    """
+    syms = _rust.collect_symbols_from_str(
+        source_code, selector=".".join(selector.symbol_path), ext=_ext
+    )
+    if not syms:
+        raise ValueError(
+            f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}"
+        )
+    kind = syms[0]["kind"]
+    if kind == "class" and selector.component in ("params", "returns"):
+        raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
+    if kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
+        raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
+    raise ValueError(
+        message or f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}"
+    )
+
+
 def get_component(selector: ExtendedSelector) -> str:
     """Get value of component.
 
@@ -3404,19 +3434,7 @@ def get_component(selector: ExtendedSelector) -> str:
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Symbol exists but component not found
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
 
@@ -3467,19 +3485,7 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Match old error messages for invalid components
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
 
@@ -3566,19 +3572,7 @@ def add_to_component(
     )
 
     if items_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-        
-        # Symbol exists but component not found
-        sym_kind = syms[0]["kind"]
-        if sym_kind == "class" and selector.component == "params":
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-        
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     # Calculate insertion index in the items list
     items = [item[0] for item in items_info]
@@ -3634,15 +3628,10 @@ def add_to_component(
             ext=_ext,
         )
         if container_range is None:
-             # Fallback: find if it's a class or function to give better error or handle it
-             syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-             if syms:
-                 sym_kind = syms[0]["kind"]
-                 if sym_kind == "class" and selector.component == "params":
-                     raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-                 elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-                     raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-             raise ValueError(f"Could not find container for {selector.component}")
+            _raise_component_not_found(
+                selector, source_code, _ext,
+                message=f"Could not find container for {selector.component}",
+            )
 
         cont_start, cont_end = container_range
         transform.replace_range(cont_start, cont_end, replacement)
@@ -3773,19 +3762,7 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Symbol exists but component not found
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
     
@@ -7424,6 +7401,63 @@ def _expand_selector_with_returns_filter(
     return result
 
 
+def _dispatch_with_returns_filter(
+    selector_str: str,
+    selector: ExtendedSelector,
+    returns_filter: list[str] | None,
+    type_oracle: TypeOracle | None,
+    single_fn: Callable[[ExtendedSelector], str],
+) -> str:
+    """Common dispatch logic for cmd_edit and cmd_add.
+
+    Handles:
+    - Returns-filter expansion: expand wildcard selector to matching symbols
+    - File-glob dispatch: iterate over multiple matching files
+    - Single-selector fall-through
+
+    *single_fn* is called with each concrete selector and should return a diff
+    string (empty string = no change).
+    """
+    if returns_filter:
+        files = (
+            selector.expand_file_glob()
+            if selector.has_file_glob()
+            else [selector.file_path]
+        )
+        all_results = []
+        for fpath in files:
+            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
+            for concrete in _expand_selector_with_returns_filter(
+                concrete_base, returns_filter, type_oracle
+            ):
+                try:
+                    result = single_fn(concrete)
+                    if result:
+                        all_results.append(result)
+                except (ValueError, FileNotFoundError):
+                    continue
+        if not all_results:
+            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
+        return '\n'.join(all_results)
+
+    if selector.has_file_glob():
+        expanded_files = selector.expand_file_glob()
+        all_results = []
+        for fpath in expanded_files:
+            concrete = selector.with_file_path(fpath)
+            try:
+                result = single_fn(concrete)
+                if result:
+                    all_results.append(result)
+            except (ValueError, FileNotFoundError):
+                continue
+        if not all_results:
+            raise ValueError(f"No symbols found matching {selector_str}")
+        return '\n'.join(all_results)
+
+    return single_fn(selector)
+
+
 def _cmd_edit_single(
     selector: ExtendedSelector,
     value: str | None = None,
@@ -7467,48 +7501,12 @@ def cmd_edit(
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)
 
-    # When returns_filter is specified, expand the selector to only include
-    # symbols that match the return type constraint.
-    if returns_filter:
-        files = (
-            selector.expand_file_glob()
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            matching = _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle,
-            )
-            for concrete in matching:
-                try:
-                    result = _cmd_edit_single(concrete, value=value, rm=rm, apply=apply)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    def _single(sel: ExtendedSelector) -> str:
+        return _cmd_edit_single(sel, value=value, rm=rm, apply=apply)
 
-    # Multi-file dispatch for file globs
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob()
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
-            try:
-                result = _cmd_edit_single(concrete, value=value, rm=rm, apply=apply)
-                if result:
-                    all_results.append(result)
-            except (ValueError, FileNotFoundError):
-                continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return _cmd_edit_single(selector, value=value, rm=rm, apply=apply)
+    return _dispatch_with_returns_filter(
+        selector_str, selector, returns_filter, type_oracle, _single
+    )
 
 
 def _cmd_add_single(
@@ -7556,45 +7554,9 @@ def cmd_add(
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)
 
-    # When returns_filter is specified, expand the selector to only include
-    # symbols that match the return type constraint.
-    if returns_filter:
-        files = (
-            selector.expand_file_glob()
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            matching = _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle,
-            )
-            for concrete in matching:
-                try:
-                    result = _cmd_add_single(concrete, value=value, before=before, after=after, at=at, apply=apply)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    def _single(sel: ExtendedSelector) -> str:
+        return _cmd_add_single(sel, value=value, before=before, after=after, at=at, apply=apply)
 
-    # Multi-file dispatch for file globs
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob()
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
-            try:
-                result = _cmd_add_single(concrete, value=value, before=before, after=after, at=at, apply=apply)
-                if result:
-                    all_results.append(result)
-            except (ValueError, FileNotFoundError):
-                continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return _cmd_add_single(selector, value=value, before=before, after=after, at=at, apply=apply)
+    return _dispatch_with_returns_filter(
+        selector_str, selector, returns_filter, type_oracle, _single
+    )

@@ -4,7 +4,7 @@ from typing import Annotated, Optional
 import typer
 
 from emend.cli_base import _state, app, resolve_file_scopes, resolve_files
-from emend.rules_config import LEGACY_PATTERNS_PATH, resolve_rules_path
+from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 
 @app.command("lint")
 def lint_cmd(
@@ -69,11 +69,6 @@ def lint_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 
 @app.command("policy")
 def policy_cmd(
@@ -134,10 +129,6 @@ def policy_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("check")
 def check_cmd(

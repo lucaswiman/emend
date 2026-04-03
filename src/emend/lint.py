@@ -18,6 +18,7 @@ from emend.rules_config import (
     yaml_key,
     as_list,
     expand_macros,
+    expand_not_through,
 )
 
 
@@ -233,15 +234,7 @@ def load_rules(
             find_pattern_str = rule_def.get("find", "")
             flows_from = expand_macros(flows_from, macros)
             flows_to = expand_macros(flows_to, macros)
-            if not_through:
-                if isinstance(not_through, list):
-                    expanded = [
-                        expand_macros(str(item), macros)
-                        for item in not_through
-                    ]
-                    not_through = " | ".join(item for item in expanded if item)
-                else:
-                    not_through = expand_macros(str(not_through), macros)
+            not_through = expand_not_through(not_through, macros)
         else:
             # Pattern rule: find is required
             match_pattern = rule_def.get("match", rule_def.get("find"))

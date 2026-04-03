@@ -1,9 +1,11 @@
+import logging
 import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
+from emend import ast_commands
 from emend.cli_base import (
     _maybe_create_oracle,
     _reject_file_glob,
@@ -14,7 +16,18 @@ from emend.cli_base import (
     resolve_file_scopes,
     resolve_files,
 )
-from emend.transform import cmd_edit
+from emend.component_selector import parse_extended_selector
+from emend.transform import (
+    cmd_add,
+    cmd_edit,
+    extract_pattern_literals,
+    move_module,
+    move_symbol,
+    rename_module,
+    rename_symbol,
+    replace_pattern,
+    safe_delete,
+)
 
 @app.command("set", hidden=True)
 def edit_set_cmd(
@@ -87,10 +100,6 @@ def edit_set_cmd(
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
 
-import sys
-import typer
-from typing import Annotated
-from emend.transform import cmd_edit
 
 @app.command("rm", hidden=True)
 def remove_cmd(
@@ -131,12 +140,6 @@ def remove_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import safe_delete
 
 @app.command("delete", hidden=True)
 def delete_cmd(
@@ -179,8 +182,6 @@ def delete_cmd(
         # JSON output for tooling
         emend delete models.py::LegacyUser --cascade --json
     """
-    from emend.component_selector import parse_extended_selector
-
     try:
         sel = parse_extended_selector(selector)
         plan = safe_delete(
@@ -226,11 +227,6 @@ def delete_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.transform import cmd_add
 
 @app.command("add", hidden=True)
 def add(
@@ -319,12 +315,6 @@ def add(
         raise typer.Exit(1)
 
 
-import logging
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.transform import replace_pattern, extract_pattern_literals
 
 @app.command("replace", hidden=True)
 def replace_cmd(
@@ -463,9 +453,6 @@ def replace_cmd(
         raise typer.Exit(1)
 
 
-import typer
-from typing import Annotated
-from emend import ast_commands
 
 @app.command("cp", hidden=True)
 def copy_to_cmd(
@@ -485,12 +472,6 @@ def copy_to_cmd(
     ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import rename_symbol, rename_module
 
 @app.command("rename", hidden=True)
 def rename_cmd(
@@ -563,12 +544,6 @@ def rename_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import move_symbol, move_module
 
 @app.command("mv", hidden=True)
 def move_cmd(
@@ -646,12 +621,6 @@ def move_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from pathlib import Path
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
-from emend.transform import replace_pattern, rename_symbol, cmd_edit, cmd_add
 
 @app.command("batch", hidden=True)
 def batch_cmd(
@@ -676,7 +645,6 @@ def batch_cmd(
         emend batch refactor.yaml
         emend batch refactor.json --apply
     """
-    from pathlib import Path
     import json as json_mod
 
     try:
@@ -844,11 +812,6 @@ def batch_cmd(
         raise typer.Exit(1)
 
 
-import sys
-from pathlib import Path
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("saturate", hidden=True)
 def saturate_cmd(

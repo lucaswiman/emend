@@ -112,17 +112,16 @@ def _smart_case_pattern(pattern: str) -> str:
     return f'({snake}|{camel}|{pascal})'
 
 
-def _parse_pattern(pattern: str, case_insensitive: bool = False) -> tuple[str, bool]:
-    """Parse a pattern into (regex_pattern, is_regex).
+def _parse_pattern(pattern: str) -> str:
+    """Parse a pattern into a regex string.
 
     Handles:
-    - /regex/ - explicit regex
+    - /regex/ - explicit regex (returned as-is without delimiters)
     - glob patterns with * and ? - converted to regex
     """
     # Check for regex pattern (slash-delimited)
     if pattern.startswith("/") and pattern.endswith("/"):
-        regex = pattern[1:-1]
-        return regex, True
+        return pattern[1:-1]
 
     # Convert glob to regex
     # Escape regex special chars except * and ?
@@ -137,7 +136,7 @@ def _parse_pattern(pattern: str, case_insensitive: bool = False) -> tuple[str, b
         else:
             regex += char
 
-    return f"^{regex}$", False
+    return f"^{regex}$"
 
 
 def _match_pattern(
@@ -155,7 +154,7 @@ def _match_pattern(
         # If it's a regex or wildcard, still use case-insensitive
         case_insensitive = True
 
-    regex, _ = _parse_pattern(pattern, case_insensitive)
+    regex = _parse_pattern(pattern)
     flags = re.IGNORECASE if case_insensitive else 0
     return bool(re.search(regex, value, flags))
 
@@ -337,22 +336,6 @@ def _filter_by_decorator(
 
             if _match_pattern(dec_name, pattern, case_insensitive, smart_case):
                 return True
-    return False
-
-
-def _filter_by_returns(
-    symbol: SymbolInfo, returns_patterns: list[str], case_insensitive: bool, smart_case: bool = False
-) -> bool:
-    """Check if symbol return type matches any pattern (OR logic)."""
-    if not returns_patterns:
-        return True
-
-    if symbol.returns is None:
-        return False
-
-    for pattern in returns_patterns:
-        if _match_pattern(symbol.returns, pattern, case_insensitive, smart_case):
-            return True
     return False
 
 

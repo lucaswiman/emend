@@ -223,6 +223,15 @@ def _execute_via_python(
     return results
 
 
+def _var_name_from_match(m: Any) -> str:
+    """Extract variable name from a pattern match: first capture, then matched text."""
+    for _cap_name, cap_text in m.captures.items():
+        return cap_text.strip()
+    if m.matched_text:
+        return m.matched_text.strip()
+    return ""
+
+
 def _execute_via_datalog(
     spec: FlowSpec,
     file_path: str,
@@ -276,13 +285,7 @@ def _execute_via_datalog(
         if m.line is None:
             continue
         loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-        # Use first captured variable name, or matched text
-        var_name = ""
-        for _cap_name, cap_text in m.captures.items():
-            var_name = cap_text.strip()
-            break
-        if not var_name and m.matched_text:
-            var_name = m.matched_text.strip()
+        var_name = _var_name_from_match(m)
         source_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
         key = (loc.file_path, loc.func_qn, loc.block_id)
         if key not in source_lines:
@@ -307,12 +310,7 @@ def _execute_via_datalog(
         if m.line is None:
             continue
         loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-        var_name = ""
-        for _cap_name, cap_text in m.captures.items():
-            var_name = cap_text.strip()
-            break
-        if not var_name and m.matched_text:
-            var_name = m.matched_text.strip()
+        var_name = _var_name_from_match(m)
         sink_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
         key = (loc.file_path, loc.func_qn, loc.block_id)
         if key not in sink_lines:
@@ -342,12 +340,7 @@ def _execute_via_datalog(
                 if m.line is None:
                     continue
                 loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-                var_name = ""
-                for _cap_name, cap_text in m.captures.items():
-                    var_name = cap_text.strip()
-                    break
-                if not var_name and m.matched_text:
-                    var_name = m.matched_text.strip()
+                var_name = _var_name_from_match(m)
                 blocker_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
                 key = (loc.file_path, loc.func_qn, loc.block_id)
                 if key not in blocker_lines:
@@ -365,10 +358,7 @@ def _execute_via_datalog(
                 if m.line is None:
                     continue
                 loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-                var_name = ""
-                for _cap_name, cap_text in m.captures.items():
-                    var_name = cap_text.strip()
-                    break
+                var_name = _var_name_from_match(m)
                 through_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
 
     try:

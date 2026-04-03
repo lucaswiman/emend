@@ -369,40 +369,21 @@ def load_trace_config(config_path: str) -> TraceConfig:
     rules_flow_config = _trace_config_from_unified_rules(config)
 
     # Support presets in both old trace-section and unified top-level forms.
-    preset_names: list[str] = []
-    preset_names.extend(str(v) for v in as_list(config.get("presets")))
+    preset_names: list[str] = list(str(v) for v in as_list(config.get("presets")))
     if isinstance(raw_section, dict):
         preset_names.extend(str(v) for v in as_list(raw_section.get("presets")))
     if preset_names:
         # Deduplicate while preserving order.
-        seen: set[str] = set()
-        unique_preset_names: list[str] = []
-        for name in preset_names:
-            if name not in seen:
-                seen.add(name)
-                unique_preset_names.append(name)
+        unique_preset_names = list(dict.fromkeys(preset_names))
 
         from emend.trace_presets import get_preset, merge_configs
 
         preset_configs = [get_preset(name) for name in unique_preset_names]
         return merge_configs(*preset_configs, explicit_config, rules_flow_config)
 
-    if (
-        explicit_config.labels
-        or explicit_config.sources
-        or explicit_config.sinks
-        or explicit_config.sanitizers
-        or explicit_config.scope_sanitizers
-        or rules_flow_config.labels
-        or rules_flow_config.sources
-        or rules_flow_config.sinks
-        or rules_flow_config.sanitizers
-        or rules_flow_config.scope_sanitizers
-    ):
-        from emend.trace_presets import merge_configs
-        return merge_configs(explicit_config, rules_flow_config)
+    from emend.trace_presets import merge_configs
 
-    return TraceConfig()
+    return merge_configs(explicit_config, rules_flow_config)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +406,14 @@ _AUG_ASSIGN_RE = re.compile(
     re.DOTALL,
 )
 
+_PYTHON_KEYWORDS = frozenset({
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else",
+    "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+    "return", "try", "while", "with", "yield",
+})
+
 
 def _extract_identifiers(expr: str) -> set[str]:
     """Return identifiers appearing in *expr*.
@@ -432,24 +421,17 @@ def _extract_identifiers(expr: str) -> set[str]:
     Includes simple identifiers (``x``), dotted identifiers (``obj.field``),
     and subscript identifiers (``data['key']``).
     """
-    _KEYWORDS = frozenset({
-        "False", "None", "True", "and", "as", "assert", "async", "await",
-        "break", "class", "continue", "def", "del", "elif", "else",
-        "except", "finally", "for", "from", "global", "if", "import",
-        "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
-        "return", "try", "while", "with", "yield",
-    })
     result: set[str] = set()
     # Dotted identifiers first (longer match takes priority)
     for m in _DOTTED_IDENT_RE.findall(expr):
         result.add(m)
     # Subscript identifiers: data['key'] → data['key']
     for base, quote, key in _SUBSCRIPT_IDENT_RE.findall(expr):
-        if base not in _KEYWORDS:
+        if base not in _PYTHON_KEYWORDS:
             result.add(f"{base}[{quote}{key}{quote}]")
     # Simple identifiers (always include as fallback)
     for m in _IDENT_RE.findall(expr):
-        if m not in _KEYWORDS:
+        if m not in _PYTHON_KEYWORDS:
             result.add(m)
     return result
 
@@ -516,16 +498,11 @@ def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int,
 
 def _has_type_constraints(config: TraceConfig) -> bool:
     """Check if any source/sink/sanitizer has a type_constraint."""
-    for s in config.sources:
-        if s.type_constraint:
-            return True
-    for s in config.sinks:
-        if s.type_constraint:
-            return True
-    for s in config.sanitizers:
-        if s.type_constraint:
-            return True
-    return False
+    return any(
+        s.type_constraint
+        for collection in (config.sources, config.sinks, config.sanitizers)
+        for s in collection
+    )
 
 
 def _maybe_create_type_oracle(config: TraceConfig) -> Any | None:
@@ -867,15 +844,11 @@ def _run_trace_datalog(
                     scope_kills.append((file_path, fq, scope_san.label, bid))
                     scope_kill_lines.append((file_path, fq, scope_san.label, bid, m.line))
 
-    if not sources:
-        return []
-
     # Build effect_sinks from config
     effect_sinks_list: list[tuple[str, str]] = []
     for sink_def in config.sinks:
         if sink_def.effect:
-            import re as _re
-            effect_m = _re.match(r'(writes|reads)\(\$\w+\)', sink_def.effect)
+            effect_m = re.match(r'(writes|reads)\(\$\w+\)', sink_def.effect)
             if effect_m:
                 effect_sinks_list.append((sink_def.label, effect_m.group(1)))
 

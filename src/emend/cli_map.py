@@ -1,7 +1,20 @@
+import json as _json
+import os
+import sys
+from typing import Annotated, Optional
+
 import typer
-from typing import Annotated
 
 from emend.cli_base import app
+from emend.component_selector import parse_extended_selector
+from emend.knowledge import (
+    IdentifierMapping,
+    MappingStore,
+    ModuleMapping,
+    make_resolve_module_cb,
+    mapping_to_dict,
+    module_mapping_to_dict,
+)
 
 map_app = typer.Typer(help="Identifier and module mappings.")
 app.add_typer(map_app, name="map")
@@ -21,9 +34,6 @@ def map_add_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Add a cross-service identifier mapping."""
-    import json as _json
-    from emend.knowledge import MappingStore, IdentifierMapping, mapping_to_dict
-
     store = MappingStore(".")
     m = IdentifierMapping(
         source_project=source_project,
@@ -44,9 +54,6 @@ def map_add_cmd(
         print(f"Added mapping: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("search")
 def map_search_cmd(
@@ -58,8 +65,6 @@ def map_search_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Search identifier mappings (substring match)."""
-    import json as _json
-    from emend.knowledge import MappingStore, mapping_to_dict
 
     store = MappingStore(".")
     results = store.search_mappings(
@@ -76,9 +81,6 @@ def map_search_cmd(
             print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]{conf}")
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("lookup")
 def map_lookup_cmd(
@@ -88,9 +90,6 @@ def map_lookup_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """Look up mappings for a specific identifier."""
-    import json as _json
-    from emend.knowledge import MappingStore, mapping_to_dict
-
     store = MappingStore(".")
     results = store.find_mappings_for(identifier, project=project, direction=direction)
     if json_output:
@@ -102,10 +101,6 @@ def map_lookup_cmd(
             print(f"{m.source_project}::{m.source_identifier} -> {m.target_project}::{m.target_identifier} [{m.relationship}]")
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @map_app.command("rm")
 def map_rm_cmd(
@@ -114,8 +109,6 @@ def map_rm_cmd(
     target_identifier: Annotated[Optional[str], typer.Option("--target-identifier")] = None,
 ):
     """Delete identifier mappings matching the given source identifier."""
-    from emend.knowledge import MappingStore
-
     store = MappingStore(".")
     ok = store.delete_mapping(
         source_identifier,
@@ -129,9 +122,6 @@ def map_rm_cmd(
         raise typer.Exit(1)
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("add-module")
 def map_add_module_cmd(
@@ -150,9 +140,6 @@ def map_add_module_cmd(
         emend map add-module shared.utils --path /home/user/shared-utils
         emend map add-module gateway --repo org/gateway --subpath src/gateway
     """
-    import json as _json
-    from emend.knowledge import MappingStore, ModuleMapping, module_mapping_to_dict
-
     if not repo and not path:
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
@@ -170,17 +157,12 @@ def map_add_module_cmd(
         print(f"Added module mapping: {module_prefix} -> {target}")
 
 
-import typer
-from typing import Annotated
 
 @map_app.command("list-modules")
 def map_list_modules_cmd(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ):
     """List all module mappings."""
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-
     store = MappingStore(".")
     results = store.list_module_mappings()
     if json_output:
@@ -194,9 +176,6 @@ def map_list_modules_cmd(
             print(f"{m.module_prefix} -> {target}{sub}")
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("update-module")
 def map_update_module_cmd(
@@ -216,9 +195,6 @@ def map_update_module_cmd(
         emend map update-module gateway --branch v2 --subpath src/gw
         emend map update-module payments --fetch
     """
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-
     store = MappingStore(".")
     mm = store.get_module_mapping_by_prefix(module_prefix)
     if mm is None:
@@ -255,17 +231,12 @@ def map_update_module_cmd(
         print(f"Updated module mapping '{module_prefix}' -> {target}")
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("rm-module")
 def map_rm_module_cmd(
     prefix: Annotated[str, typer.Argument(help="Module prefix to delete.")],
 ):
     """Delete a module mapping by prefix name."""
-    from emend.knowledge import MappingStore
-
     store = MappingStore(".")
     ok = store.delete_module_mapping_by_prefix(prefix)
     if ok:
@@ -275,10 +246,6 @@ def map_rm_module_cmd(
         raise typer.Exit(1)
 
 
-import sys
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
 
 @map_app.command("resolve")
 def map_resolve_cmd(
@@ -292,13 +259,9 @@ def map_resolve_cmd(
     If it's a dotted selector like 'a.b.C', it uses module mappings to find
     where 'a.b' lives, then treats 'C' as a symbol.
     """
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-    import os
 
     store = MappingStore(".")
     if location:
-        from emend.component_selector import parse_extended_selector
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
 
         # Resolve to a selector with an explicit file path first.
@@ -382,7 +345,6 @@ def map_resolve_cmd(
     resolved_sel = store.resolve_selector(selector)
     if resolved_sel:
         if json_output:
-            from emend.component_selector import parse_extended_selector
             sel = parse_extended_selector(resolved_sel)
             print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
         else:

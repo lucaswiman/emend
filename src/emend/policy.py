@@ -19,6 +19,7 @@ from emend.rules_config import (
     LEGACY_PATTERNS_PATH,
     load_rules_document,
     expand_macros,
+    expand_not_through,
     yaml_key,
     as_list,
 )
@@ -169,13 +170,7 @@ def _build_unified_policy(
         flow_from = yaml_key(flow_def, "from", "flows_from")
         flow_to = yaml_key(flow_def, "to", "flows_to")
         if flow_from and flow_to:
-            not_through_val = yaml_key(flow_def, "not_through")
-            not_through = None
-            if isinstance(not_through_val, list):
-                expanded = [expand_macros(str(v), macros) for v in not_through_val]
-                not_through = " | ".join(v for v in expanded if v)
-            elif not_through_val:
-                not_through = expand_macros(str(not_through_val), macros)
+            not_through = expand_not_through(yaml_key(flow_def, "not_through"), macros)
             checks.append(FlowCheck(
                 flows_from=expand_macros(str(flow_from), macros),
                 flows_to=expand_macros(str(flow_to), macros),

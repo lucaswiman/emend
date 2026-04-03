@@ -177,27 +177,22 @@ def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, Met
     temp_code = pattern.raw
     metavar_map: dict[str, MetaVar] = {}
 
-    sorted_metavars = sorted(pattern.metavars, key=lambda mv: (
-        -len(f"$...{mv.name}:{mv.type_constraint or ''}"),
-        -len(f"$...{mv.name}"),
-        -len(f"${mv.name}:{mv.type_constraint or ''}"),
-        -len(f"${mv.name}")
-    ))
+    def _metavar_pattern_str(mv: MetaVar) -> str:
+        """Build the literal pattern string for a metavar (e.g. '$...X:int')."""
+        prefix = "$..." if mv.ellipsis else "$"
+        suffix = f":{mv.type_constraint}" if mv.type_constraint else ""
+        return f"{prefix}{mv.name}{suffix}"
+
+    # Sort longest first so that more specific patterns are replaced before
+    # shorter ones that are a prefix of them (e.g. '$X' before '$XY').
+    sorted_metavars = sorted(
+        pattern.metavars, key=lambda mv: -len(_metavar_pattern_str(mv))
+    )
 
     for mv in sorted_metavars:
         placeholder = f"__META_{mv.name}__"
         metavar_map[placeholder] = mv
-
-        if mv.ellipsis and mv.type_constraint:
-            pattern_str = f"$...{mv.name}:{mv.type_constraint}"
-        elif mv.ellipsis:
-            pattern_str = f"$...{mv.name}"
-        elif mv.type_constraint:
-            pattern_str = f"${mv.name}:{mv.type_constraint}"
-        else:
-            pattern_str = f"${mv.name}"
-
-        temp_code = temp_code.replace(pattern_str, placeholder)
+        temp_code = temp_code.replace(_metavar_pattern_str(mv), placeholder)
 
     # Fix ellipsis metavars in dict context by appending `: None`
     for mv in sorted_metavars:
@@ -250,6 +245,35 @@ def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, Met
     )
 
     return temp_code, metavar_map
+
+
+def _compile_generators(generators, metavar_map: dict) -> list | None:
+    """Compile a list of ast comprehension generator objects to IR dicts.
+
+    Returns a list of IR dicts, or None if any sub-node cannot be compiled.
+    Shared by ListComp/SetComp/GeneratorExp and DictComp handling.
+    """
+    import ast as _ast
+    generators_ir = []
+    for gen in generators:
+        target_ir = _ast_to_rust_ir(gen.target, metavar_map)
+        if target_ir is None:
+            return None
+        iter_ir = _ast_to_rust_ir(gen.iter, metavar_map)
+        if iter_ir is None:
+            return None
+        ifs_ir = []
+        for if_clause in gen.ifs:
+            if_ir = _ast_to_rust_ir(if_clause, metavar_map)
+            if if_ir is None:
+                return None
+            ifs_ir.append(if_ir)
+        generators_ir.append({
+            "target": target_ir,
+            "iter": iter_ir,
+            "ifs": ifs_ir,
+        })
+    return generators_ir
 
 
 def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
@@ -671,35 +695,20 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
         elt_ir = _ast_to_rust_ir(node.elt, metavar_map)
         if elt_ir is None:
             return None
-        generators_ir = []
-        for gen in node.generators:
-            target_ir = _ast_to_rust_ir(gen.target, metavar_map)
-            if target_ir is None:
-                return None
-            iter_ir = _ast_to_rust_ir(gen.iter, metavar_map)
-            if iter_ir is None:
-                return None
-            ifs_ir = []
-            for if_clause in gen.ifs:
-                if_ir = _ast_to_rust_ir(if_clause, metavar_map)
-                if if_ir is None:
-                    return None
-                ifs_ir.append(if_ir)
-            generators_ir.append({
-                "target": target_ir,
-                "iter": iter_ir,
-                "ifs": ifs_ir
-            })
-        kind = "list_comprehension"
+        generators_ir = _compile_generators(node.generators, metavar_map)
+        if generators_ir is None:
+            return None
         if isinstance(node, _ast.SetComp):
             kind = "set_comprehension"
         elif isinstance(node, _ast.GeneratorExp):
             kind = "generator_expression"
+        else:
+            kind = "list_comprehension"
         return {
             "type": "comprehension",
             "kind": kind,
             "elt": elt_ir,
-            "generators": generators_ir
+            "generators": generators_ir,
         }
 
     elif isinstance(node, _ast.DictComp):
@@ -709,30 +718,14 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
         value_ir = _ast_to_rust_ir(node.value, metavar_map)
         if value_ir is None:
             return None
-        generators_ir = []
-        for gen in node.generators:
-            target_ir = _ast_to_rust_ir(gen.target, metavar_map)
-            if target_ir is None:
-                return None
-            iter_ir = _ast_to_rust_ir(gen.iter, metavar_map)
-            if iter_ir is None:
-                return None
-            ifs_ir = []
-            for if_clause in gen.ifs:
-                if_ir = _ast_to_rust_ir(if_clause, metavar_map)
-                if if_ir is None:
-                    return None
-                ifs_ir.append(if_ir)
-            generators_ir.append({
-                "target": target_ir,
-                "iter": iter_ir,
-                "ifs": ifs_ir
-            })
+        generators_ir = _compile_generators(node.generators, metavar_map)
+        if generators_ir is None:
+            return None
         return {
             "type": "dict_comprehension",
             "key": key_ir,
             "value": value_ir,
-            "generators": generators_ir
+            "generators": generators_ir,
         }
 
     elif isinstance(node, _ast.JoinedStr):
@@ -1104,34 +1097,25 @@ def compile_constraint_to_rust_ir(
         if constraint.startswith(keyword + " "):
             name_pattern = constraint[len(keyword) + 1:].strip()
             name_pattern = name_pattern.rstrip(":").strip()
-            if "*" in name_pattern:
-                name_ir = {"type": "name_glob", "value": name_pattern}
-            else:
-                name_ir = {"type": "name", "value": name_pattern}
-            
-            if keyword == "def":
-                return {
-                    "type": "funcdef",
-                    "name": name_ir,
-                    "params": [{"type": "ellipsis"}],
-                    "decorators": [{"type": "ellipsis"}],
-                    "is_async": False,
-                }
-            elif keyword == "async def":
-                return {
-                    "type": "funcdef",
-                    "name": name_ir,
-                    "params": [{"type": "ellipsis"}],
-                    "decorators": [{"type": "ellipsis"}],
-                    "is_async": True,
-                }
-            else:
+            name_ir = (
+                {"type": "name_glob", "value": name_pattern}
+                if "*" in name_pattern
+                else {"type": "name", "value": name_pattern}
+            )
+            if keyword == "class":
                 return {
                     "type": "classdef",
                     "name": name_ir,
                     "bases": [{"type": "ellipsis"}],
                     "decorators": [{"type": "ellipsis"}],
                 }
+            return {
+                "type": "funcdef",
+                "name": name_ir,
+                "params": [{"type": "ellipsis"}],
+                "decorators": [{"type": "ellipsis"}],
+                "is_async": keyword == "async def",
+            }
 
     # Simple keyword constraints for compound statements
     # Use NodeKindMatch to match related tree-sitter node types

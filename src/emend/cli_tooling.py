@@ -1,8 +1,8 @@
 import logging
 import sys
-from typing import Optional
+from typing import Annotated, Optional
+
 import typer
-from typing import Annotated
 
 from emend.cli_base import app, tool_app
 from emend.transform import warm_caches
@@ -155,9 +155,6 @@ def index_cmd(
     )
 
 
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("editor-search", hidden=True)
 def editor_search_cmd(
@@ -222,8 +219,6 @@ def editor_search_cmd(
         engine.close()
 
 
-import typer
-from typing import Annotated
 
 @app.command("editor-server", hidden=True)
 def editor_server_cmd(
@@ -263,10 +258,6 @@ def editor_server_cmd(
     run_editor_server(path)
 
 
-import sys
-from typing import Optional
-import typer
-from typing import Annotated
 
 @app.command("mcp")
 def mcp_cmd(
