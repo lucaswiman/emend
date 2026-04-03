@@ -1865,6 +1865,8 @@ class EditorSearchEngine:
         When *line* and *col* are provided, local variables from the
         enclosing scopes are ranked first.
         """
+        import time as _time
+        t0 = _time.monotonic()
         conn = self._get_conn()
         seen: set[str] = set()
         items: list[dict] = []
@@ -1889,9 +1891,61 @@ class EditorSearchEngine:
                     if s_start <= zero_based_line <= s_end:
                         size = s_end - s_start
                         enclosing_scopes.append((size, bindings))
-                
-                enclosing_scopes.sort(key=lambda x: x[0]) # innermost first
-                
+
+                enclosing_scopes.sort(key=lambda x: x[0])  # innermost first
+
+                # Try to build CFG data for more precise reachability analysis
+                cfg_defs_before_cursor: set[str] | None = None
+                cfg_func_range: tuple[int, int] | None = None
+                try:
+                    from emend.cfg import build_cfgs_for_source
+                    cfg_t0 = _time.monotonic()
+                    cfgs = build_cfgs_for_source(source)
+                    # Find the CFG for the function containing the cursor (prefer innermost)
+                    cursor_cfg = None
+                    for c in cfgs:
+                        if c.func_start_line <= zero_based_line <= c.func_end_line:
+                            if cursor_cfg is None or (c.func_end_line - c.func_start_line) < (cursor_cfg.func_end_line - cursor_cfg.func_start_line):
+                                cursor_cfg = c
+                    if cursor_cfg is not None:
+                        cfg_func_range = (cursor_cfg.func_start_line, cursor_cfg.func_end_line)
+                        # Find which block the cursor is in
+                        cursor_block_id = None
+                        for block in cursor_cfg.get_blocks():
+                            if block['start_line'] <= zero_based_line <= block['end_line']:
+                                cursor_block_id = block['id']
+                                break
+                        if cursor_block_id is not None:
+                            # Build reverse reachability: which blocks can reach cursor_block?
+                            edges = cursor_cfg.get_edges()
+                            pred: dict[int, list[int]] = {}
+                            for e in edges:
+                                pred.setdefault(e['to'], []).append(e['from'])
+                            # BFS backwards from cursor block
+                            reachable_to_cursor: set[int] = set()
+                            queue = [cursor_block_id]
+                            while queue:
+                                bid = queue.pop()
+                                if bid in reachable_to_cursor:
+                                    continue
+                                reachable_to_cursor.add(bid)
+                                queue.extend(pred.get(bid, []))
+                            # Collect defs from blocks that can reach cursor
+                            cfg_defs_before_cursor = set()
+                            for block in cursor_cfg.get_blocks():
+                                if block['id'] in reachable_to_cursor:
+                                    for def_tuple in block['defs']:
+                                        d_name = def_tuple[0]
+                                        d_line = def_tuple[1]
+                                        # Only count defs on lines before cursor
+                                        if d_line <= zero_based_line:
+                                            cfg_defs_before_cursor.add(d_name)
+                    cfg_elapsed = (_time.monotonic() - cfg_t0) * 1000
+                    if cfg_elapsed > 50:
+                        logger.debug("CFG analysis took %.1fms (slow)", cfg_elapsed)
+                except Exception as exc:
+                    logger.debug("CFG-informed completion failed: %s", exc)
+
                 for _, bindings in enclosing_scopes:
                     for b_name, b_kind, b_line, b_col in bindings:
                         # Only include if it matches prefix
@@ -1900,12 +1954,36 @@ class EditorSearchEngine:
                         if b_name not in seen:
                             seen.add(b_name)
                             local_names.add(b_name)
-                            # Rank local variables higher than parameters
-                            score = 2000 if b_kind.lower() != "parameter" else 1800
+
+                            # CFG-informed scoring: only apply CFG analysis to
+                            # variables within the same function as the cursor.
+                            # Outer scope variables use the line-number heuristic.
+                            is_param = b_kind.lower() == "parameter"
+                            in_cfg_func = (
+                                cfg_func_range is not None
+                                and cfg_func_range[0] <= b_line <= cfg_func_range[1]
+                            )
+                            if is_param:
+                                # Parameters are always in scope
+                                score = 1800
+                            elif cfg_defs_before_cursor is not None and in_cfg_func:
+                                # Use CFG reachability for same-function locals
+                                if b_name in cfg_defs_before_cursor:
+                                    score = 2000
+                                else:
+                                    score = 400
+                            else:
+                                # Fallback: simple line-number heuristic
+                                if b_line <= zero_based_line:
+                                    score = 2000
+                                else:
+                                    score = 400  # defined after cursor
+
+                            menu = "[local]" if score >= 1800 else "[local?]"
                             items.append({
                                 "word": b_name,
                                 "kind": b_kind.lower(),
-                                "menu": "[local]",
+                                "menu": menu,
                                 "score": score,
                             })
             except Exception as exc:
@@ -1959,6 +2037,31 @@ class EditorSearchEngine:
                         if b and b not in checked_parents:
                             parents_to_check.append(b)
 
+            # Enrich dotted completions via reference_index: find members referenced on parent
+            if len(items) < limit:
+                try:
+                    ref_sql = (
+                        "SELECT DISTINCT target_qn FROM reference_index "
+                        "WHERE target_qn GLOB ? LIMIT ?"
+                    )
+                    for p in checked_parents:
+                        ref_pattern = f"*{p}.{member_prefix}*"
+                        for row in conn.execute(ref_sql, (ref_pattern, limit - len(items))):
+                            target_qn = row[0]
+                            # Extract the member name (segment immediately after the parent)
+                            suffix = target_qn.split(f"{p}.", 1)[-1] if f"{p}." in target_qn else ""
+                            member_name = suffix.split(".")[0] if suffix else ""
+                            if member_name and member_name.startswith(member_prefix) and member_name not in seen:
+                                seen.add(member_name)
+                                items.append({
+                                    "word": member_name,
+                                    "kind": "reference",
+                                    "menu": f"[ref:{target_qn}]",
+                                    "score": 800,
+                                })
+                except Exception as exc:
+                    logger.debug("Reference-based completion failed: %s", exc)
+
             # Fallback: resolve through KB module mappings for cross-project symbols
             if not items:
                 items = self._complete_via_mapping(
@@ -1997,7 +2100,32 @@ class EditorSearchEngine:
         # Sort by score (desc) and word length (asc)
         items.sort(key=lambda x: (-x.get("score", 0), len(x["word"])))
 
-        return SearchResult(items=items[:limit], elapsed_ms=0, mode="complete", query=prefix)
+        elapsed = round((_time.monotonic() - t0) * 1000, 2)
+        return SearchResult(items=items[:limit], elapsed_ms=elapsed, mode="complete", query=prefix)
+
+    def complete_diagnostics(self, prefix: str, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
+        """Return completion candidates with detailed timing breakdown."""
+        import time as _time
+        t0 = _time.monotonic()
+        timings: dict[str, float] = {}
+
+        result = self.complete(prefix, file=file, line=line, col=col)
+        timings["total_ms"] = round((_time.monotonic() - t0) * 1000, 2)
+        timings["item_count"] = len(result.items)
+
+        # Report which signals were used
+        signals_used = []
+        for item in result.items:
+            menu = item.get("menu", "")
+            if menu not in signals_used:
+                signals_used.append(menu)
+
+        return SearchResult(
+            items=[{"timings": timings, "signals": signals_used}] + result.items,
+            elapsed_ms=timings["total_ms"],
+            mode="complete_diagnostics",
+            query=prefix,
+        )
 
     @staticmethod
     def _extract_import_names(file: str) -> dict[str, str]:
@@ -2140,6 +2268,12 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         col = int(params.get("col", 0))
         logger.debug(f"complete() called: prefix={prefix!r}, file={file!r}, line={line}, col={col}")
         return engine.complete(prefix, file=file, line=line, col=col).to_dict()
+    elif method == "complete_diagnostics":
+        prefix = params.get("prefix", params.get("query", ""))
+        file = params.get("file", "")
+        line = int(params.get("line", 0))
+        col = int(params.get("col", 0))
+        return engine.complete_diagnostics(prefix, file=file, line=line, col=col).to_dict()
     # -- Mapping methods --
     elif method == "mapping_lookup":
         return _mapping_lookup(engine, params)
