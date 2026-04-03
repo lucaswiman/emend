@@ -284,6 +284,30 @@ make test TESTS="-k default"
 * Always identify yourself in commit messages (Claude Code, Gemini, Codex, etc.)
 * You should use `make test` rather than trying to run tests directly from the environment.
 
+<roadmaps-and-phasing>
+<layout>
+Projects in progress are put in the ideas/roadmap/ folder with an index.md with `- [ ] TODOs` for each phase and more detailed instructions in linked markdown files also in the roadmap directory.
+
+Completed roadmaps go in ideas/old-roadmaps but should only be moved if the user confirms they should be moved.
+</layout>
+
+<instructions>
+"Implement the next phase." refers to referencing that index.md file, finding the next phase that was not implemented, implementing it, then checking off finished TODOs.
+
+ALWAYS check off TODOs and phases when you complete them. This can waste time in later sessions duplicating work and sow confusion.
+
+When you finish a phase, you should always let the user know if there are any unfinished tasks from earlier phases, including xfailed tests.
+
+You should only xfail tests if the user tells you to. It's preferable to leave red/failing tests so that the CI build demonstrates the current project status.
+</instructions>
+
+<planning>
+When asked to create a roadmap for something, use that directory structure.
+Put it in ideas/roadmap-project-name if there is an active roadmap rn.
+</planning>
+
+</roadmaps-and-phasing>
+
 ## Environment notes
 
 Do not assume the dependencies will be installed on the active python installation. The venv must be built to include the compiled rust emend_core. THAT LIBRARY IS _REQUIRED_ for `emend` to function. DO NOT hack around its absence, which indicates you are not working in the correct environment. Try `make clean test` to build a functional .venv and run the test suite.
