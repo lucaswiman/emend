@@ -1463,7 +1463,7 @@ def find_dsl_impact(
     class_to_tables: dict[str, set[str]] = {}
     for cls in changed_classes:
         # Convention: PascalCase -> snake_case plural
-        snake = _to_snake_case(cls)
+        snake = re.sub(r'(?<!^)(?=[A-Z])', '_', cls).lower()
         tables = {snake, snake + "s", snake + "es"}
         # Also check __tablename__ in project files
         for py_file in root.rglob("*.py"):

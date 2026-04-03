@@ -231,17 +231,12 @@ def map_update_module_cmd(
         print(f"Updated module mapping '{module_prefix}' -> {target}")
 
 
-import sys
-import typer
-from typing import Annotated
 
 @map_app.command("rm-module")
 def map_rm_module_cmd(
     prefix: Annotated[str, typer.Argument(help="Module prefix to delete.")],
 ):
     """Delete a module mapping by prefix name."""
-    from emend.knowledge import MappingStore
-
     store = MappingStore(".")
     ok = store.delete_module_mapping_by_prefix(prefix)
     if ok:
@@ -251,10 +246,6 @@ def map_rm_module_cmd(
         raise typer.Exit(1)
 
 
-import sys
-import typer
-from typing import Annotated
-from emend.component_selector import parse_extended_selector
 
 @map_app.command("resolve")
 def map_resolve_cmd(
@@ -268,13 +259,9 @@ def map_resolve_cmd(
     If it's a dotted selector like 'a.b.C', it uses module mappings to find
     where 'a.b' lives, then treats 'C' as a symbol.
     """
-    import json as _json
-    from emend.knowledge import MappingStore, module_mapping_to_dict
-    import os
 
     store = MappingStore(".")
     if location:
-        from emend.component_selector import parse_extended_selector
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path, resolve_through_reexports
 
         # Resolve to a selector with an explicit file path first.

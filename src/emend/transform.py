@@ -3628,15 +3628,10 @@ def add_to_component(
             ext=_ext,
         )
         if container_range is None:
-             # Fallback: find if it's a class or function to give better error or handle it
-             syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-             if syms:
-                 sym_kind = syms[0]["kind"]
-                 if sym_kind == "class" and selector.component == "params":
-                     raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-                 elif sym_kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-                     raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-             raise ValueError(f"Could not find container for {selector.component}")
+            _raise_component_not_found(
+                selector, source_code, _ext,
+                message=f"Could not find container for {selector.component}",
+            )
 
         cont_start, cont_end = container_range
         transform.replace_range(cont_start, cont_end, replacement)
@@ -3767,19 +3762,7 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
     )
 
     if range_info is None:
-        # Check if symbol exists at all
-        syms = _rust.collect_symbols_from_str(source_code, selector=".".join(selector.symbol_path), ext=_ext)
-        if not syms:
-             raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
-
-        # Symbol exists but component not found
-        kind = syms[0]["kind"]
-        if kind == "class" and selector.component in ("params", "returns"):
-            raise ValueError(f"Component '{selector.component}' not valid for ClassDef")
-        elif kind in ("function", "async_function", "method", "async_method") and selector.component == "bases":
-            raise ValueError(f"Component '{selector.component}' not valid for FunctionDef")
-
-        raise ValueError(f"Component '{selector.component}' not found or not valid for symbol {'.'.join(selector.symbol_path)}")
+        _raise_component_not_found(selector, source_code, _ext)
 
     start_byte, end_byte = range_info
     
