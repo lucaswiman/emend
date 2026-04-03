@@ -27,6 +27,7 @@ from emend.dsl import (
     format_symbols,
     _singularize,
     _to_pascal_case,
+    _find_tablename_mapping,
 )
 
 
@@ -58,10 +59,57 @@ class TestNamingHelpers:
         assert _singularize("user") == "user"
         assert _singularize("class") == "class"  # ends in ss
 
+    def test_singularize_already_singular_ending_in_s(self):
+        """Words like 'status' are already singular—must not strip the trailing 's'."""
+        # 'status' ends in 's' but NOT 'ss', so the naive rule would strip it to 'statu'.
+        # The correct answer is 'status' (unchanged) because the word is already singular.
+        assert _singularize("status") == "status"
+        assert _singularize("nexus") == "nexus"
+        assert _singularize("corpus") == "corpus"
+
     def test_to_pascal_case(self):
         assert _to_pascal_case("user") == "User"
         assert _to_pascal_case("user_profile") == "UserProfile"
         assert _to_pascal_case("order_item") == "OrderItem"
+
+
+class TestFindTablenameMapping:
+    """Tests for _find_tablename_mapping()."""
+
+    def test_basic_class_tablename(self, tmp_path):
+        """Finds __tablename__ assignments inside a class."""
+        f = tmp_path / "models.py"
+        f.write_text(
+            "class User:\n"
+            "    __tablename__ = 'users'\n"
+        )
+        result = _find_tablename_mapping(str(f))
+        assert "users" in result
+        assert result["users"][0] == "User"
+
+    def test_module_level_tablename_not_attributed_to_class(self, tmp_path):
+        """A __tablename__ at module level after a class must NOT be mapped to that class.
+
+        Previously current_class was never reset after a class definition, so any
+        module-level __tablename__ was wrongly attributed to the last class seen.
+        """
+        f = tmp_path / "models.py"
+        f.write_text(
+            "class User:\n"
+            "    __tablename__ = 'users'\n"
+            "\n"
+            "class Post:\n"
+            "    __tablename__ = 'posts'\n"
+            "\n"
+            "# Module-level – should NOT be attributed to Post\n"
+            "__tablename__ = 'orphan_table'\n"
+        )
+        result = _find_tablename_mapping(str(f))
+        # The two class tablenames should be found
+        assert result.get("users", (None,))[0] == "User"
+        assert result.get("posts", (None,))[0] == "Post"
+        # The module-level tablename must not be attributed to any class
+        assert "orphan_table" not in result
 
 
 class TestDetectDslRegions:
@@ -122,6 +170,34 @@ class TestDetectDslRegions:
         regions = detect_dsl_regions(str(f))
         assert len(regions) >= 1
         assert "SELECT" in regions[0].content
+
+    def test_detect_update_with_multi_char_table(self, tmp_path):
+        """UPDATE statements with multi-character table names must be detected.
+
+        The SQL regex previously used UPDATE\\s+\\w (exactly one word char) which
+        meant 'UPDATE users ...' was not matched while 'UPDATE u ...' was.
+        """
+        f = tmp_path / "app.py"
+        f.write_text('q = "UPDATE users SET name=\'Alice\' WHERE id=1"\n')
+        regions = detect_dsl_regions(str(f))
+        assert len(regions) >= 1, "UPDATE with multi-char table name must be detected as SQL"
+        assert regions[0].dsl == DslKind.SQL
+
+    def test_detect_with_cte_multi_char_name(self, tmp_path):
+        """WITH clause with multi-character CTE name must be detected.
+
+        The SQL regex previously used WITH\\s+\\w (exactly one word char) which
+        missed 'WITH cte AS ...' while matching 'WITH x AS ...'.
+        Test uses a magic comment so that the string is parsed as SQL regardless
+        of keyword detection, then checks the raw regex directly.
+        """
+        from emend.dsl import _SQL_KEYWORD_RE
+        # Single-char CTE name: should match
+        assert _SQL_KEYWORD_RE.search("WITH x AS (...)") is not None
+        # Multi-char CTE name: should also match
+        assert _SQL_KEYWORD_RE.search("WITH cte AS (...)") is not None, (
+            "WITH with multi-char CTE name must be detected by the SQL keyword regex"
+        )
 
 
 class TestExtractSqlSymbols:

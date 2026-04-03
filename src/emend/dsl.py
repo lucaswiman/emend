@@ -93,7 +93,7 @@ class DslLink:
 
 # SQL keyword pattern used to identify SQL content in string literals
 _SQL_KEYWORD_RE = re.compile(
-    r'\b(SELECT|INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|TRUNCATE\s+TABLE|WITH\s+\w|REPLACE\s+INTO)\b',
+    r'\b(SELECT|INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|TRUNCATE\s+TABLE|WITH\s+\w+|REPLACE\s+INTO)\b',
     re.IGNORECASE,
 )
 
@@ -730,7 +730,9 @@ def _singularize(name: str) -> str:
     # "ses" (e.g. "buses") → strip "es"
     if name.endswith("ses"):
         return name[:-2]
-    if name.endswith("s") and not name.endswith("ss"):
+    # Words ending in "us" or "is" are almost always already singular in English
+    # (e.g. "status", "nexus", "corpus", "analysis") – do not strip the "s".
+    if name.endswith("s") and not name.endswith("ss") and not name.endswith("us") and not name.endswith("is"):
         return name[:-1]
     return name
 
@@ -777,6 +779,10 @@ def _find_tablename_mapping(file_path: str) -> dict[str, tuple[str, int]]:
         class_match = _CLASS_DEF_RE.match(line)
         if class_match:
             current_class = class_match.group(1)
+        elif current_class and line and not line[0].isspace():
+            # A non-blank, non-indented line that is not a class definition
+            # signals that we have left the previous class body.
+            current_class = None
         if current_class:
             tn_match = _TABLENAME_RE.search(line)
             if tn_match:
