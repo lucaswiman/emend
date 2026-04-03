@@ -40,6 +40,7 @@ changing the public API.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import shutil
@@ -48,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -412,6 +414,10 @@ class EditorSearchEngine:
         # Hot buffer snapshots (unsaved editor content)
         self._hot_buffers: dict[str, str] = {}  # resolved file_path -> content
         self._hot_buffer_versions: dict[str, int] = {}  # resolved file_path -> version
+
+        # Cache expensive CFG construction for synchronous completion ranking.
+        self._completion_cfg_cache: OrderedDict[str, list[Any]] = OrderedDict()
+        self._completion_cfg_cache_max = 8
 
     # -- connection ---------------------------------------------------------
 
@@ -1374,6 +1380,23 @@ class EditorSearchEngine:
             return p.read_text()
         return None
 
+    def _get_completion_cfgs(self, source: str) -> list[Any]:
+        """Return CFGs for *source*, caching the expensive build step."""
+        from emend.cfg import build_cfgs_for_source
+
+        source_hash = hashlib.sha1(source.encode("utf-8")).hexdigest()
+        cached = self._completion_cfg_cache.get(source_hash)
+        if cached is not None:
+            self._completion_cfg_cache.move_to_end(source_hash)
+            return cached
+
+        cfgs = build_cfgs_for_source(source)
+        self._completion_cfg_cache[source_hash] = cfgs
+        self._completion_cfg_cache.move_to_end(source_hash)
+        while len(self._completion_cfg_cache) > self._completion_cfg_cache_max:
+            self._completion_cfg_cache.popitem(last=False)
+        return cfgs
+
     def goto_definition(self, file: str, line: int, col: int) -> SearchResult:
         """Find the definition of the symbol at the given position.
 
@@ -1817,9 +1840,8 @@ class EditorSearchEngine:
                 cfg_defs_before_cursor: set[str] | None = None
                 cfg_func_range: tuple[int, int] | None = None
                 try:
-                    from emend.cfg import build_cfgs_for_source
                     cfg_t0 = time.monotonic()
-                    cfgs = build_cfgs_for_source(source)
+                    cfgs = self._get_completion_cfgs(source)
                     # Find the CFG for the function containing the cursor (prefer innermost)
                     cursor_cfg = None
                     for c in cfgs:
@@ -2045,13 +2067,17 @@ class EditorSearchEngine:
             query=prefix,
         )
 
-    @staticmethod
-    def _extract_import_names(file: str) -> dict[str, str]:
-        """Parse imports from a Python file, returning {local_name: qualified_source}."""
+    def _extract_import_names(self, file: str) -> dict[str, str]:
+        """Parse imports from a Python file or hot buffer.
+
+        Returns ``{local_name: qualified_source}``.
+        """
         import ast as _ast
 
         try:
-            source = Path(file).read_text()
+            source = self._read_file_or_hot(file)
+            if source is None:
+                source = Path(file).read_text()
             tree = _ast.parse(source)
         except Exception:
             return {}

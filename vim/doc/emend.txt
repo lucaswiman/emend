@@ -142,8 +142,8 @@ saved file on disk.
                                                     *:EmendHotBuffersEnable*
 :EmendHotBuffersEnable  Register all currently open buffers with the server
                         and begin syncing edits as you type.  The server
-                        receives the full buffer text on activation and
-                        incremental updates thereafter.
+                        receives the full buffer text on activation and on
+                        each subsequent buffer update.
 
                                                    *:EmendHotBuffersDisable*
 :EmendHotBuffersDisable Stop syncing buffer contents with the server.  The

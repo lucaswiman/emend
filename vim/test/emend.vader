@@ -209,6 +209,12 @@ Execute (show_history_overlay handles empty history gracefully):
   " This should echo a message, not crash.
   call emend#ui#show_history_overlay()
 
+Execute (history overlay caps visible entries at 20):
+  let history = map(range(0, 20), 'printf("query_%d", v:val)')
+  let lines = emend#ui#history_overlay_lines(history)
+  AssertEqual 22, len(lines)
+  AssertEqual '  Recent queries  (j/k navigate, Enter select, Esc cancel)', lines[0]
+
 " ===========================================================================
 " Phase 2: Local outline filtering
 " ===========================================================================

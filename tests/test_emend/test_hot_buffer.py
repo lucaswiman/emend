@@ -429,6 +429,64 @@ class TestCompleteHotBuffer:
             f"Expected 'Foo' in completions without hot buffer; got: {words}"
         )
 
+    def test_complete_uses_hot_buffer_imports(self, tmp_path):
+        """Import names are extracted from the hot buffer, not the on-disk file."""
+        disk_source = textwrap.dedent("""\
+            from services import alpha
+
+            def run():
+                return alpha
+        """)
+        proj = build_indexed_project(tmp_path, {"mod.py": disk_source})
+        eng = EditorSearchEngine(str(proj))
+        try:
+            mod = str((proj / "mod.py").resolve())
+
+            hot_source = textwrap.dedent("""\
+                from services import beta
+
+                def run():
+                    return beta
+            """)
+            eng.buffer_open(mod, hot_source)
+
+            result = eng.complete("be", file=mod, line=4, col=12)
+            words = {item.get("word", "") for item in result.items}
+            assert "beta" in words
+            assert "alpha" not in words
+        finally:
+            eng.close()
+
+    def test_complete_caches_cfg_construction(self, monkeypatch, tmp_path):
+        """Repeated completions for the same source should reuse cached CFGs."""
+        source = textwrap.dedent("""\
+            def run(flag):
+                value = 1
+                return value
+        """)
+        proj = build_indexed_project(tmp_path, {"mod.py": source})
+        eng = EditorSearchEngine(str(proj))
+        try:
+            mod = str((proj / "mod.py").resolve())
+
+            from emend import cfg as cfg_module
+
+            calls = {"count": 0}
+            real_builder = cfg_module.build_cfgs_for_source
+
+            def wrapped_builder(source_text):
+                calls["count"] += 1
+                return real_builder(source_text)
+
+            monkeypatch.setattr(cfg_module, "build_cfgs_for_source", wrapped_builder)
+
+            eng.complete("val", file=mod, line=2, col=12)
+            eng.complete("val", file=mod, line=2, col=12)
+
+            assert calls["count"] == 1
+        finally:
+            eng.close()
+
 
 # ---------------------------------------------------------------------------
 # TestReadFileOrHot

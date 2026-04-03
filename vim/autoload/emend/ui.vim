@@ -1614,6 +1614,17 @@ let s:history_buf = -1
 let s:history_win = -1
 let s:history_selected = 0
 
+function! emend#ui#history_overlay_lines(history) abort
+  let l:max_items = min([len(a:history), 20])
+  let l:lines = ['  Recent queries  (j/k navigate, Enter select, Esc cancel)',
+        \ repeat('─', 50)]
+  for l:i in range(0, l:max_items - 1)
+    let l:prefix = l:i == 0 ? '> ' : '  '
+    call add(l:lines, l:prefix . a:history[l:i])
+  endfor
+  return l:lines
+endfunction
+
 function! emend#ui#show_history_overlay() abort
   if empty(s:search_history)
     echo 'emend: no query history'
@@ -1626,7 +1637,8 @@ function! emend#ui#show_history_overlay() abort
   if !has('nvim')
     " Fallback for classic Vim: use inputlist.
     let l:choices = ['  Recent queries:']
-    for l:i in range(min([len(s:search_history), 20]))
+    let l:max_items = min([len(s:search_history), 20])
+    for l:i in range(0, l:max_items - 1)
       call add(l:choices, printf('  %d. %s', l:i + 1, s:search_history[l:i]))
     endfor
     let l:pick = inputlist(l:choices)
@@ -1638,9 +1650,9 @@ function! emend#ui#show_history_overlay() abort
   endif
 
   " Neovim: compact floating overlay.
-  let l:max_items = min([len(s:search_history), 20])
   let l:width = 50
-  let l:height = l:max_items + 2  " +2 for header + separator
+  let l:lines = emend#ui#history_overlay_lines(s:search_history)
+  let l:height = len(l:lines)
 
   " Center the overlay over the current editor.
   let l:row = (&lines - l:height) / 2
@@ -1658,14 +1670,6 @@ function! emend#ui#show_history_overlay() abort
         \ 'title': ' recent queries ',
         \ 'title_pos': 'center',
         \ })
-
-  " Render history lines.
-  let l:lines = ['  Recent queries  (j/k navigate, Enter select, Esc cancel)']
-  call add(l:lines, repeat('─', l:width))
-  for l:i in range(l:max_items)
-    let l:prefix = l:i == 0 ? '> ' : '  '
-    call add(l:lines, l:prefix . s:search_history[l:i])
-  endfor
 
   call nvim_buf_set_lines(s:history_buf, 0, -1, v:false, l:lines)
   call nvim_buf_set_option(s:history_buf, 'modifiable', v:false)
