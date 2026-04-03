@@ -69,6 +69,7 @@ class SearchResult:
     truncated: bool = False
     query: str = ""
     indexing: bool = False
+    provenance: str = ""  # "indexed", "pattern", "grep", "selector", "files"
 
     def to_dict(self) -> dict:
         """Lightweight serialization (avoids ``dataclasses.asdict`` deep-copy)."""
@@ -81,6 +82,8 @@ class SearchResult:
         }
         if self.indexing:
             d["indexing"] = True
+        if self.provenance:
+            d["provenance"] = self.provenance
         return d
 
 
@@ -402,6 +405,10 @@ class EditorSearchEngine:
         self._index_thread: threading.Thread | None = None
         self._index_lock = threading.Lock()
 
+        # Query history (session-scoped, most recent first)
+        self._query_history: list[dict] = []
+        self._query_history_max = 100
+
     # -- connection ---------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -554,16 +561,20 @@ class EditorSearchEngine:
             result = self._search_grep(
                 query[1:-1], limit=limit, file_scope=file_scope
             )
+            result.provenance = "grep"
         elif "::" in query:
             result = self._search_selector(query, limit=limit)
+            result.provenance = "selector"
         elif "$" in query:
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
+            result.provenance = "pattern"
         elif re.match(r'\s*(?:async\s+)?(?:def|class)\s+\w*[*?]', query):
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
+            result.provenance = "pattern"
         elif "/" in query or any(query.endswith(ext) for ext in (".py", ".ts", ".js", ".rs", ".go", ".c", ".cpp", ".h")):
             # Prioritize file search for path-like queries
             result = self._search_files(query, limit=limit)
@@ -571,15 +582,51 @@ class EditorSearchEngine:
                 result = self._search_symbols(
                     query, limit=limit, file_scope=file_scope, kind=kind
                 )
+                result.provenance = "indexed"
+            else:
+                result.provenance = "files"
         else:
             result = self._search_symbols(
                 query, limit=limit, file_scope=file_scope, kind=kind
             )
+            result.provenance = "indexed"
 
         result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
         result.query = query
         result.indexing = self._indexing
+        self._record_query(query, result)
         return result
+
+    # -- query history ------------------------------------------------------
+
+    def _record_query(self, query: str, result: SearchResult) -> None:
+        """Record a query in the session history."""
+        if not query or not query.strip():
+            return
+        entry = {
+            "query": query,
+            "mode": result.mode,
+            "result_count": len(result.items),
+            "provenance": result.provenance,
+            "timestamp": time.time(),
+        }
+        # Deduplicate: remove existing entry for same query
+        self._query_history = [
+            e for e in self._query_history if e["query"] != query
+        ]
+        self._query_history.insert(0, entry)
+        # Cap size
+        if len(self._query_history) > self._query_history_max:
+            self._query_history = self._query_history[:self._query_history_max]
+
+    def query_history(self, *, limit: int = 50) -> SearchResult:
+        """Return recent query history entries."""
+        items = self._query_history[:limit]
+        return SearchResult(
+            items=items,
+            elapsed_ms=0,
+            mode="query_history",
+        )
 
     # -- symbol search ------------------------------------------------------
 
@@ -1904,6 +1951,9 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return engine.status().to_dict()
     elif method == "reindex":
         return engine.reindex().to_dict()
+    elif method == "query_history":
+        limit = int(params.get("limit", 50))
+        return engine.query_history(limit=limit).to_dict()
     elif method == "reindex_async":
         started = engine.start_background_reindex()
         return {"started": started, "indexing": engine.is_indexing}

@@ -196,6 +196,7 @@ Inside the search results window:
     `<CR>`              Open the selected file at the matching line
     `q` / `<Esc>`       Close the search UI
     `/`                 Start a new search
+    `<C-h>`             Open query history overlay
 
     Actions:~
 
@@ -205,6 +206,37 @@ Inside the search results window:
     `C`                 Find callees of the selected symbol
     `t`                 Show type information for the selected symbol
     `m`                 Move the selected symbol to another file
+
+Inside the interactive search input:~
+
+    `<C-h>`             Open query history overlay
+    `<C-r>`             Cycle forward through query history
+    `<C-f>`             Cycle backward through query history
+    `<C-n>` / `<Down>`  Move selection down in results
+    `<C-p>` / `<Up>`    Move selection up in results
+    `<C-Space>`         Trigger completion
+
+Inside the query history overlay:~
+
+    `j` / `<Down>`      Move selection down
+    `k` / `<Up>`        Move selection up
+    `<CR>`              Search for the selected query
+    `<Esc>` / `q`       Dismiss the overlay
+
+                                                      *emend-provenance*
+Provenance~
+
+The search header shows a provenance tag indicating how results were
+obtained:
+
+    `[indexed]`   Symbol index (fast, requires built index)
+    `[files]`     File path matching
+    `[pattern]`   Tree-sitter pattern search
+    `[grep]`      Regex/grep fallback
+    `[selector]`  Direct selector resolution
+
+This makes it obvious whether results came from the index, a pattern
+search, or a fallback mode.
 
 ==============================================================================
 6. PROJECT CONFIGURATION                              *emend-project-config*
@@ -253,6 +285,7 @@ JSON-RPC methods:~
     selector        Resolve `file.py::Sym.path` selectors
     references      Find references by qualified name
     file_symbols    File outline (all symbols in a file)
+    query_history   Recent query history (session-scoped)
     status          Index statistics
     reindex         Refresh stale files + rebuild FTS
     shutdown        Clean server exit
