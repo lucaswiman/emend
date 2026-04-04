@@ -219,3 +219,31 @@ def test_search_include_map(tmp_path, emend_cmd_list, run_emend_cmd):
     result = run_emend_cmd(["search", "--include-map", "ext.utils.my_func"])
     assert "def my_func():" in result.stdout
     assert "hello" in result.stdout
+
+
+def test_map_add_module_infers_subpath_from_repo_root(tmp_path, emend_cmd_list, run_emend_cmd):
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+
+    repo_root = tmp_path / "repo"
+    (repo_root / "src" / "package_name").mkdir(parents=True)
+    (repo_root / "src" / "package_name" / "worker.py").write_text(
+        "class WorkerClass:\n    pass\n"
+    )
+
+    os.chdir(str(proj))
+
+    add_result = run_emend_cmd([
+        "map", "add-module", "package_name",
+        "--path", str(repo_root),
+        "--json",
+    ])
+    assert add_result.returncode == 0, add_result.stderr
+    assert '"subpath": "src/package_name"' in add_result.stdout
+
+    resolve_result = run_emend_cmd([
+        "map", "resolve", "package_name.worker.WorkerClass",
+    ])
+    assert resolve_result.returncode == 0, resolve_result.stderr
+    assert "src/package_name/worker.py::WorkerClass" in resolve_result.stdout

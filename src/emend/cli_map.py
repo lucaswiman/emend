@@ -1,6 +1,7 @@
 import json as _json
 import os
 import sys
+from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
@@ -18,6 +19,44 @@ from emend.knowledge import (
 
 map_app = typer.Typer(help="Identifier and module mappings.")
 app.add_typer(map_app, name="map")
+
+
+def _infer_module_subpath(module_prefix: str, path: str, subpath: str) -> str:
+    """Infer a package subpath when *path* points at a repo root.
+
+    If the user maps ``pkg`` to ``/repo`` and ``/repo/pkg`` or ``/repo/src/pkg``
+    exists, infer the relative subpath automatically. Explicit ``subpath`` wins.
+    """
+    if subpath or not path:
+        return subpath
+
+    root = Path(os.path.expanduser(path)).resolve()
+    if not root.is_dir():
+        return subpath
+
+    prefix_parts = tuple(part for part in module_prefix.split(".") if part)
+    if not prefix_parts:
+        return subpath
+
+    if root.name == prefix_parts[-1]:
+        return subpath
+
+    direct_candidate = root.joinpath(*prefix_parts)
+    if direct_candidate.is_dir():
+        return direct_candidate.relative_to(root).as_posix()
+
+    matches: list[Path] = []
+    for candidate in root.rglob(prefix_parts[-1]):
+        if not candidate.is_dir():
+            continue
+        rel_parts = candidate.relative_to(root).parts
+        if tuple(rel_parts[-len(prefix_parts):]) == prefix_parts:
+            matches.append(candidate)
+
+    if len(matches) == 1:
+        return matches[0].relative_to(root).as_posix()
+
+    return subpath
 
 @map_app.command("add")
 def map_add_cmd(
@@ -144,6 +183,7 @@ def map_add_module_cmd(
         print("Error: specify --repo or --path", file=sys.stderr)
         raise typer.Exit(1)
 
+    subpath = _infer_module_subpath(module_prefix, path, subpath)
     store = MappingStore(".")
     m = ModuleMapping(
         module_prefix=module_prefix, repo=repo, local_path=path,
