@@ -870,9 +870,10 @@ def _type_cache_db_path(project_root: Path | None = None) -> str | None:
             root = Path(_find_project_root("."))
         else:
             root = project_root
-        from emend.transform import _cache_db_dir
+        from emend.transform import _cache_db_dir, _ensure_cache_ignore_files
         cache_dir = _cache_db_dir(root)
         cache_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_cache_ignore_files(str(root))
         return str(cache_dir / "parse.db")
     except Exception:
         return None
