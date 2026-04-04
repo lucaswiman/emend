@@ -208,6 +208,15 @@ Execute (history overlay function exists):
   Assert exists('*emend#ui#history_move'), 'history_move should exist'
   Assert exists('*emend#ui#history_accept'), 'history_accept should exist'
   Assert exists('*emend#ui#history_dismiss'), 'history_dismiss should exist'
+  Assert exists('*emend#ui#recall_query'), 'recall_query should exist'
+
+Execute (recall_query updates the interactive picker input):
+  call emend#ui#interactive()
+  let input_buf = bufnr('%')
+  call setline(1, 'draft')
+  call emend#ui#recall_query('beta', v:false)
+  AssertEqual 'beta', getbufline(input_buf, 1)[0]
+  call emend#ui#close()
 
 Execute (show_history_overlay handles empty history gracefully):
   " This should echo a message, not crash.

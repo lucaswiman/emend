@@ -7,7 +7,7 @@ the unified search model.
 
 ## TODO
 
-- [ ] Add recent-query recall from inside the picker
+- [x] Add recent-query recall from inside the picker
 - [ ] Design the recent-query overlay interaction
 - [ ] Decide whether query history should be session-only or partially persisted
 - [ ] Expose result provenance in the picker header

@@ -1563,24 +1563,34 @@ function! s:save_history(query) abort
   let s:history_idx = -1
 endfunction
 
+function! emend#ui#recall_query(query, ...) abort
+  let l:search_after = a:0 > 0 ? a:1 : v:true
+  let s:query = a:query
+
+  if s:is_interactive && s:input_buf >= 0 && bufexists(s:input_buf)
+    call s:set_buf_lines(s:input_buf, [a:query])
+    if s:input_win >= 0
+      call win_gotoid(s:input_win)
+      call cursor(1, len(a:query) + 1)
+      startinsert
+    endif
+    if l:search_after
+      call s:trigger_search()
+    endif
+    return 1
+  endif
+
+  if l:search_after
+    call emend#ui#search(a:query)
+  endif
+  return 0
+endfunction
+
 function! emend#ui#history(delta) abort
   if empty(s:search_history) | return | endif
   let s:history_idx = max([0, min([s:history_idx + a:delta, len(s:search_history) - 1])])
   let l:query = s:search_history[s:history_idx]
-  
-  if s:input_buf >= 0 && bufexists(s:input_buf)
-    call s:set_buf_lines(s:input_buf, [l:query])
-    
-    " Move cursor to end of line in input window
-    if s:input_win >= 0 && nvim_win_is_valid(s:input_win)
-      call win_gotoid(s:input_win)
-      call cursor(1, len(l:query) + 1)
-    endif
-
-    " Trigger search
-    let s:query = l:query
-    call s:trigger_search()
-  endif
+  call emend#ui#recall_query(l:query, v:true)
 endfunction
 
 function! emend#ui#complete() abort
@@ -1705,8 +1715,7 @@ function! emend#ui#history_accept() abort
   if s:history_selected >= 0 && s:history_selected < len(s:search_history)
     let l:query = s:search_history[s:history_selected]
     call s:close_history_overlay()
-    let s:query = l:query
-    call emend#ui#search(l:query)
+    call emend#ui#recall_query(l:query, v:true)
   endif
 endfunction
 

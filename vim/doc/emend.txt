@@ -250,7 +250,7 @@ Inside the query history overlay:~
 
     `j` / `<Down>`      Move selection down
     `k` / `<Up>`        Move selection up
-    `<CR>`              Search for the selected query
+    `<CR>`              Recall the selected query into the picker and search
     `<Esc>` / `q`       Dismiss the overlay
 
                                                       *emend-provenance*
