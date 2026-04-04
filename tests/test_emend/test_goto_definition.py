@@ -113,6 +113,37 @@ def compute():
     engine.close()
 
 
+def test_goto_definition_follows_imported_symbol(tmp_path):
+    """Imported symbols should resolve to their defining file, not the import line."""
+    helper = tmp_path / "helper.py"
+    helper.write_text(
+        """
+def parse():
+    return 1
+""".strip()
+    )
+    engine, fp = _make_engine(tmp_path, "app.py", """
+from helper import parse
+
+def run():
+    return parse()
+""")
+    try:
+        result = engine.goto_definition(str(fp), line=4, col=12)
+        assert result.items, "goto_definition on imported usage should resolve"
+        item = result.items[0]
+        assert item["file_path"] == str(helper)
+        assert item["line"] == 1
+
+        import_result = engine.goto_definition(str(fp), line=1, col=20)
+        assert import_result.items, "goto_definition on import should resolve across files"
+        import_item = import_result.items[0]
+        assert import_item["file_path"] == str(helper)
+        assert import_item["line"] == 1
+    finally:
+        engine.close()
+
+
 # -- Edge case stress tests --
 
 

@@ -1,11 +1,12 @@
 # emend.vim
 
-A Vim/Neovim plugin for searching Python code with [emend](https://github.com/lucaswiman/emend).
+A Vim/Neovim plugin for searching and navigating code with [emend](https://github.com/lucaswiman/emend).
 
 ## Features
 
 - **Interactive search**: symbols, code patterns (`$X`), and selectors (`file.py::Class`)
 - **Split-pane UI**: navigable result list + file preview with syntax highlighting
+- **Definition jumps**: `:EmendGoto` resolves locals, imports, and mapped cross-project symbols
 - **Async RPC**: non-blocking communication with `emend editor-server` over stdio
 - **Auto cache warming**: builds the index on first use with progress display
 - **Works in Vim 8+ and Neovim**
@@ -55,9 +56,19 @@ Plug '~/src/emend', { 'rtp': 'vim' }
 :EmendSearch print($X)    " Pattern search
 :EmendSearch file.py::Cls " Selector search
 :EmendOutline             " Symbols in current file
+:EmendGoto                " Definition jump for symbol under cursor
 :EmendRefs                " References to word under cursor
 :EmendStatus              " Index statistics
 ```
+
+### Goto behavior
+
+`:EmendGoto` prefers a local definition first. If the symbol is imported,
+emend resolves the imported definition instead of stopping on the import line.
+Cross-file jumps open in a new tab. If the destination buffer is already
+loaded, emend reuses that buffer instead of reopening the file. Cross-file
+jumps are opened from a tab cloned from the current window so Vim's normal
+`<C-o>` / `<C-i>` jump navigation continues to work.
 
 ### Search UI navigation
 
@@ -93,6 +104,7 @@ let g:emend_default_mappings = 1
 "   <Leader>es → :Emend
 "   <Leader>eo → :EmendOutline
 "   <Leader>er → :EmendRefs
+"   <Leader>eg → :EmendGoto
 ```
 
 ## Architecture

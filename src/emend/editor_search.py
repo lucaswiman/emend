@@ -1673,19 +1673,17 @@ class EditorSearchEngine:
         # 1. Local definition in the same file
         local_defs = []
         all_refs = []
+        import_refs = []
         resolved_qn = target_qn
         for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
             # Match by exact QN, or by suffix when target_qn is a bare name from bindings
             if qn == target_qn or (qn_sep not in target_qn and qn.endswith(qn_sep + target_qn)):
                 resolved_qn = qn  # upgrade to fully-qualified name
                 all_refs.append((r_line, r_col))
+                if r_kind == "import":
+                    import_refs.append((r_line, r_col))
                 if r_kind in ("definition", "write"):
                     local_defs.append((r_line, r_col))
-
-        if not local_defs and all_refs:
-            # Fallback: use the first occurrence in the file
-            all_refs.sort()
-            local_defs = [all_refs[0]]
 
         if local_defs:
             local_defs.sort()
@@ -1702,9 +1700,91 @@ class EditorSearchEngine:
             res.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
             return res
 
-        # 2. Cross-file definition: resolve target_qn via symbol index
+        # 2. Cross-file definition: resolve imported/global targets via symbol index.
+        # Import references should resolve to the imported symbol, not back to the
+        # import statement in the current file.
         # This handles module-level symbols and imported names.
-        return self._search_symbols(target_qn, limit=1)
+        symbol_result = self._search_symbols(resolved_qn, limit=1)
+        if symbol_result.items:
+            symbol_result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
+            return symbol_result
+
+        import_result = self._resolve_imported_symbol_location(resolved_qn)
+        if import_result is not None:
+            import_result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
+            return import_result
+
+        # If the only in-file hit was an import and we couldn't resolve it through
+        # the symbol index, don't bounce back to the import line.
+        if import_refs:
+            return SearchResult(
+                items=[],
+                elapsed_ms=round((time.monotonic() - t0) * 1000, 2),
+                mode="symbol",
+            )
+
+        if all_refs:
+            all_refs.sort()
+            r_line, r_col = all_refs[0]
+            item = {
+                "name": resolved_qn.split(qn_sep)[-1],
+                "kind": "variable",
+                "file_path": str(file_path),
+                "line": r_line,
+                "col": r_col,
+                "qualified_name": resolved_qn,
+            }
+            return SearchResult(
+                items=[item],
+                elapsed_ms=round((time.monotonic() - t0) * 1000, 2),
+                mode="symbol",
+            )
+
+        return symbol_result
+
+    def _resolve_imported_symbol_location(self, qualified_name: str) -> SearchResult | None:
+        """Resolve ``pkg.mod.Symbol``-style imports to a project file + line."""
+        if "." not in qualified_name:
+            return None
+
+        from emend.ast_utils import find_nested_definitions, find_symbol_by_path
+
+        parts = qualified_name.split(".")
+        for split_at in range(len(parts) - 1, 0, -1):
+            module_name = ".".join(parts[:split_at])
+            symbol_path = parts[split_at:]
+            for candidate in self._module_candidates(module_name):
+                if not candidate.is_file():
+                    continue
+                try:
+                    symbol = find_symbol_by_path(
+                        find_nested_definitions(str(candidate)),
+                        symbol_path,
+                    )
+                except Exception:
+                    continue
+                if symbol is None:
+                    continue
+                return SearchResult(
+                    items=[{
+                        "name": symbol_path[-1],
+                        "kind": getattr(symbol, "kind", "symbol"),
+                        "file_path": str(candidate),
+                        "line": symbol.line_start,
+                        "qualified_name": qualified_name,
+                    }],
+                    elapsed_ms=0,
+                    mode="symbol",
+                )
+        return None
+
+    def _module_candidates(self, module_name: str) -> list[Path]:
+        """Return plausible project-local files for a dotted Python module."""
+        module_rel = Path(*module_name.split("."))
+        return [
+            (self.project_root / module_rel).with_suffix(".py"),
+            self.project_root / module_rel / "__init__.py",
+        ]
 
     # -- incremental re-index -----------------------------------------------
 

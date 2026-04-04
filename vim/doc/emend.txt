@@ -97,7 +97,13 @@ After installing, run `:helptags ALL` to index this help file.
 :EmendGoto [name]       Jump to the definition or mapped target for [name].
                         Without an argument, uses the symbol under the cursor.
                         Local definitions are preferred; if none are found,
-                        configured cross-project mappings are used.
+                        configured cross-project mappings are used.  When the
+                        target is in another file, emend opens it in a new tab
+                        and reuses an already-loaded buffer when possible.
+                        Imported symbols resolve to their defining file instead
+                        of stopping on the import line.  Cross-file jumps are
+                        opened from a tab cloned off the current window so
+                        `<C-o>` / `<C-i>` continue to follow the jump history.
 
                                                                *:EmendRename*
 :EmendRename [new_name] Rename the symbol under the cursor across the project.

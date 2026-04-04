@@ -823,35 +823,20 @@ function! emend#jump_to(file, line) abort
 
   " Case 1: Same file — just move the cursor.
   if l:target ==# l:current
-    " Mark current position in jumplist so Ctrl-O returns here.
-    normal! m'
     execute a:line
     normal! zz
     return
   endif
 
-  " Case 2: File already open in a tab — switch to it.
-  " Search all tab pages and windows for a buffer matching the target path.
-  for l:tab in range(1, tabpagenr('$'))
-    for l:win in range(1, tabpagewinnr(l:tab, '$'))
-      let l:bufnr = tabpagebuflist(l:tab)[l:win - 1]
-      if fnamemodify(bufname(l:bufnr), ':p') ==# l:target
-        " Found it. Switch tab, switch window, go to line.
-        execute 'tabnext ' . l:tab
-        execute l:win . 'wincmd w'
-        " Mark position in jumplist before moving.
-        normal! m'
-        execute a:line
-        normal! zz
-        return
-      endif
-    endfor
-  endfor
-
-  " Case 3: File not open anywhere — open it in the current window.
-  " normal! m' sets the ' mark so Ctrl-O returns to this position/buffer.
-  normal! m'
-  execute 'edit ' . fnameescape(l:target)
+  " Case 2: Other file — open via a tab cloned from the current window.
+  " This preserves the current window's jumplist for <C-o>/<C-i> navigation.
+  let l:target_buf = bufnr(l:target)
+  tab split
+  if l:target_buf > 0
+    execute 'buffer ' . l:target_buf
+  else
+    execute 'edit ' . fnameescape(l:target)
+  endif
   execute a:line
   normal! zz
 endfunction

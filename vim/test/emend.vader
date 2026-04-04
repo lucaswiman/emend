@@ -269,6 +269,59 @@ Execute (history is persisted to the project .emend directory):
   let g:emend_project_root = ''
 
 " ===========================================================================
+" Goto navigation
+" ===========================================================================
+
+Execute (jump_to opens cross-file targets in a new tab and preserves jumplist):
+  let source = tempname() . '.py'
+  let target = tempname() . '.py'
+  call writefile(['one', 'two', 'three', 'four'], source)
+  call writefile(['alpha', 'beta', 'gamma'], target)
+
+  let start_tabs = tabpagenr('$')
+  execute 'edit ' . fnameescape(source)
+  execute '3'
+  let origin_buf = bufnr('%')
+  let origin_line = line('.')
+
+  call emend#jump_to(target, 2)
+
+  AssertEqual start_tabs + 1, tabpagenr('$')
+  AssertEqual fnamemodify(target, ':p'), expand('%:p')
+  AssertEqual 2, line('.')
+
+  let jumps = getjumplist()[0]
+  let has_origin = 0
+  for entry in jumps
+    if get(entry, 'bufnr', -1) == origin_buf && get(entry, 'lnum', -1) == origin_line
+      let has_origin = 1
+      break
+    endif
+  endfor
+  Assert has_origin, 'jump list should include the source buffer position'
+
+  tabclose!
+  execute 'bwipe! ' . origin_buf
+
+Execute (jump_to reuses an already loaded target buffer in the new tab):
+  let source = tempname() . '.py'
+  let target = tempname() . '.py'
+  call writefile(['one', 'two'], source)
+  call writefile(['alpha', 'beta'], target)
+
+  execute 'edit ' . fnameescape(target)
+  let target_buf = bufnr('%')
+  execute 'edit ' . fnameescape(source)
+
+  call emend#jump_to(target, 2)
+
+  AssertEqual target_buf, bufnr('%')
+  AssertEqual 2, line('.')
+
+  tabclose!
+  execute 'bwipe! ' . target_buf
+
+" ===========================================================================
 " Default mapping validation
 " ===========================================================================
 
