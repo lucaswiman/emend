@@ -1541,7 +1541,12 @@ class EditorSearchEngine:
         # Parse with scope resolver
         try:
             ext = file_path.suffix.lstrip('.')
-            resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
+            try:
+                resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
+            except Exception as cfg_exc:
+                import tempfile
+                logger.debug("Scope resolver failed with project root config, retrying with clean root: %s", cfg_exc)
+                resolver = _rust.PyScopeResolver(tempfile.mkdtemp(), extension=ext)
             content = self._read_file_or_hot(str(file_path))
             if content is None:
                 return SearchResult(items=[], elapsed_ms=0, mode="symbol")
@@ -1745,6 +1750,12 @@ class EditorSearchEngine:
     def _resolve_imported_symbol_location(self, qualified_name: str) -> SearchResult | None:
         """Resolve ``pkg.mod.Symbol``-style imports to a project file + line."""
         if "." not in qualified_name:
+            return None
+        # Skip absolute-path QNs produced by the scope resolver for method
+        # references (e.g. ``/.home.user...module.method``).  Splitting on
+        # '.' would produce '/' as the first module component, causing
+        # Path('/').with_suffix('.py') to raise ValueError.
+        if qualified_name.startswith("/"):
             return None
 
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
