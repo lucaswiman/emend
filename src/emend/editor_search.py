@@ -39,6 +39,7 @@ changing the public API.
 
 from __future__ import annotations
 
+import ast
 import json
 import hashlib
 import logging
@@ -1937,9 +1938,11 @@ class EditorSearchEngine:
         seen: set[str] = set()
         items: list[dict] = []
 
+        is_dotted = "." in prefix
+
         # 1. Local variables from PyScopeResolver
         local_names: set[str] = set()
-        if file and line > 0:
+        if file and line > 0 and not is_dotted:
             try:
                 from emend.transform import _rust
                 resolver = _rust.PyScopeResolver(str(self.project_root))
@@ -2056,10 +2059,12 @@ class EditorSearchEngine:
 
         # Collect imported names from the current file for local completions.
         import_names: dict[str, str] = {}  # local_name -> qualified source
+        source = ""
         if file:
+            source = self._read_file_or_hot(file) or ""
             import_names = self._extract_import_names(file)
 
-        if "." in prefix:
+        if is_dotted:
             # Dotted prefix: e.g. "Foo.bar" -> search qualified names
             parts = prefix.rsplit(".", 1)
             parent = parts[0]
@@ -2068,8 +2073,32 @@ class EditorSearchEngine:
             # Resolve parent through imports (e.g. DocumentFilter -> document_api...DocumentFilter)
             resolved_parent = import_names.get(parent, parent)
 
+            if file and source:
+                local_attr_items, inferred_parents = self._complete_local_attributes(
+                    parent=parent,
+                    member_prefix=member_prefix,
+                    source=source,
+                    line=line,
+                    import_names=import_names,
+                    seen=seen,
+                    limit=limit,
+                )
+                items.extend(local_attr_items)
+                if len(items) < limit:
+                    items.extend(
+                        self._complete_source_parent_members(
+                            inferred_parents=inferred_parents,
+                            member_prefix=member_prefix,
+                            source=source,
+                            seen=seen,
+                            limit=limit - len(items),
+                        )
+                    )
+            else:
+                inferred_parents = []
+
             # Search local project symbol index
-            parents_to_check = [resolved_parent, parent]
+            parents_to_check = inferred_parents + [resolved_parent, parent]
             checked_parents: set[str] = set()
             
             while parents_to_check:
@@ -2167,6 +2196,206 @@ class EditorSearchEngine:
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items[:limit], elapsed_ms=elapsed, mode="complete", query=prefix)
+
+    def _complete_local_attributes(
+        self,
+        parent: str,
+        member_prefix: str,
+        source: str,
+        line: int,
+        import_names: dict[str, str],
+        seen: set[str],
+        limit: int,
+    ) -> tuple[list[dict], list[str]]:
+        """Return attribute completions seen on a local receiver plus inferred type targets."""
+        import ast as _ast
+
+        try:
+            tree = _ast.parse(self._normalize_completion_source(source, line, parent))
+        except Exception:
+            return [], []
+
+        scope_node = self._find_enclosing_scope_node(tree, line)
+        if scope_node is None:
+            return [], []
+
+        attr_names: set[str] = set()
+        inferred_parents: list[str] = []
+        inferred_seen: set[str] = set()
+
+        for node in _ast.walk(scope_node):
+            if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
+                if node.value.id == parent:
+                    attr_names.add(node.attr)
+            elif isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+                candidate = self._infer_receiver_target(node, parent, import_names)
+                if candidate and candidate not in inferred_seen:
+                    inferred_seen.add(candidate)
+                    inferred_parents.append(candidate)
+
+        items: list[dict] = []
+        for name in sorted(attr_names):
+            if member_prefix and not name.startswith(member_prefix):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            items.append({
+                "word": name,
+                "kind": "attribute",
+                "menu": f"[scope:{parent}]",
+                "score": 2500,
+            })
+            if len(items) >= limit:
+                break
+
+        return items, inferred_parents
+
+    def _normalize_completion_source(self, source: str, line: int, parent: str) -> str:
+        """Patch the active line so incomplete ``parent.`` remains parseable."""
+        if line <= 0:
+            return source
+        lines = source.splitlines()
+        if not 1 <= line <= len(lines):
+            return source
+        current = lines[line - 1]
+        lines[line - 1] = re.sub(
+            rf"\b{re.escape(parent)}\.(?=\s*(?:#.*)?$)",
+            f"{parent}.__emend_complete__",
+            current,
+        )
+        return "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+
+    def _complete_source_parent_members(
+        self,
+        inferred_parents: list[str],
+        member_prefix: str,
+        source: str,
+        seen: set[str],
+        limit: int,
+    ) -> list[dict]:
+        """Complete members from class definitions available in the current source."""
+        import ast as _ast
+
+        if limit <= 0 or not inferred_parents:
+            return []
+        try:
+            tree = _ast.parse(source)
+        except Exception:
+            return []
+
+        target_names = {parent.rsplit(".", 1)[-1] for parent in inferred_parents}
+        items: list[dict] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, _ast.ClassDef) or node.name not in target_names:
+                continue
+            for child in node.body:
+                member_name = self._class_member_name(child)
+                if not member_name:
+                    continue
+                if member_prefix and not member_name.startswith(member_prefix):
+                    continue
+                if member_name in seen:
+                    continue
+                seen.add(member_name)
+                items.append({
+                    "word": member_name,
+                    "kind": "member",
+                    "menu": f"[class:{node.name}]",
+                    "score": 1500,
+                })
+                if len(items) >= limit:
+                    return items
+        return items
+
+    def _class_member_name(self, node: Any) -> str | None:
+        """Extract a direct class member name from a class-body statement."""
+        import ast as _ast
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+        if isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+            targets = node.targets if isinstance(node, _ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, _ast.Name):
+                    return target.id
+        return None
+
+    def _find_enclosing_scope_node(self, tree: Any, line: int) -> Any | None:
+        """Return the innermost function/class/module node containing the cursor."""
+        if line <= 0:
+            return tree
+
+        candidate = tree
+        candidate_span = float("inf")
+        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        for node in ast.walk(tree):
+            if not isinstance(node, scope_types):
+                continue
+            start = getattr(node, "lineno", 0)
+            end = getattr(node, "end_lineno", start)
+            if start <= line <= end:
+                span = end - start
+                if span < candidate_span:
+                    candidate = node
+                    candidate_span = span
+        return candidate
+
+    def _infer_receiver_target(
+        self,
+        node: Any,
+        parent: str,
+        import_names: dict[str, str],
+    ) -> str | None:
+        """Infer the target type/module path assigned to a receiver name."""
+        import ast as _ast
+
+        if isinstance(node, _ast.Assign):
+            targets = node.targets
+            value = node.value
+            annotation = None
+        elif isinstance(node, _ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+            annotation = node.annotation
+        else:
+            return None
+
+        if not any(isinstance(target, _ast.Name) and target.id == parent for target in targets):
+            return None
+
+        inferred = self._qualified_name_from_expr(value, import_names)
+        if inferred:
+            return inferred
+        return self._qualified_name_from_expr(annotation, import_names)
+
+    def _qualified_name_from_expr(
+        self,
+        expr: Any | None,
+        import_names: dict[str, str],
+    ) -> str | None:
+        """Extract a dotted name from a simple AST expression."""
+        import ast as _ast
+
+        if expr is None:
+            return None
+        if isinstance(expr, _ast.Call):
+            return self._qualified_name_from_expr(expr.func, import_names)
+        if isinstance(expr, _ast.Name):
+            return import_names.get(expr.id, expr.id)
+        if isinstance(expr, _ast.Attribute):
+            parts: list[str] = []
+            current = expr
+            while isinstance(current, _ast.Attribute):
+                parts.append(current.attr)
+                current = current.value
+            if isinstance(current, _ast.Name):
+                root = import_names.get(current.id, current.id)
+                parts.append(root)
+                return ".".join(reversed(parts))
+        if isinstance(expr, _ast.Subscript):
+            return self._qualified_name_from_expr(expr.value, import_names)
+        return None
 
     def complete_diagnostics(self, prefix: str, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
         """Return completion candidates with detailed timing breakdown."""

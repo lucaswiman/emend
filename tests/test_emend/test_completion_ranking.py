@@ -212,3 +212,38 @@ def test_completion_function_parameters(engine):
     # Should find param_one and param_two
     assert "param_one" in words, f"param_one not in {words}"
     assert "param_two" in words, f"param_two not in {words}"
+
+
+def test_attribute_completion_prefers_local_scope_usage(engine):
+    eng, proj = engine
+    source = textwrap.dedent("""\
+        class Workflow:
+            def alpha(self):
+                pass
+
+            def archive(self):
+                pass
+
+        class Worker:
+            def run(self):
+                wf = Workflow()
+                wf.archive()
+                return wf.
+    """)
+    (proj / "workflow.py").write_text(source)
+    _dispatch(eng, "reindex", {})
+    file_path = str((proj / "workflow.py").resolve())
+
+    result = _dispatch(eng, "complete", {
+        "prefix": "wf.",
+        "file": file_path,
+        "line": 12,
+        "col": 18,
+    })
+
+    words = [item["word"] for item in result["items"]]
+    menus = {item["word"]: item.get("menu", "") for item in result["items"]}
+    assert "archive" in words
+    assert "alpha" in words
+    assert menus["archive"] == "[scope:wf]"
+    assert words.index("archive") < words.index("alpha")

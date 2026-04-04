@@ -487,6 +487,50 @@ class TestCompleteHotBuffer:
         finally:
             eng.close()
 
+    def test_complete_prefers_hot_buffer_attribute_usage(self, tmp_path):
+        """Scoped attribute accesses from the hot buffer outrank generic members."""
+        disk_source = textwrap.dedent("""\
+            class Workflow:
+                def alpha(self):
+                    pass
+
+                def archive(self):
+                    pass
+
+            def run():
+                wf = Workflow()
+                return wf.
+        """)
+        proj = build_indexed_project(tmp_path, {"mod.py": disk_source})
+        eng = EditorSearchEngine(str(proj))
+        try:
+            mod = str((proj / "mod.py").resolve())
+            hot_source = textwrap.dedent("""\
+                class Workflow:
+                    def alpha(self):
+                        pass
+
+                    def archive(self):
+                        pass
+
+                def run():
+                    wf = Workflow()
+                    wf.archive()
+                    return wf.
+            """)
+            eng.buffer_open(mod, hot_source)
+
+            result = eng.complete("wf.", file=mod, line=11, col=18)
+            words = [item["word"] for item in result.items]
+            menus = {item["word"]: item.get("menu", "") for item in result.items}
+
+            assert "archive" in words
+            assert "alpha" in words
+            assert menus["archive"] == "[scope:wf]"
+            assert words.index("archive") < words.index("alpha")
+        finally:
+            eng.close()
+
 
 # ---------------------------------------------------------------------------
 # TestReadFileOrHot
