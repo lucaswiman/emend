@@ -4720,6 +4720,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     project_root = _find_project_root(project_path)
     emend_dir = Path(project_root) / ".emend" / "cache"
     emend_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_ignore_files(project_root)
     facts_db = emend_dir / "facts.db"
 
     # Path 1: load existing facts.db
