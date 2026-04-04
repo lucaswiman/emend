@@ -115,6 +115,23 @@ After installing, run `:helptags ALL` to index this help file.
                         If the target path is available locally, jump to it.
                         Otherwise, show the mapped repository.
 
+                                                            *:EmendModuleMap*
+:EmendModuleMap [module]
+                        Add a module mapping so that |:EmendGoto| can resolve
+                        imports from an external package.  Without [module],
+                        the module is auto-detected from the import statement
+                        on the current line (e.g. `from payments.models import
+                        Order` → `payments.models`).
+
+                        You are prompted for either a GitHub repo (`org/name`)
+                        or a local filesystem path.  Local paths are validated
+                        before saving — an error is shown if the directory does
+                        not exist.
+
+                        When |:EmendGoto| cannot resolve an imported symbol
+                        and the import has no mapping, it displays a hint
+                        suggesting this command.
+
                                                               *:EmendReplace*
 :EmendReplace           Open a prompt for a find pattern and replacement.
                         After entering both, a diff preview is shown.

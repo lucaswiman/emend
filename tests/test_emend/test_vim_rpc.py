@@ -394,3 +394,131 @@ class TestIncrementalSearch:
         assert second is False
         if eng._index_thread:
             eng._index_thread.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Module Map Add
+# ---------------------------------------------------------------------------
+
+
+class TestModuleMapAdd:
+    """Tests for the module_map_add RPC method used by :EmendModuleMap."""
+
+    def test_add_module_mapping_with_local_path(self, engine):
+        """Adding a mapping with a valid local path should succeed."""
+        eng, proj = engine
+        local_dir = proj / "external_lib"
+        local_dir.mkdir()
+        result = _dispatch(eng, "module_map_add", {
+            "module_prefix": "external_lib",
+            "local_path": str(local_dir),
+        })
+        assert result["mode"] == "module_map_add"
+        assert len(result["items"]) == 1
+        assert result["items"][0]["module_prefix"] == "external_lib"
+        assert "message" in result
+
+    def test_add_module_mapping_with_repo(self, engine):
+        """Adding a mapping with a repo should succeed."""
+        eng, proj = engine
+        result = _dispatch(eng, "module_map_add", {
+            "module_prefix": "payments",
+            "repo": "org/payments-service",
+        })
+        assert result["mode"] == "module_map_add"
+        assert result["items"][0]["repo"] == "org/payments-service"
+
+    def test_add_module_mapping_rejects_nonexistent_local_path(self, engine):
+        """A local path that doesn't exist should return an error."""
+        eng, proj = engine
+        result = _dispatch(eng, "module_map_add", {
+            "module_prefix": "missing",
+            "local_path": "/nonexistent/path/that/does/not/exist",
+        })
+        assert "error" in result
+        assert "does not exist" in result["error"]["message"]
+
+    def test_add_module_mapping_requires_prefix(self, engine):
+        """module_prefix is required."""
+        eng, proj = engine
+        result = _dispatch(eng, "module_map_add", {
+            "module_prefix": "",
+            "repo": "org/something",
+        })
+        assert "error" in result
+        assert "module_prefix" in result["error"]["message"]
+
+    def test_add_module_mapping_requires_repo_or_path(self, engine):
+        """At least one of repo or local_path is required."""
+        eng, proj = engine
+        result = _dispatch(eng, "module_map_add", {
+            "module_prefix": "something",
+        })
+        assert "error" in result
+        assert "repo or local_path" in result["error"]["message"]
+
+    def test_module_mapping_persists_and_resolves(self, engine):
+        """After adding a mapping, module_resolve should find it."""
+        eng, proj = engine
+        local_dir = proj / "my_lib"
+        local_dir.mkdir()
+        _dispatch(eng, "module_map_add", {
+            "module_prefix": "my_lib",
+            "local_path": str(local_dir),
+        })
+        result = _dispatch(eng, "module_resolve", {"module": "my_lib"})
+        assert len(result["items"]) == 1
+        assert result["items"][0]["module_prefix"] == "my_lib"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Unmapped import hint in mapping_goto
+# ---------------------------------------------------------------------------
+
+
+class TestUnmappedImportHint:
+    """Tests for the unmapped_import hint returned by mapping_goto."""
+
+    def test_goto_unmapped_import_returns_hint(self, engine):
+        """When goto fails on an imported symbol, the response should
+        include an unmapped_import hint with the module name."""
+        eng, proj = engine
+        # Create a file that imports from an unmapped module.
+        caller = proj / "caller.py"
+        caller.write_text("from payments.models import Order\n\nprint(Order)\n")
+        _dispatch(eng, "reindex", {})
+
+        result = _dispatch(eng, "mapping_goto", {
+            "identifier": "Order",
+            "file": str(caller),
+            "line": 3,
+            "col": 7,
+        })
+        assert result["items"] == []
+        assert "unmapped_import" in result
+        assert result["unmapped_import"]["unmapped_module"] == "payments.models"
+        assert result["unmapped_import"]["identifier"] == "Order"
+
+    def test_goto_local_symbol_no_hint(self, engine):
+        """When goto succeeds locally, no unmapped_import hint is returned."""
+        eng, proj = engine
+        result = _dispatch(eng, "mapping_goto", {
+            "identifier": "UserService",
+            "file": str(proj / "app.py"),
+            "line": 1,
+            "col": 0,
+        })
+        assert len(result["items"]) >= 1
+        assert "unmapped_import" not in result
+
+    def test_goto_non_import_symbol_no_hint(self, engine):
+        """When goto fails on a symbol that isn't imported, no hint."""
+        eng, proj = engine
+        result = _dispatch(eng, "mapping_goto", {
+            "identifier": "totally_unknown_symbol",
+            "file": str(proj / "app.py"),
+            "line": 1,
+            "col": 0,
+        })
+        assert result["items"] == []
+        assert "unmapped_import" not in result

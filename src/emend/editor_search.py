@@ -2669,6 +2669,8 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return _mapping_goto(engine, params)
     elif method == "module_resolve":
         return _module_resolve(engine, params)
+    elif method == "module_map_add":
+        return _module_map_add(engine, params)
     elif method == "replace_preview":
         return engine.replace_preview(
             pattern=params.get("pattern", ""),
@@ -2863,13 +2865,13 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
         items.append(entry)
 
     # --- 3. Import-aware module mapping resolution (Tier 3) ---
+    found_import = None
     if not items and params.get("file"):
         from emend.ast_utils import get_imports
         file_path = params["file"]
         imports = get_imports(file_path)
 
         # Filter imports for the target identifier
-        found_import = None
         for imp in imports:
             if (imp["asname"] or imp["name"]) == identifier:
                 found_import = imp
@@ -2886,8 +2888,13 @@ def _mapping_goto(engine: EditorSearchEngine, params: dict) -> dict:
                 if item:
                     items.append(item)
 
+    # --- 4. No results — include import info so the editor can offer to map ---
     elapsed = (time.monotonic() - t0) * 1000
-    return {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto", "source": "kb"}
+    result: dict = {"items": items, "elapsed_ms": round(elapsed, 2), "mode": "mapping_goto", "source": "kb"}
+    if not items and found_import:
+        module = found_import.get("module") or found_import["name"]
+        result["unmapped_import"] = {"unmapped_module": module, "identifier": identifier}
+    return result
 
 
 def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:
@@ -2910,6 +2917,58 @@ def _module_resolve(engine: EditorSearchEngine, params: dict) -> dict:
         item["resolved_path"] = resolved_path
     elapsed = (time.monotonic() - t0) * 1000
     return {"items": [item], "elapsed_ms": round(elapsed, 2), "mode": "module_resolve"}
+
+
+def _module_map_add(engine: EditorSearchEngine, params: dict) -> dict:
+    """Add a module mapping (module_prefix → repo or local path).
+
+    If ``local_path`` is provided, verifies the directory exists before saving.
+    """
+    from emend.knowledge import ModuleMapping
+
+    t0 = time.monotonic()
+    module_prefix = params.get("module_prefix", "").strip()
+    if not module_prefix:
+        return {"error": {"code": -1, "message": "module_prefix is required"}}
+
+    repo = params.get("repo", "").strip()
+    local_path = params.get("local_path", "").strip()
+    branch = params.get("branch", "").strip()
+    subpath = params.get("subpath", "").strip()
+
+    if not repo and not local_path:
+        return {"error": {"code": -1, "message": "either repo or local_path is required"}}
+
+    # Validate local_path exists on the filesystem.
+    if local_path:
+        p = Path(local_path).expanduser()
+        if not p.is_dir():
+            return {
+                "error": {
+                    "code": -1,
+                    "message": f"directory does not exist: {local_path}",
+                }
+            }
+        local_path = str(p.resolve())
+
+    store = _get_store(engine)
+    mapping = ModuleMapping(
+        module_prefix=module_prefix,
+        repo=repo,
+        local_path=local_path,
+        branch=branch,
+        subpath=subpath,
+        provenance="manual",
+    )
+    store.add_module_mapping(mapping)
+
+    elapsed = (time.monotonic() - t0) * 1000
+    return {
+        "items": [{"module_prefix": module_prefix, "repo": repo, "local_path": local_path}],
+        "elapsed_ms": round(elapsed, 2),
+        "mode": "module_map_add",
+        "message": f"Mapped {module_prefix} → {repo or local_path}",
+    }
 
 
 def _write_json(obj: dict, stream=None) -> None:
