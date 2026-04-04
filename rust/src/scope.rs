@@ -661,6 +661,8 @@ pub struct ScopeCreator {
 pub struct ScopeRule {
     pub is_closure_boundary: bool,
     pub names_visible_to_inner: bool,
+    #[serde(default)]
+    pub continue_outer_lookup: bool,
     pub scoped_children: Option<Vec<String>>,
 }
 
@@ -1887,7 +1889,10 @@ impl ScopeResolver {
             // Check closure boundary
             if let Some(rule) = self.config.scoping.rules.get(&scope.kind) {
                 if rule.is_closure_boundary && !rule.names_visible_to_inner {
-                    // Class scope in Python: stop searching
+                    if rule.continue_outer_lookup {
+                        current = scope.parent;
+                        continue;
+                    }
                     break;
                 }
             }
@@ -2710,12 +2715,13 @@ impl LanguageConfig {
                     ScopeCreator { node_type: "generator_expression".to_string(), kind: ScopeKind::Comprehension },
                 ],
                 rules: HashMap::from([
-                    (ScopeKind::Module, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, scoped_children: None }),
-                    (ScopeKind::Function, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, scoped_children: None }),
-                    (ScopeKind::Class, ScopeRule { is_closure_boundary: true, names_visible_to_inner: false, scoped_children: None }),
+                    (ScopeKind::Module, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, continue_outer_lookup: false, scoped_children: None }),
+                    (ScopeKind::Function, ScopeRule { is_closure_boundary: false, names_visible_to_inner: true, continue_outer_lookup: false, scoped_children: None }),
+                    (ScopeKind::Class, ScopeRule { is_closure_boundary: true, names_visible_to_inner: false, continue_outer_lookup: true, scoped_children: None }),
                     (ScopeKind::Comprehension, ScopeRule { 
                         is_closure_boundary: false, 
                         names_visible_to_inner: true, 
+                        continue_outer_lookup: false,
                         scoped_children: Some(vec!["for_in_clause.left".to_string()]) 
                     }),
                 ]),
@@ -3068,9 +3074,41 @@ class MyClass:
         let rule = config.scoping.rules.get(&ScopeKind::Class).unwrap();
         assert!(rule.is_closure_boundary);
         assert!(!rule.names_visible_to_inner);
+        assert!(rule.continue_outer_lookup);
 
         assert!(class_scope.bindings.contains_key("class_var"));
         assert!(class_scope.bindings.contains_key("method"));
+    }
+
+    #[test]
+    fn test_nested_method_closure_sees_module_globals() {
+        let source = r#"
+def foo():
+    return 1
+
+class E:
+    def method(self):
+        def bar():
+            return foo()
+        return bar()
+"#;
+        let tree = parse(source);
+        let config = LanguageConfig::python_default();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/test.py");
+        resolver.index_file(&path, source, &tree);
+
+        let file_scope = resolver.file_scopes.get(&path).unwrap();
+        let call_refs: Vec<_> = file_scope.references.iter()
+            .filter(|r| r.kind == super::ReferenceKind::Call)
+            .map(|r| r.qn.name.clone())
+            .collect();
+
+        assert!(
+            call_refs.iter().any(|qn| qn == "test.foo"),
+            "nested method closure should resolve foo() to module global, got: {:?}",
+            call_refs
+        );
     }
 
     #[test]

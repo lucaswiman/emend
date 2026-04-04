@@ -60,6 +60,8 @@ kind = "comprehension"
 # cannot see class-level names without explicit `self.` or the class name.
 is_closure_boundary = true
 names_visible_to_inner = false
+# But lookup should continue past the class to enclosing module/global scopes.
+continue_outer_lookup = true
 
 [scoping.rules.function]
 is_closure_boundary = false

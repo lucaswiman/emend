@@ -159,6 +159,39 @@ class TestFindCallers:
         callers = list(find_callers(selector, project_path=str(project)))
         assert len(callers) > 0, "Should find caller in same file"
 
+    def test_callers_find_nested_method_closure_calls_module_function(self, tmp_path):
+        """callers includes same-module calls from nested functions inside methods."""
+        from emend.transform import find_callers
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        target = project / "module.py"
+        target.write_text(
+            "def foo():\n"
+            "    return 1\n"
+            "\n"
+            "class E:\n"
+            "    def method(self):\n"
+            "        def bar():\n"
+            "            return foo()\n"
+            "        return bar()\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(target),
+            symbol_path=["foo"],
+            component=None,
+            accessor=None,
+        )
+
+        callers = list(find_callers(selector, project_path=str(project)))
+        caller_lines = {(r.file_path, r.line) for r in callers}
+        assert any(
+            Path(f).resolve() == target.resolve() and line == 7
+            for f, line in caller_lines
+        ), f"Expected nested foo() call on line 7, got {caller_lines}"
+
 
 class TestCallersCommand:
     """Tests for the refs --calls-only CLI command."""
