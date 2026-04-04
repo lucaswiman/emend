@@ -15,51 +15,29 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import shutil
 import statistics
-import subprocess
 import sys
-import textwrap
 import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Shared utilities (path setup for script-mode execution)
 # ---------------------------------------------------------------------------
 
-DJANGO_REPO = "https://github.com/django/django.git"
-DJANGO_COMMIT = "9e7cc2b628fe8fd3895986af9b7fc9525034c1b0"
-DJANGO_TAG = "5.2"  # Tag that resolves to DJANGO_COMMIT (annotated tag)
-CACHE_DIR = Path(__file__).resolve().parent / ".django-checkout"
-SCALED_DIR = Path(__file__).resolve().parent / ".django-scaled"
-SCALED_COPIES = 50  # Number of copies of django/ to create
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_utils import _log, _run, check_emend_available, TIMEOUT  # noqa: E402
+from django_checkout import (  # noqa: E402
+    ensure_django_checkout,
+    ensure_scaled_checkout,
+    setup_lint_rules,
+    SCALED_COPIES,
+)
 
-LINT_RULES_YAML = textwrap.dedent("""\
-    macros:
-      print_call: "print($...ARGS)"
-      isinstance_str: "isinstance($X, str)"
+# ---------------------------------------------------------------------------
+# Benchmark definitions
+# ---------------------------------------------------------------------------
 
-    rules:
-      no-print:
-        find: "{print_call}"
-        message: "Avoid bare print() calls in production code."
-
-      isinstance-str:
-        find: "{isinstance_str}"
-        message: "Consider using type($X) is str or more specific checks."
-
-      no-hasattr:
-        find: "hasattr($X, $Y)"
-        message: "hasattr() swallows exceptions; use try/except or check __dict__."
-
-      no-open-without-encoding:
-        find: "open($PATH)"
-        message: "Specify encoding when calling open()."
-
-      no-mutable-default:
-        find: "def $F($...A, $P=[], $...B):"
-        message: "Mutable default argument; use None and initialize inside."
-""")
+LINT_RULES_YAML_SUMMARY = "5 pattern rules (print, isinstance, hasattr, open, mutable-default)"
 
 # Each benchmark entry: (name, description, args_list, ok_codes)
 # args_list is a list of CLI arguments to pass after 'emend'.
@@ -135,41 +113,40 @@ BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
 ]
 
 # Scaled benchmarks run against the 50x-duplicated codebase.
-# args_list uses "." as the search target (entire scaled directory).
 SCALED_BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
     (
         "scaled_find_optional",
-        'search "Optional[$X]" on 50x django (~38K py files)',
+        f'search "Optional[$X]" on {SCALED_COPIES}x django (~38K py files)',
         ["search", "Optional[$X]", "."],
         {0},
     ),
     (
         "scaled_find_filter",
-        'search "$X.objects.filter($...ARGS)" on 50x django',
+        f'search "$X.objects.filter($...ARGS)" on {SCALED_COPIES}x django',
         ["search", "$X.objects.filter($...ARGS)", "."],
         {0},
     ),
     (
         "scaled_find_isinstance",
-        'search "isinstance($X, str)" on 50x django',
+        f'search "isinstance($X, str)" on {SCALED_COPIES}x django',
         ["search", "isinstance($X, str)", "."],
         {0},
     ),
     (
         "scaled_find_print",
-        'search "print($...ARGS)" on 50x django',
+        f'search "print($...ARGS)" on {SCALED_COPIES}x django',
         ["search", "print($...ARGS)", "."],
         {0},
     ),
     (
         "scaled_find_assign",
-        'search "$X = None" on 50x django',
+        f'search "$X = None" on {SCALED_COPIES}x django',
         ["search", "$X = None", "."],
         {0},
     ),
     (
         "scaled_summary",
-        'search --output summary django1/django/db/models/ on 50x django',
+        f'search --output summary django1/django/db/models/ on {SCALED_COPIES}x django',
         ["search", "django1/django/db/models/", "--output", "summary"],
         {0},
     ),
@@ -177,178 +154,8 @@ SCALED_BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Benchmark runner
 # ---------------------------------------------------------------------------
-
-
-TIMEOUT = 600  # seconds -- generous limit for slow operations on large codebases
-
-# Whether to suppress progress output (for JSON mode).
-_quiet = False
-
-
-def _log(msg: str) -> None:
-    """Print a progress message to stderr (so JSON output stays clean)."""
-    if not _quiet:
-        print(msg, file=sys.stderr)
-
-
-def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run a command, raising on failure with combined output."""
-    kwargs.setdefault("timeout", TIMEOUT)
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-
-def ensure_django_checkout() -> Path:
-    """Clone Django into the cache directory if not already present.
-
-    Uses a shallow clone at the exact commit (via its tag) to minimize
-    download size.  Falls back to a full clone if needed.
-
-    Returns the path to the Django checkout.
-    """
-    if CACHE_DIR.exists() and (CACHE_DIR / ".git").is_dir():
-        # Verify we have the right commit checked out.
-        result = _run(["git", "rev-parse", "HEAD"], cwd=CACHE_DIR)
-        if result.returncode == 0 and result.stdout.strip() == DJANGO_COMMIT:
-            _log(f"  Django checkout already present at {CACHE_DIR}")
-            return CACHE_DIR
-        else:
-            _log("  Django checkout exists but wrong commit, resetting...")
-            _run(
-                ["git", "fetch", "--depth", "1", "origin", f"tag {DJANGO_TAG}"],
-                cwd=CACHE_DIR,
-            )
-            result = _run(
-                ["git", "checkout", f"tags/{DJANGO_TAG}"], cwd=CACHE_DIR
-            )
-            if result.returncode != 0:
-                _log(f"  Failed to checkout tag {DJANGO_TAG}, re-cloning...")
-                shutil.rmtree(CACHE_DIR)
-
-    if not CACHE_DIR.exists():
-        _log(f"  Cloning Django (tag {DJANGO_TAG}) into {CACHE_DIR}...")
-        # Shallow clone at the exact tag to minimize download size.
-        result = _run([
-            "git", "clone",
-            "--branch", DJANGO_TAG,
-            "--depth", "1",
-            DJANGO_REPO,
-            str(CACHE_DIR),
-        ])
-        if result.returncode != 0:
-            print(
-                f"ERROR: Failed to clone Django at tag {DJANGO_TAG}:\n"
-                f"{result.stderr}",
-                file=sys.stderr,
-            )
-            shutil.rmtree(CACHE_DIR, ignore_errors=True)
-            sys.exit(1)
-
-        # Verify the commit matches what we expect.
-        result = _run(["git", "rev-parse", "HEAD"], cwd=CACHE_DIR)
-        actual_commit = (
-            result.stdout.strip() if result.returncode == 0 else "<unknown>"
-        )
-        if actual_commit != DJANGO_COMMIT:
-            print(
-                f"  WARNING: Tag {DJANGO_TAG} resolved to {actual_commit}, "
-                f"expected {DJANGO_COMMIT}. Proceeding anyway.",
-                file=sys.stderr,
-            )
-
-    _log(f"  Django checkout ready at {CACHE_DIR}")
-    return CACHE_DIR
-
-
-def ensure_scaled_checkout(django_dir: Path) -> Path:
-    """Create a scaled directory with N copies of django/.
-
-    The result is a directory like:
-        .django-scaled/
-            django1/django/...
-            django2/django/...
-            ...
-            django50/django/...
-
-    Uses hard links for .py files to avoid duplicating data while keeping
-    the directory structure real (no symlinks, so scanners work natively).
-
-    Returns the path to the scaled directory.
-    """
-    marker = SCALED_DIR / f".{SCALED_COPIES}-copies"
-    if SCALED_DIR.exists() and marker.exists():
-        _log(f"  Scaled checkout already present at {SCALED_DIR} ({SCALED_COPIES} copies)")
-        return SCALED_DIR
-
-    if SCALED_DIR.exists():
-        _log("  Scaled checkout exists but stale, recreating...")
-        shutil.rmtree(SCALED_DIR)
-
-    _log(f"  Creating scaled checkout with {SCALED_COPIES} copies...")
-    SCALED_DIR.mkdir(parents=True)
-    src_django = django_dir / "django"
-
-    # Collect the list of .py files relative to django/
-    py_files = []
-    for py_file in src_django.rglob("*.py"):
-        py_files.append(py_file.relative_to(src_django))
-
-    _log(f"  Source: {len(py_files)} .py files in {src_django}")
-
-    for i in range(1, SCALED_COPIES + 1):
-        dest_root = SCALED_DIR / f"django{i}" / "django"
-        for rel in py_files:
-            dest = dest_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            src = src_django / rel
-            try:
-                dest.hardlink_to(src)
-            except OSError:
-                # Fall back to copy if hard links fail (cross-device etc.)
-                shutil.copy2(str(src), str(dest))
-
-    total_py = len(py_files) * SCALED_COPIES
-    _log(f"  Scaled checkout ready: {total_py} .py files in {SCALED_DIR}")
-
-    # Write marker
-    marker.write_text(f"{SCALED_COPIES}\n")
-    return SCALED_DIR
-
-
-def setup_lint_rules(django_dir: Path) -> None:
-    """Create .emend/patterns.yaml in the Django checkout for lint benchmarks."""
-    emend_dir = django_dir / ".emend"
-    emend_dir.mkdir(exist_ok=True)
-    rules_file = emend_dir / "patterns.yaml"
-    rules_file.write_text(LINT_RULES_YAML)
-    _log(f"  Lint rules written to {rules_file}")
-
-
-def check_emend_available() -> list[str]:
-    """Check that emend CLI is available. Returns the command to use."""
-    # Try 'emend' on PATH first, then look for it next to the current Python.
-    venv_emend = str(Path(sys.executable).parent / "emend")
-    candidates = [
-        ["emend", "--help"],
-        [venv_emend, "--help"],
-        [sys.executable, "-m", "emend", "--help"],
-    ]
-    for cmd in candidates:
-        try:
-            result = _run(cmd)
-        except (FileNotFoundError, OSError):
-            continue
-        if result.returncode == 0:
-            # Return the base command (without --help).
-            return cmd[:-1]
-
-    print(
-        "ERROR: emend is not installed or not on PATH.\n"
-        "Install it with: pip install -e . (from the emend repo root)",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 
 def run_benchmark(
@@ -358,17 +165,7 @@ def run_benchmark(
     iterations: int,
     ok_codes: set[int] | None = None,
 ) -> dict:
-    """Run a single benchmark for the specified number of iterations.
-
-    Args:
-        emend_cmd: Base command to invoke emend (e.g. ["emend"]).
-        django_dir: Working directory for the command.
-        args: CLI arguments to append after emend_cmd.
-        iterations: Number of times to run the benchmark.
-        ok_codes: Set of return codes treated as success (default: {0}).
-
-    Returns a dict with timing results and metadata.
-    """
+    """Run a single benchmark for the specified number of iterations."""
     if ok_codes is None:
         ok_codes = {0}
 
@@ -382,7 +179,7 @@ def run_benchmark(
         start = time.perf_counter()
         try:
             result = _run(full_cmd, cwd=django_dir)
-        except subprocess.TimeoutExpired:
+        except __import__("subprocess").TimeoutExpired:
             elapsed = time.perf_counter() - start
             times.append(elapsed)
             last_returncode = -1
@@ -395,11 +192,7 @@ def run_benchmark(
         last_stdout = result.stdout
         last_stderr = result.stderr
 
-    # Count output lines as a rough measure of result volume.
-    output_lines = (
-        len(last_stdout.strip().splitlines()) if last_stdout else 0
-    )
-
+    output_lines = len(last_stdout.strip().splitlines()) if last_stdout else 0
     is_ok = last_returncode in ok_codes
 
     return {
@@ -422,15 +215,12 @@ def run_benchmark(
 
 
 def _fmt_time(seconds: float) -> str:
-    """Format a duration in human-friendly form."""
     if seconds < 1.0:
         return f"{seconds * 1000:.0f}ms"
     return f"{seconds:.2f}s"
 
 
 def print_table(results: dict[str, dict]) -> None:
-    """Print a human-readable summary table."""
-    # Header
     name_width = max(len(name) for name in results) + 2
     print()
     print("=" * 80)
@@ -462,13 +252,9 @@ def print_table(results: dict[str, dict]) -> None:
             f"  {data['output_lines']:>7}"
             f"  {status:>7}"
         )
-
     print()
 
-    # Print errors for failed benchmarks.
-    failures = {
-        name: data for name, data in results.items() if not data["ok"]
-    }
+    failures = {name: data for name, data in results.items() if not data["ok"]}
     if failures:
         print("Failures:")
         for name, data in failures.items():
@@ -480,7 +266,6 @@ def print_table(results: dict[str, dict]) -> None:
 
 
 def _get_emend_commit() -> str:
-    """Get the current emend git commit hash."""
     try:
         result = _run(["git", "rev-parse", "HEAD"])
         return result.stdout.strip() if result.returncode == 0 else "unknown"
@@ -494,7 +279,7 @@ def print_json(
     label: str | None = None,
     save_path: str | None = None,
 ) -> None:
-    """Print machine-readable JSON output, optionally saving to a file."""
+    from django_checkout import DJANGO_COMMIT
     output: dict = {
         "django_commit": DJANGO_COMMIT,
         "emend_commit": _get_emend_commit(),
@@ -534,105 +319,70 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Benchmark emend operations against the Django codebase.",
     )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Run only 1 iteration of each benchmark.",
-    )
-    parser.add_argument(
-        "--json",
-        dest="json_output",
-        action="store_true",
-        help="Output results as JSON.",
-    )
-    parser.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help="Override number of iterations (default: 3, or 1 with --quick).",
-    )
-    parser.add_argument(
-        "--only",
-        type=str,
-        default=None,
-        help="Run only benchmarks whose name contains this substring.",
-    )
-    parser.add_argument(
-        "--label",
-        type=str,
-        default=None,
-        help="Prose description of what's being tested (required with --save).",
-    )
-    parser.add_argument(
-        "--save",
-        type=str,
-        default=None,
-        help="Save JSON results to this file path.",
-    )
-    parser.add_argument(
-        "--scaled",
-        action="store_true",
-        help=f"Run scaled benchmarks against {SCALED_COPIES}x-duplicated Django codebase.",
-    )
-    parser.add_argument(
-        "--scaled-only",
-        action="store_true",
-        help="Run ONLY the scaled benchmarks (skip standard benchmarks).",
-    )
+    parser.add_argument("--quick", action="store_true",
+                        help="Run only 1 iteration of each benchmark.")
+    parser.add_argument("--json", dest="json_output", action="store_true",
+                        help="Output results as JSON.")
+    parser.add_argument("--iterations", type=int, default=None,
+                        help="Override number of iterations (default: 3, or 1 with --quick).")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Run only benchmarks whose name contains this substring.")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Prose description of what's being tested (required with --save).")
+    parser.add_argument("--save", type=str, default=None,
+                        help="Save JSON results to this file path.")
+    parser.add_argument("--scaled", action="store_true",
+                        help=f"Run scaled benchmarks against {SCALED_COPIES}x-duplicated Django codebase.")
+    parser.add_argument("--scaled-only", action="store_true",
+                        help="Run ONLY the scaled benchmarks (skip standard benchmarks).")
     args = parser.parse_args()
 
     if args.save and not args.label:
         print("ERROR: --label is required when using --save.", file=sys.stderr)
         sys.exit(1)
 
-    global _quiet
+    global _quiet  # noqa: PLW0603
+    from bench_utils import _quiet as _q  # read current value
     iterations = args.iterations or (1 if args.quick else 3)
 
     if args.json_output:
-        _quiet = True
+        import bench_utils
+        bench_utils._quiet = True
 
     _log("emend Django Benchmark Suite")
     _log("=" * 40)
     _log("")
 
-    # Step 1: Check emend is available.
-    _log("[1/3] Checking emend installation...")
+    _log("[1/4] Checking emend installation...")
     emend_cmd = check_emend_available()
     _log(f"  Using: {' '.join(str(c) for c in emend_cmd)}")
     _log("")
 
-    # Step 2: Ensure Django checkout.
     _log("[2/4] Ensuring Django checkout...")
     django_dir = ensure_django_checkout()
     setup_lint_rules(django_dir)
     _log("")
 
-    # Step 2b: Ensure scaled checkout if needed.
     scaled_dir: Path | None = None
     if args.scaled or args.scaled_only:
         _log("[2b/4] Ensuring scaled Django checkout...")
         scaled_dir = ensure_scaled_checkout(django_dir)
         _log("")
 
-    # Step 3: Run standard benchmarks (unless --scaled-only).
     all_benchmarks: list[tuple[str, str, list[str], set[int]]] = []
-    all_dirs: list[tuple[str, Path]] = []  # (bench_name, cwd) pairs
+    all_dirs: list[tuple[str, Path]] = []
 
     if not args.scaled_only:
         selected_benchmarks = BENCHMARKS
         if args.only:
-            selected_benchmarks = [
-                b for b in BENCHMARKS if args.only in b[0]
-            ]
+            selected_benchmarks = [b for b in BENCHMARKS if args.only in b[0]]
         all_benchmarks.extend(selected_benchmarks)
         all_dirs.extend((b[0], django_dir) for b in selected_benchmarks)
 
     if (args.scaled or args.scaled_only) and scaled_dir is not None:
         selected_scaled = SCALED_BENCHMARKS
         if args.only:
-            selected_scaled = [
-                b for b in SCALED_BENCHMARKS if args.only in b[0]
-            ]
+            selected_scaled = [b for b in SCALED_BENCHMARKS if args.only in b[0]]
         all_benchmarks.extend(selected_scaled)
         all_dirs.extend((b[0], scaled_dir) for b in selected_scaled)
 
@@ -661,10 +411,7 @@ def main() -> None:
         )
         results[bench_name] = data
 
-        if data["ok"]:
-            status = "OK"
-        else:
-            status = f"FAIL (exit {data['returncode']})"
+        status = "OK" if data["ok"] else f"FAIL (exit {data['returncode']})"
         _log(
             f"    -> {status}  median={_fmt_time(data['median'])}  "
             f"({data['output_lines']} output lines)"
@@ -672,10 +419,8 @@ def main() -> None:
 
     total_elapsed = time.perf_counter() - total_start
 
-    # Step 4: Output results.
     benchmarks_meta = [(b[0], b[1]) for b in all_benchmarks]
     if args.save:
-        # Save JSON to file; print human-readable table to stderr
         print_json(results, benchmarks_meta, label=args.label, save_path=args.save)
         print_table(results)
         print(f"  Total wall time: {_fmt_time(total_elapsed)}")
