@@ -634,7 +634,244 @@ def _build_fact_sym_rows(
     _walk(raw_symbols)
 
 
-def _build_facts_db(project_root: str) -> None:
+def _extract_file_facts(
+    abs_path: str,
+    rel_path: str,
+    ext: str,
+    content: str,
+    project_root: str,
+    module_name: str,
+    scope_resolver,
+    _rust,
+    build_cfgs_for_source,
+    _walk_symbols,
+    _find_containing_block,
+    _enclosing_symbol,
+    _extract_imports,
+    _build_symbol_line_index,
+    _build_fact_sym_rows_func,
+    SymbolFact,
+    DecoratorOnFact,
+    precomputed_refs: list[tuple] | None = None,
+) -> dict:
+    """Extract all analysis facts for a single file.
+
+    Returns a dict of lists for each relation type.
+    Thread-safe — only reads from the shared scope_resolver, no writes.
+
+    Args:
+        precomputed_refs: Optional list of (target_qn, line, col, ref_kind)
+            tuples from parse.db's reference_index.  When provided, skips
+            the expensive scope_resolver.references_in_file() call.
+    """
+    import_re = re.compile(
+        r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+        re.MULTILINE,
+    )
+
+    result: dict[str, list] = {
+        "fact_sym": [], "fact_ref": [], "fact_imp": [], "fg_sym": [],
+        "dec": [], "cfg_blocks": [], "cfg_edges": [], "fg_refs": [],
+        "calls": [], "calls_by_callee": [], "calls_by_file": [],
+        "def_uses": [], "method_calls": [], "source_locs": [],
+        "imports": [], "ref_by_block": [], "module_level_refs": [],
+    }
+
+    # -- Extract symbols via Rust
+    try:
+        raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
+    except Exception:
+        raw_symbols = []
+
+    sym_facts_for_file: list = []
+    dec_facts_for_file: list = []
+    _walk_symbols(
+        sym_facts_for_file, dec_facts_for_file,
+        raw_symbols, rel_path, module_name, parent_qn=None,
+    )
+
+    # Build fact_symbol rows from the raw Rust output (all symbol kinds)
+    _build_fact_sym_rows_func(
+        result["fact_sym"], raw_symbols, rel_path, module_name,
+        abs_path, project_root, content,
+    )
+
+    # Populate FactGraph-style symbol rows (filtered)
+    for sf in sym_facts_for_file:
+        result["fg_sym"].append([
+            sf.qualified_name, sf.file_path, sf.name, sf.kind,
+            sf.line, sf.end_line, sf.parent or "",
+        ])
+
+    # Populate decorator_on
+    for df in dec_facts_for_file:
+        result["dec"].append([df.symbol_qn, df.decorator])
+
+    # -- Extract references (pre-computed or via Rust scope resolver)
+    file_refs: list[tuple] = []
+    if precomputed_refs is not None:
+        for qn_str, line, col, kind in precomputed_refs:
+            file_refs.append((qn_str, line, col, kind))
+            result["fact_ref"].append([qn_str, rel_path, line, col, kind])
+    else:
+        try:
+            for qn_str, line, col, _offset, _end_offset, kind in \
+                    scope_resolver.references_in_file(abs_path):
+                file_refs.append((qn_str, line, col, kind))
+                result["fact_ref"].append([qn_str, rel_path, line, col, kind])
+        except Exception:
+            pass
+
+    # -- Extract imports
+    if ext == "py":
+        try:
+            for m_match in import_re.finditer(content):
+                mod = m_match.group(1) or m_match.group(2)
+                if mod:
+                    result["fact_imp"].append([rel_path, mod])
+        except Exception:
+            pass
+
+        # Detailed imports for the import relation
+        for imp in _extract_imports(rel_path, content):
+            result["imports"].append([
+                imp.importing_file, imp.imported_module,
+                imp.imported_name or "", imp.line,
+                imp.alias or "",
+            ])
+
+    # -- source_loc (from symbol facts)
+    for sf in sym_facts_for_file:
+        result["source_locs"].append([
+            sf.file_path, "symbol", sf.qualified_name,
+            sf.line, 0, sf.end_line, 0,
+        ])
+
+    # -- CFG
+    try:
+        cfgs = build_cfgs_for_source(content, ext=ext)
+    except Exception:
+        cfgs = []
+
+    block_ranges: list[tuple[str, int, int, int, bool]] = []
+    for cfg in cfgs:
+        func_name = cfg.func_name
+        func_qn = ""
+        for sf in sym_facts_for_file:
+            if sf.name == func_name and sf.file_path == rel_path:
+                func_qn = sf.qualified_name
+                break
+        if not func_qn:
+            func_qn = f"{module_name}.{func_name}"
+
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            result["cfg_blocks"].append([
+                rel_path, func_qn, bid,
+                bid == cfg.entry, bid == cfg.exit,
+            ])
+            has_content = bool(
+                block.get("statements")
+                or block.get("defs")
+                or block.get("uses")
+            )
+            # Tree-sitter lines are 0-indexed; convert to 1-indexed
+            # for consistency with reference lines and source_loc.
+            block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
+
+        for edge in cfg.get_edges():
+            result["cfg_edges"].append([
+                rel_path, func_qn,
+                edge["from"], edge["to"], edge["kind"], 0, 0,
+            ])
+
+    block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
+
+    # -- source_loc entries for blocks (for unreachable block reporting)
+    # Only store blocks with real content (statements, defs, or uses)
+    # to avoid reporting empty structural join blocks as unreachable.
+    for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
+        if start_line_br > 0 and has_content_br:
+            result["source_locs"].append([
+                rel_path, "block", f"{func_qn_br}:{bid_br}",
+                start_line_br, 0, end_line_br, 0,
+            ])
+
+    # -- Block-tagged references, calls, method_calls
+    # Filter out empty structural blocks (exit/join blocks with 0-0 ranges)
+    # which get converted to (1,1) and can incorrectly match references.
+    content_block_ranges = [br for br in block_ranges if br[4]]
+    symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
+
+    for tqn, line, col, kind in file_refs:
+        fq, bid = _find_containing_block(content_block_ranges, line)
+        result["fg_refs"].append([tqn, rel_path, line, col, kind, fq, bid])
+        # ref_by_block: only for refs with real block data
+        if fq and bid >= 0:
+            result["ref_by_block"].append([rel_path, fq, bid, tqn])
+        else:
+            result["module_level_refs"].append([tqn, rel_path, line])
+
+        if kind == "call":
+            caller = _enclosing_symbol(symbol_ranges, line)
+            caller_qn = caller if caller is not None else module_name
+            result["calls"].append([caller_qn, tqn, rel_path, line, col, fq, bid])
+            result["calls_by_callee"].append([tqn, caller_qn, rel_path, line, col, fq, bid])
+            result["calls_by_file"].append([rel_path, caller_qn, tqn, line, col, fq, bid])
+
+            # method_call for dotted call refs
+            if "." in tqn:
+                parts = tqn.rsplit(".", 1)
+                if len(parts) == 2:
+                    result["method_calls"].append([
+                        rel_path, fq,
+                        parts[0].rsplit(".", 1)[-1], parts[1],
+                        bid, line,
+                    ])
+
+    # -- Def-use facts
+    for cfg in cfgs:
+        func_name = cfg.func_name
+        func_qn = ""
+        for sf in sym_facts_for_file:
+            if sf.name == func_name and sf.file_path == rel_path:
+                func_qn = sf.qualified_name
+                break
+        if not func_qn:
+            func_qn = f"{module_name}.{func_name}"
+
+        defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            for d in block.get("defs", []) or []:
+                var_name = d[0] if isinstance(d, (list, tuple)) else d
+                dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
+                dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
+                dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
+
+        for block in cfg.get_blocks():
+            bid = block["id"]
+            for u in block.get("uses", []) or []:
+                var_name = u[0] if isinstance(u, (list, tuple)) else u
+                uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
+                ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
+                ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
+                if var_name in defs_map:
+                    for def_bid, dl, dc, dk in defs_map[var_name]:
+                        result["def_uses"].append([
+                            rel_path, func_qn, var_name, dk,
+                            def_bid, bid, dl, dc, uline, ucol,
+                        ])
+
+    return result
+
+
+def _build_facts_db(
+    project_root: str,
+    scope_resolver=None,
+    precomputed_refs: dict[str, list[tuple]] | None = None,
+) -> None:
     """Build CozoDB facts.db directly from source files.
 
     Extracts all analysis facts (symbols, references, imports, CFG, def-use,
@@ -645,7 +882,23 @@ def _build_facts_db(project_root: str) -> None:
     from parse.db's structured-analysis tables (symbol_index, reference_index,
     import_graph).  Those SQLite tables exist only for editor search and
     QN pre-filtering; Cozo owns all structured analysis data.
+
+    When called from ``warm_caches()``, pre-computed references from the
+    index phase can be passed via *precomputed_refs* to skip the expensive
+    scope resolver (~34s on Django-sized projects).
+
+    Args:
+        project_root: Root directory of the project.
+        scope_resolver: Optional pre-built PyScopeResolver from the index
+            phase.  When provided, skips the expensive per-file index_file()
+            calls.
+        precomputed_refs: Optional dict mapping absolute file paths to lists
+            of ``(target_qn, line, col, ref_kind)`` tuples.  When provided,
+            skips scope resolver entirely for reference extraction.
     """
+    from concurrent.futures import ThreadPoolExecutor
+    import multiprocessing
+
     from emend.cfg import build_cfgs_for_source
     from emend.fact_graph import (
         _find_containing_block,
@@ -691,23 +944,43 @@ def _build_facts_db(project_root: str) -> None:
             file_contents.append((abs_path, rel_path, ext, content))
 
         # Create a project-level scope resolver and index all files.
-        scope_resolver = _rust.PyScopeResolver(resolved_root)
-        for abs_path, _rel, _ext, content in file_contents:
-            try:
-                scope_resolver.index_file(abs_path, content)
-            except Exception:
-                pass
+        # Skip entirely when precomputed_refs covers all files (from warm_caches).
+        # Fall back to building one when called standalone.
+        if precomputed_refs is None and scope_resolver is None:
+            scope_resolver = _rust.PyScopeResolver(resolved_root)
+            for abs_path, _rel, _ext, content in file_contents:
+                try:
+                    scope_resolver.index_file(abs_path, content)
+                except Exception:
+                    pass
 
         # ------------------------------------------------------------------
         # Per-file extraction: symbols, references, imports, CFG, def-use,
-        # method_call, source_loc — all from Rust extractors, no parse.db.
+        # method_call, source_loc — parallelized via ThreadPoolExecutor.
+        # Rust extension methods release the GIL, enabling true parallelism.
         # ------------------------------------------------------------------
-        cozo_fact_sym: list[list] = []      # fact_symbol relation
-        cozo_fact_ref: list[list] = []      # fact_reference relation
-        cozo_fact_imp: list[list] = []      # fact_import relation
-        cozo_fg_sym: list[list] = []        # symbol relation
-        dec_rows_list: list[list] = []      # decorator_on relation
+        max_workers = min(multiprocessing.cpu_count() or 4, 8)
 
+        def _process_file(file_tuple):
+            abs_path, rel_path, ext, content = file_tuple
+            module_name = _file_to_module(abs_path, project_root)
+            file_refs = precomputed_refs.get(abs_path) if precomputed_refs else None
+            return _extract_file_facts(
+                abs_path, rel_path, ext, content,
+                project_root, module_name, scope_resolver,
+                _rust, build_cfgs_for_source, _walk_symbols,
+                _find_containing_block, _enclosing_symbol,
+                _extract_imports, _build_symbol_line_index,
+                _build_fact_sym_rows, SymbolFact, DecoratorOnFact,
+                precomputed_refs=file_refs,
+            )
+
+        # Collect all per-file results
+        cozo_fact_sym: list[list] = []
+        cozo_fact_ref: list[list] = []
+        cozo_fact_imp: list[list] = []
+        cozo_fg_sym: list[list] = []
+        dec_rows_list: list[list] = []
         all_cfg_blocks: list[list] = []
         all_cfg_edges: list[list] = []
         all_fg_refs: list[list] = []
@@ -721,192 +994,22 @@ def _build_facts_db(project_root: str) -> None:
         all_ref_by_block: list[list] = []
         all_module_level_refs: list[list] = []
 
-        import_re = re.compile(
-            r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
-            re.MULTILINE,
-        )
+        _KEYS_TO_LISTS = {
+            "fact_sym": cozo_fact_sym, "fact_ref": cozo_fact_ref,
+            "fact_imp": cozo_fact_imp, "fg_sym": cozo_fg_sym,
+            "dec": dec_rows_list, "cfg_blocks": all_cfg_blocks,
+            "cfg_edges": all_cfg_edges, "fg_refs": all_fg_refs,
+            "calls": all_calls, "calls_by_callee": all_calls_by_callee,
+            "calls_by_file": all_calls_by_file, "def_uses": all_def_uses,
+            "method_calls": all_method_calls, "source_locs": all_source_locs,
+            "imports": all_imports, "ref_by_block": all_ref_by_block,
+            "module_level_refs": all_module_level_refs,
+        }
 
-        for abs_path, rel_path, ext, content in file_contents:
-            module_name = _file_to_module(abs_path, project_root)
-
-            # -- Extract symbols via Rust
-            try:
-                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
-            except Exception:
-                raw_symbols = []
-
-            sym_facts_for_file: list[SymbolFact] = []
-            dec_facts_for_file: list[DecoratorOnFact] = []
-            _walk_symbols(
-                sym_facts_for_file, dec_facts_for_file,
-                raw_symbols, rel_path, module_name, parent_qn=None,
-            )
-
-            # Build fact_symbol rows from the raw Rust output (all symbol kinds)
-            _build_fact_sym_rows(
-                cozo_fact_sym, raw_symbols, rel_path, module_name,
-                abs_path, project_root, content,
-            )
-
-            # Populate FactGraph-style symbol rows (filtered)
-            for sf in sym_facts_for_file:
-                cozo_fg_sym.append([
-                    sf.qualified_name, sf.file_path, sf.name, sf.kind,
-                    sf.line, sf.end_line, sf.parent or "",
-                ])
-
-            # Populate decorator_on
-            for df in dec_facts_for_file:
-                dec_rows_list.append([df.symbol_qn, df.decorator])
-
-            # -- Extract references via Rust scope resolver
-            file_refs: list[tuple] = []
-            try:
-                for qn_str, line, col, _offset, _end_offset, kind in \
-                        scope_resolver.references_in_file(abs_path):
-                    file_refs.append((qn_str, line, col, kind))
-                    cozo_fact_ref.append([qn_str, rel_path, line, col, kind])
-            except Exception:
-                pass
-
-            # -- Extract imports
-            if ext == "py":
-                try:
-                    for m_match in import_re.finditer(content):
-                        mod = m_match.group(1) or m_match.group(2)
-                        if mod:
-                            cozo_fact_imp.append([rel_path, mod])
-                except Exception:
-                    pass
-
-                # Detailed imports for the import relation
-                for imp in _extract_imports(rel_path, content):
-                    all_imports.append([
-                        imp.importing_file, imp.imported_module,
-                        imp.imported_name or "", imp.line,
-                        imp.alias or "",
-                    ])
-
-            # -- source_loc (from symbol facts)
-            for sf in sym_facts_for_file:
-                all_source_locs.append([
-                    sf.file_path, "symbol", sf.qualified_name,
-                    sf.line, 0, sf.end_line, 0,
-                ])
-
-            # -- CFG
-            try:
-                cfgs = build_cfgs_for_source(content, ext=ext)
-            except Exception:
-                cfgs = []
-
-            block_ranges: list[tuple[str, int, int, int, bool]] = []
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                func_qn = ""
-                for sf in sym_facts_for_file:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    all_cfg_blocks.append([
-                        rel_path, func_qn, bid,
-                        bid == cfg.entry, bid == cfg.exit,
-                    ])
-                    has_content = bool(
-                        block.get("statements")
-                        or block.get("defs")
-                        or block.get("uses")
-                    )
-                    # Tree-sitter lines are 0-indexed; convert to 1-indexed
-                    # for consistency with reference lines and source_loc.
-                    block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
-
-                for edge in cfg.get_edges():
-                    all_cfg_edges.append([
-                        rel_path, func_qn,
-                        edge["from"], edge["to"], edge["kind"], 0, 0,
-                    ])
-
-            block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
-
-            # -- source_loc entries for blocks (for unreachable block reporting)
-            # Only store blocks with real content (statements, defs, or uses)
-            # to avoid reporting empty structural join blocks as unreachable.
-            for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
-                if start_line_br > 0 and has_content_br:
-                    all_source_locs.append([
-                        rel_path, "block", f"{func_qn_br}:{bid_br}",
-                        start_line_br, 0, end_line_br, 0,
-                    ])
-
-            # -- Block-tagged references, calls, method_calls
-            symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
-
-            for tqn, line, col, kind in file_refs:
-                fq, bid = _find_containing_block(block_ranges, line)
-                all_fg_refs.append([tqn, rel_path, line, col, kind, fq, bid])
-                # ref_by_block: only for refs with real block data
-                if fq and bid >= 0:
-                    all_ref_by_block.append([rel_path, fq, bid, tqn])
-                else:
-                    all_module_level_refs.append([tqn, rel_path, line])
-
-                if kind == "call":
-                    caller = _enclosing_symbol(symbol_ranges, line)
-                    caller_qn = caller if caller is not None else module_name
-                    all_calls.append([caller_qn, tqn, rel_path, line, col, fq, bid])
-                    all_calls_by_callee.append([tqn, caller_qn, rel_path, line, col, fq, bid])
-                    all_calls_by_file.append([rel_path, caller_qn, tqn, line, col, fq, bid])
-
-                    # method_call for dotted call refs
-                    if "." in tqn:
-                        parts = tqn.rsplit(".", 1)
-                        if len(parts) == 2:
-                            all_method_calls.append([
-                                rel_path, fq,
-                                parts[0].rsplit(".", 1)[-1], parts[1],
-                                bid, line,
-                            ])
-
-            # -- Def-use facts
-            for cfg in cfgs:
-                func_name = cfg.func_name
-                func_qn = ""
-                for sf in sym_facts_for_file:
-                    if sf.name == func_name and sf.file_path == rel_path:
-                        func_qn = sf.qualified_name
-                        break
-                if not func_qn:
-                    func_qn = f"{module_name}.{func_name}"
-
-                defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for d in block.get("defs", []) or []:
-                        var_name = d[0] if isinstance(d, (list, tuple)) else d
-                        dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
-                        dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                        dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
-                        defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
-
-                for block in cfg.get_blocks():
-                    bid = block["id"]
-                    for u in block.get("uses", []) or []:
-                        var_name = u[0] if isinstance(u, (list, tuple)) else u
-                        uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
-                        ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
-                        ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
-                        if var_name in defs_map:
-                            for def_bid, dl, dc, dk in defs_map[var_name]:
-                                all_def_uses.append([
-                                    rel_path, func_qn, var_name, dk,
-                                    def_bid, bid, dl, dc, uline, ucol,
-                                ])
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for file_result in executor.map(_process_file, file_contents):
+                for key, target in _KEYS_TO_LISTS.items():
+                    target.extend(file_result[key])
 
         # -- Compute reachable blocks via BFS from entry blocks
         entries_by_func: dict[tuple[str, str], set[int]] = {}
@@ -2648,10 +2751,50 @@ def warm_caches(
         stats["fts_indexed"] = 0
 
     # Phase 5: build CozoDB facts.db directly from source files.
-    # Done here (main process, single-threaded) — extracts analysis facts
-    # via Rust extractors without reading from parse.db.
+    # Read pre-computed references from parse.db (written by _index_batch
+    # in Phase 2) so _build_facts_db can skip the expensive scope resolver
+    # indexing entirely (~34s saved on Django-sized projects).
     try:
-        _build_facts_db(project_root)
+        t_facts = time.monotonic()
+        precomputed_refs: dict[str, list[tuple]] = {}
+        try:
+            import sqlite3 as _sqlite3
+            _ref_conn = _sqlite3.connect(db_path, timeout=30)
+            _ref_conn.execute("PRAGMA journal_mode=WAL")
+            for row in _ref_conn.execute(
+                "SELECT file_path, target_qn, line, col, ref_kind "
+                "FROM reference_index"
+            ):
+                fp, tqn, line, col, kind = row
+                precomputed_refs.setdefault(fp, []).append((tqn, line, col, kind))
+            _ref_conn.close()
+            logger.info(
+                "warm_caches: loaded %d pre-computed refs for %d files",
+                sum(len(v) for v in precomputed_refs.values()),
+                len(precomputed_refs),
+            )
+        except Exception:
+            precomputed_refs = {}
+
+        if precomputed_refs:
+            _build_facts_db(
+                project_root, precomputed_refs=precomputed_refs,
+            )
+        else:
+            # Fallback: build scope resolver from scratch
+            scope_resolver = _rust.PyScopeResolver(
+                str(Path(project_root).resolve()),
+            )
+            for py_file, content in file_contents:
+                try:
+                    scope_resolver.index_file(py_file, content)
+                except Exception:
+                    pass
+            _build_facts_db(project_root, scope_resolver=scope_resolver)
+        logger.info(
+            "warm_caches: facts db built in %.3fs",
+            time.monotonic() - t_facts,
+        )
     except BaseException:
         logger.debug("warm_caches: facts db build failed", exc_info=True)
 
