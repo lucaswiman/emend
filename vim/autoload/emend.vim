@@ -847,7 +847,16 @@ function! s:on_goto_result(result) abort
   endif
   let l:items = get(a:result, 'items', [])
   if empty(l:items)
-    echo 'emend: no definition found for this symbol'
+    " Check if the server identified an unmapped import we can offer to map.
+    let l:hint = get(a:result, 'unmapped_import', {})
+    if !empty(l:hint)
+      let l:mod = get(l:hint, 'unmapped_module', '?')
+      echohl WarningMsg
+      echom 'emend: "' . l:mod . '" is not mapped.  Use :EmendModuleMap to add a mapping.'
+      echohl None
+    else
+      echo 'emend: no definition found for this symbol'
+    endif
     return
   endif
   let l:source = get(a:result, 'source', 'kb')
@@ -874,6 +883,85 @@ function! s:on_goto_result(result) abort
 
   " Multiple results: show in the search UI.
   call emend#ui#on_search_result(a:result)
+endfunction
+
+" ---------------------------------------------------------------------------
+" Module Map — add a module mapping from the editor
+" ---------------------------------------------------------------------------
+
+function! emend#module_map(module_arg) abort
+  " Determine the module prefix to map.
+  " 1. Explicit argument:  :EmendModuleMap payments.models
+  " 2. Auto-detect from import on the current line.
+  let l:module = a:module_arg
+  if empty(l:module)
+    let l:module = s:detect_import_module()
+  endif
+  if empty(l:module)
+    echohl ErrorMsg
+    echom 'emend: no import found on this line.  Usage: :EmendModuleMap <module>'
+    echohl None
+    return
+  endif
+
+  " Prompt for repo or local path.
+  echo 'Map module "' . l:module . '"'
+  let l:target = input('Repo (org/name) or local path: ', '', 'file')
+  if empty(l:target)
+    return
+  endif
+
+  let l:repo = ''
+  let l:local_path = ''
+
+  " Heuristic: if it looks like org/name (no path separators beyond one /),
+  " treat it as a repo.  Otherwise treat as a local path.
+  if l:target =~# '^\w[^/]*/\w' && l:target !~# '^[/~.]' && l:target !~# '/'  . '.*/'
+    let l:repo = l:target
+  else
+    " Treat as local path — validate it exists.
+    let l:expanded = fnamemodify(l:target, ':p')
+    if !isdirectory(l:expanded)
+      echohl ErrorMsg
+      echom "\nemend: directory does not exist: " . l:expanded
+      echohl None
+      return
+    endif
+    let l:local_path = l:expanded
+  endif
+
+  let l:params = {
+        \ 'module_prefix': l:module,
+        \ 'repo': l:repo,
+        \ 'local_path': l:local_path,
+        \ }
+
+  echo "\n"
+  echom 'emend: adding mapping for ' . l:module . '...'
+  call emend#send('module_map_add', l:params, function('s:on_module_map_result'))
+endfunction
+
+function! s:detect_import_module() abort
+  let l:line = getline('.')
+  " Match: from foo.bar import X
+  let l:match = matchstr(l:line, '^\s*from\s\+\zs[A-Za-z_][A-Za-z0-9_.]*')
+  if !empty(l:match)
+    return l:match
+  endif
+  " Match: import foo.bar
+  let l:match = matchstr(l:line, '^\s*import\s\+\zs[A-Za-z_][A-Za-z0-9_.]*')
+  if !empty(l:match)
+    return l:match
+  endif
+  return ''
+endfunction
+
+function! s:on_module_map_result(result) abort
+  if s:show_rpc_error('emend map: ', a:result)
+    return
+  endif
+  let l:msg = get(a:result, 'message', 'mapping added')
+  echo 'emend: ' . l:msg
 endfunction
 
 function! emend#module_resolve(module_name, ...) abort

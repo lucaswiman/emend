@@ -63,6 +63,9 @@ command! -nargs=? EmendRename call emend#rename(<q-args>)
 " Resolve a module to its external repo / local path.
 command! -nargs=1 EmendResolve call emend#module_resolve(<q-args>)
 
+" Add a module mapping for an import on the current line.
+command! -nargs=? EmendModuleMap call emend#module_map(<q-args>)
+
 " Server lifecycle.
 command! -nargs=0 EmendStart call emend#start()
 command! -nargs=0 EmendStop call emend#stop()
