@@ -61,6 +61,7 @@ class TestProvenance:
         result = _dispatch(eng, "search", {"query": "get_user"})
         assert "provenance" in result, "Missing provenance field"
         assert result["provenance"] == "indexed"
+        assert result["sources"] == ["indexed"]
 
     def test_pattern_search_provenance(self, engine):
         """Pattern search should report provenance='pattern'."""
@@ -85,6 +86,7 @@ class TestProvenance:
         eng, proj = engine
         result = _dispatch(eng, "search", {"query": "app.py"})
         assert result["provenance"] == "files"
+        assert result["sources"] == ["files"]
 
     def test_provenance_in_to_dict(self):
         """provenance should appear in to_dict() output."""
@@ -96,6 +98,18 @@ class TestProvenance:
         )
         d = sr.to_dict()
         assert d["provenance"] == "indexed"
+        assert "sources" not in d
+
+    def test_sources_in_to_dict(self):
+        sr = SearchResult(
+            items=[],
+            elapsed_ms=1.0,
+            mode="symbol",
+            provenance="indexed + files",
+            sources=["indexed", "files"],
+        )
+        d = sr.to_dict()
+        assert d["sources"] == ["indexed", "files"]
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +200,14 @@ class TestFilePathFallback:
     def test_file_results_included_in_symbol_search(self, engine):
         """When query matches both symbols and files, both appear."""
         eng, proj = engine
-        result = _dispatch(eng, "search", {"query": "app"})
+        (proj / "get_user.py").write_text("def helper():\n    pass\n")
+        _dispatch(eng, "reindex", {})
+        result = _dispatch(eng, "search", {"query": "get_user"})
         kinds = {item.get("kind") for item in result["items"]}
         # Should have both file and non-file results
         assert "file" in kinds, "File results should be included in symbol search"
+        assert result["provenance"] == "indexed + files"
+        assert result["sources"] == ["indexed", "files"]
 
     def test_file_only_search_provenance(self, engine):
         """A path-like query with only file results should have files provenance."""
@@ -200,4 +218,23 @@ class TestFilePathFallback:
         result = _dispatch(eng, "search", {"query": "unique_config.yaml"})
         # Should find the file
         if result["items"]:
-            assert result["provenance"] in ("files", "indexed")
+            assert result["provenance"] == "files"
+            assert result["sources"] == ["files"]
+
+    def test_file_search_falls_back_to_filesystem_without_index(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "unique_config.yaml").write_text("key: value\n")
+        eng = EditorSearchEngine(str(proj))
+        try:
+            result = _dispatch(eng, "search", {"query": "unique_config.yaml"})
+        finally:
+            eng.close()
+
+        assert result["provenance"] == "files"
+        assert result["sources"] == ["files"]
+        assert any(
+            item["kind"] == "file"
+            and item["name"] == "unique_config.yaml"
+            for item in result["items"]
+        )

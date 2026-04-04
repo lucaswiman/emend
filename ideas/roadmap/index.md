@@ -6,7 +6,7 @@ constraints.
 
 ## Phases
 
-- [ ] [Phase 1: Picker Workflow](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-1-picker-workflow.md)
+- [x] [Phase 1: Picker Workflow](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-1-picker-workflow.md)
 - [x] [Phase 2: Local Navigation](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-2-local-navigation.md)
 - [x] [Phase 3: Hot Buffer Protocol](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-3-hot-buffer.md)
 - [x] [Phase 4: Analysis-Aware Intelligence](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-4-analysis-aware.md)
@@ -14,7 +14,7 @@ constraints.
 
 ## Scope
 
-- [ ] Keep unified search; do not add a dedicated file mode
-- [ ] Preserve graceful degradation when the symbol index is unavailable
-- [ ] Prioritize repeated navigation and common editor actions over feature count
-- [ ] Use Cozo/CFG/trace for bounded ranking and quick actions, not keystroke-path analysis
+- [x] Keep unified search; do not add a dedicated file mode
+- [x] Preserve graceful degradation when the symbol index is unavailable
+- [x] Prioritize repeated navigation and common editor actions over feature count
+- [x] Use Cozo/CFG/trace for bounded ranking and quick actions, not keystroke-path analysis

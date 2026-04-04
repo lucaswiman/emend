@@ -161,6 +161,25 @@ Execute (provenance is rendered in header when present):
   " If we get here without error, the render succeeded.
   call emend#ui#close()
 
+Execute (composite sources are rendered in header when present):
+  let result = {
+        \ 'items': [
+        \   {'name': 'foo', 'kind': 'function', 'file_path': '/tmp/test.py',
+        \    'line': 10, 'end_line': 15, 'qualified_name': 'mod.foo',
+        \    'signature': '(x, y)', 'score': 1000.0},
+        \   {'name': 'test.py', 'kind': 'file', 'file_path': '/tmp/test.py',
+        \    'line': 1, 'score': 800.0},
+        \ ],
+        \ 'mode': 'symbol',
+        \ 'provenance': 'indexed + files',
+        \ 'sources': ['indexed', 'files'],
+        \ 'elapsed_ms': 2.3,
+        \ 'query': 'test',
+        \ 'truncated': v:false,
+        \ }
+  call emend#ui#on_search_result(result)
+  call emend#ui#close()
+
 Execute (provenance absent does not crash):
   let result = {
         \ 'items': [
@@ -223,10 +242,31 @@ Execute (show_history_overlay handles empty history gracefully):
   call emend#ui#show_history_overlay()
 
 Execute (history overlay caps visible entries at 20):
-  let history = map(range(0, 20), 'printf("query_%d", v:val)')
+  let history = map(range(0, 20), '{''query'': printf("query_%d", v:val), ''provenance'': ''indexed'', ''result_count'': 1}')
   let lines = emend#ui#history_overlay_lines(history)
-  AssertEqual 22, len(lines)
-  AssertEqual '  Recent queries  (j/k navigate, Enter select, Esc cancel)', lines[0]
+  AssertEqual 23, len(lines)
+  AssertEqual '  Recent queries  (<CR> search, <Esc> restore draft)', lines[0]
+  AssertEqual '  Stored in .emend/.vimhistory', lines[1]
+
+Execute (history is persisted to the project .emend directory):
+  let g:emend_project_root = tempname()
+  call mkdir(g:emend_project_root, 'p')
+  let result = {
+        \ 'items': [{'name': 'persist_me', 'kind': 'function',
+        \    'file_path': g:emend_project_root . '/app.py', 'line': 1, 'end_line': 1,
+        \    'qualified_name': 'app.persist_me', 'signature': '()', 'score': 900.0}],
+        \ 'mode': 'symbol',
+        \ 'provenance': 'indexed',
+        \ 'query': 'persist_me',
+        \ 'truncated': v:false,
+        \ }
+  call emend#ui#on_search_result(result)
+  call emend#ui#close()
+  let history_path = g:emend_project_root . '/.emend/.vimhistory'
+  Assert filereadable(history_path), 'history file should be written'
+  let history = json_decode(join(readfile(history_path), "\n"))
+  AssertEqual 'persist_me', history[0].query
+  let g:emend_project_root = ''
 
 " ===========================================================================
 " Default mapping validation

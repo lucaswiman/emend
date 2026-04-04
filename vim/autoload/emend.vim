@@ -60,6 +60,10 @@ function! emend#find_executable() abort
   return s:find_emend()
 endfunction
 
+function! emend#project_root() abort
+  return fnamemodify(g:emend_project_root !=# '' ? g:emend_project_root : getcwd(), ':p')
+endfunction
+
 " ---------------------------------------------------------------------------
 " Server lifecycle
 " ---------------------------------------------------------------------------
@@ -77,7 +81,7 @@ function! emend#start(...) abort
     return
   endif
 
-  let l:root = g:emend_project_root !=# '' ? g:emend_project_root : getcwd()
+  let l:root = emend#project_root()
 
   let s:ready = 0
   let s:indexing = 0

@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -55,6 +56,14 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _ordered_sources(*sources: str) -> list[str]:
+    ordered: list[str] = []
+    for source in sources:
+        if source and source not in ordered:
+            ordered.append(source)
+    return ordered
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -72,6 +81,7 @@ class SearchResult:
     query: str = ""
     indexing: bool = False
     provenance: str = ""  # "indexed", "pattern", "grep", "selector", "files"
+    sources: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Lightweight serialization (avoids ``dataclasses.asdict`` deep-copy)."""
@@ -86,6 +96,8 @@ class SearchResult:
             d["indexing"] = True
         if self.provenance:
             d["provenance"] = self.provenance
+        if self.sources:
+            d["sources"] = self.sources
         return d
 
 
@@ -410,6 +422,7 @@ class EditorSearchEngine:
         # Query history (session-scoped, most recent first)
         self._query_history: list[dict] = []
         self._query_history_max = 100
+        self._project_file_cache: tuple[int, list[str]] | None = None
 
         # Hot buffer snapshots (unsaved editor content)
         self._hot_buffers: dict[str, str] = {}  # resolved file_path -> content
@@ -423,6 +436,7 @@ class EditorSearchEngine:
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self.db_path), timeout=10)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -443,6 +457,73 @@ class EditorSearchEngine:
             except Exception:
                 pass
             delattr(self, "_kb")
+
+    def _set_result_sources(self, result: SearchResult, *sources: str) -> SearchResult:
+        ordered = _ordered_sources(*sources)
+        result.sources = ordered
+        if ordered:
+            result.provenance = " + ".join(ordered)
+        return result
+
+    def _collect_project_files(self) -> list[str]:
+        root = Path(self.project_root).resolve()
+        try:
+            root_mtime = root.stat().st_mtime_ns
+        except OSError:
+            root_mtime = -1
+
+        if (
+            self._project_file_cache is not None
+            and self._project_file_cache[0] == root_mtime
+        ):
+            return self._project_file_cache[1]
+
+        files: list[str] = []
+        try:
+            proc = subprocess.run(
+                ["git", "ls-files", "-z"],
+                capture_output=True,
+                check=False,
+                cwd=str(root),
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                files = [
+                    str(root / rel_path)
+                    for rel_path in proc.stdout.decode(
+                        "utf-8", errors="replace"
+                    ).split("\0")
+                    if rel_path
+                ]
+        except Exception:
+            logger.debug("git ls-files fallback failed", exc_info=True)
+
+        if not files:
+            ignored_dirs = {
+                ".emend",
+                ".git",
+                ".hg",
+                ".mypy_cache",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".svn",
+                ".venv",
+                "__pycache__",
+                "node_modules",
+                "target",
+                "venv",
+            }
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if dirname not in ignored_dirs
+                ]
+                for filename in filenames:
+                    files.append(str(Path(dirpath) / filename))
+
+        self._project_file_cache = (root_mtime, files)
+        return files
 
     # -- FTS ----------------------------------------------------------------
 
@@ -472,9 +553,12 @@ class EditorSearchEngine:
             file_fts_count = 0
 
         if fts_count == 0 or file_fts_count == 0:
-            sym_count = conn.execute(
-                "SELECT COUNT(*) FROM symbol_index"
-            ).fetchone()[0]
+            try:
+                sym_count = conn.execute(
+                    "SELECT COUNT(*) FROM symbol_index"
+                ).fetchone()[0]
+            except sqlite3.Error:
+                sym_count = 0
             if sym_count > 0:
                 rebuild_fts(conn)
 
@@ -571,20 +655,20 @@ class EditorSearchEngine:
             result = self._search_grep(
                 query[1:-1], limit=limit, file_scope=file_scope
             )
-            result.provenance = "grep"
+            self._set_result_sources(result, "grep")
         elif "::" in query:
             result = self._search_selector(query, limit=limit)
-            result.provenance = "selector"
+            self._set_result_sources(result, "selector")
         elif "$" in query:
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
-            result.provenance = "pattern"
+            self._set_result_sources(result, "pattern")
         elif re.match(r'\s*(?:async\s+)?(?:def|class)\s+\w*[*?]', query):
             result = self._search_pattern(
                 query, limit=limit, file_scope=file_scope
             )
-            result.provenance = "pattern"
+            self._set_result_sources(result, "pattern")
         elif "/" in query or any(query.endswith(ext) for ext in (".py", ".ts", ".js", ".rs", ".go", ".c", ".cpp", ".h")):
             # Prioritize file search for path-like queries
             result = self._search_files(query, limit=limit)
@@ -592,14 +676,14 @@ class EditorSearchEngine:
                 result = self._search_symbols(
                     query, limit=limit, file_scope=file_scope, kind=kind
                 )
-                result.provenance = "indexed"
-            else:
-                result.provenance = "files"
+            elif not result.sources:
+                self._set_result_sources(result, "files")
         else:
             result = self._search_symbols(
                 query, limit=limit, file_scope=file_scope, kind=kind
             )
-            result.provenance = "indexed"
+            if not result.sources:
+                self._set_result_sources(result, "indexed")
 
         result.elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
         result.query = query
@@ -774,6 +858,8 @@ class EditorSearchEngine:
             except Exception:
                 logger.debug("Venv symbol lookup failed", exc_info=True)
 
+        has_symbol_results = bool(items)
+
         # Score and rank
         scored = [
             (round(_score_symbol(c["name"], c["qualified_name"], query), 1), c)
@@ -795,43 +881,75 @@ class EditorSearchEngine:
             elapsed_ms=0,
             mode="symbol",
             truncated=truncated,
+            provenance=" + ".join(_ordered_sources(
+                "indexed" if has_symbol_results else "",
+                "files" if file_results.items else "",
+            )),
+            sources=_ordered_sources(
+                "indexed" if has_symbol_results else "",
+                "files" if file_results.items else "",
+            ),
         )
 
     def _search_files(self, query: str, limit: int = 50) -> SearchResult:
         """Search for files matching the query."""
         conn = self._get_conn()
         q_lower = query.lower()
-        
-        candidates: set[str] = set()
-        
-        # Strategy 1: exact basename or substring
-        # Using DISTINCT file_path from symbol_index
-        base_sql = "SELECT DISTINCT file_path FROM symbol_index"
-        
-        # FTS5 pre-filter
-        fts_ok = len(query) >= 3 and self._ensure_fts()
-        if fts_ok:
-            fts_q = '"' + query.replace('"', '""') + '"'
-            sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT 200"
-            candidates.update(r[0] for r in conn.execute(sql, (fts_q,)))
-        else:
-            # Fallback for short queries
-            sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT 200"
-            candidates.update(r[0] for r in conn.execute(sql, ("%" + q_lower + "%",)))
 
-        # Fuzzy subsequence fallback if candidates are few
-        if len(candidates) < limit:
-            # This is expensive on large indexes, but DISTINCT file_path is usually small enough
-            all_files = [r[0] for r in conn.execute(base_sql)]
-            for fp in all_files:
-                if is_fuzzy_subsequence(query, fp):
+        candidates: set[str] = set()
+        candidate_cap = max(limit * 4, 200)
+
+        # Strategy 1: exact basename or substring via the index when available.
+        base_sql = "SELECT DISTINCT file_path FROM symbol_index"
+        try:
+            fts_ok = len(query) >= 3 and self._ensure_fts()
+            if fts_ok:
+                fts_q = '"' + query.replace('"', '""') + '"'
+                sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT ?"
+                candidates.update(
+                    r[0] for r in conn.execute(sql, (fts_q, candidate_cap))
+                )
+            else:
+                sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT ?"
+                candidates.update(
+                    r[0]
+                    for r in conn.execute(
+                        sql, ("%" + q_lower + "%", candidate_cap)
+                    )
+                )
+
+            if len(candidates) < candidate_cap:
+                for row in conn.execute(base_sql):
+                    fp = row[0]
+                    if is_fuzzy_subsequence(query, fp):
+                        candidates.add(fp)
+                        if len(candidates) >= candidate_cap:
+                            break
+        except sqlite3.Error:
+            logger.debug("indexed file search unavailable", exc_info=True)
+
+        # Filesystem fallback keeps file hits visible even when the index
+        # is stale, missing, or does not cover non-source files.
+        if len(candidates) < candidate_cap:
+            for fp in self._collect_project_files():
+                display_path = (
+                    os.path.relpath(fp, self.project_root)
+                    if os.path.isabs(fp)
+                    else fp
+                )
+                if q_lower in display_path.lower() or is_fuzzy_subsequence(query, display_path):
                     candidates.add(fp)
-                    if len(candidates) >= 200:
+                    if len(candidates) >= candidate_cap:
                         break
 
         items = []
         for fp in candidates:
-            score = _score_file(fp, query)
+            display_path = (
+                os.path.relpath(fp, self.project_root)
+                if os.path.isabs(fp)
+                else fp
+            )
+            score = _score_file(display_path, query)
             if score > 0:
                 items.append({
                     "kind": "file",
@@ -842,7 +960,13 @@ class EditorSearchEngine:
                 })
         
         items.sort(key=lambda x: -x["score"])
-        return SearchResult(items=items[:limit], elapsed_ms=0, mode="symbol")
+        return SearchResult(
+            items=items[:limit],
+            elapsed_ms=0,
+            mode="symbol",
+            provenance="files" if items else "",
+            sources=["files"] if items else [],
+        )
 
     # -- pattern search -----------------------------------------------------
 

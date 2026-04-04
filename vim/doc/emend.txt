@@ -253,6 +253,9 @@ Inside the query history overlay:~
     `<CR>`              Recall the selected query into the picker and search
     `<Esc>` / `q`       Dismiss the overlay
 
+Query history is persisted per project in `.emend/.vimhistory`, so repeated
+searches remain available across editor restarts.
+
                                                       *emend-provenance*
 Provenance~
 
@@ -261,12 +264,14 @@ obtained:
 
     `[indexed]`   Symbol index (fast, requires built index)
     `[files]`     File path matching
+    `[indexed + files]`
+                  Mixed symbol and file-path matches in one picker
     `[pattern]`   Tree-sitter pattern search
     `[grep]`      Regex/grep fallback
     `[selector]`  Direct selector resolution
 
 This makes it obvious whether results came from the index, a pattern
-search, or a fallback mode.
+search, file-path fallback, or a mixed fallback mode.
 
 ==============================================================================
 7. PROJECT CONFIGURATION                              *emend-project-config*
@@ -315,7 +320,7 @@ JSON-RPC methods:~
     selector        Resolve `file.py::Sym.path` selectors
     references      Find references by qualified name
     file_symbols    File outline (all symbols in a file)
-    query_history   Recent query history (session-scoped)
+    query_history   Recent query history
     status          Index statistics
     reindex         Refresh stale files + rebuild FTS
     shutdown        Clean server exit

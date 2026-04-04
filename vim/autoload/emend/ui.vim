@@ -29,6 +29,8 @@ let s:outline_mode = 0
 let s:outline_items = []        " cached file symbols for local filtering
 let s:outline_file = ''         " file path whose symbols are cached
 let s:outline_changedtick = -1  " b:changedtick when symbols were fetched
+let s:history_loaded_root = ''
+let s:history_draft_query = ''
 
 " Namespace for extmark highlights in the result list.
 let s:ns_id = -1
@@ -136,12 +138,13 @@ function! emend#ui#on_search_result(result) abort
     return
   endif
 
+  let s:query = get(a:result, 'query', s:query)
   let s:last_result = a:result
   let s:results = get(a:result, 'items', [])
   let s:selected = 0
   
   if s:query !=# ''
-    call s:save_history(s:query)
+    call s:save_history(s:query, a:result)
   endif
 
   if s:ui_is_open()
@@ -189,7 +192,7 @@ function! s:show_cache_warming(query) abort
   if l:emend ==# ''
     let l:emend = 'emend'
   endif
-  let l:root = g:emend_project_root !=# '' ? g:emend_project_root : getcwd()
+  let l:root = emend#project_root()
 
   if has('nvim')
     let s:cache_job = jobstart([l:emend, 'index', l:root, '-vv'], {
@@ -453,6 +456,8 @@ function! s:close_ui() abort
 endfunction
 
 function! s:close_ui_silent() abort
+  call s:close_history_overlay()
+
   if s:cache_timer >= 0
     call timer_stop(s:cache_timer)
     let s:cache_timer = -1
@@ -870,6 +875,14 @@ endfunction
 " Rendering
 " ---------------------------------------------------------------------------
 
+function! s:result_source_label(result) abort
+  let l:sources = get(a:result, 'sources', [])
+  if type(l:sources) == v:t_list && !empty(l:sources)
+    return join(l:sources, ' + ')
+  endif
+  return get(a:result, 'provenance', '')
+endfunction
+
 function! s:render_list() abort
   if s:list_buf < 0 || !bufexists(s:list_buf)
     return
@@ -879,7 +892,7 @@ function! s:render_list() abort
   let l:mode = get(s:last_result, 'mode', '?')
   let l:indexing = get(s:last_result, 'indexing', 0)
 
-  let l:provenance = get(s:last_result, 'provenance', '')
+  let l:provenance = s:result_source_label(s:last_result)
 
   let l:header = '  ' . len(s:results) . ' results'
   if l:elapsed > 0
@@ -1549,18 +1562,146 @@ endfunction
 let s:search_history = []
 let s:history_idx = -1
 
-function! s:save_history(query) abort
+function! s:history_file() abort
+  return emend#project_root() . '/.emend/.vimhistory'
+endfunction
+
+function! s:history_entry_query(entry) abort
+  if type(a:entry) == v:t_dict
+    return get(a:entry, 'query', '')
+  endif
+  return a:entry
+endfunction
+
+function! s:history_entry(entry) abort
+  if type(a:entry) == v:t_dict
+    return {
+          \ 'query': get(a:entry, 'query', ''),
+          \ 'mode': get(a:entry, 'mode', ''),
+          \ 'provenance': get(a:entry, 'provenance', ''),
+          \ 'result_count': get(a:entry, 'result_count', 0),
+          \ 'timestamp': get(a:entry, 'timestamp', localtime()),
+          \ }
+  endif
+  return {
+        \ 'query': a:entry,
+        \ 'mode': '',
+        \ 'provenance': '',
+        \ 'result_count': 0,
+        \ 'timestamp': localtime(),
+        \ }
+endfunction
+
+function! s:normalize_history(entries) abort
+  let l:normalized = []
+  for l:entry in a:entries
+    let l:item = s:history_entry(l:entry)
+    if empty(get(l:item, 'query', '')) || get(l:item, 'query', '') =~# '^\s*$'
+      continue
+    endif
+    call add(l:normalized, l:item)
+  endfor
+  return l:normalized
+endfunction
+
+function! s:ensure_history_loaded() abort
+  let l:root = emend#project_root()
+  if s:history_loaded_root ==# l:root
+    return
+  endif
+
+  let s:history_loaded_root = l:root
+  let s:search_history = []
+  let s:history_idx = -1
+
+  let l:file = s:history_file()
+  if !filereadable(l:file)
+    return
+  endif
+
+  try
+    let l:decoded = json_decode(join(readfile(l:file), "\n"))
+    if type(l:decoded) == v:t_list
+      let s:search_history = s:normalize_history(l:decoded)
+    endif
+  catch
+    let s:search_history = []
+  endtry
+endfunction
+
+function! s:write_history() abort
+  let l:file = s:history_file()
+  call mkdir(fnamemodify(l:file, ':h'), 'p')
+  try
+    call writefile([json_encode(s:search_history)], l:file)
+  catch
+  endtry
+endfunction
+
+function! s:visible_history() abort
+  call s:ensure_history_loaded()
+  return s:search_history[:19]
+endfunction
+
+function! s:history_item_count_text(entry) abort
+  let l:count = get(a:entry, 'result_count', 0)
+  return printf('%d result%s', l:count, l:count == 1 ? '' : 's')
+endfunction
+
+function! s:truncate_text(text, width) abort
+  if strdisplaywidth(a:text) <= a:width
+    return a:text
+  endif
+  return strpart(a:text, 0, max([0, a:width - 3])) . '...'
+endfunction
+
+function! s:history_entry_label(entry, width) abort
+  let l:query = s:history_entry_query(a:entry)
+  let l:meta = []
+  let l:provenance = get(a:entry, 'provenance', '')
+  if l:provenance !=# ''
+    call add(l:meta, '[' . l:provenance . ']')
+  endif
+  call add(l:meta, s:history_item_count_text(a:entry))
+  let l:text = l:query
+  if !empty(l:meta)
+    let l:text .= '  ' . join(l:meta, '  ')
+  endif
+  return s:truncate_text(l:text, a:width)
+endfunction
+
+function! s:find_history_query(query) abort
+  if a:query ==# ''
+    return -1
+  endif
+  for l:i in range(len(s:search_history))
+    if s:history_entry_query(s:search_history[l:i]) ==# a:query
+      return l:i
+    endif
+  endfor
+  return -1
+endfunction
+
+function! s:save_history(query, result) abort
+  call s:ensure_history_loaded()
   if empty(a:query) || a:query =~# '^\s*$' | return | endif
-  " Remove if already exists to move to top
-  let l:idx = index(s:search_history, a:query)
+  let l:entry = {
+        \ 'query': a:query,
+        \ 'mode': get(a:result, 'mode', ''),
+        \ 'provenance': get(a:result, 'provenance', ''),
+        \ 'result_count': len(get(a:result, 'items', [])),
+        \ 'timestamp': localtime(),
+        \ }
+  let l:idx = s:find_history_query(a:query)
   if l:idx >= 0
     call remove(s:search_history, l:idx)
   endif
-  call insert(s:search_history, a:query, 0)
+  call insert(s:search_history, l:entry, 0)
   if len(s:search_history) > 100
     call remove(s:search_history, 100, -1)
   endif
   let s:history_idx = -1
+  call s:write_history()
 endfunction
 
 function! emend#ui#recall_query(query, ...) abort
@@ -1587,9 +1728,10 @@ function! emend#ui#recall_query(query, ...) abort
 endfunction
 
 function! emend#ui#history(delta) abort
+  call s:ensure_history_loaded()
   if empty(s:search_history) | return | endif
   let s:history_idx = max([0, min([s:history_idx + a:delta, len(s:search_history) - 1])])
-  let l:query = s:search_history[s:history_idx]
+  let l:query = s:history_entry_query(s:search_history[s:history_idx])
   call emend#ui#recall_query(l:query, v:true)
 endfunction
 
@@ -1623,19 +1765,28 @@ endfunction
 let s:history_buf = -1
 let s:history_win = -1
 let s:history_selected = 0
+let s:history_overlay_width = 64
+
+function! s:history_line_offset() abort
+  return 4
+endfunction
 
 function! emend#ui#history_overlay_lines(history) abort
   let l:max_items = min([len(a:history), 20])
-  let l:lines = ['  Recent queries  (j/k navigate, Enter select, Esc cancel)',
-        \ repeat('─', 50)]
+  let l:lines = [
+        \ '  Recent queries  (<CR> search, <Esc> restore draft)',
+        \ '  Stored in .emend/.vimhistory',
+        \ repeat('─', s:history_overlay_width),
+        \ ]
   for l:i in range(0, l:max_items - 1)
     let l:prefix = l:i == 0 ? '> ' : '  '
-    call add(l:lines, l:prefix . a:history[l:i])
+    call add(l:lines, l:prefix . s:history_entry_label(a:history[l:i], s:history_overlay_width - 2))
   endfor
   return l:lines
 endfunction
 
 function! emend#ui#show_history_overlay() abort
+  call s:ensure_history_loaded()
   if empty(s:search_history)
     echo 'emend: no query history'
     return
@@ -1643,25 +1794,32 @@ function! emend#ui#show_history_overlay() abort
 
   " Close any existing overlay first.
   call s:close_history_overlay()
+  let s:history_draft_query = s:is_interactive ? s:query : ''
+  let s:history_selected = max([0, s:find_history_query(s:query)])
+  if s:history_selected >= len(s:visible_history())
+    let s:history_selected = 0
+  endif
 
   if !has('nvim')
     " Fallback for classic Vim: use inputlist.
     let l:choices = ['  Recent queries:']
-    let l:max_items = min([len(s:search_history), 20])
+    let l:visible = s:visible_history()
+    let l:max_items = len(l:visible)
     for l:i in range(0, l:max_items - 1)
-      call add(l:choices, printf('  %d. %s', l:i + 1, s:search_history[l:i]))
+      call add(l:choices, printf('  %d. %s', l:i + 1, s:history_entry_label(l:visible[l:i], 56)))
     endfor
     let l:pick = inputlist(l:choices)
-    if l:pick > 0 && l:pick <= len(s:search_history)
-      let s:query = s:search_history[l:pick - 1]
-      call emend#ui#search(s:query)
+    if l:pick > 0 && l:pick <= len(l:visible)
+      call emend#ui#recall_query(s:history_entry_query(l:visible[l:pick - 1]), v:true)
+    else
+      call emend#ui#history_dismiss()
     endif
     return
   endif
 
   " Neovim: compact floating overlay.
-  let l:width = 50
-  let l:lines = emend#ui#history_overlay_lines(s:search_history)
+  let l:width = s:history_overlay_width
+  let l:lines = emend#ui#history_overlay_lines(s:visible_history())
   let l:height = len(l:lines)
 
   " Center the overlay over the current editor.
@@ -1669,7 +1827,7 @@ function! emend#ui#show_history_overlay() abort
   let l:col = (&columns - l:width) / 2
 
   let s:history_buf = nvim_create_buf(v:false, v:true)
-  let s:history_win = nvim_open_win(s:history_buf, v:true, {
+  let l:opts = {
         \ 'relative': 'editor',
         \ 'width': l:width,
         \ 'height': l:height,
@@ -1677,17 +1835,18 @@ function! emend#ui#show_history_overlay() abort
         \ 'col': l:col,
         \ 'style': 'minimal',
         \ 'border': 'rounded',
-        \ 'title': ' recent queries ',
-        \ 'title_pos': 'center',
-        \ })
+        \ }
+  if has('nvim-0.9')
+    let l:opts.title = ' recent queries '
+    let l:opts.title_pos = 'center'
+  endif
+  let s:history_win = nvim_open_win(s:history_buf, v:true, l:opts)
 
   call nvim_buf_set_lines(s:history_buf, 0, -1, v:false, l:lines)
   call nvim_buf_set_option(s:history_buf, 'modifiable', v:false)
   call nvim_buf_set_option(s:history_buf, 'bufhidden', 'wipe')
 
-  " Set cursor to first item (line 3 = index 0).
-  let s:history_selected = 0
-  call cursor(3, 1)
+  call cursor(s:history_selected + s:history_line_offset(), 1)
 
   " Apply highlight for selected row.
   call s:highlight_history_selected()
@@ -1704,17 +1863,18 @@ endfunction
 
 function! emend#ui#history_move(delta) abort
   if s:history_buf < 0 | return | endif
-  let l:max = min([len(s:search_history), 20]) - 1
+  let l:max = len(s:visible_history()) - 1
   let s:history_selected = max([0, min([s:history_selected + a:delta, l:max])])
-  " Cursor: line = selected + 3 (header + separator = 2 lines offset, 1-indexed)
-  call cursor(s:history_selected + 3, 1)
+  call cursor(s:history_selected + s:history_line_offset(), 1)
   call s:highlight_history_selected()
 endfunction
 
 function! emend#ui#history_accept() abort
-  if s:history_selected >= 0 && s:history_selected < len(s:search_history)
-    let l:query = s:search_history[s:history_selected]
+  let l:visible = s:visible_history()
+  if s:history_selected >= 0 && s:history_selected < len(l:visible)
+    let l:query = s:history_entry_query(l:visible[s:history_selected])
     call s:close_history_overlay()
+    let s:history_draft_query = ''
     call emend#ui#recall_query(l:query, v:true)
   endif
 endfunction
@@ -1723,11 +1883,15 @@ function! emend#ui#history_dismiss() abort
   call s:close_history_overlay()
   " Return focus to the picker if it's open.
   if s:is_interactive && s:input_win >= 0
+    if s:history_draft_query !=# ''
+      call emend#ui#recall_query(s:history_draft_query, v:false)
+    endif
     call win_gotoid(s:input_win)
     startinsert
   elseif s:list_win >= 0
     call win_gotoid(s:list_win)
   endif
+  let s:history_draft_query = ''
 endfunction
 
 function! s:close_history_overlay() abort
@@ -1749,7 +1913,6 @@ function! s:highlight_history_selected() abort
   if !has('nvim') || s:history_buf < 0 | return | endif
   let l:ns = s:get_ns()
   call nvim_buf_clear_namespace(s:history_buf, l:ns, 0, -1)
-  " Selected line = s:history_selected + 2 (0-indexed: header=0, separator=1)
-  let l:line = s:history_selected + 2
+  let l:line = s:history_selected + (s:history_line_offset() - 1)
   call nvim_buf_add_highlight(s:history_buf, l:ns, 'EmendSelected', l:line, 0, -1)
 endfunction
