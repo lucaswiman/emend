@@ -1538,15 +1538,12 @@ class EditorSearchEngine:
             logger.debug(f"goto_definition: file not found: {file_path}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
-        # Parse with scope resolver
+        # Parse with scope resolver.  PyScopeResolver now falls back to
+        # python_default() when the project config fails to load, so it no
+        # longer raises on malformed TOML (see scope_py.rs).
         try:
             ext = file_path.suffix.lstrip('.')
-            try:
-                resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
-            except Exception as cfg_exc:
-                import tempfile
-                logger.debug("Scope resolver failed with project root config, retrying with clean root: %s", cfg_exc)
-                resolver = _rust.PyScopeResolver(tempfile.mkdtemp(), extension=ext)
+            resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
             content = self._read_file_or_hot(str(file_path))
             if content is None:
                 return SearchResult(items=[], elapsed_ms=0, mode="symbol")

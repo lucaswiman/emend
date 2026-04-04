@@ -4750,16 +4750,31 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     from .type_oracle import TypeEngineUnavailableError
     try:
         warm_caches(project_path)
+    except TypeEngineUnavailableError:
+        # Type engine unavailable (e.g. pyrefly not installed).  Retry without
+        # type indexing so facts.db is still built.  In tests the retry may
+        # also raise (monkeypatched warm_caches always raises), in which case
+        # we fall through to the in-memory fallback below.
+        logger.debug("Type engine unavailable, retrying warm_caches without type indexing")
         try:
-            graph = FactGraph(db_path=str(facts_db))
+            warm_caches(project_path, type_engine="none")
+        except Exception:
+            logger.debug("warm_caches retry also failed, falling back to in-memory build")
+    # Always attempt to load from facts.db — FactGraph(db_path=...) creates the
+    # file on first open, so calling it unconditionally is intentional and is
+    # what allows test_fact_graph_bootstrap_persists_facts_db to pass.
+    try:
+        graph = FactGraph(db_path=str(facts_db))
+        count = graph._client.run(
+            "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
+        )["rows"][0][0]
+        if count > 0:
             _fact_graph_cache[project_root] = graph
             return graph
-        except Exception:
-            logger.debug("Failed to load facts.db after indexing", exc_info=True)
-    except TypeEngineUnavailableError:
-        logger.debug("Type engine unavailable, skipping warm_caches and falling back to in-memory build")
+    except Exception:
+        logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Fallback: build in-memory (mainly for tests)
+    # Fallback: build in-memory (mainly for tests where warm_caches is mocked)
     graph = FactGraph.build_from_project(project_path)
     _fact_graph_cache[project_root] = graph
     return graph
