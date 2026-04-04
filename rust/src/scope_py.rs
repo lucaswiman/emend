@@ -18,9 +18,12 @@ impl PyScopeResolver {
     fn new(project_root: &str, extension: Option<&str>) -> PyResult<Self> {
         let root = PathBuf::from(project_root);
         let config = if let Some(ext) = extension {
-            LanguageConfig::load_for_extension(ext, &root).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to load config: {}", e))
-            })?
+            // Use the same fallback behaviour as find_pattern_in_files: silently
+            // fall back to python_default() when the project-local config fails
+            // to load (e.g. malformed TOML), rather than propagating a
+            // RuntimeError that would silently empty all goto_definition results.
+            LanguageConfig::load_for_extension(ext, &root)
+                .unwrap_or_else(|_| LanguageConfig::python_default())
         } else {
             LanguageConfig::python_default()
         };

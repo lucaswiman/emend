@@ -282,6 +282,46 @@ def test_goto_definition_same_file_baseline(tmp_path):
         engine.close()
 
 
+# ---------------------------------------------------------------------------
+# Bug #3 – goto_definition raises ValueError on absolute-path QNs
+# ---------------------------------------------------------------------------
+
+
+def test_goto_definition_method_call_does_not_raise(tmp_path):
+    """goto_definition should return gracefully (not raise) for method calls
+    whose qualified name starts with '/' (absolute-path QN from scope resolver).
+
+    Current behaviour (BUG): raises ValueError 'PosixPath('/') has an empty name'
+    because _resolve_imported_symbol_location splits on '.' producing '/' as the
+    first module component and then calls Path('/').with_suffix('.py').
+    Expected behaviour: returns empty or a valid result without raising.
+    """
+    from emend.editor_search import EditorSearchEngine
+
+    project = _make_project(
+        tmp_path,
+        {
+            "module.py": """\
+                def process(data):
+                    return data.get("key", None)
+                """,
+        },
+    )
+
+    engine = EditorSearchEngine(str(project))
+    try:
+        source_line = (project / "module.py").read_text().splitlines()[1]
+        col = source_line.index("get") + 1  # 1-based
+        # Should NOT raise ValueError; may return empty (method on external obj).
+        result = engine.goto_definition(str(project / "module.py"), line=2, col=col)
+        # We just assert no exception is raised.
+        assert isinstance(result.items, list), (
+            "Expected a list (possibly empty) for .get() method call"
+        )
+    finally:
+        engine.close()
+
+
 def test_callees_invariant_baseline(tmp_path):
     """Every function call inside a function should appear in find_callees results."""
     from emend.transform import find_callees

@@ -197,11 +197,14 @@ def _collect_call_sites(file_path: Path) -> list[CallSite]:
 
 
 def _iter_python_files(root: Path) -> Iterator[Path]:
+    root_parts = len(root.parts)
     for p in sorted(root.rglob("*.py")):
-        # Skip __pycache__ and similar
-        if any(part.startswith("__pycache__") for part in p.parts):
+        # Only filter on path components *below* root (avoids false positives
+        # when root itself is inside a hidden directory like .django-checkout).
+        rel_parts = p.parts[root_parts:]
+        if any(part.startswith("__pycache__") for part in rel_parts):
             continue
-        if any(part.startswith(".") for part in p.parts):
+        if any(part.startswith(".") for part in rel_parts):
             continue
         yield p
 

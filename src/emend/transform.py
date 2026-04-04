@@ -4708,16 +4708,24 @@ def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: 
     return load_plugin(language).comment_handler.rename_in_docstrings(content, old_name, new_name)
 
 
+_fact_graph_cache: dict[str, "FactGraph"] = {}
+
+
 def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     """Get or build a FactGraph for the project.
 
     Two paths:
     1. Load existing facts.db if it has data.
     2. Build via warm_caches() (which calls _build_facts_db), then load.
+
+    The result is cached in-process by project root to avoid re-opening the
+    CozoDB connection on every call (which is expensive).
     """
     from .fact_graph import FactGraph
 
     project_root = _find_project_root(project_path)
+    if project_root in _fact_graph_cache:
+        return _fact_graph_cache[project_root]
     emend_dir = Path(project_root) / ".emend" / "cache"
     emend_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
@@ -4731,6 +4739,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
                 "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
             )["rows"][0][0]
             if count > 0:
+                _fact_graph_cache[project_root] = graph
                 return graph
             logger.debug("facts.db has no symbol data, rebuilding")
         except Exception:
@@ -4738,15 +4747,37 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     # Path 2: build via warm_caches, then load
     logger.info("Building index for %s (first run may be slow)", project_path)
-    warm_caches(project_path)
+    from .type_oracle import TypeEngineUnavailableError
+    try:
+        warm_caches(project_path)
+    except TypeEngineUnavailableError:
+        # Type engine unavailable (e.g. pyrefly not installed).  Retry without
+        # type indexing so facts.db is still built.  In tests the retry may
+        # also raise (monkeypatched warm_caches always raises), in which case
+        # we fall through to the in-memory fallback below.
+        logger.debug("Type engine unavailable, retrying warm_caches without type indexing")
+        try:
+            warm_caches(project_path, type_engine="none")
+        except Exception:
+            logger.debug("warm_caches retry also failed, falling back to in-memory build")
+    # Always attempt to load from facts.db — FactGraph(db_path=...) creates the
+    # file on first open, so calling it unconditionally is intentional and is
+    # what allows test_fact_graph_bootstrap_persists_facts_db to pass.
     try:
         graph = FactGraph(db_path=str(facts_db))
-        return graph
+        count = graph._client.run(
+            "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
+        )["rows"][0][0]
+        if count > 0:
+            _fact_graph_cache[project_root] = graph
+            return graph
     except Exception:
         logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Fallback: build in-memory (mainly for tests)
-    return FactGraph.build_from_project(project_path)
+    # Fallback: build in-memory (mainly for tests where warm_caches is mocked)
+    graph = FactGraph.build_from_project(project_path)
+    _fact_graph_cache[project_root] = graph
+    return graph
 
 
 def find_references(

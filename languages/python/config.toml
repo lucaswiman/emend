@@ -140,8 +140,10 @@ function_def = "function_definition"
 class_def = "class_definition"
 name_field = "name"
 
-# Walrus operator
-[bindings.walrus]
+# Walrus operator (:=)
+# Must be [[...]] (array of tables) so serde deserialises it as Vec<AssignmentRule>,
+# consistent with [[bindings.assignment]], [[bindings.loop]], etc.
+[[bindings.walrus]]
 node = "named_expression"
 target = "name"
 
@@ -322,6 +324,18 @@ await_expr = "await"
 yield_expr = "yield"
 lambda = "lambda"
 named_expr = "named_expression"
+# These were missing from the TOML (present only in python_default()); their
+# absence caused walrus pattern-matching to fail when the config loaded
+# successfully (e.g. after the [[bindings.walrus]] fix) because
+# parenthesized_expression defaulted to "" instead of "parenthesized_expression".
+parenthesized_expression = "parenthesized_expression"
+not_operator = "not_operator"
+conditional_expression = "conditional_expression"
+true_literal = "true"
+false_literal = "false"
+none_literal = "none"
+as_pattern = "as_pattern"
+dict_comprehension = "dictionary_comprehension"
 integer = "integer"
 float = "float"
 string = "string"

@@ -1538,7 +1538,9 @@ class EditorSearchEngine:
             logger.debug(f"goto_definition: file not found: {file_path}")
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
-        # Parse with scope resolver
+        # Parse with scope resolver.  PyScopeResolver now falls back to
+        # python_default() when the project config fails to load, so it no
+        # longer raises on malformed TOML (see scope_py.rs).
         try:
             ext = file_path.suffix.lstrip('.')
             resolver = _rust.PyScopeResolver(str(self.project_root), extension=ext)
@@ -1745,6 +1747,12 @@ class EditorSearchEngine:
     def _resolve_imported_symbol_location(self, qualified_name: str) -> SearchResult | None:
         """Resolve ``pkg.mod.Symbol``-style imports to a project file + line."""
         if "." not in qualified_name:
+            return None
+        # Skip absolute-path QNs produced by the scope resolver for method
+        # references (e.g. ``/.home.user...module.method``).  Splitting on
+        # '.' would produce '/' as the first module component, causing
+        # Path('/').with_suffix('.py') to raise ValueError.
+        if qualified_name.startswith("/"):
             return None
 
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
