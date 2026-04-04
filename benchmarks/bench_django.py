@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import shutil
 import statistics
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -44,6 +46,12 @@ LINT_RULES_YAML_SUMMARY = "5 pattern rules (print, isinstance, hasattr, open, mu
 # ok_codes is a set of return codes considered successful (default: {0}).
 # The working directory will be set to the Django checkout.
 BENCHMARKS: list[tuple[str, str, list[str], set[int]]] = [
+    (
+        "index_full",
+        "index . --type-engine none (full index build)",
+        ["index", ".", "--type-engine", "none"],
+        {0},
+    ),
     (
         "search_symbol_lookup",
         "search django/db/models/base.py::Model (symbol lookup)",
@@ -164,8 +172,14 @@ def run_benchmark(
     args: list[str],
     iterations: int,
     ok_codes: set[int] | None = None,
+    setup: Callable | None = None,
 ) -> dict:
-    """Run a single benchmark for the specified number of iterations."""
+    """Run a single benchmark for the specified number of iterations.
+
+    Args:
+        setup: Optional callable invoked before each iteration (e.g. to clear
+            caches for cold-start benchmarks like ``index``).
+    """
     if ok_codes is None:
         ok_codes = {0}
 
@@ -176,6 +190,8 @@ def run_benchmark(
     last_stderr = ""
 
     for _i in range(iterations):
+        if setup is not None:
+            setup()
         start = time.perf_counter()
         try:
             result = _run(full_cmd, cwd=django_dir)
@@ -401,6 +417,19 @@ def main() -> None:
     total_start = time.perf_counter()
     dir_map = {name: cwd for name, cwd in all_dirs}
 
+    # Setup functions for benchmarks that need pre-iteration cleanup.
+    def _clear_cache(cwd: Path) -> Callable:
+        """Return a callable that clears the .emend/cache directory."""
+        def _setup():
+            cache = cwd / ".emend" / "cache"
+            if cache.exists():
+                shutil.rmtree(cache)
+        return _setup
+
+    _SETUP_MAP: dict[str, Callable] = {
+        "index_full": _clear_cache(django_dir),
+    }
+
     for bench_name, bench_desc, bench_args, bench_ok_codes in all_benchmarks:
         cwd = dir_map[bench_name]
         _log(f"  Running: {bench_desc}...")
@@ -408,6 +437,7 @@ def main() -> None:
         data = run_benchmark(
             emend_cmd, cwd, bench_args, iterations,
             ok_codes=bench_ok_codes,
+            setup=_SETUP_MAP.get(bench_name),
         )
         results[bench_name] = data
 

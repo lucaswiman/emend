@@ -3263,18 +3263,49 @@ def _find_containing_block(
     """Find the (func_qn, block_id) containing a given line.
 
     Returns ``("", -1)`` for module-level code.
+
+    *block_ranges* must be sorted by ``(start_line, -(end_line - start_line))``
+    — the default ordering produced by ``_build_facts_db``.  Uses binary search
+    to find the insertion point, then scans backwards through candidates whose
+    start_line <= line, picking the tightest (smallest span) enclosing block.
     """
+    import bisect
+
+    if not block_ranges:
+        return ("", -1)
+
+    # bisect on start_line: find rightmost block whose start_line <= line.
+    # block_ranges[i] = (func_qn, block_id, start_line, end_line, ...)
+    # sorted by start_line ascending.
+    lo, hi = 0, len(block_ranges)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if block_ranges[mid][2] <= line:
+            lo = mid + 1
+        else:
+            hi = mid
+    # lo is the first index where start_line > line.
+    # Scan backwards from lo-1 to find all blocks containing the line.
     best_func_qn = ""
     best_block_id = -1
     best_span = float("inf")
 
-    for func_qn, block_id, start_line, end_line, *_ in block_ranges:
-        if start_line <= line <= end_line:
-            span = end_line - start_line
+    for i in range(lo - 1, -1, -1):
+        start_line_i = block_ranges[i][2]
+        # Once start_line is far enough before line that no block starting
+        # here could still be the tightest, stop.  But blocks can be large,
+        # so we must check end_line.  We can stop when
+        # start_line < line - best_span (any block starting here with
+        # span < best_span would end before line).
+        if best_span < float("inf") and start_line_i < line - best_span:
+            break
+        end_line_i = block_ranges[i][3]
+        if end_line_i >= line:
+            span = end_line_i - start_line_i
             if span < best_span:
                 best_span = span
-                best_func_qn = func_qn
-                best_block_id = block_id
+                best_func_qn = block_ranges[i][0]
+                best_block_id = block_ranges[i][1]
 
     return best_func_qn, best_block_id
 
