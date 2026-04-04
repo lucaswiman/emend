@@ -1,4 +1,4 @@
-*emend.txt*  Search Python code with emend from Vim/Neovim
+*emend.txt*  Search code with emend from Vim/Neovim
 
 Author:  Lucas Wiman
 License: MPL-2.0
@@ -18,8 +18,8 @@ CONTENTS                                                      *emend-contents*
 ==============================================================================
 1. INTRODUCTION                                           *emend-introduction*
 
-emend.vim provides a fast, interactive search interface for Python codebases
-using the emend refactoring tool.  It communicates with the `emend
+emend.vim provides a fast, interactive search interface for codebases using
+the emend refactoring tool.  It communicates with the `emend
 editor-server` via JSON-RPC over stdio pipes, keeping the process warm for
 sub-100ms searches.
 
@@ -80,12 +80,34 @@ After installing, run `:helptags ALL` to index this help file.
                         - Pattern:       `print($X)` (contains `$`)
                         - Selector:      `file.py::Class.method` (contains `::`)
 
+                                                            *:EmendSearchMap*
+:EmendSearchMap {query} Search for {query} with cross-project identifier
+                        mappings enabled.  This is useful when the local
+                        project has mappings configured for external services
+                        or repositories.
+
                                                               *:EmendOutline*
 :EmendOutline           Show all symbols in the current file (outline view).
 
                                                                  *:EmendRefs*
 :EmendRefs [name]       Find references to [name].  Without an argument, uses
                         the word under the cursor.
+
+                                                                 *:EmendGoto*
+:EmendGoto [name]       Jump to the definition or mapped target for [name].
+                        Without an argument, uses the symbol under the cursor.
+                        Local definitions are preferred; if none are found,
+                        configured cross-project mappings are used.
+
+                                                               *:EmendRename*
+:EmendRename [new_name] Rename the symbol under the cursor across the project.
+                        If [new_name] is not provided, prompts for one and
+                        shows a preview before applying.
+
+                                                              *:EmendResolve*
+:EmendResolve {module}  Resolve {module} through emend's module mapping store.
+                        If the target path is available locally, jump to it.
+                        Otherwise, show the mapped repository.
 
                                                               *:EmendReplace*
 :EmendReplace           Open a prompt for a find pattern and replacement.
@@ -111,10 +133,15 @@ After installing, run `:helptags ALL` to index this help file.
 :EmendTypeHover         Show inferred type information for the symbol under
                         the cursor in the echo area.
 
-                                                        *:EmendOutlineFilter*
+                                                            *:EmendOutlineFilter*
 :EmendOutlineFilter     Open an interactive outline of the current file with
                         real-time filtering.  As you type, the outline narrows
                         to matching symbols.
+
+                                                               *:EmendImpact*
+:EmendImpact [name]     Show the transitive impact of changing [name].
+                        Without an argument, uses the symbol under the cursor.
+                        Results can include both impacted symbols and tests.
 
                                                                 *:EmendStart*
 :EmendStart             Start the emend editor-server process.  This happens
@@ -197,6 +224,7 @@ g:emend_default_mappings
                         `<Leader>es`  →  |:Emend|
                         `<Leader>eo`  →  |:EmendOutline|
                         `<Leader>er`  →  |:EmendRefs|
+                        `<Leader>eg`  →  |:EmendGoto|
                         `<Leader>eR`  →  |:EmendReplace|
                         `<Leader>em`  →  |:EmendMove|
                         `<Leader>ec`  →  |:EmendCallers|
@@ -209,6 +237,17 @@ g:emend_default_mappings
                         configuration sets `default_mappings = true` (see
                         |emend-project-config|).  Existing mappings are left
                         alone so user keymaps are not overwritten.
+
+                                                      *emend-global-complete*
+Global completion mapping~
+
+The plugin also installs insert-mode completion mappings globally:
+
+    `<C-Space>`         Complete at cursor with emend
+    `<C-@>`             Terminal fallback for `<C-Space>`
+
+These mappings are defined unconditionally by the plugin entrypoint and are
+not controlled by |g:emend_default_mappings|.
 
 ==============================================================================
 6. KEY MAPPINGS                                             *emend-keymaps*
@@ -226,6 +265,8 @@ Inside the search results window:
     `<CR>`              Open the selected file at the matching line
     `q` / `<Esc>`       Close the search UI
     `/`                 Start a new search
+    `<Tab>`             Toggle focus between results and preview
+    `<C-q>`             Send results to the quickfix list
     `<C-h>`             Open query history overlay
 
     Actions:~
@@ -236,6 +277,8 @@ Inside the search results window:
     `C`                 Find callees of the selected symbol
     `t`                 Show type information for the selected symbol
     `m`                 Move the selected symbol to another file
+    `gd`                Jump to the selected symbol or mapped target
+    `I`                 Show impact results for the selected symbol
 
 Inside the interactive search input:~
 
@@ -244,6 +287,8 @@ Inside the interactive search input:~
     `<C-f>`             Cycle backward through query history
     `<C-n>` / `<Down>`  Move selection down in results
     `<C-p>` / `<Up>`    Move selection up in results
+    `<Tab>`             Toggle focus between input and preview/results
+    `<C-q>`             Send current results to the quickfix list
     `<C-Space>`         Trigger completion
 
 Inside the query history overlay:~
@@ -315,6 +360,7 @@ index build typically takes 5-15 seconds for a medium-sized codebase.
 JSON-RPC methods:~
 
     search          Auto-detect mode and search
+    mapping_goto    Local goto-definition with mapping fallback
     symbols         Symbol name search
     pattern         Code pattern search (supports `$` metavars)
     selector        Resolve `file.py::Sym.path` selectors
