@@ -177,10 +177,13 @@ def _parse_atom(atom: str) -> tuple[str, bool]:
 
 def _eval_atom(atom: tuple[str, bool], type_name: str) -> bool:
     """Evaluate a parsed type constraint atom."""
+    from emend.type_oracle import type_name_matches
+
     name, negated = atom
+    matches = type_name_matches(name, type_name)
     if negated:
-        return type_name != name
-    return type_name == name
+        return not matches
+    return matches
 
 
 # ---------------------------------------------------------------------------

@@ -256,6 +256,83 @@ def test_lint_not_inside(tmp_path):
     assert violations2[0].line == 1
 
 
+def test_lint_not_within_with_statement_pattern(tmp_path):
+    """lint not-within supports 'with EXPR:' patterns (with trailing colon)."""
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "import db\n"
+        "\n"
+        "# Outside with block - should be flagged\n"
+        "db.execute('SELECT 1')\n"
+        "\n"
+        "with transaction.atomic():\n"
+        "    # Inside with block - should NOT be flagged\n"
+        "    db.execute('SELECT 2')\n"
+        "\n"
+        "# Outside again - should be flagged\n"
+        "db.execute('SELECT 3')\n"
+    )
+
+    rules = [
+        LintRule(
+            name="raw-query-outside-transaction",
+            find="db.execute($...ARGS)",
+            message="db.execute outside transaction.atomic",
+            not_inside="with transaction.atomic($...A):",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    # Only the two calls outside the with block should be flagged
+    assert len(violations) == 2
+    flagged_lines = {v.line for v in violations}
+    assert 4 in flagged_lines  # db.execute('SELECT 1')
+    assert 11 in flagged_lines  # db.execute('SELECT 3')
+    # The call inside the with block (line 8) should NOT be flagged
+    assert 8 not in flagged_lines
+
+
+def test_lint_not_within_with_statement_pattern_no_colon(tmp_path):
+    """lint not-within supports 'with EXPR' patterns without trailing colon.
+
+    Bug: 'with transaction.atomic($...A)' (no colon) raised ValueError:
+    Unknown inside/not_inside constraint.
+    """
+    test_file = tmp_path / "example.py"
+    test_file.write_text(
+        "import db\n"
+        "\n"
+        "# Outside with block - should be flagged\n"
+        "db.execute('SELECT 1')\n"
+        "\n"
+        "with transaction.atomic():\n"
+        "    # Inside with block - should NOT be flagged\n"
+        "    db.execute('SELECT 2')\n"
+        "\n"
+        "# Outside again - should be flagged\n"
+        "db.execute('SELECT 3')\n"
+    )
+
+    rules = [
+        LintRule(
+            name="raw-query-outside-transaction",
+            find="db.execute($...ARGS)",
+            message="db.execute outside transaction.atomic",
+            # No trailing colon - this previously raised ValueError
+            not_inside="with transaction.atomic($...A)",
+        ),
+    ]
+
+    violations = run_lint(rules, [str(test_file)])
+    # Only the two calls outside the with block should be flagged
+    assert len(violations) == 2
+    flagged_lines = {v.line for v in violations}
+    assert 4 in flagged_lines  # db.execute('SELECT 1')
+    assert 11 in flagged_lines  # db.execute('SELECT 3')
+    # The call inside the with block (line 8) should NOT be flagged
+    assert 8 not in flagged_lines
+
+
 def test_lint_fix(tmp_path):
     """lint --fix applies replace rules."""
     test_file = tmp_path / "example.py"

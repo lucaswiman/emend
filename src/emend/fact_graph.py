@@ -1712,6 +1712,18 @@ class FactGraph:
     # -- Phase 5: Trace (data-flow) analysis via Datalog --------------------------------
 
     @staticmethod
+    def _cozo_quote(v: str | int) -> str:
+        """Escape *v* for a CozoScript single-quoted string literal.
+
+        Subscript expressions like ``request.POST["id"]`` break double-quoted
+        CozoScript strings, so we use single-quoted literals throughout.
+        """
+        if isinstance(v, str):
+            escaped = v.replace("\\", "\\\\").replace("'", "\\'")
+            return f"'{escaped}'"
+        return str(v)
+
+    @staticmethod
     def _inline_relation(
         name: str,
         cols: list[str],
@@ -1725,10 +1737,9 @@ class FactGraph:
         col_str = ", ".join(cols)
         if not rows:
             return f"{name}[{col_str}] <- []\n"
+        _q = FactGraph._cozo_quote
         formatted = ", ".join(
-            "[" + ", ".join(
-                f'"{v}"' if isinstance(v, str) else str(v) for v in row
-            ) + "]"
+            "[" + ", ".join(_q(v) for v in row) + "]"
             for row in rows
         )
         return f"{name}[{col_str}] <- [{formatted}]\n"

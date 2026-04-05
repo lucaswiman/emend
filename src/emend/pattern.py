@@ -1161,4 +1161,11 @@ def compile_constraint_to_rust_ir(
         if ir is not None:
             return ir
 
+    # Users often omit the trailing colon on compound statement headers;
+    # normalise before trying the pattern compiler.
+    if not stripped.endswith(":") and _COMPOUND_HEADER_RE.match(stripped + ":"):
+        ir = compile_pattern_to_rust_ir(stripped + ":", language=language)
+        if ir is not None:
+            return ir
+
     return None

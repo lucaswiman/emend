@@ -660,3 +660,64 @@ def test_interprocedural_datalog_empty_sources_sinks():
     g = FactGraph()
     results = g.interprocedural_trace_datalog(sources=[], sinks=[])
     assert isinstance(results, list)
+
+
+# ---------------------------------------------------------------------------
+# Bug regression: subscript notation in matched patterns (Bug #1)
+# ---------------------------------------------------------------------------
+
+
+def test_run_trace_datalog_subscript_notation_does_not_crash(tmp_path):
+    """Subscript notation like request.POST["id"] must not crash CozoDB query.
+
+    When a pattern captures a subscript expression such as ``request.POST["id"]``
+    (e.g. sink pattern ``cursor.execute($Q)`` where $Q is the whole subscript),
+    the resulting var_name ``request.POST["id"]`` (which contains brackets and
+    quotes) gets inserted into a CozoDB inline-relation string.  Without proper
+    escaping the generated query string becomes syntactically invalid, producing:
+
+        RuntimeError('CozoDB query error: ... unexpected input at ...')
+    """
+    source = '''\
+def handle(request):
+    cursor.execute(request.POST["id"])
+'''
+    p = tmp_path / "views.py"
+    p.write_text(source)
+
+    config = TraceConfig(
+        labels=["sqli"],
+        sources=[TraceSource(pattern='request.POST[$X]', label="sqli")],
+        sinks=[TraceSink(pattern="cursor.execute($Q)", label="sqli", message="SQL injection")],
+    )
+
+    # Must not raise a RuntimeError about CozoDB query parse errors
+    result = _run_trace_datalog(
+        paths=[str(p)],
+        config=config,
+        label_filter=None,
+        language="python",
+        project_path=str(tmp_path),
+    )
+    assert isinstance(result, list)
+
+
+def test_inline_relation_escapes_quotes_in_strings():
+    """_inline_relation must escape double-quotes inside string values.
+
+    A var name like ``data["key"]`` must be serialised correctly so the
+    resulting CozoDB query parses without errors.
+    """
+    from emend.fact_graph import FactGraph
+
+    output = FactGraph._inline_relation(
+        "trace_source",
+        ["fp", "fq", "var", "bid", "lbl"],
+        [("app.py", "handler", 'request.POST["id"]', 0, "sqli")],
+    )
+    g = FactGraph()
+    query = output + "?[fp, fq, var, bid, lbl] := trace_source[fp, fq, var, bid, lbl]"
+    result = g._client.run(query)
+    rows = result["rows"]
+    assert len(rows) == 1
+    assert rows[0][2] == 'request.POST["id"]'

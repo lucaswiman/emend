@@ -349,3 +349,88 @@ class TestInterproceduralAnalysis:
             [str(test_file)], config, label_filter="nonexistent",
         )
         assert len(result_no_match.violations) == 0
+
+
+class TestInterproceduralCozoEscaping:
+    """Bug #2: Interprocedural trace crashes with CozoDB parse error when variable
+    names contain special characters (e.g. subscript captures like GET["id"])."""
+
+    def test_subscript_in_sink_does_not_crash(self, tmp_path):
+        """Crash when a sink pattern captures a subscript expression with double quotes."""
+        test_file = tmp_path / "views.py"
+        test_file.write_text(
+            "def process(request):\n"
+            '    execute(request.GET["id"])\n'
+        )
+
+        config = TraceConfig(
+            labels=["user_input"],
+            sources=[
+                TraceSource(pattern="request.GET[$X]", label="user_input"),
+            ],
+            sinks=[
+                TraceSink(
+                    pattern="execute($X)",
+                    label="user_input",
+                    message="Untrusted data reaches execute()",
+                ),
+            ],
+        )
+
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)
+
+    def test_multi_function_subscript_in_sink_does_not_crash(self, tmp_path):
+        """Multi-function file with subscript notation doesn't crash."""
+        test_file = tmp_path / "views.py"
+        test_file.write_text(
+            "def get_data(request):\n"
+            '    data = request.GET["id"]\n'
+            "    return data\n"
+            "\n"
+            "def process(request):\n"
+            "    val = get_data(request)\n"
+            "    execute(val)\n"
+        )
+
+        config = TraceConfig(
+            labels=["user_input"],
+            sources=[
+                TraceSource(pattern="request.GET[$X]", label="user_input"),
+            ],
+            sinks=[
+                TraceSink(
+                    pattern="execute($X)",
+                    label="user_input",
+                    message="Untrusted data reaches execute()",
+                ),
+            ],
+        )
+
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)
+
+    def test_single_quoted_subscript_in_sink_does_not_crash(self, tmp_path):
+        """Single-quoted subscript keys also don't crash."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def process(request, db):\n"
+            "    db.execute(request.POST['username'])\n"
+        )
+
+        config = TraceConfig(
+            labels=["user_input"],
+            sources=[
+                TraceSource(pattern="request.POST[$X]", label="user_input"),
+            ],
+            sinks=[
+                TraceSink(
+                    pattern="db.execute($X)",
+                    label="user_input",
+                    message="Untrusted data reaches db.execute()",
+                ),
+            ],
+        )
+
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)

@@ -535,3 +535,65 @@ class TestFilterVarsByType:
             {"x"}, "!int", oracle, "test.py", 5,
         )
         assert result == {"x"}
+
+    def test_fq_type_matches_short_name_constraint(self):
+        """Short name constraint should match fully-qualified type names.
+
+        e.g. type_constraint='Redis' should match oracle-returned 'redis.client.Redis'.
+        """
+        oracle = self._make_mock_oracle([
+            ("conn", 2, "redis.client.Redis"),
+            ("other", 3, "dict"),
+        ])
+        # 'Redis' constraint should match 'redis.client.Redis'
+        result = _filter_vars_by_type(
+            {"conn", "other"}, "Redis",
+            oracle, "test.py", 5,
+        )
+        assert result == {"conn"}  # only conn (redis.client.Redis) matches
+
+    def test_fq_type_negation_with_short_name(self):
+        """Negated short name should exclude FQ types ending with that name."""
+        oracle = self._make_mock_oracle([
+            ("conn", 2, "redis.client.Redis"),
+            ("other", 3, "dict"),
+        ])
+        # '!Redis' should exclude 'redis.client.Redis'
+        result = _filter_vars_by_type(
+            {"conn", "other"}, "!Redis",
+            oracle, "test.py", 5,
+        )
+        assert result == {"other"}  # conn excluded because it IS a Redis
+
+
+class TestEvaluateTypeConstraintFQNames:
+    """Tests for FQ type name matching in evaluate_type_constraint."""
+
+    def test_short_name_matches_fq_type(self):
+        """'Redis' should match 'redis.client.Redis' (last component matches)."""
+        assert evaluate_type_constraint("Redis", "redis.client.Redis") is True
+
+    def test_short_name_no_match_different_suffix(self):
+        """'Redis' should NOT match 'redis.client.StrictRedis' (different last component)."""
+        assert evaluate_type_constraint("Redis", "redis.client.StrictRedis") is False
+
+    def test_exact_fq_match(self):
+        """Full FQ name as constraint should match exact FQ type."""
+        assert evaluate_type_constraint("redis.client.Redis", "redis.client.Redis") is True
+
+    def test_short_name_does_not_match_middle_component(self):
+        """'client' should not match 'redis.client.Redis' (not the last component)."""
+        assert evaluate_type_constraint("client", "redis.client.Redis") is False
+
+    def test_negated_short_name_excludes_fq(self):
+        """'!Redis' should NOT match 'redis.client.Redis'."""
+        assert evaluate_type_constraint("!Redis", "redis.client.Redis") is False
+
+    def test_negated_short_name_allows_other_fq(self):
+        """'!Redis' should match 'redis.client.StrictRedis'."""
+        assert evaluate_type_constraint("!Redis", "redis.client.StrictRedis") is True
+
+    def test_simple_name_still_exact_matches_simple_type(self):
+        """Simple name still matches simple type (no dots in type)."""
+        assert evaluate_type_constraint("int", "int") is True
+        assert evaluate_type_constraint("int", "float") is False

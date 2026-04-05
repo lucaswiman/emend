@@ -253,6 +253,30 @@ class TestTypeDescriptorMatches:
         constraint = TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("int")))
         assert not td.matches(constraint)
 
+    def test_fq_named_matches_short_constraint(self):
+        """'redis.client.Redis' should match short constraint 'Redis'."""
+        td = TypeDescriptor.named("redis.client.Redis")
+        constraint = TypeDescriptor.named("Redis")
+        assert td.matches(constraint)
+
+    def test_fq_named_no_match_wrong_suffix(self):
+        """'redis.client.StrictRedis' should NOT match 'Redis'."""
+        td = TypeDescriptor.named("redis.client.StrictRedis")
+        constraint = TypeDescriptor.named("Redis")
+        assert not td.matches(constraint)
+
+    def test_fq_parameterized_matches_short_constraint(self):
+        """'collections.abc.Sequence[int]' should match named 'Sequence'."""
+        td = TypeDescriptor.parameterized("collections.abc.Sequence", (TypeDescriptor.named("int"),))
+        constraint = TypeDescriptor.named("Sequence")
+        assert td.matches(constraint)
+
+    def test_fq_parameterized_matches_short_parameterized_constraint(self):
+        """'collections.abc.Sequence[int]' should match 'Sequence[int]'."""
+        td = TypeDescriptor.parameterized("collections.abc.Sequence", (TypeDescriptor.named("int"),))
+        constraint = TypeDescriptor.parameterized("Sequence", (TypeDescriptor.named("int"),))
+        assert td.matches(constraint)
+
 
 # ---------------------------------------------------------------------------
 # Pyrefly debug-info JSON parsing
@@ -386,6 +410,65 @@ class TestParsePyreflyDebug:
         # Only one binding for (x, 5, 1)
         assert len(ft.bindings) == 1
         assert ft.bindings[0].binding_kind == "definition"
+
+    def test_unknown_module_standalone_file(self):
+        """When pyrefly uses __unknown__ as module key for standalone files,
+        bindings should still be extracted and keyed by file path."""
+        bindings = [
+            {
+                "key": "Key::Definition(foo 3:5-8)",
+                "location": "3:5-8",
+                "binding": "Function(KeyDecoratedFunction(foo 3:5-8))",
+                "result": "(x: int) -> str",
+            },
+            {
+                "key": "Key::Definition(x 1:1-2)",
+                "location": "1:1-2",
+                "binding": "NameAssign(x, None, 42)",
+                "result": "int",
+            },
+        ]
+        debug = {"modules": {"__unknown__": {"bindings": bindings}}}
+        ft = _parse_pyrefly_debug(debug, "/tmp/standalone.py")
+        assert len(ft.bindings) > 0, (
+            "Expected bindings from __unknown__ module, got 0. "
+            "Pyrefly uses __unknown__ for standalone files outside a project."
+        )
+        names = {b.name for b in ft.bindings}
+        assert "foo" in names
+        assert "x" in names
+
+    def test_unknown_module_alongside_builtins(self):
+        """When __unknown__ module appears alongside other modules (e.g. builtins),
+        the correct bindings from the target file's module should be returned."""
+        target_bindings = [
+            {
+                "key": "Key::Definition(my_func 5:5-12)",
+                "location": "5:5-12",
+                "binding": "Function(KeyDecoratedFunction(my_func 5:5-12))",
+                "result": "(r: SomeType) -> None",
+            },
+        ]
+        builtin_bindings = [
+            {
+                "key": "Key::Import(int 1:1)",
+                "location": "1:1",
+                "binding": "Import(builtins, int, None)",
+                "result": "type[int]",
+            },
+        ]
+        debug = {
+            "modules": {
+                "builtins": {"bindings": builtin_bindings},
+                "__unknown__": {"bindings": target_bindings},
+            }
+        }
+        ft = _parse_pyrefly_debug(debug, "/tmp/pytest-xyz/mymodule.py")
+        assert len(ft.bindings) > 0, (
+            "Expected bindings from __unknown__ module alongside builtins, got 0."
+        )
+        names = {b.name for b in ft.bindings}
+        assert "my_func" in names
 
 
 # ---------------------------------------------------------------------------
