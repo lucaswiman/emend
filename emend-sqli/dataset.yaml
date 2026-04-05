@@ -15,9 +15,10 @@
   component: JSONField / HStoreField key lookups
   repo: https://github.com/django/django
   fix_commits:
-    - "974897759e9afc4cc56fb87e12319fa9697e93c9"   # Django 1.11.23
-    - "ff9dcc0867eba90e9ab1b07a4b3eb79928717918"   # Django 2.1.11
-    - "8687fbe034ac5eec20e0948b98eb8a2f0b1431a1"   # Django 2.2.4
+    - "7deeabc7c7526786df6894429ce89a9c4b614086"   # Django main
+    - "4f5b58f5cd3c57fee9972ab074f8dc6895d8f387"   # Django 2.2.x
+    - "f74b3ae3628c26e1b4f8db3d13a91d52a833a975"   # Django 2.1.x
+    - "ed682a24fca774818542757651bfba576c3fc3ef"   # Django 1.11.x
   affected_versions: "<1.11.23, <2.1.11, <2.2.4"
   description: >
     SQL injection via crafted key or index names in JSONField and
@@ -35,7 +36,9 @@
   component: django.contrib.postgres.aggregates.StringAgg
   repo: https://github.com/django/django
   fix_commits:
-    - "eb31d845323618d688ad429479c6dda973056136"   # Django 1.11.28
+    - "eb31d845323618d688ad429479c6dda973056136"   # Django main
+    - "505826b469b16ab36693360da9e11fd13213421b"   # Django 3.0.x
+    - "c67a368c16e4680b324b4f385398d638db4d8147"   # Django 2.2.x
   affected_versions: "<1.11.28, <2.2.10, <3.0.3"
   description: >
     SQL injection via the delimiter argument to StringAgg. The delimiter
@@ -52,9 +55,10 @@
   component: django.contrib.gis (GIS functions/aggregates)
   repo: https://github.com/django/django
   fix_commits:
-    - "f1e3017aeaeddc590dcf2cf88511f3a726da73ca"   # Django 1.11.29
-    - "167699278806b21757104acf0ff0570f673d44c7"   # Django 2.2.11
-    - "c2250cfb80e27cdf8d098428824da2800a18cadf"   # Django 3.0.4
+    - "6695d29b1c1ce979725816295a26ecc64ae0e927"   # Django main
+    - "c2250cfb80e27cdf8d098428824da2800a18cadf"   # Django 3.0.x
+    - "167699278806b21757104acf0ff0570f673d44c7"   # Django 2.2.x
+    - "f1e3017aeaeddc590dcf2cf88511f3a726da73ca"   # Django 1.11.x
   affected_versions: "<1.11.29, <2.2.11, <3.0.4"
   description: >
     SQL injection via untrusted data used as a tolerance parameter in
@@ -89,9 +93,10 @@
   component: QuerySet.annotate() / aggregate() / extra()
   repo: https://github.com/django/django
   fix_commits:
-    - "5c3300027b30c1b498d99010f7d618316f685045"   # Django 2.2.28
-    - "08e6073f878264a0c091da0d3db456820252ef6c"   # Django 3.2.13
-    - "89807fbde8b7b17d00434bc4695535855e96fe77"   # Django 4.0.4
+    - "93cae5cb2f9a4ef1514cf1a41f714fef08005200"   # Django main
+    - "800828887a0509ad1162d6d407e94d8de7eafc60"   # Django 4.0.x
+    - "2044dac5c6968441be6f534c4139bcf48c5c7e48"   # Django 3.2.x
+    - "2c09e68ec911919360d5f8502cefc312f9e03c5d"   # Django 2.2.x
   affected_versions: "<2.2.28, <3.2.13, <4.0.4"
   description: >
     SQL injection via crafted dictionary expansion in column aliases
@@ -108,9 +113,10 @@
   component: QuerySet.explain()
   repo: https://github.com/django/django
   fix_commits:
-    - "5c3300027b30c1b498d99010f7d618316f685045"   # Django 2.2.28
-    - "08e6073f878264a0c091da0d3db456820252ef6c"   # Django 3.2.13
-    - "89807fbde8b7b17d00434bc4695535855e96fe77"   # Django 4.0.4
+    - "6723a26e59b0b5429a0c5873941e01a2e1bdbb81"   # Django main
+    - "00b0fc50e1738c7174c495464a5ef069408a4402"   # Django 4.0.x
+    - "9e19accb6e0a00ba77d5a95a91675bf18877c72d"   # Django 3.2.x
+    - "29a6c98b4c13af82064f993f0acc6e8fafa4d3f5"   # Django 2.2.x
   affected_versions: "<2.2.28, <3.2.13, <4.0.4"
   description: >
     SQL injection via crafted option names in QuerySet.explain(**options).
@@ -126,8 +132,10 @@
   component: Trunc() and Extract() date functions
   repo: https://github.com/django/django
   fix_commits:
-    - "746e88cc634469112b823225c19d75c7362f8ecf"   # Django 3.2.14
-    - "caad462feaa84ba78ed658a9595a4a4363dad2db"   # Django 4.0.6
+    - "54eb8a374d5d98594b264e8ec22337819b37443c"   # Django main
+    - "284b188a4194e8fa5d72a73b09a869d7dd9f0dc5"   # Django 4.1.x
+    - "0dc9c016fadb71a067e5a42be30164e3f96c0492"   # Django 4.0.x
+    - "a9010fe5555e6086a9d9ae50069579400ef0685e"   # Django 3.2.x
   affected_versions: "<3.2.14, <4.0.6"
   description: >
     SQL injection via untrusted data used as a kind/lookup_name value in
@@ -144,8 +152,10 @@
   component: QuerySet.values() / values_list()
   repo: https://github.com/django/django
   fix_commits:
-    - "4d32ebcd57340aa8de2d6d31613f1646dc6391f6"   # Django 4.2.15
-    - "84d1102a8a3bba64bcc1b14a7117c26a83fb7fe5"   # Django 5.0.8
+    - "c87bfaacf8fb84984243b5055dc70f97996cb115"   # Django main
+    - "e2583fbc2ebffce11b4444a7cec6336513e81f8b"   # Django 5.1.x
+    - "32ebcbf2e1fe3e5ba79a6554a167efce81f7422d"   # Django 5.0.x
+    - "f4af67b9b41e0f4c117a8741da3abbd1c869ab28"   # Django 4.2.x
   affected_versions: "<4.2.15, <5.0.8"
   description: >
     SQL injection via crafted JSONField key names used as column aliases
