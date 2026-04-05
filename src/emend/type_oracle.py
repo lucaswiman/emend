@@ -651,8 +651,13 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
             break
 
     if target_module is None:
-        # Fall back to the first (or only) module
-        if modules:
+        # Prefer __unknown__ — pyrefly uses this as the module name for
+        # standalone files (outside a proper Python project).  It always
+        # refers to the file being analysed, so it is the correct target.
+        if "__unknown__" in modules:
+            target_module = "__unknown__"
+        elif modules:
+            # Fall back to the first (or only) module
             target_module = next(iter(modules))
         else:
             return ft
