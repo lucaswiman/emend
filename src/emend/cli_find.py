@@ -39,6 +39,36 @@ def _extract_dsl_symbols_from_region(region):
     return []
 
 
+def _emit_dsl_overlay(
+    explicit_files: list | None,
+    language: str,
+    fallback_path: str,
+    *,
+    search_term: str | None = None,
+) -> None:
+    """Print DSL symbols found in the resolved file set.
+
+    When *search_term* is given, only symbols whose name overlaps with
+    the term are printed (used in lookup mode).
+    """
+    from emend.dsl import detect_dsl_regions
+
+    if explicit_files:
+        dsl_files, _ = resolve_file_scopes(explicit_files, language=language)
+    else:
+        dsl_files, _ = resolve_files(fallback_path, language=language)
+    for f in dsl_files:
+        for region in detect_dsl_regions(str(f)):
+            for sym in _extract_dsl_symbols_from_region(region):
+                if search_term and not (search_term in sym.name or sym.name in search_term):
+                    continue
+                print(
+                    f"{sym.host_file}:{sym.host_line}:{sym.host_col}  "
+                    f"[{sym.dsl.value}:{sym.kind.value}]  {sym.name}",
+                    flush=True,
+                )
+
+
 def _print_pattern_match_code(
     file_path_str: str,
     match,
@@ -674,22 +704,9 @@ def search(
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
 
-            # ---- DSL symbols in scanned files ----
             # Only show DSL symbols when --dsl flag is explicitly provided.
-            # Without it, DSL results are noise when doing a Python pattern search.
             if dsl is not None:
-                from emend.dsl import detect_dsl_regions
-                _lang = _state["language"]
-                if explicit_files:
-                    _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
-                else:
-                    target_path_dsl = path or "."
-                    _dsl_files, _ = resolve_files(target_path_dsl, language=_lang)
-                for _dsl_f in _dsl_files:
-                    regions = detect_dsl_regions(str(_dsl_f))
-                    for region in regions:
-                        for sym in _extract_dsl_symbols_from_region(region):
-                            print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
+                _emit_dsl_overlay(explicit_files, _state["language"], path or ".")
 
             return
 
@@ -734,25 +751,10 @@ def search(
         if result:
             print(result, end='')
 
-        # ---- DSL symbol overlay ----
         # Only show DSL symbols when --dsl flag is explicitly provided.
-        # Without it, DSL results create noise alongside symbol lookup results.
         if dsl is not None:
-            from emend.dsl import detect_dsl_regions
-            _lang = _state["language"]
-            if explicit_files:
-                _dsl_files, _ = resolve_file_scopes(explicit_files, language=_lang)
-            else:
-                _dsl_path = path or file_or_pattern or "."
-                _dsl_files, _ = resolve_files(_dsl_path, language=_lang)
             _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
-            if _search_term:
-                for _dsl_f in _dsl_files:
-                    regions = detect_dsl_regions(str(_dsl_f))
-                    for region in regions:
-                        for sym in _extract_dsl_symbols_from_region(region):
-                            if _search_term in sym.name or sym.name in _search_term:
-                                print(f"{sym.host_file}:{sym.host_line}:{sym.host_col}  [{sym.dsl.value}:{sym.kind.value}]  {sym.name}", flush=True)
+            _emit_dsl_overlay(explicit_files, _state["language"], path or file_or_pattern or ".", search_term=_search_term)
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -1712,6 +1712,18 @@ class FactGraph:
     # -- Phase 5: Trace (data-flow) analysis via Datalog --------------------------------
 
     @staticmethod
+    def _cozo_quote(v: str | int) -> str:
+        """Escape *v* for a CozoScript single-quoted string literal.
+
+        Subscript expressions like ``request.POST["id"]`` break double-quoted
+        CozoScript strings, so we use single-quoted literals throughout.
+        """
+        if isinstance(v, str):
+            escaped = v.replace("\\", "\\\\").replace("'", "\\'")
+            return f"'{escaped}'"
+        return str(v)
+
+    @staticmethod
     def _inline_relation(
         name: str,
         cols: list[str],
@@ -1721,23 +1733,13 @@ class FactGraph:
 
         Returns a string like ``name[c1, c2] <- [[v1, v2], [v3, v4]]\\n``
         or ``name[c1, c2] <- []\\n`` when *rows* is empty.
-
-        String values are serialised as single-quoted CozoScript literals with
-        backslashes and single-quotes escaped (``\\`` and ``\\'``).  This avoids
-        parse errors when string values contain double-quotes or square brackets
-        (e.g. subscript expressions like ``request.POST["id"]``).
         """
-        def _quote(v: str | int) -> str:
-            if isinstance(v, str):
-                escaped = v.replace("\\", "\\\\").replace("'", "\\'")
-                return f"'{escaped}'"
-            return str(v)
-
         col_str = ", ".join(cols)
         if not rows:
             return f"{name}[{col_str}] <- []\n"
+        _q = FactGraph._cozo_quote
         formatted = ", ".join(
-            "[" + ", ".join(_quote(v) for v in row) + "]"
+            "[" + ", ".join(_q(v) for v in row) + "]"
             for row in rows
         )
         return f"{name}[{col_str}] <- [{formatted}]\n"
