@@ -783,6 +783,47 @@ class TestDslSearchCommand:
         assert result.exit_code == 0
         assert "SELECT" not in result.output
 
+    def test_pattern_find_does_not_include_dsl_noise_by_default(self, tmp_path):
+        """Pattern find should NOT include DSL symbols by default.
+
+        When running a Python pattern search (e.g. '$X.objects.get($...ARGS)'),
+        the output should NOT include [sql:table] or [graphql:graphql_type]
+        matches from docstrings/comments. DSL symbols should only appear when
+        --dsl is explicitly provided.
+        """
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "app.py"
+        f.write_text(
+            '"""SELECT * FROM users WHERE id = %s"""\n'
+            "\n"
+            "class User:\n"
+            "    def get_user(self, uid):\n"
+            "        obj = User.objects.get(id=uid)\n"
+            "        return obj\n"
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["find", "$X.objects.get($...ARGS)", str(f), "--output", "code"])
+        assert result.exit_code == 0
+        # Should find the Python pattern match
+        assert "objects.get" in result.output
+        # Should NOT include DSL noise in default mode
+        assert "[sql:" not in result.output
+        assert "[graphql:" not in result.output
+
+    def test_pattern_find_includes_dsl_with_explicit_flag(self, tmp_path):
+        """Pattern find with --dsl flag explicitly searches DSL regions."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        f = tmp_path / "app.py"
+        f.write_text('QUERY = "SELECT * FROM users"\n')
+        runner = CliRunner()
+        result = runner.invoke(app, ["find", "SELECT $...REST", str(f), "--dsl", "sql"])
+        assert result.exit_code == 0
+        assert "[sql" in result.output or "users" in result.output
+
 
 class TestDslIndexTables:
     """Tests for dsl_symbols and dsl_links tables in parse.db."""
