@@ -1161,4 +1161,12 @@ def compile_constraint_to_rust_ir(
         if ir is not None:
             return ir
 
+    # For compound statement keywords that accept patterns (with, if, for, while),
+    # auto-append a colon if omitted so "with open('f') as f" works like
+    # "with open('f') as f:".
+    if not stripped.endswith(":") and _COMPOUND_HEADER_RE.match(stripped + ":"):
+        ir = compile_pattern_to_rust_ir(stripped + ":", language=language)
+        if ir is not None:
+            return ir
+
     return None
