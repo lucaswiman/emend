@@ -253,6 +253,30 @@ class TestTypeDescriptorMatches:
         constraint = TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("int")))
         assert not td.matches(constraint)
 
+    def test_fq_named_matches_short_constraint(self):
+        """'redis.client.Redis' should match short constraint 'Redis'."""
+        td = TypeDescriptor.named("redis.client.Redis")
+        constraint = TypeDescriptor.named("Redis")
+        assert td.matches(constraint)
+
+    def test_fq_named_no_match_wrong_suffix(self):
+        """'redis.client.StrictRedis' should NOT match 'Redis'."""
+        td = TypeDescriptor.named("redis.client.StrictRedis")
+        constraint = TypeDescriptor.named("Redis")
+        assert not td.matches(constraint)
+
+    def test_fq_parameterized_matches_short_constraint(self):
+        """'collections.abc.Sequence[int]' should match named 'Sequence'."""
+        td = TypeDescriptor.parameterized("collections.abc.Sequence", (TypeDescriptor.named("int"),))
+        constraint = TypeDescriptor.named("Sequence")
+        assert td.matches(constraint)
+
+    def test_fq_parameterized_matches_short_parameterized_constraint(self):
+        """'collections.abc.Sequence[int]' should match 'Sequence[int]'."""
+        td = TypeDescriptor.parameterized("collections.abc.Sequence", (TypeDescriptor.named("int"),))
+        constraint = TypeDescriptor.parameterized("Sequence", (TypeDescriptor.named("int"),))
+        assert td.matches(constraint)
+
 
 # ---------------------------------------------------------------------------
 # Pyrefly debug-info JSON parsing

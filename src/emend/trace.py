@@ -175,22 +175,12 @@ def _parse_atom(atom: str) -> tuple[str, bool]:
     return (atom, False)
 
 
-def _type_name_matches(constraint_name: str, type_name: str) -> bool:
-    """Match short or fully-qualified type name against a resolved type string.
-
-    e.g. ``'Redis'`` matches ``'redis.client.Redis'`` (last component).
-    """
-    if type_name == constraint_name:
-        return True
-    if "." not in constraint_name and "." in type_name:
-        return type_name.rsplit(".", 1)[-1] == constraint_name
-    return False
-
-
 def _eval_atom(atom: tuple[str, bool], type_name: str) -> bool:
     """Evaluate a parsed type constraint atom."""
+    from emend.type_oracle import type_name_matches
+
     name, negated = atom
-    matches = _type_name_matches(name, type_name)
+    matches = type_name_matches(name, type_name)
     if negated:
         return not matches
     return matches

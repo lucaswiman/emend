@@ -230,6 +230,22 @@ def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
 
 
 # ---------------------------------------------------------------------------
+# Type name matching
+# ---------------------------------------------------------------------------
+
+def type_name_matches(constraint_name: str, type_name: str) -> bool:
+    """Match short or fully-qualified type name against a resolved type string.
+
+    e.g. ``'Redis'`` matches ``'redis.client.Redis'`` (last component).
+    """
+    if type_name == constraint_name:
+        return True
+    if "." not in constraint_name and "." in type_name:
+        return type_name.rsplit(".", 1)[-1] == constraint_name
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Type descriptor tree
 # ---------------------------------------------------------------------------
 
@@ -299,12 +315,12 @@ class TypeDescriptor:
             return any(m.matches(constraint) for m in self.params)
         if constraint.kind == "named":
             if self.kind == "named":
-                return self.name == constraint.name
+                return type_name_matches(constraint.name, self.name)
             if self.kind == "parameterized":
-                return self.name == constraint.name  # List matches List[int]
+                return type_name_matches(constraint.name, self.name)
             return False
         if constraint.kind == "parameterized":
-            if self.kind == "parameterized" and self.name == constraint.name:
+            if self.kind == "parameterized" and type_name_matches(constraint.name, self.name):
                 if len(self.params) != len(constraint.params):
                     return False
                 return all(a.matches(b) for a, b in zip(self.params, constraint.params))
