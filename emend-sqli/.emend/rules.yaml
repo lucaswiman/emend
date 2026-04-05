@@ -168,6 +168,37 @@ rules:
       SQL injection via Django values_list() (CVE-2024-42005).
       User-controlled field names in values/values_list can inject SQL.
 
+  # --- CVE-2024-53908: Django HasKey on Oracle ---
+  django-haskey-injection:
+    flow:
+      from: "{django_get}"
+      to: "HasKey($X, $KEY)"
+    message: >
+      SQL injection via direct HasKey(lhs=user_input) on Oracle
+      (CVE-2024-53908). The lhs is not parameterized in JSON_EXISTS().
+      Use field__has_key=value ORM syntax instead.
+
+  # --- CVE-2019-7164 / CVE-2019-7548: SQLAlchemy text coercion ---
+  # In SQLAlchemy <1.2.18, raw strings in order_by/group_by were
+  # silently coerced to text() SQL fragments
+  sqlalchemy-order-by-string:
+    flow:
+      from: "{flask_args}"
+      to: "order_by($X)"
+    message: >
+      SQL injection via SQLAlchemy order_by() with raw string
+      (CVE-2019-7164). In SQLAlchemy <1.2.18, strings were silently
+      coerced to text(). Use column objects or explicit text() with
+      bind parameters.
+
+  sqlalchemy-group-by-string:
+    flow:
+      from: "{flask_args}"
+      to: "group_by($X)"
+    message: >
+      SQL injection via SQLAlchemy group_by() with raw string
+      (CVE-2019-7548). Use column objects instead of raw strings.
+
   # --- Raw SQL string formatting (framework-agnostic) ---
   raw-sql-format-string:
     match: "cursor.execute($X % $Y)"
