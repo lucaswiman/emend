@@ -1356,6 +1356,7 @@ def _compute_function_summary(
     func_qn: str,
     param_names: list[str],
     language: str = "python",
+    pattern_cache: dict[tuple[str, str], list] | None = None,
 ) -> FunctionSummary:
     """Compute a taint summary for a single function.
 
@@ -1411,14 +1412,27 @@ def _compute_function_summary(
 
     sinks_by_line: dict[int, list[tuple[TraceSink, set[str]]]] = {}
     for sink_def in config.sinks:
-        try:
-            matches = find_pattern(
-                sink_def.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            continue
+        if pattern_cache is not None:
+            _cache_key = (file_path, sink_def.pattern)
+            if _cache_key not in pattern_cache:
+                try:
+                    pattern_cache[_cache_key] = find_pattern(
+                        sink_def.pattern, file_path,
+                        source_override=source,
+                        language=language,
+                    )
+                except Exception:
+                    pattern_cache[_cache_key] = []
+            matches = pattern_cache[_cache_key]
+        else:
+            try:
+                matches = find_pattern(
+                    sink_def.pattern, file_path,
+                    source_override=source,
+                    language=language,
+                )
+            except Exception:
+                continue
 
         for match in matches:
             match_line = match.line or 1
@@ -1689,6 +1703,8 @@ def _run_interprocedural_trace_datalog(
             func_paths[qn] = func_path
             func_kinds[qn] = func_kind
 
+    _pattern_cache: dict[tuple[str, str], list] = {}
+
     direct_summaries: dict[str, FunctionSummary] = {}
     for qn, (fp, src, fs, fe, params) in func_info.items():
         direct_summaries[qn] = _compute_function_summary(
@@ -1700,6 +1716,7 @@ def _run_interprocedural_trace_datalog(
             func_qn=qn,
             param_names=params,
             language=language,
+            pattern_cache=_pattern_cache,
         )
 
     name_to_qn: dict[str, list[str]] = {}
@@ -1758,14 +1775,17 @@ def _run_interprocedural_trace_datalog(
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    src_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, src_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        src_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except Exception:
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0
@@ -1789,14 +1809,17 @@ def _run_interprocedural_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    san_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, san_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        san_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except Exception:
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 if not (fs <= match_line <= fe):
@@ -1817,14 +1840,17 @@ def _run_interprocedural_trace_datalog(
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    sink_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, sink_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        sink_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except Exception:
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0
