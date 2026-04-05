@@ -1,0 +1,402 @@
+# SQL Injection detection rules for emend
+#
+# These rules detect common SQL injection patterns found in real-world
+# Python CVEs across Django, SQLAlchemy, psycopg2, and raw DB-API usage.
+#
+# Usage:
+#   emend lint <path> --config emend-sqli/.emend/rules.yaml
+#   emend trace <path> --config emend-sqli/.emend/rules.yaml
+#
+# The rules are organized into:
+#   1. macros    - reusable pattern fragments
+#   2. rules     - structural pattern + flow-based lint rules
+#   3. trace     - taint-tracking source/sink/sanitizer definitions
+
+macros:
+  # --- User input sources (Django) ---
+  django_get: "request.GET.get($X)"
+  django_get_bracket: "request.GET[$X]"
+  django_post: "request.POST.get($X)"
+  django_post_bracket: "request.POST[$X]"
+  django_body: "request.body"
+  django_meta: "request.META.get($X)"
+  django_cookies: "request.COOKIES.get($X)"
+
+  # --- User input sources (Flask) ---
+  flask_args: "request.args.get($X)"
+  flask_args_bracket: "request.args[$X]"
+  flask_form: "request.form.get($X)"
+  flask_form_bracket: "request.form[$X]"
+  flask_json: "request.json.get($X)"
+  flask_data: "request.data"
+
+  # --- User input sources (FastAPI) ---
+  fastapi_query: "Query(default=$X)"
+  fastapi_body: "Body(default=$X)"
+  fastapi_form: "Form(default=$X)"
+
+  # --- Raw SQL sinks ---
+  cursor_execute: "cursor.execute($Q)"
+  cursor_executemany: "cursor.executemany($Q, $PARAMS)"
+  db_execute: "db.execute($Q)"
+
+  # --- Django ORM sinks (CVE patterns) ---
+  django_raw: "Manager.raw($Q)"
+  django_extra_where: "extra(where=[$X])"
+  django_extra_select: "extra(select=$X)"
+  django_rawsql: "RawSQL($X)"
+  django_order_by: "order_by($X)"
+  django_annotate: "annotate($X)"
+  django_aggregate: "aggregate($X)"
+
+  # --- SQLAlchemy sinks ---
+  sa_text: "text($X)"
+  sa_textclause: "TextClause($X)"
+  sa_session_execute: "session.execute($X)"
+  sa_engine_execute: "engine.execute($X)"
+  sa_conn_execute: "connection.execute($X)"
+
+  # --- String formatting (the root cause of most SQLi) ---
+  format_pct: "$X % $Y"
+  format_call: "$X.format($Y)"
+  fstring_concat: "$X + $Y"
+
+rules:
+  # ============================================================
+  # Structural rules: detect dangerous patterns directly
+  # ============================================================
+
+  # --- CVE-2021-35042: Django order_by() SQL injection ---
+  # User input passed directly to order_by() allows arbitrary SQL
+  django-order-by-user-input:
+    flow:
+      from: "{django_get}"
+      to: "order_by($X)"
+    message: >
+      SQL injection via Django order_by() (CVE-2021-35042).
+      User input passed to order_by() can inject arbitrary SQL.
+      Use a whitelist of allowed field names instead.
+
+  # --- CVE-2019-14234: Django JSONField key/index lookup injection ---
+  # Crafted JSON key names in QuerySet filter kwargs can inject SQL
+  django-jsonfield-key-injection:
+    flow:
+      from: "{django_get}"
+      to: "filter($KWARGS)"
+    message: >
+      Potential SQL injection via Django JSONField key lookup
+      (CVE-2019-14234). User input in filter() kwargs on JSONField
+      columns can inject SQL via crafted key names.
+
+  # --- CVE-2020-9402: Django GIS functions SQL injection ---
+  # tolerance/bbox parameters passed without validation
+  django-gis-tolerance-injection:
+    flow:
+      from: "{django_get}"
+      to: "GeoQuerySet.tolerance($X)"
+    message: >
+      SQL injection via Django GIS tolerance parameter
+      (CVE-2020-9402). Numeric parameters must be validated.
+
+  # --- CVE-2022-28346: Django annotate()/aggregate() injection ---
+  # Crafted column aliases in annotate/aggregate
+  django-annotate-injection:
+    flow:
+      from: "{django_get}"
+      to: "annotate($X)"
+    message: >
+      SQL injection via Django annotate() (CVE-2022-28346).
+      User-controlled alias names in annotate/aggregate can inject SQL.
+
+  django-aggregate-injection:
+    flow:
+      from: "{django_get}"
+      to: "aggregate($X)"
+    message: >
+      SQL injection via Django aggregate() (CVE-2022-28346).
+      User-controlled alias names in aggregate can inject SQL.
+
+  # --- CVE-2022-28347: Django explain() injection ---
+  django-explain-injection:
+    flow:
+      from: "{django_get}"
+      to: "explain($X)"
+    message: >
+      SQL injection via Django QuerySet.explain() (CVE-2022-28347).
+      Options passed to explain() are interpolated into SQL without escaping.
+
+  # --- CVE-2022-34265: Django Trunc/Extract injection ---
+  django-trunc-kind-injection:
+    flow:
+      from: "{django_get}"
+      to: "Trunc($EXPR, $X)"
+    message: >
+      SQL injection via Django Trunc() kind parameter (CVE-2022-34265).
+      The kind argument is interpolated into SQL without validation.
+
+  django-extract-lookup-injection:
+    flow:
+      from: "{django_get}"
+      to: "Extract($EXPR, lookup_name=$X)"
+    message: >
+      SQL injection via Django Extract() lookup_name (CVE-2022-34265).
+      The lookup_name is interpolated into SQL without validation.
+
+  # --- CVE-2020-7471: Django StringAgg delimiter injection ---
+  django-stringagg-delimiter-injection:
+    flow:
+      from: "{django_get}"
+      to: "StringAgg($EXPR, delimiter=$X)"
+    message: >
+      SQL injection via Django StringAgg delimiter (CVE-2020-7471).
+      The delimiter parameter is passed as a raw SQL literal.
+
+  # --- CVE-2024-42005: Django values()/values_list() injection ---
+  django-values-injection:
+    flow:
+      from: "{django_get}"
+      to: "values($X)"
+    message: >
+      SQL injection via Django values() (CVE-2024-42005).
+      User-controlled field names in values/values_list can inject SQL.
+
+  django-values-list-injection:
+    flow:
+      from: "{django_get}"
+      to: "values_list($X)"
+    message: >
+      SQL injection via Django values_list() (CVE-2024-42005).
+      User-controlled field names in values/values_list can inject SQL.
+
+  # --- Raw SQL string formatting (framework-agnostic) ---
+  raw-sql-format-string:
+    match: "cursor.execute($X % $Y)"
+    message: >
+      SQL injection: string formatting in cursor.execute().
+      Use parameterized queries: cursor.execute($X, $Y)
+
+  raw-sql-f-string:
+    match: 'cursor.execute(f"$X")'
+    message: >
+      SQL injection: f-string in cursor.execute().
+      Use parameterized queries instead of string interpolation.
+
+  raw-sql-format-method:
+    match: "cursor.execute($X.format($Y))"
+    message: >
+      SQL injection: .format() in cursor.execute().
+      Use parameterized queries: cursor.execute($X, $Y)
+
+  raw-sql-concat:
+    match: "cursor.execute($X + $Y)"
+    message: >
+      SQL injection: string concatenation in cursor.execute().
+      Use parameterized queries instead.
+
+  # --- SQLAlchemy raw text patterns ---
+  sqlalchemy-text-format:
+    match: "text($X % $Y)"
+    message: >
+      SQL injection: string formatting in sqlalchemy text().
+      Use text($X).bindparams() or text() with :param placeholders.
+
+  sqlalchemy-text-fstring:
+    match: 'text(f"$X")'
+    message: >
+      SQL injection: f-string in sqlalchemy text().
+      Use text() with :param placeholders and .bindparams().
+
+  sqlalchemy-text-format-method:
+    match: "text($X.format($Y))"
+    message: >
+      SQL injection: .format() in sqlalchemy text().
+      Use text() with :param placeholders and .bindparams().
+
+  sqlalchemy-execute-format:
+    match: "session.execute($X % $Y)"
+    message: >
+      SQL injection: string formatting in session.execute().
+      Wrap in text() with bind parameters.
+
+  sqlalchemy-engine-execute-format:
+    match: "engine.execute($X % $Y)"
+    message: >
+      SQL injection: string formatting in engine.execute().
+      Use text() with bind parameters.
+
+  # --- psycopg2 patterns ---
+  psycopg2-format-string:
+    match: "cursor.execute($X % $Y)"
+    message: >
+      SQL injection: Python string formatting in cursor.execute().
+      Use psycopg2 parameterized queries: cursor.execute($X, ($Y,))
+
+  psycopg2-string-concat:
+    match: "cursor.execute($X + $Y)"
+    message: >
+      SQL injection: string concatenation in execute().
+      Use psycopg2's built-in parameterization.
+
+  # --- Django .extra() (deprecated but still used) ---
+  django-extra-where-raw:
+    match: 'extra(where=[$X % $Y])'
+    message: >
+      SQL injection in Django .extra(where=).
+      The extra() method is deprecated; use annotate() or RawSQL with params.
+
+  django-extra-select-raw:
+    match: 'extra(select=$X)'
+    message: >
+      Potential SQL injection in Django .extra(select=).
+      Ensure values are not user-controlled. Prefer annotate().
+
+  # --- Django RawSQL ---
+  django-rawsql-format:
+    match: "RawSQL($X % $Y)"
+    message: >
+      SQL injection in Django RawSQL() with string formatting.
+      Use RawSQL($X, [$Y]) with parameterized query.
+
+  django-rawsql-fstring:
+    match: 'RawSQL(f"$X")'
+    message: >
+      SQL injection in Django RawSQL() with f-string.
+      Use RawSQL() with parameterized query and params list.
+
+# ============================================================
+# Trace configuration: taint tracking from sources to sinks
+# ============================================================
+trace:
+  labels:
+    - sqli
+
+  sources:
+    # Django sources
+    - pattern: "request.GET.get($X)"
+      label: sqli
+    - pattern: "request.GET[$X]"
+      label: sqli
+    - pattern: "request.POST.get($X)"
+      label: sqli
+    - pattern: "request.POST[$X]"
+      label: sqli
+    - pattern: "request.body"
+      label: sqli
+    - pattern: "request.META.get($X)"
+      label: sqli
+    - pattern: "request.COOKIES.get($X)"
+      label: sqli
+    # Flask sources
+    - pattern: "request.args.get($X)"
+      label: sqli
+    - pattern: "request.args[$X]"
+      label: sqli
+    - pattern: "request.form.get($X)"
+      label: sqli
+    - pattern: "request.form[$X]"
+      label: sqli
+    - pattern: "request.json.get($X)"
+      label: sqli
+    - pattern: "request.data"
+      label: sqli
+    # Generic sources
+    - pattern: "input($X)"
+      label: sqli
+    - pattern: "sys.argv[$X]"
+      label: sqli
+    - pattern: "os.environ.get($X)"
+      label: sqli
+    - pattern: "os.environ[$X]"
+      label: sqli
+
+  sinks:
+    # Raw DB-API
+    - pattern: "cursor.execute($X)"
+      label: sqli
+      message: "SQL injection: tainted data reaches cursor.execute()"
+    - pattern: "cursor.executemany($X, $PARAMS)"
+      label: sqli
+      message: "SQL injection: tainted data reaches cursor.executemany()"
+    # Django ORM dangerous methods
+    - pattern: "RawSQL($X)"
+      label: sqli
+      message: "SQL injection: tainted data in RawSQL()"
+    - pattern: "extra(where=[$X])"
+      label: sqli
+      message: "SQL injection: tainted data in .extra(where=)"
+    - pattern: "extra(select=$X)"
+      label: sqli
+      message: "SQL injection: tainted data in .extra(select=)"
+    - pattern: "raw($X)"
+      label: sqli
+      message: "SQL injection: tainted data in Manager.raw()"
+    - pattern: "order_by($X)"
+      label: sqli
+      message: "SQL injection: tainted data in order_by() (CVE-2021-35042)"
+    - pattern: "annotate($X)"
+      label: sqli
+      message: "SQL injection: tainted data in annotate() (CVE-2022-28346)"
+    - pattern: "aggregate($X)"
+      label: sqli
+      message: "SQL injection: tainted data in aggregate() (CVE-2022-28346)"
+    - pattern: "explain($X)"
+      label: sqli
+      message: "SQL injection: tainted data in explain() (CVE-2022-28347)"
+    - pattern: "Trunc($EXPR, $X)"
+      label: sqli
+      message: "SQL injection: tainted data in Trunc() kind (CVE-2022-34265)"
+    - pattern: "Extract($EXPR, lookup_name=$X)"
+      label: sqli
+      message: "SQL injection: tainted data in Extract() (CVE-2022-34265)"
+    - pattern: "StringAgg($EXPR, delimiter=$X)"
+      label: sqli
+      message: "SQL injection: tainted data in StringAgg delimiter (CVE-2020-7471)"
+    - pattern: "values($X)"
+      label: sqli
+      message: "SQL injection: tainted data in values() (CVE-2024-42005)"
+    - pattern: "values_list($X)"
+      label: sqli
+      message: "SQL injection: tainted data in values_list() (CVE-2024-42005)"
+    # SQLAlchemy
+    - pattern: "text($X)"
+      label: sqli
+      message: "SQL injection: tainted data in sqlalchemy text()"
+    - pattern: "TextClause($X)"
+      label: sqli
+      message: "SQL injection: tainted data in TextClause()"
+    - pattern: "session.execute($X)"
+      label: sqli
+      message: "SQL injection: tainted data in session.execute()"
+    - pattern: "engine.execute($X)"
+      label: sqli
+      message: "SQL injection: tainted data in engine.execute()"
+    - pattern: "connection.execute($X)"
+      label: sqli
+      message: "SQL injection: tainted data in connection.execute()"
+
+  sanitizers:
+    # Type conversion (safe: produces non-injectable values)
+    - pattern: "int($X)"
+      label: sqli
+    - pattern: "float($X)"
+      label: sqli
+    - pattern: "bool($X)"
+      label: sqli
+    # Parameterized query helpers
+    - pattern: "bindparam($X)"
+      label: sqli
+    # Django's connection.ops quoting
+    - pattern: "connection.ops.quote_name($X)"
+      label: sqli
+    # Whitelist validation patterns
+    - pattern: "validate_field_name($X)"
+      label: sqli
+    - pattern: "escape($X)"
+      label: sqli
+    # psycopg2 safe adapters
+    - pattern: "sql.Identifier($X)"
+      label: sqli
+    - pattern: "sql.Literal($X)"
+      label: sqli
+    - pattern: "sql.Placeholder($X)"
+      label: sqli

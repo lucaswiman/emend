@@ -1,0 +1,288 @@
+# SQL Injection Vulnerability Dataset
+#
+# Curated dataset of real-world SQL injection CVEs in Python libraries.
+# Each entry includes the fix commit so you can check out the parent
+# commit (fix_commit~1) to test detection on the vulnerable version.
+#
+# Sources: NVD, OSV (osv.dev), GitHub Security Advisories
+
+# ==============================================================
+# Django — ORM and QuerySet API SQL injection vulnerabilities
+# ==============================================================
+
+- cve: CVE-2019-14234
+  library: django
+  component: JSONField / HStoreField key lookups
+  repo: https://github.com/django/django
+  fix_commits:
+    - "974897759e9afc4cc56fb87e12319fa9697e93c9"   # Django 1.11.23
+    - "ff9dcc0867eba90e9ab1b07a4b3eb79928717918"   # Django 2.1.11
+    - "8687fbe034ac5eec20e0948b98eb8a2f0b1431a1"   # Django 2.2.4
+  affected_versions: "<1.11.23, <2.1.11, <2.2.4"
+  description: >
+    SQL injection via crafted key or index names in JSONField and
+    HStoreField lookups. An attacker could pass a malicious key like
+    "x]'; DROP TABLE --" through QuerySet.filter() kwargs to inject SQL.
+  vulnerable_pattern: >
+    filter(**{user_controlled_key: value}) on JSONField/HStoreField
+    columns. The key portion (after __) was interpolated into SQL without
+    quoting.
+  detection_strategy: flow
+  emend_rule: django-jsonfield-key-injection
+
+- cve: CVE-2020-7471
+  library: django
+  component: django.contrib.postgres.aggregates.StringAgg
+  repo: https://github.com/django/django
+  fix_commits:
+    - "eb31d845323618d688ad429479c6dda973056136"   # Django 1.11.28
+  affected_versions: "<1.11.28, <2.2.10, <3.0.3"
+  description: >
+    SQL injection via the delimiter argument to StringAgg. The delimiter
+    was treated as a raw SQL literal rather than a parameter, allowing
+    injection through crafted delimiter strings.
+  vulnerable_pattern: >
+    StringAgg('field', delimiter=user_input) where user_input is not
+    a Value() wrapped string.
+  detection_strategy: flow
+  emend_rule: django-stringagg-delimiter-injection
+
+- cve: CVE-2020-9402
+  library: django
+  component: django.contrib.gis (GIS functions/aggregates)
+  repo: https://github.com/django/django
+  fix_commits:
+    - "f1e3017aeaeddc590dcf2cf88511f3a726da73ca"   # Django 1.11.29
+    - "167699278806b21757104acf0ff0570f673d44c7"   # Django 2.2.11
+    - "c2250cfb80e27cdf8d098428824da2800a18cadf"   # Django 3.0.4
+  affected_versions: "<1.11.29, <2.2.11, <3.0.4"
+  description: >
+    SQL injection via untrusted data used as a tolerance parameter in
+    GIS functions and aggregates on Oracle. The tolerance value was
+    interpolated into SQL without parameterization.
+  vulnerable_pattern: >
+    GIS aggregate/function calls with tolerance=user_input on Oracle
+    backend. The tolerance float was formatted directly into SQL.
+  detection_strategy: flow
+  emend_rule: django-gis-tolerance-injection
+
+- cve: CVE-2021-35042
+  library: django
+  component: QuerySet.order_by()
+  repo: https://github.com/django/django
+  fix_commits:
+    - "a34a5f724c5d5adb2109374ba3989ebb7b11f81f"   # Django 3.2.5
+    - "0bd57a879a0d54920bb9038a732645fb917040e9"   # Django 3.1.13
+  affected_versions: "<3.1.13, <3.2.5"
+  description: >
+    SQL injection via QuerySet.order_by() when untrusted data is passed
+    as column names. Allowed injection of arbitrary SQL through crafted
+    field names containing SQL syntax.
+  vulnerable_pattern: >
+    queryset.order_by(user_input) where user_input comes from request
+    parameters without validation against an allowlist.
+  detection_strategy: flow
+  emend_rule: django-order-by-user-input
+
+- cve: CVE-2022-28346
+  library: django
+  component: QuerySet.annotate() / aggregate() / extra()
+  repo: https://github.com/django/django
+  fix_commits:
+    - "5c3300027b30c1b498d99010f7d618316f685045"   # Django 2.2.28
+    - "08e6073f878264a0c091da0d3db456820252ef6c"   # Django 3.2.13
+    - "89807fbde8b7b17d00434bc4695535855e96fe77"   # Django 4.0.4
+  affected_versions: "<2.2.28, <3.2.13, <4.0.4"
+  description: >
+    SQL injection via crafted dictionary expansion in column aliases
+    passed to annotate(), aggregate(), and extra(). A dict like
+    {"injected_sql AS 1; DROP TABLE--": Count("id")} could inject SQL.
+  vulnerable_pattern: >
+    queryset.annotate(**user_dict) or queryset.aggregate(**user_dict)
+    where dict keys come from user input.
+  detection_strategy: flow
+  emend_rule: django-annotate-injection
+
+- cve: CVE-2022-28347
+  library: django
+  component: QuerySet.explain()
+  repo: https://github.com/django/django
+  fix_commits:
+    - "5c3300027b30c1b498d99010f7d618316f685045"   # Django 2.2.28
+    - "08e6073f878264a0c091da0d3db456820252ef6c"   # Django 3.2.13
+    - "89807fbde8b7b17d00434bc4695535855e96fe77"   # Django 4.0.4
+  affected_versions: "<2.2.28, <3.2.13, <4.0.4"
+  description: >
+    SQL injection via crafted option names in QuerySet.explain(**options).
+    The option keys were interpolated into SQL without escaping, allowing
+    injection through dict expansion with malicious keys.
+  vulnerable_pattern: >
+    queryset.explain(**user_dict) where dict keys contain injected SQL.
+  detection_strategy: flow
+  emend_rule: django-explain-injection
+
+- cve: CVE-2022-34265
+  library: django
+  component: Trunc() and Extract() date functions
+  repo: https://github.com/django/django
+  fix_commits:
+    - "746e88cc634469112b823225c19d75c7362f8ecf"   # Django 3.2.14
+    - "caad462feaa84ba78ed658a9595a4a4363dad2db"   # Django 4.0.6
+  affected_versions: "<3.2.14, <4.0.6"
+  description: >
+    SQL injection via untrusted data used as a kind/lookup_name value in
+    Trunc() and Extract() functions. These parameters were interpolated
+    directly into SQL without validation.
+  vulnerable_pattern: >
+    Trunc('field', kind=user_input) or Extract('field', lookup_name=user_input)
+    where the kind/lookup_name is user-controlled.
+  detection_strategy: flow
+  emend_rule: django-trunc-kind-injection
+
+- cve: CVE-2024-42005
+  library: django
+  component: QuerySet.values() / values_list()
+  repo: https://github.com/django/django
+  fix_commits:
+    - "4d32ebcd57340aa8de2d6d31613f1646dc6391f6"   # Django 4.2.15
+    - "84d1102a8a3bba64bcc1b14a7117c26a83fb7fe5"   # Django 5.0.8
+  affected_versions: "<4.2.15, <5.0.8"
+  description: >
+    SQL injection via crafted JSONField key names used as column aliases
+    in values() and values_list(). Malicious keys could inject SQL through
+    the field name parsing.
+  vulnerable_pattern: >
+    queryset.values(user_controlled_field) or
+    queryset.values_list(user_controlled_field) on JSONField columns.
+  detection_strategy: flow
+  emend_rule: django-values-injection
+
+# ==============================================================
+# Non-Django Python libraries
+# ==============================================================
+
+- cve: CVE-2026-26198
+  library: ormar
+  component: QuerySet.min() / max() aggregate functions
+  repo: https://github.com/collerek/ormar
+  fix_commits:
+    - "a03bae14fe01358d3eaf7e319fcd5db2e4956b16"   # ormar 0.23.0
+  affected_versions: ">=0.9.9, <=0.22.0"
+  description: >
+    SQL injection through aggregate functions min() and max(). Unlike
+    sum() and avg() which validate column names, min/max accepted
+    arbitrary strings that were embedded directly into SQL queries via
+    SQLAlchemy's func.min/func.max.
+  vulnerable_pattern: >
+    await Model.objects.min(user_input) or max(user_input) where the
+    column name is user-controlled. The column was passed directly to
+    sqlalchemy.func without validation.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    Interesting case: inconsistent validation across similar methods.
+    sum() and avg() had type checks but min/max did not.
+
+- cve: CVE-2025-65896
+  library: asyncmy
+  component: dict key escaping in query parameters
+  repo: https://github.com/long2ice/asyncmy
+  fix_commits:
+    - "6c16f3ba5abeb03686043273fdb2daab7b3f82a7"   # post-0.2.10
+  affected_versions: "<=0.2.10"
+  description: >
+    SQL injection via crafted dictionary keys when using dict-style
+    parameterized queries. The dict keys (column names) were not
+    properly escaped, allowing injection through keys like
+    "col; DROP TABLE users--".
+  vulnerable_pattern: >
+    cursor.execute("INSERT INTO t ({keys}) VALUES ({values})", user_dict)
+    where dict keys are interpolated without escaping.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    MySQL async driver. The dict key escaping gap is similar to Django's
+    annotate/aggregate alias injection pattern.
+
+- cve: GHSA-wq2g-r956-j8cc
+  library: pg8000
+  component: pg8000.native.literal()
+  repo: https://codeberg.org/tlocke/pg8000
+  fix_commits:
+    - "8663c746b02286c32f19c385f0e2e5da9e4fa140"   # pg8000 1.31.5
+  affected_versions: "<=1.31.4"
+  description: >
+    SQL injection via specially crafted Python list input to the
+    pg8000.native.literal() function. The list serialization did not
+    properly escape nested values, allowing injection.
+  vulnerable_pattern: >
+    pg8000.native.literal(user_controlled_list) where list elements
+    contain SQL injection payloads.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    PostgreSQL pure-Python driver. The literal() function is used to
+    format Python values into SQL-safe literals but failed on nested
+    list structures.
+
+- cve: GHSA-4h97-wpxp-3757
+  library: langgraph-checkpoint-sqlite
+  component: SQLite store filter operators
+  repo: https://github.com/langchain-ai/langgraph
+  fix_commits:
+    - "bc9d45b476101e441cb1cc602dea03eb29232de4"   # langgraph 2.0.11
+  affected_versions: "<=2.0.10"
+  description: >
+    SQL injection via filter operators ($eq, $ne, $gt, $lt, $gte, $lte)
+    in the SQLite store. Direct string concatenation was used instead of
+    parameterized queries, allowing arbitrary SQL execution.
+  vulnerable_pattern: >
+    store.search(filter={"key": {"$eq": user_input}}) where the filter
+    operator values were concatenated into SQL strings.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    LLM framework checkpoint storage. Shows SQLi in AI/ML tooling - an
+    emerging attack surface as LLM apps handle more user input.
+
+- cve: CVE-2026-32611
+  library: glances
+  component: DuckDB export module
+  repo: https://github.com/nicolargo/glances
+  fix_commits:
+    - "a56a5b78ef931b1d1391c9898bf735a5b4323ec9"   # Glances 4.5.3
+    - "63b7da28895249d775202d639e5531ba63491a5c"
+  affected_versions: "<4.5.3"
+  description: >
+    SQL injection in the DuckDB export module where table and column
+    names derived from monitoring statistics were directly interpolated
+    into SQL statements via f-strings. INSERT values used parameters
+    but DDL/identifier names did not.
+  vulnerable_pattern: >
+    f"CREATE TABLE IF NOT EXISTS {table_name} ..." and
+    f"INSERT INTO {table_name} ..." where table_name comes from
+    monitoring stat names that could be attacker-influenced.
+  detection_strategy: structural
+  emend_rule: raw-sql-f-string
+  notes: >
+    Classic pattern: parameterized values but unparameterized identifiers.
+    A previous fix for TimescaleDB was not applied to the DuckDB module.
+
+- cve: CVE-2026-30930
+  library: glances
+  component: TimescaleDB export module
+  repo: https://github.com/nicolargo/glances
+  fix_commits: []  # See CVE-2026-32611 for related fix
+  affected_versions: "<4.5.0"
+  description: >
+    SQL injection via process names in the TimescaleDB export module.
+    Process names from the system are used as table/column identifiers
+    in SQL statements without sanitization.
+  vulnerable_pattern: >
+    f"INSERT INTO {stat_name} ..." where stat_name includes process
+    names that could contain SQL metacharacters.
+  detection_strategy: structural
+  emend_rule: raw-sql-f-string
+  notes: >
+    Second-order SQLi: the injection payload comes from process names
+    on the system rather than direct HTTP input.
