@@ -175,12 +175,33 @@ def _parse_atom(atom: str) -> tuple[str, bool]:
     return (atom, False)
 
 
+def _type_name_matches(constraint_name: str, type_name: str) -> bool:
+    """Check if *type_name* matches *constraint_name*.
+
+    Supports both exact matching and suffix matching for fully-qualified names.
+    e.g. ``'Redis'`` matches ``'redis.client.Redis'`` because the last
+    dot-separated component is ``'Redis'``.  Exact matches always work too,
+    so ``'redis.client.Redis'`` matches ``'redis.client.Redis'``.
+
+    The match is against the last dot-separated component when the constraint
+    does not contain a dot (i.e. it's a simple short name).  If the constraint
+    contains a dot, an exact match is required.
+    """
+    if type_name == constraint_name:
+        return True
+    if "." not in constraint_name and "." in type_name:
+        # Short constraint name: check if it matches the last component
+        return type_name.rsplit(".", 1)[-1] == constraint_name
+    return False
+
+
 def _eval_atom(atom: tuple[str, bool], type_name: str) -> bool:
     """Evaluate a parsed type constraint atom."""
     name, negated = atom
+    matches = _type_name_matches(name, type_name)
     if negated:
-        return type_name != name
-    return type_name == name
+        return not matches
+    return matches
 
 
 # ---------------------------------------------------------------------------
