@@ -196,6 +196,27 @@
 # SQLAlchemy — automatic text coercion SQL injection
 # ==============================================================
 
+- cve: CVE-2012-0805
+  library: sqlalchemy
+  component: select() limit/offset parameters
+  repo: https://github.com/sqlalchemy/sqlalchemy
+  fix_commits:
+    - "51fea2e159ca93daa0bc8066a5c35d8436d99418"   # SQLAlchemy 0.7.0b4
+  affected_versions: "<0.7.0b4"
+  description: >
+    Multiple SQL injection vulnerabilities in SQLAlchemy before 0.7.0b4.
+    Remote attackers could execute arbitrary SQL via the limit or offset
+    keyword to the select function, or via select.limit/select.offset.
+    Used as a vector in OpenStack Keystone.
+  vulnerable_pattern: >
+    select(...).limit(user_input) or select(...).offset(user_input)
+    where the parameters were not properly parameterized.
+  detection_strategy: flow
+  emend_rule: null
+  notes: >
+    CVSS 9.3. Historical vulnerability (2012) in the SQL builder layer.
+    The fix parameterizes limit/offset values.
+
 - cve: CVE-2019-7164
   library: sqlalchemy
   component: order_by() automatic text coercion
@@ -286,6 +307,71 @@
   notes: >
     MySQL async driver. The dict key escaping gap is similar to Django's
     annotate/aggregate alias injection pattern.
+
+- cve: CVE-2024-36039
+  library: pymysql
+  component: escape_dict() function
+  repo: https://github.com/PyMySQL/PyMySQL
+  fix_commits:
+    - "521e40050cb386a499f68f483fefd144c493053c"   # PyMySQL 1.1.1
+  affected_versions: "<=1.1.0"
+  description: >
+    SQL injection via untrusted JSON dictionary keys. The escape_dict()
+    function escaped dictionary values but not keys. An attacker
+    controlling JSON input keys could inject SQL through key names
+    used in query parameter formatting.
+  vulnerable_pattern: >
+    cursor.execute("INSERT INTO t (%(key)s) VALUES (%(key)s)", user_dict)
+    where dict keys from untrusted JSON are not escaped.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    CVSS 9.8 Critical. Notable vector: dict keys bypass escape_string
+    protection. Same class of bug as asyncmy CVE-2025-65896.
+
+- cve: CVE-2020-11010
+  library: tortoise-orm
+  component: text/character field filtering
+  repo: https://github.com/tortoise/tortoise-orm
+  fix_commits:
+    - "91c364053e0ddf77edc5442914c6f049512678b3"   # tortoise-orm 0.16.6
+  affected_versions: "<0.15.23, 0.16.0-0.16.5"
+  description: >
+    SQL injection vulnerabilities in MySQL and in text/character field
+    filtering. SQLite and PostgreSQL were affected via contains,
+    starts_with, ends_with filters (and case-insensitive variants).
+    MySQL had more extensive injection surface including mass-updates
+    on char/text fields.
+  vulnerable_pattern: >
+    Model.filter(name__contains=user_input) where the contains/
+    starts_with/ends_with filter values were not properly escaped
+    for the LIKE clause.
+  detection_strategy: structural
+  emend_rule: null
+  notes: >
+    CVSS 5.3. Async ORM built on asyncpg/aiomysql. The LIKE clause
+    wildcards (% and _) were not escaped in filter operations.
+
+- cve: CVE-2024-29231
+  library: scitokens
+  component: KeyCache SQL queries
+  repo: https://github.com/scitokens/scitokens
+  fix_commits:
+    - "3dba108853f2f4a6c0f2325c03779bf083c41cf2"   # scitokens 1.9.6
+  affected_versions: "<1.9.6"
+  description: >
+    SQL injection in the KeyCache class. Five methods (addkeyinfo,
+    _addkeyinfo, _delete_cache_entry, _add_negative_cache_entry,
+    getkeyinfo) used str.format() to build SQL queries against a
+    local SQLite database with unsanitized issuer and key_id inputs.
+  vulnerable_pattern: >
+    cursor.execute("SELECT * FROM keycache WHERE issuer='{}'".format(issuer))
+    where issuer and key_id come from JWT token claims.
+  detection_strategy: structural
+  emend_rule: raw-sql-format-method
+  notes: >
+    CVSS 9.8 Critical. Classic str.format() SQL injection in a security
+    token library. The fix switches to parameterized queries (?placeholders).
 
 - cve: GHSA-wq2g-r956-j8cc
   library: pg8000
