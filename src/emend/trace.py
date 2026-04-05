@@ -1421,7 +1421,7 @@ def _compute_function_summary(
                         source_override=source,
                         language=language,
                     )
-                except Exception:
+                except (ValueError, RuntimeError):
                     pattern_cache[_cache_key] = []
             matches = pattern_cache[_cache_key]
         else:
@@ -1431,7 +1431,7 @@ def _compute_function_summary(
                     source_override=source,
                     language=language,
                 )
-            except Exception:
+            except (ValueError, RuntimeError):
                 continue
 
         for match in matches:
@@ -1783,7 +1783,7 @@ def _run_interprocedural_trace_datalog(
                         source_override=src,
                         language=language,
                     )
-                except Exception:
+                except (ValueError, RuntimeError):
                     _pattern_cache[_cache_key] = []
             matches = _pattern_cache[_cache_key]
             for match in matches:
@@ -1817,7 +1817,7 @@ def _run_interprocedural_trace_datalog(
                         source_override=src,
                         language=language,
                     )
-                except Exception:
+                except (ValueError, RuntimeError):
                     _pattern_cache[_cache_key] = []
             matches = _pattern_cache[_cache_key]
             for match in matches:
@@ -1848,7 +1848,7 @@ def _run_interprocedural_trace_datalog(
                         source_override=src,
                         language=language,
                     )
-                except Exception:
+                except (ValueError, RuntimeError):
                     _pattern_cache[_cache_key] = []
             matches = _pattern_cache[_cache_key]
             for match in matches:
