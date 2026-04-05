@@ -95,6 +95,7 @@ class TraceConfig:
     sinks: list[TraceSink] = field(default_factory=list)
     sanitizers: list[TraceSanitizer] = field(default_factory=list)
     scope_sanitizers: list[TraceScopeSanitizer] = field(default_factory=list)
+    exclude_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -252,12 +253,15 @@ def _trace_config_from_trace_section(raw: dict[str, Any] | None) -> TraceConfig:
             label=str(s["label"]),
         ))
 
+    exclude_paths = [str(v) for v in as_list(raw.get("exclude_paths"))]
+
     return TraceConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
         scope_sanitizers=scope_sanitizers,
+        exclude_paths=exclude_paths,
     )
 
 
@@ -289,15 +293,30 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
         if not flow_from or not flow_to:
             continue
 
+        # Dict-form flow definitions: extract pattern and type_constraint.
+        from_type_constraint = ""
+        to_type_constraint = ""
+        if isinstance(flow_from, dict):
+            from_type_constraint = str(flow_from.get("type_constraint", ""))
+            flow_from = flow_from.get("pattern", "")
+        if isinstance(flow_to, dict):
+            to_type_constraint = str(flow_to.get("type_constraint", ""))
+            flow_to = flow_to.get("pattern", "")
+        if not flow_from or not flow_to:
+            continue
+
         label = str(flow_def.get("label") or rule_def.get("label") or name)
         labels.append(label)
 
         source_pattern = expand_macros(str(flow_from), macros)
         sink_pattern = expand_macros(str(flow_to), macros)
+        # Per-endpoint type constraints override flow-level type_constraint.
+        src_tc = from_type_constraint or str(flow_def.get("type_constraint", ""))
+        sink_tc = to_type_constraint or str(flow_def.get("type_constraint", ""))
         sources.append(TraceSource(
             pattern=source_pattern,
             label=label,
-            type_constraint=str(flow_def.get("type_constraint", "")),
+            type_constraint=src_tc,
         ))
 
         sink_message = str(rule_def.get("message", "Traced value reaches sink"))
@@ -307,7 +326,7 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
                 label=label,
                 message=sink_message,
                 effect=sink_pattern,
-                type_constraint=str(flow_def.get("type_constraint", "")),
+                type_constraint=sink_tc,
             ))
         else:
             sinks.append(TraceSink(
@@ -315,7 +334,7 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
                 label=label,
                 message=sink_message,
                 effect=str(flow_def.get("effect", "")),
-                type_constraint=str(flow_def.get("type_constraint", "")),
+                type_constraint=sink_tc,
             ))
 
         for sanitizer in as_list(yaml_key(flow_def, "not_through")):
@@ -336,12 +355,15 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
                     label=label,
                 ))
 
+    exclude_paths = [str(v) for v in as_list(config.get("exclude_paths"))]
+
     return TraceConfig(
         labels=labels,
         sources=sources,
         sinks=sinks,
         sanitizers=sanitizers,
         scope_sanitizers=scope_sanitizers,
+        exclude_paths=exclude_paths,
     )
 
 
@@ -610,6 +632,22 @@ def _filter_by_receiver_type(
     return kept
 
 
+def _trace_path_is_excluded(file_path: str, patterns: list[str]) -> bool:
+    """Check whether *file_path* matches any exclusion glob in *patterns*."""
+    if not patterns:
+        return False
+    import fnmatch
+
+    for pattern in patterns:
+        if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pattern + "*"):
+            return True
+        if "**" in pattern:
+            relaxed = pattern.replace("**", "*")
+            if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "*"):
+                return True
+    return False
+
+
 def run_trace_analysis(
     paths: list[str],
     config: TraceConfig,
@@ -633,6 +671,11 @@ def run_trace_analysis(
     """
     if not config.sources or not config.sinks:
         return []
+
+    if config.exclude_paths:
+        paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
+        if not paths:
+            return []
 
     _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
     logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
@@ -1313,6 +1356,7 @@ def _compute_function_summary(
     func_qn: str,
     param_names: list[str],
     language: str = "python",
+    pattern_cache: dict[tuple[str, str], list] | None = None,
 ) -> FunctionSummary:
     """Compute a taint summary for a single function.
 
@@ -1368,14 +1412,27 @@ def _compute_function_summary(
 
     sinks_by_line: dict[int, list[tuple[TraceSink, set[str]]]] = {}
     for sink_def in config.sinks:
-        try:
-            matches = find_pattern(
-                sink_def.pattern, file_path,
-                source_override=source,
-                language=language,
-            )
-        except Exception:
-            continue
+        if pattern_cache is not None:
+            _cache_key = (file_path, sink_def.pattern)
+            if _cache_key not in pattern_cache:
+                try:
+                    pattern_cache[_cache_key] = find_pattern(
+                        sink_def.pattern, file_path,
+                        source_override=source,
+                        language=language,
+                    )
+                except (ValueError, RuntimeError):
+                    pattern_cache[_cache_key] = []
+            matches = pattern_cache[_cache_key]
+        else:
+            try:
+                matches = find_pattern(
+                    sink_def.pattern, file_path,
+                    source_override=source,
+                    language=language,
+                )
+            except (ValueError, RuntimeError):
+                continue
 
         for match in matches:
             match_line = match.line or 1
@@ -1646,6 +1703,8 @@ def _run_interprocedural_trace_datalog(
             func_paths[qn] = func_path
             func_kinds[qn] = func_kind
 
+    _pattern_cache: dict[tuple[str, str], list] = {}
+
     direct_summaries: dict[str, FunctionSummary] = {}
     for qn, (fp, src, fs, fe, params) in func_info.items():
         direct_summaries[qn] = _compute_function_summary(
@@ -1657,6 +1716,7 @@ def _run_interprocedural_trace_datalog(
             func_qn=qn,
             param_names=params,
             language=language,
+            pattern_cache=_pattern_cache,
         )
 
     name_to_qn: dict[str, list[str]] = {}
@@ -1715,14 +1775,17 @@ def _run_interprocedural_trace_datalog(
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    src_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, src_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        src_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except (ValueError, RuntimeError):
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0
@@ -1746,14 +1809,17 @@ def _run_interprocedural_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    san_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, san_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        san_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except (ValueError, RuntimeError):
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 if not (fs <= match_line <= fe):
@@ -1774,14 +1840,17 @@ def _run_interprocedural_trace_datalog(
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
                 continue
-            try:
-                matches = find_pattern(
-                    sink_def.pattern, fp,
-                    source_override=src,
-                    language=language,
-                )
-            except Exception:
-                continue
+            _cache_key = (fp, sink_def.pattern)
+            if _cache_key not in _pattern_cache:
+                try:
+                    _pattern_cache[_cache_key] = find_pattern(
+                        sink_def.pattern, fp,
+                        source_override=src,
+                        language=language,
+                    )
+                except (ValueError, RuntimeError):
+                    _pattern_cache[_cache_key] = []
+            matches = _pattern_cache[_cache_key]
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0
@@ -2010,6 +2079,10 @@ def run_interprocedural_trace(
     project_path: str | None = None,
 ) -> InterproceduralResult:
     """Run interprocedural trace analysis using the Datalog engine."""
+    if config.exclude_paths:
+        paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
+        if not paths:
+            return InterproceduralResult(violations=[], summaries={}, iterations=0)
     return _run_interprocedural_trace_datalog(
         paths, config,
         label_filter=label_filter,

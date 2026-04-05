@@ -333,6 +333,7 @@ def merge_configs(*configs: TraceConfig) -> TraceConfig:
     sinks: list[TraceSink] = []
     sanitizers: list[TraceSanitizer] = []
     scope_sanitizers: list[TraceScopeSanitizer] = []
+    exclude_paths: list[str] = []
 
     for cfg in configs:
         for lbl in cfg.labels:
@@ -343,6 +344,7 @@ def merge_configs(*configs: TraceConfig) -> TraceConfig:
         sinks.extend(cfg.sinks)
         sanitizers.extend(cfg.sanitizers)
         scope_sanitizers.extend(cfg.scope_sanitizers)
+        exclude_paths.extend(cfg.exclude_paths)
 
     return TraceConfig(
         labels=labels,
@@ -350,4 +352,5 @@ def merge_configs(*configs: TraceConfig) -> TraceConfig:
         sinks=sinks,
         sanitizers=sanitizers,
         scope_sanitizers=scope_sanitizers,
+        exclude_paths=exclude_paths,
     )

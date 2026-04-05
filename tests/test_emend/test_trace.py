@@ -629,3 +629,149 @@ def test_trace_container_extend(tmp_path):
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Defect #9: dict-form flow rules in unified rules config
+# ---------------------------------------------------------------------------
+
+
+def test_trace_load_config_dict_form_flow_rules(tmp_path):
+    """Dict-form from/to with type_constraint should extract the pattern string.
+
+    Regression test for defect #9: str(dict) produced garbage patterns
+    like "{'pattern': '...', 'type_constraint': '...'}" instead of
+    extracting the actual pattern.
+    """
+    _write_rules_config(tmp_path, {
+        "rules": {
+            "redis-get-set": {
+                "flow": {
+                    "from": {
+                        "pattern": "$R.get($KEY)",
+                        "type_constraint": "Redis",
+                    },
+                    "to": {
+                        "pattern": "$R.set($KEY, $VAL)",
+                        "type_constraint": "Redis",
+                    },
+                    "not-through": "$R.pipeline($...ARGS)",
+                },
+                "message": "Redis TOCTOU",
+            },
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    assert len(config.sources) == 1
+    assert config.sources[0].pattern == "$R.get($KEY)"
+    assert config.sources[0].type_constraint == "Redis"
+    assert len(config.sinks) == 1
+    assert config.sinks[0].pattern == "$R.set($KEY, $VAL)"
+    assert config.sinks[0].type_constraint == "Redis"
+
+
+def test_trace_dict_form_mixed_string_and_dict(tmp_path):
+    """Mixed string-form and dict-form in the same config should both work."""
+    _write_rules_config(tmp_path, {
+        "rules": {
+            "string-form": {
+                "flow": {
+                    "from": "request.args.get($X)",
+                    "to": "cursor.execute($Q)",
+                },
+                "message": "SQLi",
+            },
+            "dict-form": {
+                "flow": {
+                    "from": {
+                        "pattern": "$R.get($KEY)",
+                        "type_constraint": "Redis",
+                    },
+                    "to": "$R.set($KEY, $VAL)",
+                },
+                "message": "Redis TOCTOU",
+            },
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    patterns = {s.pattern for s in config.sources}
+    assert "request.args.get($X)" in patterns
+    assert "$R.get($KEY)" in patterns
+    # The dict-form source should have the type constraint extracted
+    redis_src = next(s for s in config.sources if s.pattern == "$R.get($KEY)")
+    assert redis_src.type_constraint == "Redis"
+
+
+# ---------------------------------------------------------------------------
+# Defect #8: exclude_paths support in trace analysis
+# ---------------------------------------------------------------------------
+
+
+def test_trace_exclude_paths_from_yaml(tmp_path):
+    """exclude_paths in trace config YAML should be loaded."""
+    _write_rules_config(tmp_path, {
+        "trace": {
+            "labels": ["test"],
+            "sources": [{"pattern": "$X.get($K)", "label": "test"}],
+            "sinks": [{"pattern": "$X.set($K, $V)", "label": "test",
+                        "message": "test"}],
+            "exclude_paths": ["*/migrations/*.py", "tests/**"],
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    assert config.exclude_paths == ["*/migrations/*.py", "tests/**"]
+
+
+def test_trace_exclude_paths_from_unified_rules(tmp_path):
+    """exclude_paths at top level of unified rules config should be loaded."""
+    _write_rules_config(tmp_path, {
+        "exclude_paths": ["*/migrations/*.py"],
+        "rules": {
+            "test-rule": {
+                "flow": {
+                    "from": "$X.get($K)",
+                    "to": "$X.save()",
+                },
+                "message": "test",
+            },
+        },
+    })
+
+    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    assert "*/migrations/*.py" in config.exclude_paths
+
+
+def test_trace_exclude_paths_filters_files(tmp_path):
+    """Files matching exclude_paths should be skipped during trace analysis."""
+    # Create a source file that would trigger a violation
+    migrations_dir = tmp_path / "app" / "migrations"
+    migrations_dir.mkdir(parents=True)
+    migration_file = migrations_dir / "0001_initial.py"
+    migration_file.write_text(
+        "def forwards(apps, schema_editor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+
+    # Same code in a non-migration file should still be flagged
+    app_file = tmp_path / "app" / "views.py"
+    app_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+
+    config = _make_sql_injection_config()
+    config.exclude_paths = ["*/migrations/*.py"]
+
+    violations = run_trace_analysis(
+        [str(migration_file), str(app_file)], config
+    )
+
+    # Only the non-migration file should have violations
+    violation_files = {v.file_path for v in violations}
+    assert str(app_file) in violation_files
+    assert str(migration_file) not in violation_files

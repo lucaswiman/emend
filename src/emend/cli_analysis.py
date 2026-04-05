@@ -36,6 +36,7 @@ def _trace_cmd_impl(
     interprocedural: bool,
     max_iterations: int,
     preset: str | None,
+    exclude_path: list[str] | None = None,
 ) -> None:
     """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
@@ -56,6 +57,9 @@ def _trace_cmd_impl(
             from emend.trace_presets import get_preset, merge_configs
             preset_config = get_preset(preset)
             trace_config = merge_configs(trace_config, preset_config)
+        if exclude_path:
+            trace_config.exclude_paths = list(trace_config.exclude_paths) + list(exclude_path)
+
         if not trace_config.sources:
             print("No trace sources configured.", file=sys.stderr)
             raise typer.Exit(0)
@@ -121,6 +125,7 @@ def trace_cmd(
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
+    exclude_path: Annotated[Optional[list[str]], typer.Option("--exclude-path", help="Glob patterns for paths to exclude from analysis (repeatable)")] = None,
 ):
     """Run trace analysis to detect unsafe data flows.
 
@@ -143,9 +148,10 @@ def trace_cmd(
         emend trace src/ --json
         emend trace src/ --interprocedural
         emend trace app.py --preset flask
+        emend trace src/ --exclude-path "*/migrations/*.py"
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
-                    interprocedural, max_iterations, preset)
+                    interprocedural, max_iterations, preset, exclude_path)
 
 
 
