@@ -879,3 +879,75 @@ def test_lint_union_to_pipe_config_file(tmp_path):
     content = test_file.read_text()
     assert "int | str" in content
     assert '"MyClass | int"' in content
+
+
+def test_load_rules_dict_form_flow_rules_do_not_crash(tmp_path):
+    """Dict-form flow rules (with type_constraint) should not crash load_rules.
+
+    Regression test for defect #9: emend lint crashes with TypeError when
+    flow rules use dict-form from/to with type_constraint.
+    """
+    config = {
+        "rules": {
+            "typed-flow-rule": {
+                "flow": {
+                    "from": {
+                        "pattern": "$R.get($KEY)",
+                        "type_constraint": "Redis",
+                    },
+                    "to": {
+                        "pattern": "$R.set($KEY, $VAL)",
+                        "type_constraint": "Redis",
+                    },
+                },
+                "message": "typed flow",
+            },
+            "lint-rule": {
+                "match": "$X.objects.get($...ARGS)",
+                "message": "match rule",
+            },
+        },
+    }
+    _write_rules_config(tmp_path, config)
+
+    rules, macros, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
+
+    assert {r.name for r in rules} == {"typed-flow-rule", "lint-rule"}
+    typed_rule = next(r for r in rules if r.name == "typed-flow-rule")
+    assert typed_rule.flows_from == "$R.get($KEY)"
+    assert typed_rule.flows_to == "$R.set($KEY, $VAL)"
+
+
+def test_lint_dict_form_flow_rules_do_not_crash_run_lint(tmp_path):
+    """Running lint with dict-form flow rules should not crash.
+
+    Regression test for defect #9: the full run_lint path with a mix of
+    dict-form flow rules and plain match rules.
+    """
+    config = {
+        "rules": {
+            "typed-flow": {
+                "flow": {
+                    "from": {
+                        "pattern": "$R.get($KEY)",
+                        "type_constraint": "Redis",
+                    },
+                    "to": "$R.set($KEY, $VAL)",
+                },
+                "message": "typed flow",
+            },
+            "simple-match": {
+                "match": "print($X)",
+                "message": "no print",
+            },
+        },
+    }
+    config_file = _write_rules_config(tmp_path, config)
+    test_file = tmp_path / "app.py"
+    test_file.write_text("print('hello')\n")
+
+    rules, _, _ = load_rules(str(config_file))
+    violations = run_lint(rules, [str(test_file)])
+
+    # The match rule should fire; the flow rule should not crash.
+    assert any(v.rule_name == "simple-match" for v in violations)

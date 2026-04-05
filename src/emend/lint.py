@@ -229,6 +229,13 @@ def load_rules(
             flows_to = flows_to or flow_def.get("to")
             not_through = not_through or yaml_key(flow_def, "not_through")
 
+        # Dict-form flow definitions (e.g. {pattern: ..., type_constraint: ...})
+        # need the pattern string extracted before macro expansion.
+        if isinstance(flows_from, dict):
+            flows_from = flows_from.get("pattern")
+        if isinstance(flows_to, dict):
+            flows_to = flows_to.get("pattern")
+
         if flows_from and flows_to:
             # Flow rule: find is not required
             find_pattern_str = rule_def.get("find", "")
