@@ -769,7 +769,8 @@ def _run_datalog_check(
             return None
 
     _fp = _col_idx("file_path")
-    fp_idx = _fp if _fp is not None else _col_idx("file") if _col_idx("file") is not None else 0
+    _f = _col_idx("file")
+    fp_idx = _fp if _fp is not None else _f if _f is not None else 0
     _ln = _col_idx("line")
     line_idx = _ln if _ln is not None else (1 if len(headers) > 1 else 0)
     msg_idx = _col_idx("message")
