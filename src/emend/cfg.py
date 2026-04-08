@@ -7,6 +7,7 @@ convenience functions for file-level and project-level CFG extraction.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -123,9 +124,9 @@ def find_unreachable_blocks(cfg) -> list[dict]:
 
     # BFS from entry
     reachable: set[int] = set()
-    queue = [cfg.entry]
+    queue = deque([cfg.entry])
     while queue:
-        bid = queue.pop()
+        bid = queue.popleft()
         if bid in reachable:
             continue
         reachable.add(bid)

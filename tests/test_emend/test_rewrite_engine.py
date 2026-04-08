@@ -74,6 +74,47 @@ class TestEGraph:
         assert node is not None
         assert node.op == "x"
 
+    def test_ematch_nested_concrete_children(self):
+        """ematch must recursively match concrete children and bind their metavars.
+
+        Pattern: op1(op2($X, $Y), $Z)
+        Data:    op1(op2(a, b), c)
+
+        The match should bind $X=a, $Y=b, $Z=c.  A shallow match that only
+        checks the op of op2 without recursing into its children would fail
+        to bind $X and $Y.
+        """
+        eg = EGraph()
+        # Data nodes
+        a = eg.add(ENode(op="a"))
+        b = eg.add(ENode(op="b"))
+        c = eg.add(ENode(op="c"))
+        inner = eg.add(ENode(op="op2", children=(a, b)))  # op2(a, b)
+        root = eg.add(ENode(op="op1", children=(inner, c)))  # op1(op2(a, b), c)
+
+        # Pattern nodes
+        px = eg.add(ENode(op="$X"))
+        py = eg.add(ENode(op="$Y"))
+        pz = eg.add(ENode(op="$Z"))
+        p_inner = eg.add(ENode(op="op2", children=(px, py)))  # op2($X, $Y)
+        p_root = eg.add(ENode(op="op1", children=(p_inner, pz)))  # op1(op2($X, $Y), $Z)
+
+        pattern = eg._get_pattern_for_eclass(p_root)
+        assert pattern is not None
+        matches = eg.ematch(pattern)
+        assert len(matches) >= 1, "Should match the data expression"
+
+        # At least one match should bind all three metavars
+        found = False
+        for m in matches:
+            if "$X" in m and "$Y" in m and "$Z" in m:
+                assert eg.find(m["$X"]) == eg.find(a)
+                assert eg.find(m["$Y"]) == eg.find(b)
+                assert eg.find(m["$Z"]) == eg.find(c)
+                found = True
+                break
+        assert found, f"No match bound all metavars; matches={matches}"
+
     def test_apply_rules_uses_correct_root_eclass(self):
         """apply_rules must merge each matched e-class independently.
 
