@@ -7147,12 +7147,23 @@ def _update_imports_for_move(
     return diffs
 
 
-def _resolve_relative_import_qn(qn: str, file_path: str, project_root: str, sep: str = ".") -> str | None:
+def _resolve_relative_import_qn(
+    qn: str,
+    file_path: str,
+    project_root: str,
+    sep: str = ".",
+    src_text: str | None = None,
+) -> str | None:
     """Resolve a relative-import QN like ``.models`` to an absolute QN like ``pkg.models``.
 
     The Rust resolver emits QNs such as ``.models`` for ``from .models import X``
     and ``..util`` for ``from ..util import Y``.  We resolve these by computing the
     containing package from the file path.
+
+    For ``from . import X`` style imports (bare name after dot-only relative), the
+    Rust resolver adds an extra separator dot to the QN (e.g. ``..models`` instead
+    of ``.models``).  When *src_text* is provided and does not start with a dot,
+    we compensate by reducing the dot count.
 
     Returns the absolute module QN, or ``None`` if resolution fails.
     """
@@ -7161,6 +7172,12 @@ def _resolve_relative_import_qn(qn: str, file_path: str, project_root: str, sep:
 
     dot_count = len(qn) - len(qn.lstrip("."))
     relative_part = qn[dot_count:]
+
+    # For ``from . import X`` the source text is just the bare name (no dots),
+    # but the Rust resolver produces QN ``..X`` with an extra separator dot.
+    # Compensate so that the dot count reflects the actual import level.
+    if src_text is not None and not src_text.startswith("."):
+        dot_count = max(1, dot_count - 1)
 
     module = _file_to_module(file_path, project_root)
     package = module.rsplit(".", 1)[0] if "." in module else None
@@ -7248,45 +7265,58 @@ def _rename_module_references(
         transform = _rust.PyFileTransform(content)
         changed = False
 
-        for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
-            if kind != "import":
-                continue
+        old_bare_mod = old_module.rsplit(sep, 1)[-1]
+        new_bare_mod = new_module.rsplit(sep, 1)[-1]
 
-            # Resolve relative imports (e.g. ".models" -> "pkg.models") so that
+        for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
+            # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
             # the comparison against old_module works correctly.
             resolved_qn = qn
+            src_text = content[offset:end_offset]
             if qn.startswith("."):
-                resolved = _resolve_relative_import_qn(qn, py_file, project_root, sep)
+                resolved = _resolve_relative_import_qn(qn, py_file, project_root, sep, src_text=src_text)
                 if resolved is not None:
                     resolved_qn = resolved
 
-            # Exact match: import old_module or from old_module import ...
-            if resolved_qn == old_module:
-                if qn.startswith(".") and resolved_qn != qn:
-                    # Relative import: preserve leading dots, replace only the module name.
-                    dot_count = len(qn) - len(qn.lstrip("."))
-                    new_relative = "." * dot_count + new_module.rsplit(sep, 1)[-1]
-                    transform.replace_range(offset, end_offset, new_relative)
-                else:
-                    transform.replace_range(offset, end_offset, new_module)
-                changed = True
-            # Prefix match: import old_module.sub or from old_module.sub import ...
-            elif resolved_qn.startswith(old_module + sep):
-                prefix_len = len(old_module)
-                src_text = content[offset : offset + prefix_len]
-                if src_text == old_module:
-                    transform.replace_range(offset, offset + prefix_len, new_module)
+            if kind == "import":
+                # Exact match: import old_module or from old_module import ...
+                if resolved_qn == old_module:
+                    if qn.startswith(".") and resolved_qn != qn:
+                        # Relative import: preserve leading dots, replace only the module name.
+                        if src_text.startswith("."):
+                            # Text includes dots (e.g. ``from .models import VALUE``).
+                            dot_count = len(qn) - len(qn.lstrip("."))
+                            new_relative = "." * dot_count + new_bare_mod
+                        else:
+                            # Bare name (e.g. ``from . import models``); dots are in
+                            # the ``from .`` part, not in the captured text span.
+                            new_relative = new_bare_mod
+                        transform.replace_range(offset, end_offset, new_relative)
+                    else:
+                        transform.replace_range(offset, end_offset, new_module)
                     changed = True
-                elif qn.startswith(".") and resolved_qn != qn:
-                    # Relative sub-module import: replace old bare name at offset.
-                    old_bare = old_module.rsplit(sep, 1)[-1]
-                    new_bare = new_module.rsplit(sep, 1)[-1]
-                    dot_count = len(qn) - len(qn.lstrip("."))
-                    relative_module_part = qn[dot_count:]
-                    if relative_module_part.startswith(old_bare):
-                        if content[offset : offset + len(old_bare)] == old_bare:
-                            transform.replace_range(offset, offset + len(old_bare), new_bare)
-                            changed = True
+                # Prefix match: import old_module.sub or from old_module.sub import ...
+                elif resolved_qn.startswith(old_module + sep):
+                    prefix_len = len(old_module)
+                    if content[offset : offset + prefix_len] == old_module:
+                        transform.replace_range(offset, offset + prefix_len, new_module)
+                        changed = True
+                    elif qn.startswith(".") and resolved_qn != qn:
+                        # Relative sub-module import: replace old bare name at offset.
+                        dot_count = len(qn) - len(qn.lstrip("."))
+                        relative_module_part = qn[dot_count:]
+                        if relative_module_part == old_bare_mod or relative_module_part.startswith(old_bare_mod + sep):
+                            if content[offset : offset + len(old_bare_mod)] == old_bare_mod:
+                                transform.replace_range(offset, offset + len(old_bare_mod), new_bare_mod)
+                                changed = True
+
+            elif kind in ("read", "write"):
+                # Attribute access through a module binding, e.g. ``models.VALUE``
+                # after ``from . import models``.  The bare module name in the
+                # source text must be updated to match the new module name.
+                if resolved_qn == old_module and src_text == old_bare_mod:
+                    transform.replace_range(offset, end_offset, new_bare_mod)
+                    changed = True
 
         # Check if string literals might contain the old module name.
         old_bare_name = old_module.rsplit(sep, 1)[-1]

@@ -297,6 +297,240 @@ def test_rename_module_importlib_dynamic(tmp_path, run_emend_cmd):
     )
 
 
+def test_rename_module_bare_relative_import_in_init(tmp_path, run_emend_cmd):
+    """``from . import models`` in __init__.py should be updated on module rename.
+
+    GitHub issue #135 (additional sub-issue): When renaming pkg/models.py to
+    pkg/resolution_models.py, a bare relative import ``from . import models``
+    in __init__.py is not updated.  This is different from the
+    ``from .models import VALUE`` form (which was already fixed).
+
+    Root cause: the Rust scope resolver emits QN ``..models`` (two dots) for
+    ``from . import models`` in __init__.py because __init__.py IS the package.
+    ``_resolve_relative_import_qn`` miscounts the levels and resolves to just
+    ``models`` instead of ``pkg.models``, so the comparison against the old
+    module name fails.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+
+    (pkg / "__init__.py").write_text(
+        "from . import models\n"
+        "__all__ = ['models']\n"
+    )
+    (pkg / "models.py").write_text(
+        "VALUE = 42\n"
+    )
+
+    result = run_emend_cmd([
+        "rename", str(pkg / "models.py"),
+        "--to", "resolution_models",
+        "--project", str(tmp_path),
+        "--apply",
+    ])
+    assert result.returncode == 0
+
+    assert (pkg / "resolution_models.py").exists()
+    assert not (pkg / "models.py").exists()
+
+    init_content = (pkg / "__init__.py").read_text()
+    # The bare relative import should have been updated
+    assert "from . import resolution_models" in init_content, (
+        f"Bare relative import was not updated. __init__.py content:\n{init_content}"
+    )
+    assert "from . import models" not in init_content, (
+        f"Old bare relative import still present. __init__.py content:\n{init_content}"
+    )
+
+
+def test_rename_module_bare_relative_import_attribute_access(tmp_path, run_emend_cmd):
+    """``models.VALUE`` should become ``resolution_models.VALUE`` after rename.
+
+    When a sibling module uses ``from . import models`` and then accesses
+    ``models.VALUE``, renaming the module should update both the import and
+    all attribute-access references to the old module name.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+
+    (pkg / "__init__.py").write_text("")
+    (pkg / "models.py").write_text("VALUE = 42\n")
+    (pkg / "consumer.py").write_text(
+        "from . import models\n"
+        "\n"
+        "def use_it():\n"
+        "    return models.VALUE\n"
+    )
+
+    result = run_emend_cmd([
+        "rename", str(pkg / "models.py"),
+        "--to", "resolution_models",
+        "--project", str(tmp_path),
+        "--apply",
+    ])
+    assert result.returncode == 0
+
+    consumer_content = (pkg / "consumer.py").read_text()
+    assert "from . import resolution_models" in consumer_content, (
+        f"Import not updated. consumer.py:\n{consumer_content}"
+    )
+    assert "resolution_models.VALUE" in consumer_content, (
+        f"Attribute access not updated. consumer.py:\n{consumer_content}"
+    )
+    # Check no bare "models.VALUE" remains (but "resolution_models.VALUE" is OK).
+    lines = consumer_content.splitlines()
+    for line_text in lines:
+        if "models.VALUE" in line_text:
+            # Only flag if the match is NOT part of "resolution_models.VALUE"
+            stripped = line_text.replace("resolution_models.VALUE", "")
+            assert "models.VALUE" not in stripped, (
+                f"Old attribute access still present. consumer.py:\n{consumer_content}"
+            )
+
+
+def test_rename_module_bare_relative_import_in_sibling(tmp_path, run_emend_cmd):
+    """``from . import models`` in a sibling module should be updated on rename.
+
+    Same root cause as the __init__.py variant: the Rust resolver adds an extra
+    separator dot for ``from . import X`` style imports, producing QN ``..models``
+    instead of ``.models``.  ``_resolve_relative_import_qn`` must compensate
+    regardless of whether the file is __init__.py.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+
+    (pkg / "__init__.py").write_text("")
+    (pkg / "models.py").write_text("VALUE = 42\n")
+    (pkg / "consumer.py").write_text(
+        "from . import models\n"
+        "\n"
+        "def use_it():\n"
+        "    return models.VALUE\n"
+    )
+
+    result = run_emend_cmd([
+        "rename", str(pkg / "models.py"),
+        "--to", "resolution_models",
+        "--project", str(tmp_path),
+        "--apply",
+    ])
+    assert result.returncode == 0
+
+    assert (pkg / "resolution_models.py").exists()
+    assert not (pkg / "models.py").exists()
+
+    consumer_content = (pkg / "consumer.py").read_text()
+    assert "from . import resolution_models" in consumer_content, (
+        f"Bare relative import not updated. consumer.py:\n{consumer_content}"
+    )
+    assert "from . import models" not in consumer_content, (
+        f"Old import still present. consumer.py:\n{consumer_content}"
+    )
+
+
+def test_rename_module_parent_relative_import(tmp_path, run_emend_cmd):
+    """``from .. import models`` in a sub-package should be updated on rename.
+
+    The Rust resolver produces QN ``...models`` (three dots) for
+    ``from .. import models``.  Resolution must handle this correctly.
+    """
+    pkg = tmp_path / "pkg"
+    sub = pkg / "sub"
+    sub.mkdir(parents=True)
+
+    (pkg / "__init__.py").write_text("")
+    (pkg / "models.py").write_text("VALUE = 42\n")
+    (sub / "__init__.py").write_text("")
+    (sub / "consumer.py").write_text(
+        "from .. import models\n"
+        "\n"
+        "def use_it():\n"
+        "    return models.VALUE\n"
+    )
+
+    result = run_emend_cmd([
+        "rename", str(pkg / "models.py"),
+        "--to", "resolution_models",
+        "--project", str(tmp_path),
+        "--apply",
+    ])
+    assert result.returncode == 0
+
+    assert (pkg / "resolution_models.py").exists()
+    assert not (pkg / "models.py").exists()
+
+    consumer_content = (sub / "consumer.py").read_text()
+    assert "from .. import resolution_models" in consumer_content, (
+        f"Parent relative import not updated. consumer.py:\n{consumer_content}"
+    )
+    assert "from .. import models" not in consumer_content, (
+        f"Old import still present. consumer.py:\n{consumer_content}"
+    )
+
+
+def test_move_symbol_retains_import_used_by_remaining_code(tmp_path, emend_cmd):
+    """Moving a symbol should not remove imports still needed by other code.
+
+    When source.py has ``from utils import helper`` and two functions that both
+    use ``helper``, moving only one function should leave the import in place
+    for the remaining function.
+    """
+    (tmp_path / "utils.py").write_text(
+        "def helper(x):\n"
+        "    return x + 1\n"
+    )
+
+    source = tmp_path / "source.py"
+    source.write_text(
+        "from utils import helper\n"
+        "\n"
+        "def func_a():\n"
+        "    return helper(1)\n"
+        "\n"
+        "def func_b():\n"
+        "    return helper(2)\n"
+    )
+
+    dest = tmp_path / "dest.py"
+    dest.write_text(
+        "def existing():\n"
+        "    return 0\n"
+    )
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{source}::func_a",
+            str(dest),
+            "--project", str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    # func_a should be in dest.py now
+    dest_content = dest.read_text()
+    assert "def func_a" in dest_content, (
+        f"func_a should have been moved to dest.py:\n{dest_content}"
+    )
+
+    # source.py should still have func_b AND the helper import
+    src_content = source.read_text()
+    assert "def func_b" in src_content, (
+        f"func_b should remain in source.py:\n{src_content}"
+    )
+    assert "from utils import helper" in src_content, (
+        f"'from utils import helper' should be retained — func_b still uses it.\n"
+        f"source.py content:\n{src_content}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Issue #138 - Bug 1: sibling imports must NOT be retargeted
 # Issue #138 - Bug 2: moved symbol must carry its dependencies
