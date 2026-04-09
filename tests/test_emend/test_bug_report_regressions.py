@@ -468,6 +468,126 @@ def test_rename_module_parent_relative_import(tmp_path, run_emend_cmd):
     )
 
 
+def test_move_symbol_resolves_relative_imports(tmp_path, emend_cmd):
+    """Moving a symbol out of a package should convert relative imports to absolute.
+
+    When source is ``pkg/source.py`` with ``from .helpers import do_thing``
+    and the symbol is moved to ``dest.py`` (outside the package), the
+    relative import must become ``from pkg.helpers import do_thing``.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+
+    (pkg / "__init__.py").write_text("")
+    (pkg / "helpers.py").write_text(
+        "def do_thing():\n"
+        "    return 42\n"
+    )
+    (pkg / "source.py").write_text(
+        "from .helpers import do_thing\n"
+        "\n"
+        "def my_func():\n"
+        "    return do_thing()\n"
+    )
+
+    dest = tmp_path / "dest.py"
+    dest.write_text(
+        "def existing():\n"
+        "    return 0\n"
+    )
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{pkg / 'source.py'}::my_func",
+            str(dest),
+            "--project", str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    dest_content = dest.read_text()
+    assert "def my_func" in dest_content, (
+        f"my_func should have been moved to dest.py:\n{dest_content}"
+    )
+    # The relative import must be resolved to absolute
+    assert "from pkg.helpers import do_thing" in dest_content, (
+        f"Relative import should be resolved to absolute.\n"
+        f"dest.py content:\n{dest_content}"
+    )
+    # Must NOT contain the broken relative import
+    assert "from .helpers import" not in dest_content, (
+        f"Relative import should not appear in dest.py:\n{dest_content}"
+    )
+    assert "from  import" not in dest_content, (
+        f"Broken empty-module import in dest.py:\n{dest_content}"
+    )
+
+
+def test_move_symbol_resolves_bare_relative_import(tmp_path, emend_cmd):
+    """``from . import helpers`` should become ``from pkg import helpers``.
+
+    Same as above but for the bare-name relative import form.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+
+    (pkg / "__init__.py").write_text("")
+    (pkg / "helpers.py").write_text(
+        "def do_thing():\n"
+        "    return 42\n"
+    )
+    (pkg / "source.py").write_text(
+        "from . import helpers\n"
+        "\n"
+        "def my_func():\n"
+        "    return helpers.do_thing()\n"
+    )
+
+    dest = tmp_path / "dest.py"
+    dest.write_text(
+        "def existing():\n"
+        "    return 0\n"
+    )
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{pkg / 'source.py'}::my_func",
+            str(dest),
+            "--project", str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    dest_content = dest.read_text()
+    assert "def my_func" in dest_content, (
+        f"my_func should have been moved to dest.py:\n{dest_content}"
+    )
+    # The bare relative import must be resolved to absolute
+    assert "from pkg import helpers" in dest_content, (
+        f"Bare relative import should be resolved to 'from pkg import helpers'.\n"
+        f"dest.py content:\n{dest_content}"
+    )
+    assert "from  import" not in dest_content, (
+        f"Broken empty-module import in dest.py:\n{dest_content}"
+    )
+
+
 def test_move_symbol_retains_import_used_by_remaining_code(tmp_path, emend_cmd):
     """Moving a symbol should not remove imports still needed by other code.
 

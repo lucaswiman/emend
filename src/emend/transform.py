@@ -4484,10 +4484,53 @@ def _collect_names(source: str) -> set[str]:
     return names
 
 
+def _resolve_relative_module(
+    level: int,
+    module: str,
+    source_file: str,
+    project_path: str | None,
+) -> str:
+    """Convert a relative import into an absolute module path.
+
+    ``level`` is the number of leading dots (``stmt.level`` from AST),
+    ``module`` is the dotted name after the dots (may be empty for
+    ``from . import X``), and ``source_file`` is the file containing the
+    import.
+
+    Returns the fully-qualified module name, or falls back to ``module``
+    unchanged if resolution is not possible.
+    """
+    if project_path is None:
+        return module
+
+    src_module = _file_to_module(source_file, project_path)
+    # Compute the package that owns source_file.
+    if src_module.endswith(".__init__"):
+        # __init__.py IS the package.
+        package = src_module[: -len(".__init__")]
+    elif "." in src_module:
+        package = src_module.rsplit(".", 1)[0]
+    else:
+        package = ""
+
+    parts = package.split(".") if package else []
+    # ``from . import X`` has level=1, meaning current package (0 levels up).
+    # ``from .. import X`` has level=2, meaning 1 level up, etc.
+    levels_up = level - 1
+    if levels_up > len(parts):
+        return module  # can't resolve — too many dots
+    base_parts = parts[: len(parts) - levels_up] if levels_up else parts
+
+    if module:
+        base_parts.append(module)
+    return ".".join(base_parts) if base_parts else module
+
+
 def analyze_imports(
     symbol_source: str,
     source_file: str,
     source_module: str | None = None,
+    project_path: str | None = None,
 ) -> list[str]:
     """Analyze which imports from source_file are needed by symbol_source.
 
@@ -4499,6 +4542,7 @@ def analyze_imports(
             functions, assignments) rather than imported are also pulled in as
             ``from source_module import Name`` statements so the destination
             file remains self-contained after a move (issue #138 Bug 2).
+        project_path: Project root for resolving relative imports to absolute.
 
     Returns:
         List of import statement strings needed for the symbol
@@ -4540,6 +4584,13 @@ def analyze_imports(
                 continue
 
             module_name = stmt.module or ''
+
+            # Resolve relative imports to absolute so they work from the
+            # destination file (which is typically in a different package).
+            if stmt.level and stmt.level > 0:
+                module_name = _resolve_relative_module(
+                    stmt.level, module_name, source_file, project_path,
+                )
 
             used_import_names = []
             for alias in stmt.names:
@@ -4608,6 +4659,7 @@ def copy_symbol(
     dedent: bool = False,
     include_imports: bool = False,
     source_module: str | None = None,
+    project_path: str | None = None,
     apply: bool = False,
 ) -> str:
     """Copy a symbol from one location to another.
@@ -4622,6 +4674,7 @@ def copy_symbol(
             ``analyze_imports`` when ``include_imports`` is True so that
             locally-defined symbols referenced by the moved symbol also get
             import statements in the destination (issue #138 Bug 2).
+        project_path: Project root for resolving relative imports to absolute.
         apply: If True, write changes to file. If False, return diff only.
 
     Returns:
@@ -4668,7 +4721,7 @@ def copy_symbol(
     if include_imports:
         lang = detect_language(dest_file) or "python"
         imp_handler = load_plugin(lang).import_handler
-        imports = analyze_imports(source, selector.file_path, source_module=source_module)
+        imports = analyze_imports(source, selector.file_path, source_module=source_module, project_path=project_path)
         for imp in imports:
             try:
                 pos = 0 if imp.startswith("from __future__") else -1
@@ -6922,7 +6975,8 @@ def move_symbol(
     # fixing issue #138 Bug 2).
     copy_diff = copy_symbol(
         selector, dest_file, position=position, dedent=dedent,
-        include_imports=True, source_module=source_module, apply=apply,
+        include_imports=True, source_module=source_module,
+        project_path=project_path, apply=apply,
     )
     diffs[dest_file] = copy_diff
 

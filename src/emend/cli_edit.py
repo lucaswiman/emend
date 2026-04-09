@@ -581,7 +581,8 @@ def move_cmd(
                 destination,
                 dedent=dedent,
                 update_imports=not no_update_imports,
-                apply=apply
+                project_path=project,
+                apply=apply,
             )
 
             if not diffs:
