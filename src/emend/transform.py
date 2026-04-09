@@ -4484,12 +4484,21 @@ def _collect_names(source: str) -> set[str]:
     return names
 
 
-def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
+def analyze_imports(
+    symbol_source: str,
+    source_file: str,
+    source_module: str | None = None,
+) -> list[str]:
     """Analyze which imports from source_file are needed by symbol_source.
 
     Args:
         symbol_source: Source code of the symbol being copied
         source_file: Path to file where symbol originated (to read imports from)
+        source_module: Dotted module name of source_file.  When provided,
+            top-level names that are *defined* in source_file (classes,
+            functions, assignments) rather than imported are also pulled in as
+            ``from source_module import Name`` statements so the destination
+            file remains self-contained after a move (issue #138 Bug 2).
 
     Returns:
         List of import statement strings needed for the symbol
@@ -4545,6 +4554,45 @@ def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
                         import_parts.append(name)
                 needed_imports.append(f"from {module_name} import {', '.join(import_parts)}")
 
+    # When moving a symbol, also detect locally-defined top-level names that
+    # the moved symbol references.  These are not captured by the import-scan
+    # above because they live in the source file itself rather than being
+    # imported.  We synthesise ``from source_module import Name`` statements so
+    # the destination file can resolve those names after the move.
+    if source_module:
+        # Collect top-level names defined in source_file
+        locally_defined: set[str] = set()
+        for stmt in source_tree.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                locally_defined.add(stmt.name)
+            elif isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        locally_defined.add(target.id)
+            elif isinstance(stmt, ast.AnnAssign):
+                if isinstance(stmt.target, ast.Name):
+                    locally_defined.add(stmt.target.id)
+
+        # Collect names already covered by the import analysis above so we
+        # do not emit duplicate import lines.
+        already_covered: set[str] = set()
+        for imp in needed_imports:
+            if " import " in imp:
+                names_part = imp.split(" import ", 1)[1]
+                for part in names_part.split(","):
+                    part = part.strip()
+                    name = part.split(" as ")[-1].strip() if " as " in part else part
+                    already_covered.add(name)
+
+        local_refs_needed = sorted(
+            n for n in locally_defined
+            if n in used_names and n not in already_covered
+        )
+        if local_refs_needed:
+            needed_imports.append(
+                f"from {source_module} import {', '.join(local_refs_needed)}"
+            )
+
     return needed_imports
 
 
@@ -4554,7 +4602,8 @@ def copy_symbol(
     position: str = "end",
     dedent: bool = False,
     include_imports: bool = False,
-    apply: bool = False
+    source_module: str | None = None,
+    apply: bool = False,
 ) -> str:
     """Copy a symbol from one location to another.
 
@@ -4564,6 +4613,10 @@ def copy_symbol(
         position: Where to insert: "start", "end" (default)
         dedent: If True, dedent the source code to remove common indentation
         include_imports: If True, analyze and include necessary imports from source file
+        source_module: Dotted module name of the source file.  Passed to
+            ``analyze_imports`` when ``include_imports`` is True so that
+            locally-defined symbols referenced by the moved symbol also get
+            import statements in the destination (issue #138 Bug 2).
         apply: If True, write changes to file. If False, return diff only.
 
     Returns:
@@ -4584,7 +4637,7 @@ def copy_symbol(
 
     # Analyze and prepend imports if requested
     if include_imports:
-        imports = analyze_imports(source, selector.file_path)
+        imports = analyze_imports(source, selector.file_path, source_module=source_module)
         if imports:
             source = "\n".join(imports) + "\n\n" + source
 
@@ -6835,12 +6888,17 @@ def move_symbol(
     if not symbol_name:
         raise ValueError("Symbol path is required for move_symbol")
 
+    # Compute source module name so that locally-defined symbols referenced by
+    # the moved symbol get ``from source_module import Name`` statements added
+    # to the destination file (issue #138 Bug 2).
+    source_module = _file_to_module(selector.file_path, project_path)
+
     # Step 1: Copy symbol to destination (include_imports=True so the moved
     # symbol carries its own import dependencies into the destination file,
     # fixing issue #138 Bug 2).
     copy_diff = copy_symbol(
         selector, dest_file, position=position, dedent=dedent,
-        include_imports=True, apply=apply,
+        include_imports=True, source_module=source_module, apply=apply,
     )
     diffs[dest_file] = copy_diff
 
@@ -7286,6 +7344,30 @@ def _rename_module_references(
         diff = _generate_diff(py_file, content, final_content)
         diffs[py_file] = diff
 
+        if apply:
+            Path(py_file).write_text(final_content)
+
+    # Third pass: string-literal replacements in files that the structural pre-filter
+    # may have excluded (e.g. files with importlib.import_module("pkg.models") but no
+    # import statement mentioning "models" as an identifier that tree-sitter picks up).
+    already_processed = set(diffs.keys())
+    all_source_files = _collect_source_files(project_root, language=language)
+    old_bare = old_module.rsplit(sep, 1)[-1]
+    for py_file in all_source_files:
+        if py_file in already_processed:
+            continue
+        try:
+            content = Path(py_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Quick substring check before the heavier regex scan.
+        if old_module not in content and old_bare not in content:
+            continue
+        final_content = _replace_module_in_strings(content, old_module, new_module)
+        if final_content == content:
+            continue
+        diff = _generate_diff(py_file, content, final_content)
+        diffs[py_file] = diff
         if apply:
             Path(py_file).write_text(final_content)
 
