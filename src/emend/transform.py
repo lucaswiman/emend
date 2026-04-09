@@ -4557,8 +4557,11 @@ def analyze_imports(
     # When moving a symbol, also detect locally-defined top-level names that
     # the moved symbol references.  These are not captured by the import-scan
     # above because they live in the source file itself rather than being
-    # imported.  We synthesise ``from source_module import Name`` statements so
-    # the destination file can resolve those names after the move.
+    # imported.  We add them under a TYPE_CHECKING guard with
+    # ``from __future__ import annotations`` so that the annotations are lazy
+    # strings at runtime.  This avoids circular-import errors when the source
+    # module in turn imports from the destination module (e.g. because the
+    # #137 fix re-imports the moved symbol back into source).
     if source_module:
         # Collect top-level names defined in source_file
         locally_defined: set[str] = set()
@@ -4589,9 +4592,25 @@ def analyze_imports(
             if n in used_names and n not in already_covered
         )
         if local_refs_needed:
-            needed_imports.append(
-                f"from {source_module} import {', '.join(local_refs_needed)}"
+            # Use TYPE_CHECKING to avoid circular imports at runtime.
+            # ``from __future__ import annotations`` makes all annotations
+            # lazy strings so that the TYPE_CHECKING-only import is sufficient
+            # for type-checking tools while the runtime never evaluates the
+            # annotation as an expression.
+            #
+            # We emit the __future__ import as a separate item so that
+            # copy_symbol can insert it before all other imports (position=0),
+            # and then the TYPE_CHECKING block after the last import (-1).
+            needed_imports.append("from __future__ import annotations")
+            type_checking_block = (
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                + "".join(
+                    f"    from {source_module} import {n}\n"
+                    for n in local_refs_needed
+                )
             )
+            needed_imports.append(type_checking_block)
 
     return needed_imports
 
@@ -4627,6 +4646,8 @@ def copy_symbol(
         ValueError: If symbol not found
     """
     import textwrap
+    from emend.language_registry import detect_language
+    from emend.language_plugins import load_plugin
 
     # Get source code of the symbol
     source = get_symbol_source(selector)
@@ -4635,12 +4656,6 @@ def copy_symbol(
     if dedent:
         source = textwrap.dedent(source)
 
-    # Analyze and prepend imports if requested
-    if include_imports:
-        imports = analyze_imports(source, selector.file_path, source_module=source_module)
-        if imports:
-            source = "\n".join(imports) + "\n\n" + source
-
     # Read destination file (create if doesn't exist)
     dest_path = Path(dest_file)
     if dest_path.exists():
@@ -4648,7 +4663,7 @@ def copy_symbol(
     else:
         dest_content = ""
 
-    # Build new content based on position
+    # Build new content based on position (symbol only, without imports)
     if position == "start":
         if dest_content:
             new_content = source + "\n\n" + dest_content
@@ -4659,6 +4674,26 @@ def copy_symbol(
             new_content = dest_content.rstrip() + "\n\n\n" + source + "\n"
         else:
             new_content = source
+
+    # Add necessary imports to the import section of the destination file.
+    # This is done AFTER appending the symbol so that imports land in the
+    # proper location at the top of the file rather than being embedded at
+    # the insertion point (which matters especially for "from __future__"
+    # imports that must appear before any other statements, issue #138 Bug 2).
+    if include_imports:
+        lang = detect_language(dest_file) or "python"
+        imports = analyze_imports(source, selector.file_path, source_module=source_module)
+        for imp in imports:
+            try:
+                imp_handler = load_plugin(lang).import_handler
+                # ``from __future__`` must come before all other imports so it
+                # uses position=0; multi-line blocks (TYPE_CHECKING guards) and
+                # all other imports use position=-1 (after the last import).
+                pos = 0 if imp.startswith("from __future__") else -1
+                new_content = imp_handler.add_import_text(imp.rstrip("\n"), pos, new_content)
+            except (SyntaxError, Exception):
+                # Fall back to naive prepend if the import handler fails
+                new_content = imp + "\n" + new_content
 
     # Generate diff
     diff = _generate_diff(dest_file, dest_content, new_content)
