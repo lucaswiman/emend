@@ -7,10 +7,6 @@ from typing import Optional
 
 from emend.component_selector import parse_extended_selector, ExtendedSelector
 from emend.transform import copy_symbol
-from emend.ast_utils import (
-    find_nested_definitions,
-    find_symbol_by_line,
-)
 
 
 def cmd_copy_to(
@@ -19,71 +15,40 @@ def cmd_copy_to(
     append: bool = False,
     dedent: bool = False,
     apply: bool = False,
+    project_path: str | None = None,
 ):
     """Copy a symbol to another file using copy_symbol primitive."""
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_line
+
     ext_selector = parse_extended_selector(selector)
 
-    # Handle line-based selectors
+    # Resolve line-based selectors (e.g. file.py:4) to the enclosing symbol
+    # so that "copy the symbol at line 4" copies the whole symbol, not just
+    # the raw line.
     if ext_selector.line_start is not None:
-        from emend.ast_utils import get_symbol_source as get_symbol_source_ast
-
         symbols = find_nested_definitions(ext_selector.file_path)
         symbol = find_symbol_by_line(symbols, ext_selector.line_start, ext_selector.line_end)
         if not symbol:
-            line_desc = f"line {ext_selector.line_start}" if ext_selector.line_start == ext_selector.line_end else f"lines {ext_selector.line_start}-{ext_selector.line_end}"
+            line_desc = (
+                f"line {ext_selector.line_start}"
+                if ext_selector.line_start == ext_selector.line_end
+                else f"lines {ext_selector.line_start}-{ext_selector.line_end}"
+            )
             print(f"No symbol found at {line_desc}")
             sys.exit(1)
+        ext_selector = ExtendedSelector(
+            file_path=ext_selector.file_path,
+            symbol_path=symbol.path,
+            component=None,
+            accessor=None,
+        )
 
-        print(f"\nCopying {'.'.join(symbol.path)} to {destination}")
-        print("-" * 50)
-        print(f"Source: {ext_selector.file_path} lines {symbol.line_start}-{symbol.line_end}")
-        print(f"Append: {append}")
-        if dedent:
-            print(f"Dedent: {dedent}")
-
-        source = get_symbol_source_ast(ext_selector.file_path, symbol, dedent=dedent)
-
-        dest_path = Path(destination)
-        if dest_path.exists():
-            dest_content = dest_path.read_text()
-        else:
-            dest_content = ""
-
-        if append:
-            if dest_content:
-                new_content = dest_content.rstrip() + "\n\n\n" + source
-            else:
-                new_content = source
-        else:
-            if dest_content:
-                new_content = source + "\n\n" + dest_content
-            else:
-                new_content = source
-
-        import difflib
-        diff_lines = list(difflib.unified_diff(
-            dest_content.splitlines(keepends=True) if dest_content else [],
-            new_content.splitlines(keepends=True),
-            fromfile=destination,
-            tofile=destination
-        ))
-        diff = ''.join(diff_lines)
-
-        if diff:
-            print("\nPreview:")
-            print(diff, end='')
-
-        if apply:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            dest_path.write_text(new_content)
-            print(f"\n✓ Written to {destination}")
-        else:
-            print("\nRun with --apply to write the file.")
-        return
-
-    # Use the new copy_symbol primitive for symbol-based selectors
     position = "end" if append else "start"
-    diff = copy_symbol(ext_selector, destination, position=position, dedent=dedent, include_imports=True, apply=apply)
+    diff = copy_symbol(
+        ext_selector, destination,
+        position=position, dedent=dedent, include_imports=True,
+        project_path=project_path, apply=apply,
+    )
 
     print(diff, end='')
     if apply:

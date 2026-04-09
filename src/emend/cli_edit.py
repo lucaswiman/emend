@@ -461,6 +461,7 @@ def copy_to_cmd(
     append: Annotated[bool, typer.Option("--append", help="Append to destination file")] = False,
     dedent: Annotated[bool, typer.Option("--dedent", help="Dedent the copied symbol (useful for nested functions)")] = False,
     apply: Annotated[bool, typer.Option("--apply", "-a", help="Apply the changes")] = False,
+    project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
 ):
     """Copy a symbol to another file.
 
@@ -469,7 +470,7 @@ def copy_to_cmd(
         emend cp file.py::MyClass other.py --append --apply
         emend cp file.py::outer.inner other.py --dedent --apply
     """
-    ast_commands.cmd_copy_to(selector, destination, append, dedent, apply)
+    ast_commands.cmd_copy_to(selector, destination, append, dedent, apply, project_path=project)
 
 
 
