@@ -3412,7 +3412,7 @@ def visit_project_ts(
     The same resolver instance is used for all files in the batch.
     """
     t_start = time.monotonic()
-    project_root = project_path
+    project_root = str(Path(project_path).resolve())
     source_files = _collect_source_files(project_root, language=language)
 
     if candidate_files is not None:
