@@ -522,7 +522,7 @@ def move(
     dedent: Annotated[bool, Field(description="Dedent nested symbols (symbol mode only).")] = False,
     no_update_imports: Annotated[bool, Field(description="Don't update imports across the project (symbol mode only).")] = False,
     apply: Annotated[bool, Field(description="Write changes to disk. Default is dry-run.")] = False,
-    project: Annotated[str | None, Field(description="Project root directory (module mode only).")] = None,
+    project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
     """Move (or copy) a symbol or module to another file, updating all imports.
 
@@ -531,7 +531,7 @@ def move(
     if copy_only:
         buf = io.StringIO()
         with redirect_stdout(buf):
-            ast_commands.cmd_copy_to(selector, destination, append=True, dedent=dedent, apply=apply)
+            ast_commands.cmd_copy_to(selector, destination, append=True, dedent=dedent, apply=apply, project_path=project)
         return buf.getvalue()
     if "::" in selector:
         parsed = parse_extended_selector(selector)
@@ -540,6 +540,7 @@ def move(
             destination,
             dedent=dedent,
             update_imports=not no_update_imports,
+            project_path=project,
             apply=apply,
         )
         if not diffs:
