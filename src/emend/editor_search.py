@@ -51,7 +51,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -2079,9 +2079,9 @@ class EditorSearchEngine:
                                 pred.setdefault(e['to'], []).append(e['from'])
                             # BFS backwards from cursor block
                             reachable_to_cursor: set[int] = set()
-                            queue = [cursor_block_id]
+                            queue = deque([cursor_block_id])
                             while queue:
-                                bid = queue.pop()
+                                bid = queue.popleft()
                                 if bid in reachable_to_cursor:
                                     continue
                                 reachable_to_cursor.add(bid)

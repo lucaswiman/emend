@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from emend.cli import app
 from emend.policy import (
+    DatalogCheck,
     FlowCheck,
     Policy,
     PolicyViolation,
@@ -15,6 +16,7 @@ from emend.policy import (
     CustomCheck,
     DeadCodeCheck,
     TypeCheck,
+    _run_datalog_check,
     format_policy_violations,
     load_policies,
     run_policy_checks,
@@ -295,3 +297,70 @@ def test_check_cli_uses_rules_yaml(tmp_path, monkeypatch):
 
     assert result.exit_code == 1
     assert "no-print" in result.stdout
+
+
+class TestDatalogCheckColumnIndexing:
+    """Regression tests for _run_datalog_check column index extraction.
+
+    _col_idx() returns int|None.  Using ``or`` to chain fallbacks treats
+    index **0** as falsy, silently skipping the first column.
+    """
+
+    def _make_policy(self):
+        check = DatalogCheck(cozoscript="?[file_path, line, message] <- ...")
+        return Policy(
+            name="test-policy",
+            description="test description",
+            severity="error",
+            checks=[check],
+        )
+
+    def _run_with_mock_result(self, monkeypatch, headers, rows):
+        """Call _run_datalog_check with a mocked FactGraph."""
+        import emend.fact_graph
+
+        class _MockGraph:
+            def run_query(self, query):
+                return {"headers": headers, "rows": rows}
+
+        class _MockFactGraphCls:
+            @staticmethod
+            def build_from_project(path):
+                return _MockGraph()
+
+        monkeypatch.setattr(emend.fact_graph, "FactGraph", _MockFactGraphCls)
+        policy = self._make_policy()
+        return _run_datalog_check(policy.checks[0], policy, "/tmp/fake")
+
+    def test_file_path_at_column_zero(self, monkeypatch):
+        """file_path at index 0 must not be skipped by the or-chain."""
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["file_path", "line", "message"],
+            rows=[["app.py", 42, "problem"]],
+        )
+        assert len(violations) == 1
+        assert violations[0].file_path == "app.py"
+        assert violations[0].line == 42
+        assert violations[0].message == "problem"
+
+    def test_line_at_column_zero(self, monkeypatch):
+        """line at index 0 must not be skipped by the or-chain."""
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["line", "file_path", "message"],
+            rows=[[10, "foo.py", "issue"]],
+        )
+        assert len(violations) == 1
+        assert violations[0].line == 10
+        assert violations[0].file_path == "foo.py"
+
+    def test_file_path_at_zero_with_file_column_present(self, monkeypatch):
+        """file_path at 0 must take priority over a later 'file' column."""
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["file_path", "line", "file", "message"],
+            rows=[["correct.py", 1, "wrong.py", "msg"]],
+        )
+        assert len(violations) == 1
+        assert violations[0].file_path == "correct.py"

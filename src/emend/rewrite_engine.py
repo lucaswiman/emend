@@ -161,6 +161,50 @@ class EGraph:
                 result.append((canonical, node))
         return result
 
+    def _match_against_eclass(
+        self, pattern: ENode, eclass_id: int, var_map: dict[str, int],
+    ) -> list[dict[str, int]]:
+        """Match a pattern ENode against a specific e-class, returning substitutions.
+
+        Recursively descends into concrete children so that nested metavars
+        are bound correctly.
+        """
+        canonical = self._uf.find(eclass_id)
+
+        # Metavariable: matches the whole e-class
+        if pattern.op.startswith("$"):
+            new_map = dict(var_map)
+            if pattern.op in new_map:
+                if new_map[pattern.op] != canonical:
+                    return []
+            else:
+                new_map[pattern.op] = canonical
+            return [new_map]
+
+        # Concrete: find enodes in the target e-class with matching op
+        results: list[dict[str, int]] = []
+        nodes = self._classes.get(canonical, set())
+        for node in nodes:
+            if node.op != pattern.op:
+                continue
+            if len(node.children) != len(pattern.children):
+                continue
+            # Recursively match each child pair
+            child_maps = [dict(var_map)]
+            for p_child, n_child in zip(pattern.children, node.children):
+                p_child_enode = self._get_pattern_for_eclass(p_child)
+                if p_child_enode is None:
+                    child_maps = []
+                    break
+                new_child_maps: list[dict[str, int]] = []
+                for cmap in child_maps:
+                    new_child_maps.extend(
+                        self._match_against_eclass(p_child_enode, n_child, cmap)
+                    )
+                child_maps = new_child_maps
+            results.extend(child_maps)
+        return results
+
     def ematch(self, pattern: ENode, var_map: dict[str, int] | None = None) -> list[dict[str, int]]:
         """Pattern-match against the e-graph.
 
@@ -170,48 +214,9 @@ class EGraph:
         if var_map is None:
             var_map = {}
 
-        # Metavariable: matches any e-class
-        if pattern.op.startswith("$"):
-            results = []
-            for eid in set(self._uf.find(e) for e in self._classes):
-                new_map = dict(var_map)
-                if pattern.op in new_map:
-                    if new_map[pattern.op] != self._uf.find(eid):
-                        continue
-                else:
-                    new_map[pattern.op] = self._uf.find(eid)
-                results.append(new_map)
-            return results
-
-        # Concrete node: match op and recursively match children
-        results = []
-        for canonical_eid, node in self._all_enodes():
-            if node.op != pattern.op:
-                continue
-            if len(node.children) != len(pattern.children):
-                continue
-            # Recursively match children
-            child_maps = [dict(var_map)]
-            for p_child, n_child in zip(pattern.children, node.children):
-                n_child_canonical = self._uf.find(n_child)
-                new_child_maps = []
-                for cmap in child_maps:
-                    p_child_enode = self._get_pattern_for_eclass(p_child)
-                    if p_child_enode is None:
-                        continue
-                    if p_child_enode.op.startswith("$"):
-                        # Metavar child
-                        new_map = dict(cmap)
-                        if p_child_enode.op in new_map:
-                            if new_map[p_child_enode.op] != n_child_canonical:
-                                continue
-                        else:
-                            new_map[p_child_enode.op] = n_child_canonical
-                        new_child_maps.append(new_map)
-                    elif p_child_enode.op == self._get_op_for_eclass(n_child_canonical):
-                        new_child_maps.append(cmap)
-                child_maps = new_child_maps
-            results.extend(child_maps)
+        results: list[dict[str, int]] = []
+        for eid in set(self._uf.find(e) for e in self._classes):
+            results.extend(self._match_against_eclass(pattern, eid, var_map))
         return results
 
     def _get_pattern_for_eclass(self, eclass_id: int) -> ENode | None:
@@ -259,12 +264,13 @@ class EGraph:
             # Unknown metavar, create a fresh e-class
             return self.add(pattern)
 
-        children = tuple(
-            self._instantiate(self._get_pattern_for_eclass(c), subst)
-            if self._get_pattern_for_eclass(c) is not None
-            else c
-            for c in pattern.children
-        )
+        def _instantiate_child(c: int) -> int:
+            child_node = self._get_pattern_for_eclass(c)
+            if child_node is not None:
+                return self._instantiate(child_node, subst)
+            return c
+
+        children = tuple(_instantiate_child(c) for c in pattern.children)
         return self.add(ENode(op=pattern.op, children=children))
 
     def _find_match_root(self, pattern: ENode, subst: dict[str, int]) -> int | None:

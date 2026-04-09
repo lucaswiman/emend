@@ -768,8 +768,11 @@ def _run_datalog_check(
         except ValueError:
             return None
 
-    fp_idx = _col_idx("file_path") or _col_idx("file") or 0
-    line_idx = _col_idx("line") or (1 if len(headers) > 1 else 0)
+    _fp = _col_idx("file_path")
+    _f = _col_idx("file")
+    fp_idx = _fp if _fp is not None else _f if _f is not None else 0
+    _ln = _col_idx("line")
+    line_idx = _ln if _ln is not None else (1 if len(headers) > 1 else 0)
     msg_idx = _col_idx("message")
 
     for row in rows:
