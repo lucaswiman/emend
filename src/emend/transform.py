@@ -7046,6 +7046,14 @@ def move_symbol(
     # to the destination file (issue #138 Bug 2).
     source_module = _file_to_module(selector.file_path, project_path)
 
+    # Before removing the symbol, use the tree-sitter scope resolver to check
+    # whether the source file has non-definition/non-import references to the
+    # moved symbol (e.g. calls, type annotations).  After removal the name
+    # becomes unresolved and the resolver can no longer see it.
+    source_has_other_refs = _source_has_remaining_refs(
+        selector.file_path, symbol_name, project_path,
+    )
+
     # Step 1: Copy symbol to destination (include_imports=True so the moved
     # symbol carries its own import dependencies into the destination file,
     # fixing issue #138 Bug 2).
@@ -7068,10 +7076,47 @@ def move_symbol(
             symbol_name,
             project_path,
             apply=apply,
+            source_has_other_refs=source_has_other_refs,
         )
         diffs.update(import_diffs)
 
     return diffs
+
+
+def _source_has_remaining_refs(
+    source_file: str,
+    symbol_name: str,
+    project_path: str | None,
+) -> bool:
+    """Check whether *source_file* references *symbol_name* outside its definition.
+
+    Uses the tree-sitter scope resolver on the **current** (pre-removal) content
+    so that all references are still resolvable.  Returns True when there are
+    read/write/call references to the symbol beyond its own definition and
+    import sites — meaning the source file will need an import after the symbol
+    is removed.
+    """
+    source_path = Path(source_file)
+    try:
+        content = source_path.read_text()
+    except FileNotFoundError:
+        return False
+
+    proj_root = str(
+        Path(project_path or _find_project_root(source_file)).resolve()
+    )
+    ext = source_path.suffix.lstrip(".")
+    resolver = _rust.PyScopeResolver(proj_root, ext)
+    resolved = str(source_path.resolve())
+    resolver.index_file(resolved, content)
+
+    target_suffix = f".{symbol_name}"
+    return any(
+        kind in ("read", "write", "call")
+        for qn, _line, _col, _off, _end, kind
+        in resolver.references_in_file(resolved)
+        if qn.endswith(target_suffix) or qn == symbol_name
+    )
 
 
 def _split_or_retarget_import(
@@ -7169,6 +7214,7 @@ def _update_imports_for_move(
     symbol_name: str,
     project_path: str | None,
     apply: bool,
+    source_has_other_refs: bool = False,
 ) -> dict[str, str]:
     """Update imports across project when a symbol moves."""
     diffs = {}
@@ -7240,33 +7286,20 @@ def _update_imports_for_move(
         if apply:
             Path(py_file).write_text(new_content)
 
-    # After the move, check if the source file still references the moved symbol
-    # (e.g., calls to the helper that was moved). If so, add an import so the
-    # source file doesn't break at runtime (fixes issue #137).
-    try:
-        source_content = Path(source_file).read_text()
-    except FileNotFoundError:
-        source_content = None
+    # If the source file has read/write/call references to the moved symbol
+    # (detected by the caller via tree-sitter scope resolver on pre-removal
+    # content), add an import so the source file doesn't break at runtime.
+    if source_has_other_refs and dest_module:
+        try:
+            source_content = Path(source_file).read_text()
+        except FileNotFoundError:
+            source_content = None
 
-    if source_content is not None and dest_module:
-        from emend.language_registry import detect_language
-        lang = detect_language(source_file) or "python"
-
-        _def_or_import_re = re.compile(
-            r'^\s*(?:def|class|import|from)\s+', re.MULTILINE
-        )
-        _symbol_re = re.compile(r'\b' + re.escape(symbol_name) + r'\b')
-        has_non_import_ref = any(
-            _symbol_re.search(line)
-            for line in source_content.splitlines()
-            if not _def_or_import_re.match(line)
-        )
-
-        if has_non_import_ref:
+        if source_content is not None:
             import_stmt = f"from {dest_module} import {symbol_name}"
             from emend.language_plugins import load_plugin
             try:
-                new_source_content = load_plugin(lang).import_handler.add_import_text(
+                new_source_content = load_plugin(language).import_handler.add_import_text(
                     import_stmt, 0, source_content
                 )
             except Exception:
