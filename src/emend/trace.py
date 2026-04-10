@@ -745,6 +745,7 @@ def _write_targets_on_line(
     graph: "FactGraph",
     file_path: str,
     line: int,
+    _cached_facts: "list | None" = None,
 ) -> set[str]:
     """Return variable names written on *line* according to DefUseFacts.
 
@@ -752,52 +753,26 @@ def _write_targets_on_line(
     regex parsing, so it works correctly for all supported languages
     (Python, TypeScript, Rust).
 
-    Returns an empty set if the graph does not support def-use queries
-    (e.g. in tests using lightweight fake graphs).
+    Pass *_cached_facts* (from a prior ``graph.def_uses()`` call) to avoid
+    repeated CozoSQL queries when called in a per-match loop.
     """
     try:
-        # The fact graph stores resolved (canonical) paths, so resolve here too.
-        resolved = str(Path(file_path).resolve())
-        # DefUseFact.def_line is 0-indexed; *line* is 1-indexed (from pattern matches).
+        facts = _cached_facts if _cached_facts is not None else graph.def_uses(
+            file_path=str(Path(file_path).resolve()),
+        )
+        # DefUseFact.def_line is 0-indexed; *line* is 1-indexed.
         zero_indexed = line - 1
         return {
             f.var_name
-            for f in graph.def_uses(file_path=resolved)
+            for f in facts
             if f.kind in ("write", "aug_write") and f.def_line == zero_indexed
         }
     except AttributeError:
         return set()
 
 
-def _reads_on_line(
-    graph: "FactGraph",
-    file_path: str,
-    func_qn: str,
-    line: int,
-) -> set[str]:
-    """Return variable names read on *line* according to DefUseFacts.
-
-    Finds all variables that have a use (read) occurrence on the given line
-    within the specified function.
-
-    *line* is 1-indexed (from pattern matches); DefUseFact.use_line is
-    0-indexed, so this function adjusts automatically.
-    """
-    zero_indexed = line - 1
-    return {
-        f.var_name
-        for f in graph.def_uses(file_path=file_path, func_qn=func_qn)
-        if f.use_line == zero_indexed
-    }
-
-
 def _extract_rhs_from_line(source_lines: list[str], line: int) -> str | None:
-    """Extract the RHS of an assignment from a source line.
-
-    Finds the first ``=`` that is part of an assignment (skipping ``==``,
-    ``!=``, ``<=``, ``>=``, ``=>``) and returns everything after it.
-    This is a generic heuristic that works for Python, TypeScript, and Rust.
-    """
+    """Extract text after the first assignment ``=`` (skipping ``==``, ``!=``, etc.)."""
     if line < 1 or line > len(source_lines):
         return None
     text = source_lines[line - 1]
@@ -826,19 +801,7 @@ def _assignments_from_graph(
     func_start: int,
     func_end: int,
 ) -> dict[int, list[tuple[str, str]]]:
-    """Build assignments_by_line from tree-sitter-backed DefUseFacts.
-
-    Returns ``{abs_line: [(target, rhs_text), ...]}`` for write assignments
-    within the function line range.
-
-    Replaces ``_find_assignments_in_source()`` by using the fact graph
-    (populated from tree-sitter ``def_use_rules``) for target detection
-    and extracting the RHS text from source lines.
-
-    The RHS text extraction uses a generic heuristic (find ``=`` in the
-    source line).  Callers that need more structured RHS information
-    (e.g. function call parsing) should use ``CallFact`` queries in the
-    future (Phase 9).
+    """Build ``{abs_line: [(target, rhs_text), ...]}`` from DefUseFact writes.
     """
     facts = graph.def_uses(file_path=file_path, func_qn=func_qn)
     result: dict[int, list[tuple[str, str]]] = {}
@@ -861,6 +824,32 @@ def _assignments_from_graph(
         if rhs is not None:
             result.setdefault(abs_line, []).append((f.var_name, rhs))
 
+    return result
+
+
+def _get_assignments_by_line(
+    graph: "FactGraph | None",
+    file_path: str,
+    func_qn: str,
+    source: str,
+    func_start: int,
+    func_end: int,
+) -> "dict[int, list[tuple[str, str]]]":
+    """Return ``{abs_line: [(target, rhs), ...]}`` using the graph or regex fallback."""
+    if graph is not None and file_path:
+        return _assignments_from_graph(
+            graph, file_path, func_qn,
+            source.split("\n"), func_start, func_end,
+        )
+    import textwrap
+    lines = source.split("\n")
+    body_start = func_start + 1
+    body_text = "\n".join(lines[body_start - 1 : func_end]) + "\n"
+    body_dedented = textwrap.dedent(body_text)
+    body_assignments = _find_assignments_in_source(body_dedented)
+    result: dict[int, list[tuple[str, str]]] = {}
+    for stmt_line_rel, target, rhs in body_assignments:
+        result.setdefault(stmt_line_rel + body_start - 1, []).append((target, rhs))
     return result
 
 
@@ -923,11 +912,18 @@ def _run_trace_datalog(
         except Exception:
             continue
 
+        source_lines = source_text.split("\n")
+        # Cache def-use facts for this file to avoid repeated CozoSQL queries.
+        resolved_path = str(path_obj.resolve())
+        try:
+            _file_def_uses = graph.def_uses(file_path=resolved_path)
+        except AttributeError:
+            _file_def_uses = None
+
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
             matched_sources: list[tuple[str, str, str, int, str]] = []
-            source_lines = source_text.split("\n")
             matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
@@ -935,14 +931,11 @@ def _run_trace_datalog(
                     var_names: set[str] = set()
                     for _cn, ct in m.captures.items():
                         var_names |= _extract_identifiers(ct, language=language)
-                    # Also extract the assignment target on the same line,
-                    # mirroring the Python engine's behaviour: for
-                    # ``user_input = request.args.get("name")``, the
-                    # tainted variable is ``user_input``, not ``name``.
-                    # Use tree-sitter-backed DefUseFacts to find
-                    # assignment targets (works for all languages).
+                    # Also taint the assignment target (e.g. ``user_input`` in
+                    # ``user_input = request.args.get("name")``).
                     var_names |= _write_targets_on_line(
                         graph, file_path, m.line,
+                        _cached_facts=_file_def_uses,
                     )
                     # Type constraint filtering on sources
                     if src_def.type_constraint and type_oracle and var_names:
@@ -1007,19 +1000,16 @@ def _run_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            san_source_lines = source_text.split("\n")
             matches = find_pattern(san_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
                         var_names |= _extract_identifiers(ct, language=language)
-                    # Also sanitize the assignment target on the same line:
-                    # ``clean = sanitize(name)`` means ``clean`` is safe too.
-                    # Use tree-sitter-backed DefUseFacts to find
-                    # assignment targets (works for all languages).
+                    # Also sanitize the assignment target on the same line.
                     var_names |= _write_targets_on_line(
                         graph, file_path, m.line,
+                        _cached_facts=_file_def_uses,
                     )
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
@@ -1541,18 +1531,9 @@ def _compute_function_summary(
     body_text = "\n".join(body_text_lines) + "\n"
     body_dedented = textwrap.dedent(body_text)
 
-    if graph is not None:
-        assignments_by_line = _assignments_from_graph(
-            graph, file_path, func_qn, lines, func_start, func_end,
-        )
-    else:
-        # Fallback for callers that don't provide a graph
-        ext = Path(file_path).suffix.lstrip(".") or "py"
-        body_assignments = _find_assignments_in_source(body_dedented, ext=ext)
-        assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-        for stmt_line_rel, target, rhs in body_assignments:
-            stmt_line_abs = stmt_line_rel + body_start - 1
-            assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
     returns_by_line: dict[int, set[str]] = {}
     for line_idx in range(func_start, func_end + 1):
@@ -1663,20 +1644,9 @@ def _compute_return_reachable_vars(
     if body_start > func_end:
         return set()
 
-    import textwrap as _textwrap
-
-    if graph is not None and file_path:
-        assignments_by_line = _assignments_from_graph(
-            graph, file_path, func_qn, lines, func_start, func_end,
-        )
-    else:
-        body_text_lines = lines[body_start - 1 : func_end]
-        body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
-        body_assignments = _find_assignments_in_source(body_dedented)
-        assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-        for stmt_line_rel, target, rhs in body_assignments:
-            stmt_line_abs = stmt_line_rel + body_start - 1
-            assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
     reachable: set[str] = set()
     for line_idx in range(func_end, func_start - 1, -1):
@@ -1717,20 +1687,9 @@ def _collect_param_to_return_dependencies(
     if body_start > func_end:
         return []
 
-    import textwrap as _textwrap
-
-    if graph is not None and file_path:
-        assignments_by_line = _assignments_from_graph(
-            graph, file_path, func_qn, lines, func_start, func_end,
-        )
-    else:
-        body_text_lines = lines[body_start - 1 : func_end]
-        body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
-        body_assignments = _find_assignments_in_source(body_dedented)
-        assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-        for stmt_line_rel, target, rhs in body_assignments:
-            stmt_line_abs = stmt_line_rel + body_start - 1
-            assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
     return_reachable = _compute_return_reachable_vars(
         source, func_start, func_end, graph=graph, file_path=file_path, func_qn=func_qn,
@@ -1938,8 +1897,6 @@ def _run_interprocedural_trace_datalog(
     )
     if intra_result:
         violations.extend(intra_result)
-
-    import textwrap as _textwrap
 
     for caller_qn, (fp, src, fs, fe, _caller_params) in func_info.items():
         lines = src.split("\n")
