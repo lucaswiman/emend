@@ -951,3 +951,56 @@ def test_move_symbol_split_import_preserves_utf8_prefix(tmp_path, emend_cmd):
     assert "from source_mod import load_bundle" in consumer_content, (
         f"Sibling import missing.\nconsumer.py:\n{consumer_content}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug: _replace_module_in_strings false-positive on bare module names
+# ---------------------------------------------------------------------------
+
+
+def test_rename_module_does_not_modify_unrelated_bare_name_strings(tmp_path, run_emend_cmd):
+    """Renaming a module must not modify string literals in unrelated files.
+
+    The third pass of ``_rename_module_references`` scans ALL project files for
+    string-literal occurrences of the module name.  When the bare module name
+    (e.g. ``"models"``) appears as an exact-match standalone string in a file
+    that has *no* import relationship with the renamed module, it should be left
+    alone.  A string like ``TABLE = "models"`` in an unrelated file is almost
+    certainly NOT a reference to the Python module.
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "models.py").write_text("VALUE = 42\n")
+
+    # This file has nothing to do with pkg.models — it just happens to use the
+    # string "models" for an unrelated purpose (e.g. a database table name).
+    unrelated = tmp_path / "unrelated.py"
+    unrelated.write_text(
+        "# No imports from pkg.models at all\n"
+        'TABLE_NAME = "models"\n'
+        'LABEL = "some models here"\n'
+    )
+
+    result = run_emend_cmd([
+        "rename", str(pkg / "models.py"),
+        "--to", "data_models",
+        "--project", str(tmp_path),
+        "--apply",
+    ])
+    assert result.returncode == 0
+
+    # The module file should have been renamed
+    assert (pkg / "data_models.py").exists()
+    assert not (pkg / "models.py").exists()
+
+    # The unrelated file must be left completely untouched
+    unrelated_content = unrelated.read_text()
+    assert 'TABLE_NAME = "models"' in unrelated_content, (
+        f"Bare-name string in unrelated file was incorrectly modified.\n"
+        f"unrelated.py content:\n{unrelated_content}"
+    )
+    assert 'LABEL = "some models here"' in unrelated_content, (
+        f"String containing module name as word in unrelated file was modified.\n"
+        f"unrelated.py content:\n{unrelated_content}"
+    )
