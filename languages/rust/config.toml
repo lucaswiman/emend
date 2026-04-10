@@ -272,3 +272,40 @@ value = "right"
 node = "let_declaration"
 target = "pattern"
 value = "value"
+
+# ---------------------------------------------------------------------------
+# Trace / taint analysis configuration
+# ---------------------------------------------------------------------------
+[trace]
+# Rust keywords — identifiers matching these are excluded from
+# _extract_identifiers() to avoid false taint propagation.
+keywords = [
+    "Self", "abstract", "as", "async", "await", "become", "box",
+    "break", "const", "continue", "crate", "do", "dyn", "else",
+    "enum", "extern", "false", "final", "fn", "for", "if", "impl",
+    "in", "let", "loop", "macro", "match", "mod", "move", "mut",
+    "override", "priv", "pub", "ref", "return", "self", "static",
+    "struct", "super", "trait", "true", "try", "type", "typeof",
+    "union", "unsafe", "unsized", "use", "virtual", "where", "while",
+    "yield",
+]
+
+[trace.container_mutations]
+# Methods whose calls on a container/collection are considered mutation events.
+methods = ["push", "insert", "extend", "push_back", "push_front", "append", "remove", "pop"]
+
+# ---------------------------------------------------------------------------
+# Dead-code detection entry-point heuristics
+# ---------------------------------------------------------------------------
+[dead_code]
+# Full attribute names (Rust uses #[attribute] instead of decorators) that
+# mark a symbol as an entry point.
+entry_point_decorators = ["test", "tokio::main", "tokio::test", "no_mangle", "export_name"]
+# Attribute base-names that mark a symbol as an entry point.
+entry_point_decorator_basenames = ["test", "bench", "no_mangle", "export_name"]
+# Function names that are always considered entry points.
+entry_point_names = ["main", "lib"]
+# Name prefixes that mark a symbol as a test/entry-point.
+entry_point_name_prefixes = ["test_"]
+# Rust does not have dunder names.
+has_dunders = false

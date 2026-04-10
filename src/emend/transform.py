@@ -5314,7 +5314,9 @@ class DeadModule:
     reason: str
 
 
-# Decorator prefixes that indicate a symbol is an entry point / framework hook
+# Decorator prefixes that indicate a symbol is an entry point / framework hook.
+# These are kept as fallbacks; the config-driven path via _get_entry_point_config()
+# is the primary source.
 _ENTRY_POINT_DECORATORS = frozenset({
     'app.command', 'app.route', 'app.get', 'app.post', 'app.put',
     'app.delete', 'app.patch',
@@ -5347,48 +5349,104 @@ _ENTRY_POINT_NAMES = frozenset({
 })
 
 
+@lru_cache(maxsize=8)
+def _get_entry_point_config(language: str = "python") -> dict:
+    """Return the entry-point heuristic config for *language* from config.toml.
+
+    Returns a dict with keys:
+        ``decorators``         — frozenset of full decorator names (dotted).
+        ``decorator_basenames``— frozenset of decorator base-names (last component).
+        ``names``              — frozenset of conventional entry-point function names.
+        ``name_prefixes``      — list of name prefixes that mark entry points.
+        ``has_dunders``        — bool: whether dunder names are entry points.
+
+    Falls back to the hardcoded Python frozensets for unknown languages.
+    """
+    from emend.language_registry import load_config
+    config = load_config(language)
+    dc = config.get("dead_code", {})
+    if dc:
+        return {
+            "decorators": frozenset(dc.get("entry_point_decorators", [])),
+            "decorator_basenames": frozenset(dc.get("entry_point_decorator_basenames", [])),
+            "names": frozenset(dc.get("entry_point_names", [])),
+            "name_prefixes": list(dc.get("entry_point_name_prefixes", [])),
+            "has_dunders": bool(dc.get("has_dunders", False)),
+        }
+    # Fallback for unknown languages: use Python defaults
+    return {
+        "decorators": _ENTRY_POINT_DECORATORS,
+        "decorator_basenames": _ENTRY_POINT_DECORATOR_BASENAMES,
+        "names": _ENTRY_POINT_NAMES,
+        "name_prefixes": ["test_", "Test", "describe_"],
+        "has_dunders": True,
+    }
+
+
 def _is_dunder(name: str) -> bool:
     """Check if a name is a dunder (double underscore) name."""
     return name.startswith('__') and name.endswith('__') and len(name) > 4
 
 
-def _is_likely_entry_point(name: str, kind: str, decorators: list[str], depth: int) -> bool:
+def _is_likely_entry_point(
+    name: str,
+    kind: str,
+    decorators: list[str],
+    depth: int,
+    language: str = "python",
+) -> bool:
     """Check if a symbol is likely an entry point based on heuristics.
 
     Entry points are symbols that are invoked by frameworks or conventions
     rather than explicit code references.
+
+    Args:
+        name: Symbol name.
+        kind: Symbol kind (function, class, method, …).
+        decorators: List of decorator strings applied to the symbol.
+        depth: Nesting depth (1 = top-level).
+        language: Source language — loads heuristics from config.toml.
+            Defaults to ``"python"`` for backward compatibility.
     """
-    # Dunder methods/functions are always entry points
-    if _is_dunder(name):
+    ep = _get_entry_point_config(language)
+
+    # Dunder methods/functions are entry points only for languages that have them.
+    if ep["has_dunders"] and _is_dunder(name):
         return True
 
     # Conventional entry-point names
-    if name in _ENTRY_POINT_NAMES:
+    if name in ep["names"]:
         return True
 
-    # Names starting with test_ or Test (pytest discovery)
-    # Names starting with describe_ (pytest-describe convention)
-    if name.startswith('test_') or name.startswith('Test') or name.startswith('describe_'):
-        return True
+    # Name-prefix heuristics (e.g. test_, Test, describe_)
+    for prefix in ep["name_prefixes"]:
+        if name.startswith(prefix):
+            return True
 
     # Private names (single underscore prefix) at depth > 1 are methods,
-    # which may be called via getattr or framework internals
-    # We only flag private top-level symbols
+    # which may be called via getattr or framework internals.
+    # We only flag private top-level symbols.
 
     # Check decorators
     for dec in decorators:
-        # Strip @ prefix if present
-        dec_name = dec[1:] if dec.startswith('@') else dec
+        # Strip @ prefix if present (Python style: @app.route)
+        # Also strip Rust attribute wrapper: #[test] → test
+        dec_name = dec
+        if dec_name.startswith('#[') and dec_name.endswith(']'):
+            dec_name = dec_name[2:-1]
+        elif dec_name.startswith('@'):
+            dec_name = dec_name[1:]
         # Strip arguments: @app.command("name") -> app.command
         if '(' in dec_name:
             dec_name = dec_name[:dec_name.index('(')]
+        dec_name = dec_name.strip()
 
-        if dec_name in _ENTRY_POINT_DECORATORS:
+        if dec_name in ep["decorators"]:
             return True
 
         # Check basename: @anything.route -> "route" is entry point
         basename = dec_name.rsplit('.', 1)[-1] if '.' in dec_name else dec_name
-        if basename in _ENTRY_POINT_DECORATOR_BASENAMES:
+        if basename in ep["decorator_basenames"]:
             return True
 
     return False
