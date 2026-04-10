@@ -1687,17 +1687,25 @@ fn matches_node<'a>(
                     None
                 }
             } else if node.kind() == config.pattern_matching.subscript {
-                let value_node = match node.child_by_field_name(&config.pattern_matching.value_field) {
+                // Try value_field first (Python: "value"), then object_field (TypeScript: "object")
+                let value_node = match node.child_by_field_name(&config.pattern_matching.value_field)
+                    .or_else(|| node.child_by_field_name(&config.pattern_matching.object_field)) {
                     Some(n) => n,
                     None => return None,
                 };
                 if matches_node(value_node, source, value, captures, config).is_none() {
                     return None;
                 }
+                // Try language-specific field names: "subscript" (Python), "index" (TypeScript/Rust)
                 let mut cursor = node.walk();
-                let actual_slices: Vec<Node> = node.children_by_field_name(&config.pattern_matching.subscript, &mut cursor)
+                let mut actual_slices: Vec<Node> = node.children_by_field_name("subscript", &mut cursor)
                     .collect();
-                
+                if actual_slices.is_empty() {
+                    let mut cursor2 = node.walk();
+                    actual_slices = node.children_by_field_name("index", &mut cursor2)
+                        .collect();
+                }
+
                 if match_sequence(slices, &actual_slices, source, captures, config) {
                     Some(node)
                 } else {
@@ -3655,16 +3663,20 @@ fn node_to_ir<'a>(
     // Subscript
     if kind == config.pattern_matching.subscript {
         dict.set_item("type", "subscript").unwrap();
-        if let Some(obj) = node.child_by_field_name(&config.pattern_matching.value_field) {
+        // Try value_field first (Python: "value"), then object_field (TypeScript: "object")
+        let obj_node = node.child_by_field_name(&config.pattern_matching.value_field)
+            .or_else(|| node.child_by_field_name(&config.pattern_matching.object_field));
+        if let Some(obj) = obj_node {
             dict.set_item("value", node_to_ir(py, obj, source, config)).unwrap();
         }
         let slices = PyList::empty(py);
-        // tree-sitter-python: subscript has a 'subscript' field for the index
-        // or we can just look for named children that are not the 'value'
-        if let Some(index) = node.child_by_field_name("subscript") {
+        // Try language-specific field names: "subscript" (Python), "index" (TypeScript/Rust)
+        let index_node = node.child_by_field_name("subscript")
+            .or_else(|| node.child_by_field_name("index"));
+        if let Some(index) = index_node {
              slices.append(node_to_ir(py, index, source, config)).unwrap();
         } else {
-             // Fallback for other languages: look for children after the first one
+             // Fallback: look for named children after the object/value child
              let mut cursor = node.walk();
              let named_children: Vec<_> = node.children(&mut cursor).filter(|n| n.is_named()).collect();
              if named_children.len() > 1 {

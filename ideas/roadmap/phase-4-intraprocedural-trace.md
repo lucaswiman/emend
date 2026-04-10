@@ -108,61 +108,73 @@ parameter is threaded through (not the default `"py"`), so the underlying
 
 ### Replace regex assignment extraction with fact-graph queries
 
-- [ ] Add a `_write_targets_on_line(graph, file_path, line)` helper to
+- [x] Add a `_write_targets_on_line(graph, file_path, line)` helper to
   `trace.py` that queries `DefUseFact` for write targets on a given line.
-- [ ] Replace the inline regex at ~line 814 (source match assignment target)
+- [x] Replace the inline regex at ~line 814 (source match assignment target)
   with a call to `_write_targets_on_line()`.
-- [ ] Replace the inline regex at ~line 894 (sanitizer match assignment
+- [x] Replace the inline regex at ~line 894 (sanitizer match assignment
   target) with a call to `_write_targets_on_line()`.
-- [ ] Verify the replacement produces identical results for existing Python
+- [x] Verify the replacement produces identical results for existing Python
   tests (the fact graph should return the same targets the regex found).
+- [x] Fix CozoSQL `def_use` schema: move `def_line` and `use_line` into the
+  primary key to prevent deduplication of same-variable defs in one block.
 
 ### Thread `language` through `_extract_identifiers()` calls
 
-- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 807
+- [x] Thread `language` to the `_extract_identifiers()` call at ~line 807
   (source capture variables).
-- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 851
+- [x] Thread `language` to the `_extract_identifiers()` call at ~line 851
   (sink capture variables).
-- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 889
+- [x] Thread `language` to the `_extract_identifiers()` call at ~line 889
   (sanitizer capture variables).
 
 ### Auto-detection and parameter plumbing
 
-- [ ] Update `run_trace_analysis()` to auto-detect language from file
+- [x] Update `run_trace_analysis()` to auto-detect language from file
   extensions via `detect_language()` when the caller doesn't specify.
-- [ ] Thread `ext` through `_find_assignments_in_source()` callers (so
+- [x] Thread `ext` through `_find_assignments_in_source()` callers (so
   `get_statement_ranges()` parses the correct language for Phase 9 prep).
-- [ ] Verify `LocationResolver.from_source()` works with `.ts` and `.rs`
+- [x] Verify `LocationResolver.from_source()` works with `.ts` and `.rs`
   file paths (it derives `ext` from the path already).
+
+### Fix subscript pattern support for non-Python languages
+
+- [x] Fix Rust `node_to_ir()` subscript handling to try `object_field`
+  when `value_field` is not found (TypeScript uses `"object"` field).
+- [x] Fix Rust `matches_node()` subscript matching to use same fallback.
+- [x] Fix subscript index field lookup: try `"index"` when `"subscript"`
+  field is not found (TypeScript uses `"index"`, Python uses `"subscript"`).
+- [x] Add test for `req.body[$X]` subscript source pattern in TypeScript.
 
 ### TypeScript trace tests
 
-- [ ] Test: simple assignment propagation (`let x = source(); sink(x)`).
-- [ ] Test: sanitizer blocking (`let x = source(); x = sanitize(x); sink(x)`).
-- [ ] Test: arrow function taint flow.
-- [ ] Test: method call taint (`obj.method()` as source/sink).
-- [ ] Test: destructuring assignment (`const {a, b} = source()`).
-- [ ] Test: conditional branches (`if (cond) { x = source() } sink(x)`).
-- [ ] Test: try/catch taint flow.
-- [ ] Test: container mutation (`.push()` propagation).
+- [x] Test: simple assignment propagation (`let x = source(); sink(x)`).
+- [x] Test: sanitizer blocking (`let x = source(); x = sanitize(x); sink(x)`).
+- [x] Test: arrow function taint flow.
+- [x] Test: method call taint (`obj.method()` as source/sink).
+- [x] Test: destructuring assignment (`const {a, b} = source()`).
+- [x] Test: conditional branches (`if (cond) { x = source() } sink(x)`).
+- [x] Test: try/catch taint flow.
+- [x] Test: container mutation (`.push()` propagation).
+- [x] Test: subscript source pattern (`req.body[$X]`).
 
 ### Rust trace tests
 
-- [ ] Test: simple let binding propagation (`let x = source(); sink(x)`).
-- [ ] Test: sanitizer blocking.
-- [ ] Test: match arm taint flow.
-- [ ] Test: method call taint (`obj.method()` as source/sink).
-- [ ] Test: pattern destructuring (`let (a, b) = source()`).
-- [ ] Test: loop taint flow (`for x in source() { sink(x) }`).
-- [ ] Test: `if let` / `while let` taint flow.
-- [ ] Test: container mutation (`.push()` propagation).
+- [x] Test: simple let binding propagation (`let x = source(); sink(x)`).
+- [x] Test: sanitizer blocking.
+- [x] Test: match arm taint flow.
+- [x] Test: method call taint (`obj.method()` as source/sink).
+- [x] Test: variable reassignment (multi-hop).
+- [x] Test: loop taint flow.
+- [x] Test: conditional taint flow (`if true { sink(data) }`).
+- [x] Test: container mutation (`.push()` propagation).
 
 ### CLI integration
 
-- [ ] Verify `emend trace src/ --language typescript` works end-to-end.
-- [ ] Verify `emend trace src/ --language rust` works end-to-end.
-- [ ] Verify auto-detection: `emend trace file.ts` detects TypeScript.
-- [ ] JSON output includes correct file paths and line numbers.
+- [x] Verify `emend trace src/ --language typescript` works end-to-end.
+- [x] Verify `emend trace src/ --language rust` works end-to-end.
+- [x] Verify auto-detection: `emend trace file.ts` detects TypeScript.
+- [x] JSON output includes correct file paths and line numbers.
 
 ## Exit Criteria
 
