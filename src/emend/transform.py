@@ -722,7 +722,8 @@ def _extract_file_facts(
         except Exception:
             pass
 
-    # -- Extract imports
+    # -- Extract imports (all languages)
+    # Fast Python-regex import graph (fact_imp) is only used for Python.
     if ext == "py":
         try:
             for m_match in import_re.finditer(content):
@@ -732,13 +733,13 @@ def _extract_file_facts(
         except Exception:
             pass
 
-        # Detailed imports for the import relation
-        for imp in _extract_imports(rel_path, content):
-            result["imports"].append([
-                imp.importing_file, imp.imported_module,
-                imp.imported_name or "", imp.line,
-                imp.alias or "",
-            ])
+    # Detailed imports via _extract_imports (dispatches by language for TS/Rust).
+    for imp in _extract_imports(rel_path, content):
+        result["imports"].append([
+            imp.importing_file, imp.imported_module,
+            imp.imported_name or "", imp.line,
+            imp.alias or "",
+        ])
 
     # -- source_loc (from symbol facts)
     for sf in sym_facts_for_file:
@@ -929,8 +930,9 @@ def _build_facts_db(
             return abs_path
 
     try:
-        # Discover source files directly from the filesystem.
-        source_files = _collect_source_files_scandir(resolved_root)
+        # Discover source files directly from the filesystem, for all
+        # languages present in the project (auto-detected).
+        source_files = _collect_all_source_files(resolved_root)
 
         # Read all file contents up-front for scope resolver indexing.
         file_contents: list[tuple[str, str, str, str]] = []  # (abs, rel, ext, content)
@@ -3259,6 +3261,10 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     Detects ``src/`` layout automatically so that
     ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
     Uses the language-specific separator from config.toml.
+
+    Rust special cases:
+    - ``src/lib.rs`` → ``lib`` (the crate root; caller may map to ``crate``)
+    - ``src/foo/mod.rs`` → ``foo`` (mod.rs represents its parent directory)
     """
     from emend.language_registry import detect_language, get_module_separator
     language = detect_language(file_path) or "python"
@@ -3275,8 +3281,17 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     except ValueError:
         rel_path = abs_file.relative_to(proj_root)
 
-    module_parts = list(rel_path.parts[:-1]) + [rel_path.stem]
-    return sep.join(module_parts)
+    stem = rel_path.stem
+    dir_parts = list(rel_path.parts[:-1])
+
+    # Rust: ``mod.rs`` represents the module named after its parent directory.
+    # E.g.  src/foo/mod.rs → module "foo".
+    if language == "rust" and stem == "mod" and dir_parts:
+        module_parts = dir_parts  # drop the "mod" stem, use parent dir as name
+    else:
+        module_parts = dir_parts + [stem]
+
+    return sep.join(module_parts) if module_parts else stem
 
 
 # Non-dot directories to skip.  All directories starting with '.' are
@@ -3294,6 +3309,94 @@ def _collect_source_files_scandir(root_path: str, language: str = "python") -> l
     from emend.language_registry import get_extensions
     exts = get_extensions(language)
     return _rust.collect_files(root_path, exts)
+
+
+def detect_project_languages(project_root: str) -> list[str]:
+    """Detect which languages are present in a project.
+
+    Inspects the project root for language markers:
+    - Python: any .py file or pyproject.toml/setup.py
+    - TypeScript: package.json, tsconfig.json, or any .ts/.tsx/.js/.jsx file
+    - Rust: Cargo.toml or any .rs file
+
+    Returns a list of detected language names (e.g. ``["python", "typescript"]``).
+    Uses a lightweight heuristic — checks for marker files and a two-level-deep
+    scan of the root directory.
+    """
+    import os
+
+    root = Path(project_root).resolve()
+    detected: list[str] = []
+
+    # Gather filenames from the project root and one level of subdirectories.
+    # Also always checks root/src/ explicitly (common for many project layouts).
+    # This is intentionally shallow: we don't scan the entire tree.
+    def _scan_dir(directory: Path) -> list[str]:
+        names: list[str] = []
+        try:
+            for entry in os.scandir(str(directory)):
+                names.append(entry.name)
+        except OSError:
+            pass
+        return names
+
+    root_names = set(_scan_dir(root))
+
+    # Collect all filenames visible from root + immediate subdirs + src/
+    all_names: set[str] = set(root_names)
+    for entry_name in root_names:
+        child = root / entry_name
+        # Skip hidden directories and common non-source directories
+        if entry_name.startswith(".") or entry_name in {"node_modules", "target", "__pycache__", ".venv", "venv"}:
+            continue
+        if child.is_dir():
+            all_names.update(_scan_dir(child))
+    # Always look in src/ (common layout)
+    if (root / "src").is_dir():
+        all_names.update(_scan_dir(root / "src"))
+
+    # Python markers
+    py_markers = {"pyproject.toml", "setup.py", "setup.cfg"}
+    py_exts = (".py", ".pyi")
+    if py_markers & root_names or any(n.endswith(py_exts) for n in all_names):
+        detected.append("python")
+
+    # TypeScript / JavaScript markers
+    ts_markers = {"package.json", "tsconfig.json"}
+    ts_exts = (".ts", ".tsx", ".js", ".jsx")
+    if ts_markers & root_names or any(n.endswith(ts_exts) for n in all_names):
+        detected.append("typescript")
+
+    # Rust markers
+    rs_markers = {"Cargo.toml", "Cargo.lock"}
+    rs_exts = (".rs",)
+    if rs_markers & root_names or any(n.endswith(rs_exts) for n in all_names):
+        detected.append("rust")
+
+    return detected
+
+
+def _collect_all_source_files(
+    root_path: str,
+    languages: list[str] | None = None,
+) -> list[str]:
+    """Collect source files for all detected (or specified) languages.
+
+    When *languages* is ``None``, calls :func:`detect_project_languages` to
+    determine which languages are present.  Returns a de-duplicated list of
+    absolute file paths (stable order: Python first, then TypeScript, then Rust,
+    then any additional languages).
+    """
+    if languages is None:
+        languages = detect_project_languages(root_path)
+    all_files: list[str] = []
+    seen: set[str] = set()
+    for lang in languages:
+        for f in _collect_source_files_scandir(root_path, language=lang):
+            if f not in seen:
+                seen.add(f)
+                all_files.append(f)
+    return all_files
 
 
 def _collect_git_tracked_source_files(project_root: str, language: str = "python") -> list[str] | None:

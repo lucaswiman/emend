@@ -2968,14 +2968,19 @@ class FactGraph:
     def build_from_project(
         cls,
         project_path: str,
-        language: str = "python",
+        language: str | None = None,
         db_path: str | None = None,
+        languages: list[str] | None = None,
     ) -> FactGraph:
         """Populate a fact graph by visiting all files in a project.
 
         Uses emend's tree-sitter infrastructure (``emend_core``) to
         extract symbols, references, calls, and imports from every
         source file in the project.
+
+        ``language`` (singular) keeps backward compatibility.  Pass
+        ``languages`` (a list) or leave both as ``None`` to auto-detect
+        from the project directory.
 
         **Note**: This is a deliberate full-rebuild path used by tests and
         one-off analysis.  In steady-state indexing, ``_build_facts_db()``
@@ -2984,14 +2989,26 @@ class FactGraph:
         """
         from emend import emend_core as _rust
         from emend.transform import (
+            _collect_all_source_files,
             _collect_source_files,
             _file_to_module,
             _find_project_root,
+            detect_project_languages,
         )
 
         graph = cls(db_path=db_path)
         project_root = _find_project_root(project_path)
-        source_files = _collect_source_files(project_root, language=language)
+
+        # Resolve which languages to collect.
+        # Priority: explicit ``languages`` list > singular ``language`` > auto-detect.
+        if languages is not None:
+            effective_languages = list(languages)
+        elif language is not None:
+            effective_languages = [language]
+        else:
+            effective_languages = detect_project_languages(project_root)
+
+        source_files = _collect_all_source_files(project_root, languages=effective_languages)
 
         # The scope resolver may fail if pointed at a repo root with
         # incompatible config.  Use the user-supplied project_path as
