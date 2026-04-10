@@ -395,6 +395,10 @@ _SCHEMA_INIT = """\
 
 {:create entry_point_name { name: String }}
 
+{:create entry_point_prefix { prefix: String }}
+
+{:create exported_symbol { qualified_name: String }}
+
 {:create ref_by_block {
     file_path: String,
     func_qn: String,
@@ -878,6 +882,17 @@ class FactGraph:
             {"rows": rows},
         )
 
+    def add_exported_symbols_batch(self, qns: list[str]) -> None:
+        """Bulk-insert exported symbol qualified names."""
+        if not qns:
+            return
+        rows = [[qn] for qn in qns]
+        self._client.run(
+            "?[qualified_name] <- $rows "
+            ":put exported_symbol {qualified_name}",
+            {"rows": rows},
+        )
+
     # -- Queries ----------------------------------------------------------
 
     def symbols(
@@ -1252,6 +1267,7 @@ class FactGraph:
         entry_point_names: list[str] | None = None,
         exclude_reference_paths: list[str] | None = None,
         exclude_reference_segments: list[str] | None = None,
+        entry_point_prefixes: list[str] | None = None,
     ) -> tuple[list[SymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
@@ -1273,6 +1289,9 @@ class FactGraph:
         if entry_point_names:
             name_rows = ", ".join(f'["{n}"]' for n in entry_point_names)
             setup_rules.append(f"?[name] <- [{name_rows}] :put entry_point_name {{name}}")
+        if entry_point_prefixes:
+            pfx_rows = ", ".join(f'["{p}"]' for p in entry_point_prefixes)
+            setup_rules.append(f"?[prefix] <- [{pfx_rows}] :put entry_point_prefix {{prefix}}")
 
         # Run setup rules if any
         for rule in setup_rules:
@@ -1328,28 +1347,26 @@ class FactGraph:
             '*symbol[qn, _, name, _, _, _, _], '
             'starts_with(name, "__"), ends_with(name, "__")\n'
 
-            # Entry points: test functions (test_, Test, describe_)
+            # Entry points: dynamic prefix rules (test_, Test, describe_, etc.)
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "test_")\n'
+            '*entry_point_prefix[pfx], '
+            'starts_with(name, pfx)\n'
 
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "Test")\n'
-
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "describe_")\n'
-
-            # Entry points: decorated symbols
+            # Entry points: decorated symbols (case-insensitive for TS PascalCase)
             'entry_point[qn] := '
             '*decorator_on[qn, dec], '
-            '*entry_point_decorator[dec]\n'
+            '*entry_point_decorator[ep_dec], '
+            'lowercase(dec) == lowercase(ep_dec)\n'
 
             # Entry points: named symbols
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
             '*entry_point_name[name]\n'
+
+            # Entry points: explicitly exported symbols
+            'entry_point[qn] := '
+            '*exported_symbol[qn]\n'
 
             # Dead symbols: top-level only (parent == ""), no live reference, not entry point
             "dead[qn, fp, name, kind, line, end_line, parent] := "
@@ -3016,6 +3033,9 @@ class FactGraph:
         # the detected project_root.
         resolver_root = str(Path(project_path).resolve())
 
+        from emend.language_registry import detect_language as _detect_lang
+        from emend.language_registry import detect_exported_names
+
         for abs_file_path in source_files:
             try:
                 content = Path(abs_file_path).read_text(encoding="utf-8")
@@ -3045,6 +3065,19 @@ class FactGraph:
             _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
             graph.add_symbols_batch(sym_facts)
             graph.add_decorator_on_batch(dec_facts)
+
+            # -- Exported symbol facts (for TS/Rust visibility) ----------
+            try:
+                _lang = _detect_lang(abs_file_path) or "python"
+                exported_names = detect_exported_names(content, _lang)
+                if exported_names:
+                    exported_qns = [
+                        sf.qualified_name for sf in sym_facts
+                        if sf.name in exported_names
+                    ]
+                    graph.add_exported_symbols_batch(exported_qns)
+            except Exception:
+                logger.debug("Could not detect exported symbols for %s", abs_file_path, exc_info=True)
 
             # -- Source location facts for symbols -----------------------
             source_loc_facts: list[SourceLocFact] = []
@@ -3100,6 +3133,7 @@ class FactGraph:
                 ref_facts: list[ReferenceFact] = []
                 call_facts: list[CallFact] = []
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
+                    qn = _normalize_qn(qn)
                     ref_kind = _map_ref_kind(kind)
                     fq, bid = _find_containing_block(block_ranges, line)
                     ref_facts.append(ReferenceFact(
@@ -3132,6 +3166,7 @@ class FactGraph:
                 from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
                 from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
+                    qn = _normalize_qn(qn)
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
@@ -3282,6 +3317,15 @@ def _enclosing_symbol(
         if start <= line <= end:
             return qn
     return None
+
+
+def _normalize_qn(qn: str) -> str:
+    """Normalize language-specific QN separators to dots.
+
+    The Rust scope resolver uses ``::`` (Rust) and ``/`` (TypeScript) as
+    separators, but ``_walk_symbols`` always uses ``.``.
+    """
+    return qn.replace("::", ".").replace("/", ".")
 
 
 def _find_containing_block(

@@ -276,3 +276,58 @@ def load_config(language: str) -> dict:
                 return {}
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Config-driven export detection
+# ---------------------------------------------------------------------------
+
+_export_pattern_cache: dict[str, tuple[list, "re.Pattern | None"]] = {}
+
+
+def _get_export_patterns(language: str):
+    """Load and cache compiled export-detection regexes from config.toml.
+
+    Returns ``(compiled_patterns, named_export_re)`` where each pattern's
+    first capture group yields an exported symbol name.
+    """
+    import re as _re
+
+    if language in _export_pattern_cache:
+        return _export_pattern_cache[language]
+
+    config = load_config(language)
+    exports_cfg = config.get("exports", {})
+    raw_patterns = exports_cfg.get("export_patterns", [])
+    compiled = [_re.compile(p, _re.MULTILINE) for p in raw_patterns]
+
+    named_raw = exports_cfg.get("named_export_pattern", "")
+    named_re = _re.compile(named_raw, _re.MULTILINE) if named_raw else None
+
+    result = (compiled, named_re)
+    _export_pattern_cache[language] = result
+    return result
+
+
+def detect_exported_names(content: str, language: str) -> set[str]:
+    """Detect exported/public symbol names using patterns from config.toml.
+
+    For Python, returns empty (Python uses ``__all__`` which is handled
+    separately).  For other languages, applies the ``export_patterns`` and
+    ``named_export_pattern`` regexes defined in the language's config.
+    """
+    if language == "python":
+        return set()
+
+    compiled_patterns, named_re = _get_export_patterns(language)
+    exported: set[str] = set()
+    for pat in compiled_patterns:
+        for m in pat.finditer(content):
+            exported.add(m.group(1))
+    if named_re:
+        for m in named_re.finditer(content):
+            for name in m.group(1).split(","):
+                name = name.strip().split(" as ")[0].strip()
+                if name and name.isidentifier():
+                    exported.add(name)
+    return exported

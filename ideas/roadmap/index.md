@@ -42,7 +42,7 @@ TypeScript and Rust are **missing**:
 ### Core Analysis
 
 - [x] [Phase 4: Intraprocedural Trace for TS & Rust](./phase-4-intraprocedural-trace.md)
-- [ ] [Phase 5: Cross-Language Dead Code Detection](./phase-5-cross-language-dead-code.md)
+- [x] [Phase 5: Cross-Language Dead Code Detection](./phase-5-cross-language-dead-code.md)
 - [ ] [Phase 6: Cross-Language Lint & Flow Rules](./phase-6-cross-language-lint-flow.md)
 
 ### Project-Level Features

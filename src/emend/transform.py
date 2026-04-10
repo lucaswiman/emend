@@ -584,7 +584,13 @@ def _build_fact_sym_rows(
     Includes all symbol kinds (function, class, variable, etc.) with full
     metadata, matching what the old parse.db symbol_index contained.
     """
-    exported_names = _extract_all_exports_text(content)
+    from emend.language_registry import detect_language
+    lang = detect_language(abs_path) or "python"
+    if lang == "python":
+        exported_names = _extract_all_exports_text(content)
+    else:
+        from emend.language_registry import detect_exported_names
+        exported_names = detect_exported_names(content, lang)
     noqa_lines = _extract_noqa_lines(content)
 
     def _walk(symbols: list[dict], parent_prefix: str = "") -> None:
@@ -664,6 +670,8 @@ def _extract_file_facts(
             tuples from parse.db's reference_index.  When provided, skips
             the expensive scope_resolver.references_in_file() call.
     """
+    from emend.fact_graph import _normalize_qn
+
     import_re = re.compile(
         r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
         re.MULTILINE,
@@ -675,6 +683,7 @@ def _extract_file_facts(
         "calls": [], "calls_by_callee": [], "calls_by_file": [],
         "def_uses": [], "method_calls": [], "source_locs": [],
         "imports": [], "ref_by_block": [], "module_level_refs": [],
+        "exported_qns": [],
     }
 
     # -- Extract symbols via Rust
@@ -707,16 +716,29 @@ def _extract_file_facts(
     for df in dec_facts_for_file:
         result["dec"].append([df.symbol_qn, df.decorator])
 
+    # Collect exported symbol QNs (for TS/Rust visibility-based entry points)
+    from emend.language_registry import detect_language as _detect_lang_eff
+    _lang_eff = _detect_lang_eff(abs_path) or "python"
+    if _lang_eff != "python":
+        from emend.language_registry import detect_exported_names as _detect_exports_eff
+        exported_names = _detect_exports_eff(content, _lang_eff)
+        if exported_names:
+            for sf in sym_facts_for_file:
+                if sf.name in exported_names:
+                    result["exported_qns"].append([sf.qualified_name])
+
     # -- Extract references (pre-computed or via Rust scope resolver)
     file_refs: list[tuple] = []
     if precomputed_refs is not None:
         for qn_str, line, col, kind in precomputed_refs:
+            qn_str = _normalize_qn(qn_str)
             file_refs.append((qn_str, line, col, kind))
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
             for qn_str, line, col, _offset, _end_offset, kind, _ann in \
                     scope_resolver.references_in_file(abs_path):
+                qn_str = _normalize_qn(qn_str)
                 file_refs.append((qn_str, line, col, kind))
                 result["fact_ref"].append([qn_str, rel_path, line, col, kind])
         except Exception:
@@ -906,6 +928,7 @@ def _build_facts_db(
         _enclosing_symbol,
         _extract_imports,
         _build_symbol_line_index,
+        _normalize_qn,
         _walk_symbols,
         SymbolFact,
         DecoratorOnFact,
@@ -967,9 +990,21 @@ def _build_facts_db(
             abs_path, rel_path, ext, content = file_tuple
             module_name = _file_to_module(abs_path, project_root)
             file_refs = precomputed_refs.get(abs_path) if precomputed_refs else None
+
+            # For files not covered by precomputed_refs, create a per-file
+            # scope resolver with the correct extension so that TS/Rust
+            # files get proper reference extraction.
+            file_resolver = scope_resolver
+            if file_refs is None and ext != "py":
+                try:
+                    file_resolver = _rust.PyScopeResolver(resolved_root, ext)
+                    file_resolver.index_file(abs_path, content)
+                except Exception:
+                    file_resolver = scope_resolver
+
             return _extract_file_facts(
                 abs_path, rel_path, ext, content,
-                project_root, module_name, scope_resolver,
+                project_root, module_name, file_resolver,
                 _rust, build_cfgs_for_source, _walk_symbols,
                 _find_containing_block, _enclosing_symbol,
                 _extract_imports, _build_symbol_line_index,
@@ -995,6 +1030,7 @@ def _build_facts_db(
         all_imports: list[list] = []
         all_ref_by_block: list[list] = []
         all_module_level_refs: list[list] = []
+        all_exported_qns: list[list] = []
 
         _KEYS_TO_LISTS = {
             "fact_sym": cozo_fact_sym, "fact_ref": cozo_fact_ref,
@@ -1006,6 +1042,7 @@ def _build_facts_db(
             "method_calls": all_method_calls, "source_locs": all_source_locs,
             "imports": all_imports, "ref_by_block": all_ref_by_block,
             "module_level_refs": all_module_level_refs,
+            "exported_qns": all_exported_qns,
         }
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1152,6 +1189,13 @@ def _build_facts_db(
             {"rows": all_module_level_refs},
         )
 
+        if all_exported_qns:
+            fdb.run(
+                "?[qualified_name] <- $rows "
+                ":replace exported_symbol {qualified_name}",
+                {"rows": all_exported_qns},
+            )
+
     except BaseException:
         logger.debug("facts db build failed", exc_info=True)
 
@@ -1206,7 +1250,7 @@ def _extract_all_exports_text(source: str) -> set[str]:
     return set(_ALL_NAME_RE.findall(m.group(1)))
 
 
-_NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+_NOQA_RE = re.compile(r'(?:#|//)\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
 
 
 def _extract_noqa_lines(source: str) -> set[int]:
@@ -5778,8 +5822,11 @@ def _is_test_file(file_path: str) -> bool:
     name = p.name
     if name.startswith('test_') or name.endswith('_test.py'):
         return True
+    stem = p.stem
+    if stem.endswith('.test') or stem.endswith('.spec'):
+        return True
     parts = p.parts
-    if 'tests' in parts or 'test' in parts:
+    if 'tests' in parts or 'test' in parts or '__tests__' in parts:
         return True
     return False
 
@@ -6564,15 +6611,24 @@ def find_dead_code(
     # Build the FactGraph and run the unified Datalog dead code query.
     graph = _get_or_build_fact_graph(project_path)
 
-    # Combine built-in + user-supplied entry point info for the Datalog query.
-    all_ep_decorators = list(_ENTRY_POINT_DECORATORS)
-    all_ep_basenames = list(_ENTRY_POINT_DECORATOR_BASENAMES)
+    # Detect project languages and merge entry-point configs from all.
+    detected_langs = detect_project_languages(scan_root)
+    all_ep_decorators: list[str] = []
+    all_ep_basenames: list[str] = []
+    all_ep_names: list[str] = []
+    all_ep_prefixes: list[str] = []
+    for lang in (detected_langs or ["python"]):
+        ep = _get_entry_point_config(lang)
+        all_ep_decorators.extend(ep["decorators"])
+        all_ep_basenames.extend(ep["decorator_basenames"])
+        all_ep_names.extend(ep["names"])
+        all_ep_prefixes.extend(ep["name_prefixes"])
+    # Add user-supplied overrides
     if entry_point_decorators:
         all_ep_decorators.extend(entry_point_decorators)
         all_ep_basenames.extend(
             d.rsplit(".", 1)[-1] for d in entry_point_decorators
         )
-    all_ep_names = list(_ENTRY_POINT_NAMES)
     if entry_point_names:
         all_ep_names.extend(entry_point_names)
 
@@ -6603,6 +6659,7 @@ def find_dead_code(
     raw_dead, raw_unreachable = graph.dead_code_unified(
         entry_point_decorators=all_ep_decorators + all_ep_basenames,
         entry_point_names=all_ep_names,
+        entry_point_prefixes=all_ep_prefixes,
         exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
         exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
     )
@@ -6611,7 +6668,6 @@ def find_dead_code(
     _file_lines_cache: dict[str, list[str]] = {}
 
     def _has_noqa(fp: str, line: int) -> bool:
-        """Check if the definition line has a # noqa comment."""
         if fp not in _file_lines_cache:
             try:
                 _file_lines_cache[fp] = Path(fp).read_text(errors="replace").splitlines()
@@ -6619,8 +6675,7 @@ def find_dead_code(
                 _file_lines_cache[fp] = []
         lines = _file_lines_cache[fp]
         if 0 < line <= len(lines):
-            line_text = lines[line - 1]
-            if "# noqa" in line_text:
+            if _NOQA_RE.search(lines[line - 1]):
                 return True
         return False
 
@@ -6661,6 +6716,10 @@ def find_dead_code(
 
         # noqa suppression
         if _has_noqa(abs_fp, sym.line):
+            continue
+
+        # Skip symbols in test files — they are entry points by convention
+        if _is_test_file(abs_fp):
             continue
 
         dead_symbols.append(DeadSymbol(
