@@ -3,7 +3,26 @@
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-use crate::scope::{LanguageConfig, ScopeResolver};
+use crate::scope::{LanguageConfig, ScopeResolver, StructuredImport};
+
+/// Convert a `StructuredImport` to a Python dict.
+fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<PyObject> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("module", &si.module)?;
+    dict.set_item("level", si.level)?;
+    let names: Vec<(String, Option<String>)> = si
+        .names
+        .iter()
+        .map(|n| (n.name.clone(), n.alias.clone()))
+        .collect();
+    dict.set_item("names", names)?;
+    dict.set_item("start_byte", si.start_byte)?;
+    dict.set_item("end_byte", si.end_byte)?;
+    dict.set_item("start_line", si.start_line)?;
+    dict.set_item("end_line", si.end_line)?;
+    dict.set_item("is_plain", si.is_plain)?;
+    Ok(dict.into())
+}
 
 /// Python-visible scope resolver.
 #[pyclass]
@@ -165,25 +184,7 @@ impl PyScopeResolver {
         let _ = fs; // we only needed to verify the file was indexed
 
         let structured = self.inner.collect_structured_imports(&tree, &source);
-        let mut result = Vec::with_capacity(structured.len());
-        for si in &structured {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("module", &si.module)?;
-            dict.set_item("level", si.level)?;
-            let names: Vec<(String, Option<String>)> = si
-                .names
-                .iter()
-                .map(|n| (n.name.clone(), n.alias.clone()))
-                .collect();
-            dict.set_item("names", names)?;
-            dict.set_item("start_byte", si.start_byte)?;
-            dict.set_item("end_byte", si.end_byte)?;
-            dict.set_item("start_line", si.start_line)?;
-            dict.set_item("end_line", si.end_line)?;
-            dict.set_item("is_plain", si.is_plain)?;
-            result.push(dict.into());
-        }
-        Ok(result)
+        structured.iter().map(|si| structured_import_to_pydict(py, si)).collect()
     }
 
     /// Returns all identifier names with their annotation context for a file.
@@ -243,25 +244,7 @@ impl PyScopeResolver {
             None => return Ok(Vec::new()),
         };
         let structured = self.inner.collect_structured_imports(&tree, source);
-        let mut result = Vec::with_capacity(structured.len());
-        for si in &structured {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("module", &si.module)?;
-            dict.set_item("level", si.level)?;
-            let names: Vec<(String, Option<String>)> = si
-                .names
-                .iter()
-                .map(|n| (n.name.clone(), n.alias.clone()))
-                .collect();
-            dict.set_item("names", names)?;
-            dict.set_item("start_byte", si.start_byte)?;
-            dict.set_item("end_byte", si.end_byte)?;
-            dict.set_item("start_line", si.start_line)?;
-            dict.set_item("end_line", si.end_line)?;
-            dict.set_item("is_plain", si.is_plain)?;
-            result.push(dict.into());
-        }
-        Ok(result)
+        structured.iter().map(|si| structured_import_to_pydict(py, si)).collect()
     }
 
     /// Returns all qualified name strings mentioned in a file (for pre-filter index).

@@ -2514,6 +2514,52 @@ impl ScopeResolver {
         let imports = &self.config.imports;
         let mut result = Vec::new();
 
+        /// Extract imported names from the children of an import node.
+        /// `skip_node_id` is the id of the module_name child to skip (for from-imports).
+        fn extract_imported_names(
+            node: &tree_sitter::Node,
+            source: &[u8],
+            imports: &ImportsSection,
+            skip_node_id: Option<usize>,
+        ) -> Vec<ImportedName> {
+            let mut names = Vec::new();
+            for_each_child(node, |child| {
+                if skip_node_id == Some(child.id()) {
+                    return;
+                }
+                let ck = child.kind();
+                if !imports.star_import.is_empty() && ck == imports.star_import {
+                    names.push(ImportedName {
+                        name: "*".to_string(),
+                        alias: None,
+                    });
+                } else if imports.identifier.as_deref() == Some(ck)
+                    || imports.dotted_name.as_deref() == Some(ck)
+                {
+                    names.push(ImportedName {
+                        name: node_text(child, source).to_string(),
+                        alias: None,
+                    });
+                } else if imports.aliased_import.as_deref() == Some(ck) {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let imported = node_text(name_node, source).to_string();
+                        let alias = if !imports.alias_field.is_empty() {
+                            child
+                                .child_by_field_name(&imports.alias_field)
+                                .map(|a| node_text(a, source).to_string())
+                        } else {
+                            None
+                        };
+                        names.push(ImportedName {
+                            name: imported,
+                            alias,
+                        });
+                    }
+                }
+            });
+            names
+        }
+
         fn walk_for_imports(
             node: tree_sitter::Node,
             source: &[u8],
@@ -2522,7 +2568,6 @@ impl ScopeResolver {
         ) {
             let nk = node.kind();
 
-            // Handle `from X import Y` statements.
             if !imports.import_from.is_empty() && nk == imports.import_from {
                 let mod_node = node.child_by_field_name(&imports.module_field);
                 let raw_module = mod_node
@@ -2544,49 +2589,9 @@ impl ScopeResolver {
                         }
                     }
                 }
-                // Strip leading dots from the module name.
                 let module = raw_module.trim_start_matches('.').to_string();
 
-                let mut names = Vec::new();
-                for_each_child(&node, |child| {
-                    // Skip the module_name field — it's the module, not an imported name.
-                    if mod_node_id == Some(child.id()) {
-                        return;
-                    }
-                    let ck = child.kind();
-                    if !imports.star_import.is_empty() && ck == imports.star_import {
-                        names.push(ImportedName {
-                            name: "*".to_string(),
-                            alias: None,
-                        });
-                    } else if imports.identifier.as_deref() == Some(ck)
-                        || imports.dotted_name.as_deref() == Some(ck)
-                    {
-                        names.push(ImportedName {
-                            name: node_text(child, source).to_string(),
-                            alias: None,
-                        });
-                    } else if imports.aliased_import.as_deref() == Some(ck) {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            let imported = node_text(name_node, source).to_string();
-                            let alias = if !imports.alias_field.is_empty() {
-                                child
-                                    .child_by_field_name(&imports.alias_field)
-                                    .map(|a| node_text(a, source).to_string())
-                            } else {
-                                None
-                            };
-                            names.push(ImportedName {
-                                name: imported,
-                                alias,
-                            });
-                        }
-                    }
-                });
-
-                // The module_field child is handled separately above and is
-                // not added to ``names`` by the for_each_child loop, so no
-                // filtering is needed here.
+                let names = extract_imported_names(&node, source, imports, mod_node_id);
 
                 result.push(StructuredImport {
                     module,
@@ -2601,37 +2606,8 @@ impl ScopeResolver {
                 return;
             }
 
-            // Handle plain `import X` statements.
-            if nk == imports.import_statement
-                && (imports.import_from.is_empty() || nk != imports.import_from)
-            {
-                let mut names = Vec::new();
-                for_each_child(&node, |child| {
-                    let ck = child.kind();
-                    if imports.dotted_name.as_deref() == Some(ck)
-                        || imports.identifier.as_deref() == Some(ck)
-                    {
-                        names.push(ImportedName {
-                            name: node_text(child, source).to_string(),
-                            alias: None,
-                        });
-                    } else if imports.aliased_import.as_deref() == Some(ck) {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            let imported = node_text(name_node, source).to_string();
-                            let alias = if !imports.alias_field.is_empty() {
-                                child
-                                    .child_by_field_name(&imports.alias_field)
-                                    .map(|a| node_text(a, source).to_string())
-                            } else {
-                                None
-                            };
-                            names.push(ImportedName {
-                                name: imported,
-                                alias,
-                            });
-                        }
-                    }
-                });
+            if nk == imports.import_statement {
+                let names = extract_imported_names(&node, source, imports, None);
 
                 result.push(StructuredImport {
                     module: String::new(),

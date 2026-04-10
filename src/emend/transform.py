@@ -4464,18 +4464,6 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     return code
 
 
-def _collect_names(source: str) -> set[str]:
-    """Collect all Name references in code using tree-sitter.
-
-    Returns the set of simple identifier names (the leftmost name in
-    attribute chains) referenced anywhere in *source*, excluding
-    language keywords.
-    """
-    resolver = _rust.PyScopeResolver("/tmp", "py")
-    identifiers = resolver.collect_identifiers_from_source(source)
-    return {name for name, _ann in identifiers}
-
-
 def _collect_name_contexts(source: str) -> tuple[set[str], set[str]]:
     """Return ``(runtime_names, annotation_names)`` used in *source*.
 
@@ -4568,10 +4556,10 @@ def analyze_imports(
         >>> imports = analyze_imports(source, "module.py")
         >>> # Returns ["import ast"] if module.py has that import
     """
-    used_names = _collect_names(symbol_source)
+    runtime_names, annotation_names = _collect_name_contexts(symbol_source)
+    used_names = runtime_names | annotation_names
     if not used_names:
         return []
-    runtime_names, annotation_names = _collect_name_contexts(symbol_source)
 
     source_path = Path(source_file)
     if not source_path.exists():
@@ -7074,7 +7062,7 @@ def _split_or_retarget_import(
     source_module: str,
     dest_module: str,
     symbol_name: str,
-    resolver: object | None = None,
+    resolver: object = None,
 ) -> str | None:
     """Rewrite ``from source_module import ...`` statements for a symbol move.
 
@@ -7087,38 +7075,29 @@ def _split_or_retarget_import(
       import lines so that sibling names are not inadvertently retargeted to
       ``dest_module`` (issue #138 Bug 1).
 
-    Uses tree-sitter ``structured_imports_in_file`` for import parsing and
-    byte-range-based replacement instead of Python's ``ast`` module.
-
     Returns the rewritten file content string, or ``None`` if no change was
     needed.
     """
-    # Use the provided resolver or create a temporary one.
-    if resolver is not None:
-        structured_imports = resolver.structured_imports_in_file(py_file)
-    else:
-        tmp_resolver = _rust.PyScopeResolver("/tmp", "py")
-        try:
-            tmp_resolver.index_file(py_file, content)
-        except Exception:
-            return None
-        structured_imports = tmp_resolver.structured_imports_in_file(py_file)
+    structured_imports = resolver.structured_imports_in_file(py_file)
 
     original_content = content
     lines = content.splitlines(keepends=True)
+
+    # Precompute cumulative line offsets for O(1) lookup per import.
+    line_offsets = [0]
+    for line in lines:
+        line_offsets.append(line_offsets[-1] + len(line))
 
     # Collect (stmt_start_byte, stmt_end_byte, replacement_text) tuples;
     # applied in reverse order to preserve earlier byte offsets.
     replacements: list[tuple[int, int, str]] = []
 
     for imp in structured_imports:
-        # Only handle from-imports, not plain imports.
         if imp["is_plain"]:
             continue
         if imp["module"] != source_module:
             continue
         if imp["level"]:
-            # Relative imports: skip (module name doesn't match as simple string)
             continue
 
         names = imp["names"]
@@ -7152,13 +7131,8 @@ def _split_or_retarget_import(
         else:
             replacement = moved_line
 
-        # Compute line-based byte offsets.  tree-sitter start_byte is at the
-        # first token (after indentation), but we need to replace the whole
-        # line(s) including leading whitespace and trailing newline.
-        start_line_idx = imp["start_line"] - 1
-        end_line_idx = imp["end_line"]  # exclusive
-        stmt_start = sum(len(lines[i]) for i in range(start_line_idx))
-        stmt_end = sum(len(lines[i]) for i in range(end_line_idx))
+        stmt_start = line_offsets[imp["start_line"] - 1]
+        stmt_end = line_offsets[imp["end_line"]]
         replacements.append((stmt_start, stmt_end, replacement + "\n"))
 
     if not replacements:
@@ -7168,8 +7142,7 @@ def _split_or_retarget_import(
     for start, end, repl in replacements:
         content = content[:start] + repl + content[end:]
 
-    new_content = content
-    return new_content if new_content != original_content else None
+    return content if content != original_content else None
 
 
 def _update_imports_for_move(
