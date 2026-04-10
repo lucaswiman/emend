@@ -37,7 +37,7 @@ TypeScript and Rust are **missing**:
 
 - [x] [Phase 1: Tree-Sitter Import Extraction](./phase-1-treesitter-import-extraction.md)
 - [x] [Phase 2: Language-Aware Fact Graph Building](./phase-2-language-aware-fact-graph.md)
-- [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md)
+- [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md) *(reopened: `_find_assignments_in_source()` regex → deferred to Phase 9)*
 
 ### Core Analysis
 

@@ -20,40 +20,120 @@ correctly for TS/Rust, the trace engine should work with minimal changes.
 - Phase 3 (parameterised helpers) — needed for keyword filtering and
   container mutation
 
+## Design Principle: Tree-Sitter AST over Regexes
+
+The current trace module (`trace.py`) contains hardcoded regexes that assume
+Python syntax for extracting assignment targets, return values, etc.  Per the
+project design philosophy:
+
+> **Do not** use hand-rolled regexes for parsing source code when a
+> tree-sitter-based solution exists or can be built.  If the Rust extension
+> lacks a needed capability, extend it rather than working around the gap.
+
+The `DefUseFact` relation — populated by tree-sitter `def_use_rules` from
+each language's `config.toml` — already contains write targets with line
+numbers for every language.  Rather than adding per-language regexes, this
+phase replaces inline regex parsing with **fact-graph queries** backed by the
+tree-sitter AST.
+
 ## Scope
 
-- `src/emend/trace.py` — `run_trace_analysis()`, `_run_trace_datalog()`,
-  `_resolve_match_to_location()`, `_find_functions_in_file()`
+- `src/emend/trace.py` — `run_trace_analysis()`, `_run_trace_datalog()`
 - `src/emend/fact_graph.py` — `trace_propagation_datalog()` (should need no
-  changes if facts are correct)
-- `src/emend/location_resolver.py` — ensure `from_source()` works with
-  non-Python extensions
-- `src/emend/cli.py` — `trace` command: accept `.ts`/`.rs` files
+  changes), possibly a new lightweight query helper
+- `src/emend/location_resolver.py` — `from_source()` already derives `ext`
+  from `file_path`; verify it works with `.ts`/`.rs`
+- Language configs: `languages/{python,typescript,rust}/config.toml`
 
-## Remaining Hardcoded Assumptions
+## Hardcoded Assumptions to Fix
 
-| Location | Issue | Fix |
-|----------|-------|-----|
-| `trace.py:655` | `run_trace_analysis(language="python")` default | Auto-detect from file extensions |
-| `trace.py:464` | `_find_assignments_in_source(ext="py")` | Pass correct ext |
-| `trace.py:_find_functions_in_file()` | May assume Python function nodes | Use config `function_nodes` |
-| `location_resolver.py` | `from_source()` ext parameter | Verify it passes through |
-| `trace.py` | `build_cfgs_for_source(func_source, ext="py")` | Derive ext from file path |
+### 1. Assignment-target extraction via regex (lines ~814, ~894)
+
+**Current:** `_run_trace_datalog()` uses
+`re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)` to find the
+variable being assigned on a source/sanitizer match line.  This fails for
+TypeScript (`let x = source()`) and Rust (`let x = source()`) because it
+captures the keyword `let`/`const` instead of the variable name.
+
+**Fix:** Query the `DefUseFact` relation in the already-built fact graph for
+`kind="write"` facts on the matched line.  The fact graph is available as the
+`graph` local in `_run_trace_datalog()`.  Add a helper:
+
+```python
+def _write_targets_on_line(graph: FactGraph, file_path: str, line: int) -> set[str]:
+    """Return variable names written on *line* according to DefUseFacts."""
+    return {
+        fact.var_name
+        for fact in graph.def_uses(file_path=file_path, kind="write")
+        if fact.def_line == line
+    }
+```
+
+This is fully language-agnostic because `DefUseFact` is populated by
+tree-sitter `def_use_rules` defined in each language's `config.toml`.
+
+### 2. `_extract_identifiers()` keyword filtering (line ~459)
+
+**Current:** Already loads keywords from `config.toml` via `_get_keywords()`.
+The identifier tokenisation regex itself (`[A-Za-z_][A-Za-z_0-9]*`) is
+language-agnostic and acceptable — it's tokenising capture text, not parsing
+source structure.
+
+**Fix:** Thread `language` to all ~15 call sites in `_run_trace_datalog()`
+that currently rely on the `language="python"` default.  No new regexes
+needed.
+
+### 3. `language="python"` defaults throughout
+
+**Current:** `run_trace_analysis()`, `_compute_function_summary()`,
+`_run_interprocedural_trace_datalog()`, `run_interprocedural_trace()` all
+default to `language="python"`.
+
+**Fix:** Add auto-detection from file extensions using
+`language_registry.detect_language()`.  Keep `"python"` as the fallback for
+backward compatibility, but when a list of files is provided, infer the
+language from the first file's extension.
+
+### 4. `_find_assignments_in_source()` (line ~487) — Phase 9 scope
+
+This function uses three hardcoded regexes to parse assignments from statement
+text.  It is only called from interprocedural analysis functions
+(`_compute_function_summary`, `_compute_return_reachable_vars`,
+`_collect_param_to_return_dependencies`).  Phase 9 should replace it with
+fact-graph `DefUseFact` queries.  Phase 4 only needs to ensure the `ext`
+parameter is threaded through (not the default `"py"`), so the underlying
+`get_statement_ranges()` call parses the correct language.
 
 ## Todo
 
-### Core trace plumbing
+### Replace regex assignment extraction with fact-graph queries
+
+- [ ] Add a `_write_targets_on_line(graph, file_path, line)` helper to
+  `trace.py` that queries `DefUseFact` for write targets on a given line.
+- [ ] Replace the inline regex at ~line 814 (source match assignment target)
+  with a call to `_write_targets_on_line()`.
+- [ ] Replace the inline regex at ~line 894 (sanitizer match assignment
+  target) with a call to `_write_targets_on_line()`.
+- [ ] Verify the replacement produces identical results for existing Python
+  tests (the fact graph should return the same targets the regex found).
+
+### Thread `language` through `_extract_identifiers()` calls
+
+- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 807
+  (source capture variables).
+- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 851
+  (sink capture variables).
+- [ ] Thread `language` to the `_extract_identifiers()` call at ~line 889
+  (sanitizer capture variables).
+
+### Auto-detection and parameter plumbing
 
 - [ ] Update `run_trace_analysis()` to auto-detect language from file
-  extensions when `language` is not specified.
-- [ ] Fix `build_cfgs_for_source()` calls in `trace.py` to pass the correct
-  `ext` derived from the file path instead of hardcoding `"py"`.
-- [ ] Update `_find_functions_in_file()` to use language config `function_nodes`
-  instead of assuming Python AST structure.
-- [ ] Verify `LocationResolver.from_source()` works with `ext="ts"` and
-  `ext="rs"`.
-- [ ] Verify `_resolve_match_to_location()` correctly maps pattern matches
-  to CFG blocks for non-Python languages.
+  extensions via `detect_language()` when the caller doesn't specify.
+- [ ] Thread `ext` through `_find_assignments_in_source()` callers (so
+  `get_statement_ranges()` parses the correct language for Phase 9 prep).
+- [ ] Verify `LocationResolver.from_source()` works with `.ts` and `.rs`
+  file paths (it derives `ext` from the path already).
 
 ### TypeScript trace tests
 
@@ -90,6 +170,9 @@ correctly for TS/Rust, the trace engine should work with minimal changes.
 - `emend trace` detects source→sink violations in Rust files.
 - Sanitizer blocking works correctly for both languages.
 - Container mutation taint propagation works for both languages.
+- **No hardcoded language-specific regexes in `trace.py`.**  Assignment
+  target extraction uses tree-sitter–backed `DefUseFact` queries from the
+  fact graph, not regex.
 - All existing Python trace tests continue to pass unchanged.
 - At least 8 trace test cases per language, mirroring the Python test suite
   structure in `test_trace.py`.
