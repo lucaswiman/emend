@@ -7128,14 +7128,18 @@ def _split_or_retarget_import(
                 return f"{a.name} as {a.asname}"
             return a.name
 
+        # Preserve the indentation of the original import statement.
+        orig_line = lines[node.lineno - 1] if node.lineno - 1 < len(lines) else ""
+        indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
+
         moved_line = (
-            f"from {dest_module} import "
+            f"{indent}from {dest_module} import "
             + ", ".join(_alias_str(a) for a in moved_aliases)
         )
 
         if remaining_aliases:
             remaining_line = (
-                f"from {source_module} import "
+                f"{indent}from {source_module} import "
                 + ", ".join(_alias_str(a) for a in remaining_aliases)
             )
             replacement = moved_line + "\n" + remaining_line
