@@ -313,8 +313,8 @@ def test_grammar_and_cookbook_all_returns_full_document():
     assert "Selector syntax" in result
     assert "Pattern syntax" in result
     assert "Cookbook recipes" in result
-    assert "emend grep" in result or "emend search" in result
-    assert "emend replace" in result
+    assert "emend find" in result
+    assert "emend edit replace" in result
 
 
 def test_mcp_help():

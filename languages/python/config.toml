@@ -368,6 +368,9 @@ left_field = "left"
 right_field = "right"
 operator_field = "operator"
 annotation_field = "type"
+# Field names whose subtrees are type-annotation context.
+# References within these fields get in_annotation = true.
+annotation_fields = ["type", "return_type"]
 value_field = "value"
 condition_field = "condition"
 target_field = "left"

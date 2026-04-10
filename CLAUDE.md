@@ -140,6 +140,21 @@
 
 ## Architecture
 
+### Design Philosophy: Tree-sitter and Configuration over Language-Specific Logic
+
+**This is a fundamental principle of emend's design.** Although Python is the primary language emend is written and tested with, language-specific code must be avoided wherever possible. Prefer:
+
+1. **Tree-sitter via the Rust `emend_core` extension** — Use `PyScopeResolver`, `find_pattern_in_files`, `PyFileTransform`, and other Rust APIs for source analysis and transformation. These work across all supported languages via the same code paths.
+2. **Language configuration in `languages/<lang>/config.toml`** — Node types (e.g. `string`, `function_definition`), import syntax, comment prefixes, and other language-specific details belong in TOML configuration, not hard-coded in Python.
+3. **The `ImportHandler` / language plugin protocol** — When language-specific behavior is unavoidable, it goes in the plugin interface (`language_plugins.py`), not inline in transform logic.
+
+**Do not** use Python's `ast` module, hand-rolled regexes for parsing source code, or other Python-specific approaches when a tree-sitter-based solution exists or can be built. For example:
+- To find string literals in source code, use tree-sitter pattern matching (`{type: "string", value: null}`), not a regex.
+- To detect references to a symbol, use `PyScopeResolver.references_in_file()`, not a regex over source lines.
+- To get statement boundaries, use `get_statement_ranges()` or tree-sitter node spans, not Python's `ast.parse()`.
+
+If the Rust extension lacks a needed capability, extend it rather than working around the gap with Python-specific code.
+
 ### Tree-sitter + Rust Backend
 
 All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on tree-sitter:

@@ -715,7 +715,7 @@ def _extract_file_facts(
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
-            for qn_str, line, col, _offset, _end_offset, kind in \
+            for qn_str, line, col, _offset, _end_offset, kind, _ann in \
                     scope_resolver.references_in_file(abs_path):
                 file_refs.append((qn_str, line, col, kind))
                 result["fact_ref"].append([qn_str, rel_path, line, col, kind])
@@ -1420,7 +1420,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
         if need_ref and scope_indexed:
             try:
-                for qn_str, line, col, offset, end_offset, kind in scope_resolver.references_in_file(py_file):
+                for qn_str, line, col, offset, end_offset, kind, _ann in scope_resolver.references_in_file(py_file):
                     ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
             except Exception:
                 pass
@@ -3412,7 +3412,7 @@ def visit_project_ts(
     The same resolver instance is used for all files in the batch.
     """
     t_start = time.monotonic()
-    project_root = project_path
+    project_root = str(Path(project_path).resolve())
     source_files = _collect_source_files(project_root, language=language)
 
     if candidate_files is not None:
@@ -4067,7 +4067,7 @@ def _filter_matches_by_import(
         references = resolver.references_in_file(file_path)
         
         match_qn = None
-        for qn, line, col, offset, end_offset, kind in references:
+        for qn, line, col, offset, end_offset, kind, _ann in references:
             if line == match.line and col == match.col:
                 match_qn = qn
                 break
@@ -4106,7 +4106,7 @@ def _filter_matches_by_scope_local(
     # Build a set of names that are imported (defined via import statements).
     imported_names: set[str] = set()
     references = resolver.references_in_file(file_path)
-    for qn, line, col, offset, end_offset, kind in references:
+    for qn, line, col, offset, end_offset, kind, _ann in references:
         if kind == "import":
             # Extract the local name from the qualified name
             # (e.g., "os.path.join" → "join")
@@ -4464,32 +4464,89 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     return code
 
 
-def _collect_names(source: str) -> set[str]:
-    """Collect all Name references in code using stdlib ast."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            # Collect the leftmost name in the chain
-            current = node.value
-            while isinstance(current, ast.Attribute):
-                current = current.value
-            if isinstance(current, ast.Name):
-                names.add(current.id)
-    return names
+def _collect_name_contexts(source: str) -> tuple[set[str], set[str]]:
+    """Return ``(runtime_names, annotation_names)`` used in *source*.
+
+    ``annotation_names`` only includes names that appear in annotation
+    positions.  ``runtime_names`` includes names referenced in executable
+    positions, including decorators, bases, defaults, and function bodies.
+
+    Uses tree-sitter's annotation_fields config to classify identifiers.
+    """
+    resolver = _rust.PyScopeResolver("/tmp", "py")
+    identifiers = resolver.collect_identifiers_from_source(source)
+
+    runtime_names: set[str] = set()
+    annotation_names: set[str] = set()
+
+    for name, in_annotation in identifiers:
+        if in_annotation:
+            annotation_names.add(name)
+        else:
+            runtime_names.add(name)
+
+    return runtime_names, annotation_names
 
 
-def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
+def _resolve_relative_module(
+    level: int,
+    module: str,
+    source_file: str,
+    project_path: str | None,
+) -> str:
+    """Convert a relative import into an absolute module path.
+
+    ``level`` is the number of leading dots (``stmt.level`` from AST),
+    ``module`` is the dotted name after the dots (may be empty for
+    ``from . import X``), and ``source_file`` is the file containing the
+    import.
+
+    Returns the fully-qualified module name, or falls back to ``module``
+    unchanged if resolution is not possible.
+    """
+    if project_path is None:
+        return module
+
+    src_module = _file_to_module(source_file, project_path)
+    # Compute the package that owns source_file.
+    if src_module.endswith(".__init__"):
+        # __init__.py IS the package.
+        package = src_module[: -len(".__init__")]
+    elif "." in src_module:
+        package = src_module.rsplit(".", 1)[0]
+    else:
+        package = ""
+
+    parts = package.split(".") if package else []
+    # ``from . import X`` has level=1, meaning current package (0 levels up).
+    # ``from .. import X`` has level=2, meaning 1 level up, etc.
+    levels_up = level - 1
+    if levels_up > len(parts):
+        return module  # can't resolve — too many dots
+    base_parts = parts[: len(parts) - levels_up] if levels_up else parts
+
+    if module:
+        base_parts.append(module)
+    return ".".join(base_parts) if base_parts else module
+
+
+def analyze_imports(
+    symbol_source: str,
+    source_file: str,
+    source_module: str | None = None,
+    project_path: str | None = None,
+) -> list[str]:
     """Analyze which imports from source_file are needed by symbol_source.
 
     Args:
         symbol_source: Source code of the symbol being copied
         source_file: Path to file where symbol originated (to read imports from)
+        source_module: Dotted module name of source_file.  When provided,
+            top-level names that are *defined* in source_file (classes,
+            functions, assignments) rather than imported are also pulled in as
+            ``from source_module import Name`` statements so the destination
+            file remains self-contained after a move (issue #138 Bug 2).
+        project_path: Project root for resolving relative imports to absolute.
 
     Returns:
         List of import statement strings needed for the symbol
@@ -4499,7 +4556,8 @@ def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
         >>> imports = analyze_imports(source, "module.py")
         >>> # Returns ["import ast"] if module.py has that import
     """
-    used_names = _collect_names(symbol_source)
+    runtime_names, annotation_names = _collect_name_contexts(symbol_source)
+    used_names = runtime_names | annotation_names
     if not used_names:
         return []
 
@@ -4507,34 +4565,54 @@ def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
     if not source_path.exists():
         return []
 
+    # Use tree-sitter scope resolver to parse imports from source file.
+    proj_root = _find_project_root(project_path or source_file)
+    resolver = _rust.PyScopeResolver(proj_root, "py")
     try:
-        source_tree = ast.parse(source_path.read_text())
+        source_content = source_path.read_text()
+        resolver.index_file(str(source_path.resolve()), source_content)
     except Exception:
         return []
 
+    structured_imports = resolver.structured_imports_in_file(
+        str(source_path.resolve())
+    )
+
     needed_imports = []
+    covered_names: set[str] = set()
 
-    for stmt in source_tree.body:
-        if isinstance(stmt, ast.Import):
-            for alias in stmt.names:
-                effective_name = alias.asname or alias.name.split('.')[0]
+    for imp in structured_imports:
+        if imp["is_plain"]:
+            # Plain `import X` / `import X as A` statements.
+            for name, alias in imp["names"]:
+                effective_name = alias or name.split('.')[0]
                 if effective_name in used_names:
-                    if alias.asname:
-                        needed_imports.append(f"import {alias.name} as {alias.asname}")
+                    covered_names.add(effective_name)
+                    if alias:
+                        needed_imports.append(f"import {name} as {alias}")
                     else:
-                        needed_imports.append(f"import {alias.name}")
-
-        elif isinstance(stmt, ast.ImportFrom):
-            if stmt.names and isinstance(stmt.names[0], ast.alias) and stmt.names[0].name == '*':
+                        needed_imports.append(f"import {name}")
+        else:
+            # `from X import Y` statements.
+            names = imp["names"]
+            if names and names[0][0] == '*':
                 continue
 
-            module_name = stmt.module or ''
+            module_name = imp["module"]
+
+            # Resolve relative imports to absolute so they work from the
+            # destination file (which is typically in a different package).
+            if imp["level"] > 0:
+                module_name = _resolve_relative_module(
+                    imp["level"], module_name, source_file, project_path,
+                )
 
             used_import_names = []
-            for alias in stmt.names:
-                effective_name = alias.asname or alias.name
+            for name, alias in names:
+                effective_name = alias or name
                 if effective_name in used_names:
-                    used_import_names.append((alias.name, alias.asname))
+                    covered_names.add(effective_name)
+                    used_import_names.append((name, alias))
 
             if used_import_names:
                 import_parts = []
@@ -4545,6 +4623,53 @@ def analyze_imports(symbol_source: str, source_file: str) -> list[str]:
                         import_parts.append(name)
                 needed_imports.append(f"from {module_name} import {', '.join(import_parts)}")
 
+    # When moving a symbol, detect locally-defined top-level names that the
+    # moved symbol references.  These need TYPE_CHECKING imports to avoid
+    # circular imports at runtime.
+    if source_module:
+        # Use definitions_in_file to find top-level defined names.
+        # Top-level definitions have qn = "module.name" (one component after
+        # the module prefix).  Nested definitions like "module.Class.method"
+        # have more components and must be excluded.
+        file_module = _file_to_module(str(source_path), project_path)
+        defs = resolver.definitions_in_file(str(source_path.resolve()))
+        locally_defined: set[str] = set()
+        prefix = file_module + "."
+        for qn, _line, _col in defs:
+            if qn.startswith(prefix):
+                remainder = qn[len(prefix):]
+                if "." not in remainder:
+                    locally_defined.add(remainder)
+
+        local_refs_needed_runtime = sorted(
+            n for n in locally_defined
+            if n in runtime_names and n not in covered_names
+        )
+        local_refs_needed_annotations = sorted(
+            n for n in locally_defined
+            if (
+                n in annotation_names
+                and n not in runtime_names
+                and n not in covered_names
+            )
+        )
+
+        if local_refs_needed_runtime:
+            needed_imports.append(
+                f"from {source_module} import {', '.join(local_refs_needed_runtime)}"
+            )
+        if local_refs_needed_annotations:
+            needed_imports.append("from __future__ import annotations")
+            type_checking_block = (
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                + "".join(
+                    f"    from {source_module} import {n}\n"
+                    for n in local_refs_needed_annotations
+                )
+            )
+            needed_imports.append(type_checking_block)
+
     return needed_imports
 
 
@@ -4554,7 +4679,9 @@ def copy_symbol(
     position: str = "end",
     dedent: bool = False,
     include_imports: bool = False,
-    apply: bool = False
+    source_module: str | None = None,
+    project_path: str | None = None,
+    apply: bool = False,
 ) -> str:
     """Copy a symbol from one location to another.
 
@@ -4564,6 +4691,11 @@ def copy_symbol(
         position: Where to insert: "start", "end" (default)
         dedent: If True, dedent the source code to remove common indentation
         include_imports: If True, analyze and include necessary imports from source file
+        source_module: Dotted module name of the source file.  Passed to
+            ``analyze_imports`` when ``include_imports`` is True so that
+            locally-defined symbols referenced by the moved symbol also get
+            import statements in the destination (issue #138 Bug 2).
+        project_path: Project root for resolving relative imports to absolute.
         apply: If True, write changes to file. If False, return diff only.
 
     Returns:
@@ -4574,6 +4706,8 @@ def copy_symbol(
         ValueError: If symbol not found
     """
     import textwrap
+    from emend.language_registry import detect_language
+    from emend.language_plugins import load_plugin
 
     # Get source code of the symbol
     source = get_symbol_source(selector)
@@ -4582,12 +4716,6 @@ def copy_symbol(
     if dedent:
         source = textwrap.dedent(source)
 
-    # Analyze and prepend imports if requested
-    if include_imports:
-        imports = analyze_imports(source, selector.file_path)
-        if imports:
-            source = "\n".join(imports) + "\n\n" + source
-
     # Read destination file (create if doesn't exist)
     dest_path = Path(dest_file)
     if dest_path.exists():
@@ -4595,7 +4723,6 @@ def copy_symbol(
     else:
         dest_content = ""
 
-    # Build new content based on position
     if position == "start":
         if dest_content:
             new_content = source + "\n\n" + dest_content
@@ -4606,6 +4733,22 @@ def copy_symbol(
             new_content = dest_content.rstrip() + "\n\n\n" + source + "\n"
         else:
             new_content = source
+
+    # Add necessary imports to the import section of the destination file.
+    # This is done AFTER appending the symbol so that imports land in the
+    # proper location at the top of the file rather than being embedded at
+    # the insertion point (which matters especially for "from __future__"
+    # imports that must appear before any other statements, issue #138 Bug 2).
+    if include_imports:
+        lang = detect_language(dest_file) or "python"
+        imp_handler = load_plugin(lang).import_handler
+        imports = analyze_imports(source, selector.file_path, source_module=source_module, project_path=project_path)
+        for imp in imports:
+            try:
+                pos = 0 if imp.startswith("from __future__") else -1
+                new_content = imp_handler.add_import_text(imp.rstrip("\n"), pos, new_content)
+            except Exception:
+                new_content = imp + "\n" + new_content
 
     # Generate diff
     diff = _generate_diff(dest_file, dest_content, new_content)
@@ -6768,7 +6911,7 @@ def rename_symbol(
         transform = _rust.PyFileTransform(content)
         changed = False
 
-        for qn, line, col, offset, end_offset, kind in references:
+        for qn, line, col, offset, end_offset, kind, _ann in references:
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
@@ -6835,8 +6978,27 @@ def move_symbol(
     if not symbol_name:
         raise ValueError("Symbol path is required for move_symbol")
 
-    # Step 1: Copy symbol to destination
-    copy_diff = copy_symbol(selector, dest_file, position=position, dedent=dedent, apply=apply)
+    # Compute source module name so that locally-defined symbols referenced by
+    # the moved symbol get ``from source_module import Name`` statements added
+    # to the destination file (issue #138 Bug 2).
+    source_module = _file_to_module(selector.file_path, project_path)
+
+    # Before removing the symbol, use the tree-sitter scope resolver to check
+    # whether the source file has non-definition/non-import references to the
+    # moved symbol (e.g. calls, type annotations).  After removal the name
+    # becomes unresolved and the resolver can no longer see it.
+    source_has_other_refs = _source_has_remaining_refs(
+        selector.file_path, symbol_name, project_path,
+    )
+
+    # Step 1: Copy symbol to destination (include_imports=True so the moved
+    # symbol carries its own import dependencies into the destination file,
+    # fixing issue #138 Bug 2).
+    copy_diff = copy_symbol(
+        selector, dest_file, position=position, dedent=dedent,
+        include_imports=True, source_module=source_module,
+        project_path=project_path, apply=apply,
+    )
     diffs[dest_file] = copy_diff
 
     # Step 2: Remove from source
@@ -6851,10 +7013,136 @@ def move_symbol(
             symbol_name,
             project_path,
             apply=apply,
+            source_has_other_refs=source_has_other_refs,
         )
         diffs.update(import_diffs)
 
     return diffs
+
+
+def _source_has_remaining_refs(
+    source_file: str,
+    symbol_name: str,
+    project_path: str | None,
+) -> bool:
+    """Check whether *source_file* references *symbol_name* outside its definition.
+
+    Uses the tree-sitter scope resolver on the **current** (pre-removal) content
+    so that all references are still resolvable.  Returns True when there are
+    read/write/call references to the symbol beyond its own definition and
+    import sites — meaning the source file will need an import after the symbol
+    is removed.
+    """
+    source_path = Path(source_file)
+    try:
+        content = source_path.read_text()
+    except FileNotFoundError:
+        return False
+
+    proj_root = str(
+        Path(project_path or _find_project_root(source_file)).resolve()
+    )
+    ext = source_path.suffix.lstrip(".")
+    resolver = _rust.PyScopeResolver(proj_root, ext)
+    resolved = str(source_path.resolve())
+    resolver.index_file(resolved, content)
+
+    target_suffix = f".{symbol_name}"
+    return any(
+        kind in ("read", "write", "call")
+        for qn, _line, _col, _off, _end, kind, _ann
+        in resolver.references_in_file(resolved)
+        if qn.endswith(target_suffix) or qn == symbol_name
+    )
+
+
+def _split_or_retarget_import(
+    content: str,
+    py_file: str,
+    source_module: str,
+    dest_module: str,
+    symbol_name: str,
+    resolver: object = None,
+) -> str | None:
+    """Rewrite ``from source_module import ...`` statements for a symbol move.
+
+    For each ``from source_module import A, B, C`` where ``symbol_name`` is one
+    of the names:
+
+    * If ``symbol_name`` is the *only* name, simply change the module:
+      ``from dest_module import symbol_name``.
+    * If there are *other* names in the statement, split it into two separate
+      import lines so that sibling names are not inadvertently retargeted to
+      ``dest_module`` (issue #138 Bug 1).
+
+    Returns the rewritten file content string, or ``None`` if no change was
+    needed.
+    """
+    structured_imports = resolver.structured_imports_in_file(py_file)
+
+    original_content = content
+    lines = content.splitlines(keepends=True)
+
+    # Precompute cumulative line offsets for O(1) lookup per import.
+    line_offsets = [0]
+    for line in lines:
+        line_offsets.append(line_offsets[-1] + len(line))
+
+    # Collect (stmt_start_byte, stmt_end_byte, replacement_text) tuples;
+    # applied in reverse order to preserve earlier byte offsets.
+    replacements: list[tuple[int, int, str]] = []
+
+    for imp in structured_imports:
+        if imp["is_plain"]:
+            continue
+        if imp["module"] != source_module:
+            continue
+        if imp["level"]:
+            continue
+
+        names = imp["names"]
+        moved_aliases = [(n, a) for n, a in names if n == symbol_name]
+        if not moved_aliases:
+            continue
+
+        remaining_aliases = [(n, a) for n, a in names if n != symbol_name]
+
+        def _alias_str(name: str, alias: str | None) -> str:
+            if alias:
+                return f"{name} as {alias}"
+            return name
+
+        # Preserve the indentation of the original import statement.
+        start_line = imp["start_line"]
+        orig_line = lines[start_line - 1] if start_line - 1 < len(lines) else ""
+        indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
+
+        moved_line = (
+            f"{indent}from {dest_module} import "
+            + ", ".join(_alias_str(n, a) for n, a in moved_aliases)
+        )
+
+        if remaining_aliases:
+            remaining_line = (
+                f"{indent}from {source_module} import "
+                + ", ".join(_alias_str(n, a) for n, a in remaining_aliases)
+            )
+            replacement = moved_line + "\n" + remaining_line
+        else:
+            replacement = moved_line
+
+        stmt_start = line_offsets[imp["start_line"] - 1]
+        stmt_end = line_offsets[imp["end_line"]]
+        replacements.append((stmt_start, stmt_end, replacement + "\n"))
+
+    if not replacements:
+        return None
+
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    for start, end, repl in replacements:
+        content = content[:start] + repl + content[end:]
+
+    return content if content != original_content else None
 
 
 def _update_imports_for_move(
@@ -6863,6 +7151,7 @@ def _update_imports_for_move(
     symbol_name: str,
     project_path: str | None,
     apply: bool,
+    source_has_other_refs: bool = False,
 ) -> dict[str, str]:
     """Update imports across project when a symbol moves."""
     diffs = {}
@@ -6889,46 +7178,44 @@ def _update_imports_for_move(
         if resolved_py == resolved_source or resolved_py == resolved_dest:
             continue
 
-        transform = _rust.PyFileTransform(content)
         changed = False
 
-        references = resolver.references_in_file(py_file)
-        
-        for i, (qn, line, col, offset, end_offset, kind) in enumerate(references):
-            if kind != "import":
-                continue
-            
-            if qn == target_qn:
-                # This could be 'from source_module import symbol_name'
-                # or 'import source_module.symbol_name'
-                
-                # Search backwards for the module reference in the same statement
-                module_ref = None
-                for j in range(i - 1, -1, -1):
-                    pqn, pl, pc, po, peo, pk = references[j]
-                    if pk != "import": continue
-                    # Heuristic: must be on same or previous line
-                    if pl < line - 1: break
-                    if pqn == source_module:
-                        module_ref = (po, peo)
-                        break
-                
-                if module_ref:
-                    # 'from source_module import ...'
-                    transform.replace_range(module_ref[0], module_ref[1], dest_module)
-                    changed = True
-                else:
-                    # 'import source_module.symbol_name'
-                    # Replace the 'source_module' part of the QN
+        # Use tree-sitter to handle multi-name imports correctly.
+        # When the consumer has 'from source_mod import A, B' and only A is
+        # moved, we must split the statement instead of rewriting just the
+        # module name (which would drag B to dest_mod — issue #138 Bug 1).
+        new_content = _split_or_retarget_import(
+            content, py_file, source_module, dest_module, symbol_name,
+            resolver=resolver,
+        )
+        if new_content is not None and new_content != content:
+            changed = True
+        else:
+            # Fallback: handle dotted 'import source_module.symbol_name' style
+            # that the AST splitter does not cover.
+            transform = _rust.PyFileTransform(content)
+
+            references = resolver.references_in_file(py_file)
+
+            for i, (qn, line, col, offset, end_offset, kind, _ann) in enumerate(references):
+                if kind != "import":
+                    continue
+
+                if qn == target_qn:
+                    # Only handle 'import source_module.symbol_name' (dotted)
+                    # style; 'from source_module import ...' is handled above.
                     if content[offset : offset + len(source_module)] == source_module:
-                        transform.replace_range(offset, offset + len(source_module), dest_module)
+                        transform.replace_range(
+                            offset, offset + len(source_module), dest_module
+                        )
                         changed = True
 
-        if not changed:
-            continue
+            if changed:
+                new_content = transform.apply()
+            else:
+                new_content = None
 
-        new_content = transform.apply()
-        if new_content is None or new_content == content:
+        if not changed or new_content is None or new_content == content:
             continue
 
         diff = _generate_diff(py_file, content, new_content)
@@ -6937,7 +7224,160 @@ def _update_imports_for_move(
         if apply:
             Path(py_file).write_text(new_content)
 
+    # If the source file has read/write/call references to the moved symbol
+    # (detected by the caller via tree-sitter scope resolver on pre-removal
+    # content), add an import so the source file doesn't break at runtime.
+    if source_has_other_refs and dest_module:
+        try:
+            source_content = Path(source_file).read_text()
+        except FileNotFoundError:
+            source_content = None
+
+        if source_content is not None:
+            import_stmt = f"from {dest_module} import {symbol_name}"
+            from emend.language_plugins import load_plugin
+            try:
+                new_source_content = load_plugin(language).import_handler.add_import_text(
+                    import_stmt, 0, source_content
+                )
+            except Exception:
+                new_source_content = None
+
+            if new_source_content and new_source_content != source_content:
+                diff = _generate_diff(source_file, source_content, new_source_content)
+                diffs[source_file] = diff
+                if apply:
+                    Path(source_file).write_text(new_source_content)
+
     return diffs
+
+
+def _resolve_relative_import_qn(
+    qn: str,
+    file_path: str,
+    project_root: str,
+    sep: str = ".",
+    src_text: str | None = None,
+) -> str | None:
+    """Resolve a relative-import QN like ``.models`` to an absolute QN like ``pkg.models``.
+
+    The Rust resolver emits QNs such as ``.models`` for ``from .models import X``
+    and ``..util`` for ``from ..util import Y``.  We resolve these by computing the
+    containing package from the file path.
+
+    For ``from . import X`` style imports (bare name after dot-only relative), the
+    Rust resolver adds an extra separator dot to the QN (e.g. ``..models`` instead
+    of ``.models``).  When *src_text* is provided and does not start with a dot,
+    we compensate by reducing the dot count.
+
+    Returns the absolute module QN, or ``None`` if resolution fails.
+    """
+    if not qn.startswith("."):
+        return None
+
+    dot_count = len(qn) - len(qn.lstrip("."))
+    relative_part = qn[dot_count:]
+
+    # For ``from . import X`` the source text is just the bare name (no dots),
+    # but the Rust resolver produces QN ``..X`` with an extra separator dot.
+    # Compensate so that the dot count reflects the actual import level.
+    if src_text is not None and not src_text.startswith("."):
+        dot_count = max(1, dot_count - 1)
+
+    module = _file_to_module(file_path, project_root)
+    package = module.rsplit(".", 1)[0] if "." in module else None
+    parts = package.split(sep) if package else []
+
+    levels_up = dot_count - 1
+    if levels_up > len(parts):
+        return None
+
+    base_parts = parts[: len(parts) - levels_up] if levels_up else parts
+    if relative_part:
+        return sep.join(base_parts + [relative_part]) if base_parts else relative_part
+    else:
+        return sep.join(base_parts) if base_parts else None
+
+
+def _replace_module_in_strings(
+    content: str,
+    old_module: str,
+    new_module: str,
+    full_name_only: bool = False,
+    file_path: str = "_.py",
+    language: str = "python",
+) -> str:
+    """Replace occurrences of old_module inside string literals in *content*.
+
+    Uses tree-sitter to identify string literal nodes (via the
+    ``{type: string, value: null}`` any-string pattern), so comments and
+    non-string contexts are correctly ignored regardless of language.
+
+    Handles:
+    - Full dotted module path inside strings (for ``importlib.import_module("pkg.models")``).
+    - Bare module name when it is the entire string content (for ``__all__``
+      entries like ``"models"``) — only when *full_name_only* is False.
+
+    When *full_name_only* is True, only the full dotted module path is replaced.
+    This avoids false positives when scanning files that have no import
+    relationship with the module (e.g. an unrelated ``TABLE = "models"``).
+    """
+    from emend.language_registry import get_extensions
+
+    exts = get_extensions(language)
+    ext = exts[0] if exts else Path(file_path).suffix.lstrip(".")
+    any_string_ir: dict = {"type": "string", "value": None}
+    matches = _rust.find_pattern_in_files(
+        [(file_path, content)], any_string_ir, extension=ext,
+    )
+
+    old_bare = old_module.rsplit(".", 1)[-1]
+    new_bare = new_module.rsplit(".", 1)[-1]
+
+    lines = content.splitlines(keepends=True)
+
+    # Collect (char_start, char_end, replacement) tuples.
+    replacements: list[tuple[int, int, str]] = []
+
+    for _file, start_line, start_col, end_line, end_col, text, _caps in matches:
+        char_start = sum(len(lines[i]) for i in range(start_line - 1)) + start_col
+        char_end = sum(len(lines[i]) for i in range(end_line - 1)) + end_col
+
+        # Determine the string's inner content (without surrounding quotes).
+        if text[:3] in ('"""', "'''"):
+            inner = text[3:-3]
+        else:
+            inner = text[1:-1]
+
+        new_text = text
+        # Replace full dotted module path (most specific).
+        if old_module in text:
+            new_text = re.sub(
+                r'(?<![.\w])' + re.escape(old_module) + r'(?![.\w])',
+                new_module,
+                text,
+            )
+        # Replace bare module name only when it is the entire string content.
+        elif not full_name_only and inner == old_bare:
+            if text[:3] in ('"""', "'''"):
+                new_text = text[:3] + new_bare + text[-3:]
+            else:
+                new_text = text[0] + new_bare + text[-1]
+
+        if new_text != text:
+            replacements.append((char_start, char_end, new_text))
+
+    if not replacements:
+        return content
+
+    # Apply in reverse order to preserve earlier offsets.
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    for start, end, repl in replacements:
+        content = content[:start] + repl + content[end:]
+
+    return content
+
+
 def _rename_module_references(
     project_root: str,
     old_module: str,
@@ -6962,34 +7402,117 @@ def _rename_module_references(
         transform = _rust.PyFileTransform(content)
         changed = False
 
-        for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
-            if kind != "import":
-                continue
+        old_bare_mod = old_module.rsplit(sep, 1)[-1]
+        new_bare_mod = new_module.rsplit(sep, 1)[-1]
 
-            # Exact match: import old_module or from old_module import ...
-            if qn == old_module:
-                transform.replace_range(offset, end_offset, new_module)
-                changed = True
-            # Prefix match: import old_module.sub or from old_module.sub import ...
-            elif qn.startswith(old_module + sep):
-                prefix_len = len(old_module)
-                # Verify that the source at offset matches old_module
-                if content[offset : offset + prefix_len] == old_module:
-                    transform.replace_range(offset, offset + prefix_len, new_module)
+        for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(py_file):
+            # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
+            # the comparison against old_module works correctly.
+            resolved_qn = qn
+            src_text = content[offset:end_offset]
+            if qn.startswith("."):
+                resolved = _resolve_relative_import_qn(qn, py_file, project_root, sep, src_text=src_text)
+                if resolved is not None:
+                    resolved_qn = resolved
+
+            if kind == "import":
+                # Exact match: import old_module or from old_module import ...
+                if resolved_qn == old_module:
+                    if qn.startswith(".") and resolved_qn != qn:
+                        # Relative import: preserve leading dots, replace only the module name.
+                        if src_text.startswith("."):
+                            # Text includes dots (e.g. ``from .models import VALUE``).
+                            dot_count = len(qn) - len(qn.lstrip("."))
+                            new_relative = "." * dot_count + new_bare_mod
+                        else:
+                            # Bare name (e.g. ``from . import models``); dots are in
+                            # the ``from .`` part, not in the captured text span.
+                            new_relative = new_bare_mod
+                        transform.replace_range(offset, end_offset, new_relative)
+                    else:
+                        transform.replace_range(offset, end_offset, new_module)
+                    changed = True
+                # Prefix match: import old_module.sub or from old_module.sub import ...
+                elif resolved_qn.startswith(old_module + sep):
+                    prefix_len = len(old_module)
+                    if content[offset : offset + prefix_len] == old_module:
+                        transform.replace_range(offset, offset + prefix_len, new_module)
+                        changed = True
+                    elif qn.startswith(".") and resolved_qn != qn:
+                        # Relative sub-module import: replace old bare name at offset.
+                        dot_count = len(qn) - len(qn.lstrip("."))
+                        relative_module_part = qn[dot_count:]
+                        if relative_module_part == old_bare_mod or relative_module_part.startswith(old_bare_mod + sep):
+                            if content[offset : offset + len(old_bare_mod)] == old_bare_mod:
+                                transform.replace_range(offset, offset + len(old_bare_mod), new_bare_mod)
+                                changed = True
+
+            elif kind in ("read", "write"):
+                # Attribute access through a module binding, e.g. ``models.VALUE``
+                # after ``from . import models``.  The bare module name in the
+                # source text must be updated to match the new module name.
+                if resolved_qn == old_module and src_text == old_bare_mod:
+                    transform.replace_range(offset, end_offset, new_bare_mod)
                     changed = True
 
-        if not changed:
+        # Check if string literals might contain the old module name.
+        old_bare_name = old_module.rsplit(sep, 1)[-1]
+        strings_may_need_update = old_module in content or old_bare_name in content
+
+        if changed:
+            final_content = transform.apply() or content
+            if strings_may_need_update:
+                final_content = _replace_module_in_strings(
+                    final_content, old_module, new_module,
+                    file_path=py_file, language=language,
+                )
+        elif strings_may_need_update:
+            final_content = _replace_module_in_strings(
+                content, old_module, new_module,
+                file_path=py_file, language=language,
+            )
+        else:
             continue
 
-        new_content = transform.apply()
-        if new_content is None or new_content == content:
+        if final_content == content:
             continue
 
-        diff = _generate_diff(py_file, content, new_content)
+        diff = _generate_diff(py_file, content, final_content)
         diffs[py_file] = diff
 
         if apply:
-            Path(py_file).write_text(new_content)
+            Path(py_file).write_text(final_content)
+
+    # Third pass: string-literal replacements in files that the structural pre-filter
+    # may have excluded (e.g. files with importlib.import_module("pkg.models") but no
+    # import statement mentioning "models" as an identifier that tree-sitter picks up).
+    #
+    # Only match the full dotted module name here — NOT the bare name.  Files
+    # processed in the first/second pass already get bare-name string updates
+    # (for __all__ entries etc.), but files with no import relationship should
+    # not have coincidental bare-name strings like TABLE = "models" rewritten.
+    already_processed = set(diffs.keys())
+    all_source_files = _collect_source_files(project_root, language=language)
+    for py_file in all_source_files:
+        if py_file in already_processed:
+            continue
+        try:
+            content = Path(py_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Quick substring check before the heavier tree-sitter scan.
+        if old_module not in content:
+            continue
+        final_content = _replace_module_in_strings(
+            content, old_module, new_module, full_name_only=True,
+            file_path=py_file, language=language,
+        )
+        if final_content == content:
+            continue
+        diff = _generate_diff(py_file, content, final_content)
+        diffs[py_file] = diff
+        if apply:
+            Path(py_file).write_text(final_content)
 
     return diffs
 

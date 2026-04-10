@@ -2835,7 +2835,7 @@ class FactGraph:
 
                 ref_facts: list[ReferenceFact] = []
                 call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind in refs:
+                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
                     ref_kind = _map_ref_kind(kind)
                     fq, bid = _find_containing_block(block_ranges, line)
                     ref_facts.append(ReferenceFact(
@@ -2870,7 +2870,7 @@ class FactGraph:
                 # Convert to 0-based for consistency with CFG def-use facts.
                 mod_defs: dict[str, list[tuple[int, int]]] = {}  # var -> [(line, col)]
                 mod_uses: dict[str, list[tuple[int, int]]] = {}
-                for qn, line, col, _offset, _end_offset, kind in refs:
+                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
                     fq_check, bid_check = _find_containing_block(block_ranges, line)
                     if fq_check != "" or bid_check != -1:
                         continue  # inside a function — already handled
@@ -2908,7 +2908,7 @@ class FactGraph:
             if resolver is not None:
                 from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
                 from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
-                for qn, line, col, _offset, _end_offset, kind in refs:
+                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
@@ -3082,7 +3082,7 @@ class FactGraph:
 
                 ref_facts: list[ReferenceFact] = []
                 call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind in refs:
+                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
                     ref_kind = _map_ref_kind(kind)
                     fq, bid = _find_containing_block(block_ranges, line)
                     ref_facts.append(ReferenceFact(
@@ -3114,7 +3114,7 @@ class FactGraph:
             if resolver is not None:
                 from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
                 from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
-                for qn, line, col, _offset, _end_offset, kind in refs:
+                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
