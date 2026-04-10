@@ -440,23 +440,46 @@ _PYTHON_KEYWORDS = frozenset({
 })
 
 
-def _extract_identifiers(expr: str) -> set[str]:
+@functools.lru_cache(maxsize=8)
+def _get_keywords(language: str = "python") -> frozenset[str]:
+    """Return the keyword set for *language* from its config.toml.
+
+    Falls back to ``_PYTHON_KEYWORDS`` for unknown languages or when the
+    config file is missing.
+    """
+    from emend.language_registry import load_config
+    config = load_config(language)
+    keywords = config.get("trace", {}).get("keywords", [])
+    if keywords:
+        return frozenset(keywords)
+    # Fallback: return Python keywords for backward compat
+    return _PYTHON_KEYWORDS
+
+
+def _extract_identifiers(expr: str, language: str = "python") -> set[str]:
     """Return identifiers appearing in *expr*.
 
     Includes simple identifiers (``x``), dotted identifiers (``obj.field``),
     and subscript identifiers (``data['key']``).
+
+    Args:
+        expr: Expression text to extract identifiers from.
+        language: Source language — used to load the correct keyword set so
+            that language keywords are not treated as variable references.
+            Defaults to ``"python"`` for backward compatibility.
     """
+    keywords = _get_keywords(language)
     result: set[str] = set()
     # Dotted identifiers first (longer match takes priority)
     for m in _DOTTED_IDENT_RE.findall(expr):
         result.add(m)
     # Subscript identifiers: data['key'] → data['key']
     for base, quote, key in _SUBSCRIPT_IDENT_RE.findall(expr):
-        if base not in _PYTHON_KEYWORDS:
+        if base not in keywords:
             result.add(f"{base}[{quote}{key}{quote}]")
     # Simple identifiers (always include as fallback)
     for m in _IDENT_RE.findall(expr):
-        if m not in _PYTHON_KEYWORDS:
+        if m not in keywords:
             result.add(m)
     return result
 

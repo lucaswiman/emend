@@ -447,3 +447,61 @@ value = "right"
 node = "augmented_assignment"
 target = "left"
 value = "right"
+
+# ---------------------------------------------------------------------------
+# Trace / taint analysis configuration
+# ---------------------------------------------------------------------------
+[trace]
+# All Python keywords — identifiers matching these are excluded from
+# _extract_identifiers() to avoid false taint propagation through keywords.
+keywords = [
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else",
+    "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+    "return", "try", "while", "with", "yield",
+]
+
+[trace.container_mutations]
+# Methods whose calls on a container are considered mutation events for
+# taint propagation purposes.
+methods = ["append", "extend", "update", "insert", "add", "pop", "remove"]
+
+# ---------------------------------------------------------------------------
+# Dead-code detection entry-point heuristics
+# ---------------------------------------------------------------------------
+[dead_code]
+# Full decorator names (dotted) that mark a symbol as an entry point.
+entry_point_decorators = [
+    "app.command", "app.route", "app.get", "app.post", "app.put",
+    "app.delete", "app.patch",
+    "pytest.fixture", "fixture",
+    "staticmethod", "classmethod", "property",
+    "abstractmethod", "abc.abstractmethod",
+    "override",
+    "overload", "typing.overload",
+    "click.command", "click.group",
+    "celery.task",
+    "register",
+]
+# Decorator base-names (last component after the final ".") that mark
+# a symbol as an entry point regardless of the object they appear on.
+entry_point_decorator_basenames = [
+    "route", "get", "post", "put", "delete", "patch", "head", "options",
+    "sync_get", "sync_post", "sync_put", "sync_delete", "sync_patch",
+    "websocket", "websocket_route",
+    "command", "task", "hook", "listener",
+    "receiver", "signal", "handler", "middleware",
+    "register", "export",
+    "tool",
+]
+# Function/class names that are always considered entry points by convention.
+entry_point_names = [
+    "main", "setup", "teardown", "configure",
+    "setUp", "tearDown", "setUpClass", "tearDownClass",
+    "setUpModule", "tearDownModule",
+]
+# Name prefixes that mark a symbol as a test/entry-point.
+entry_point_name_prefixes = ["test_", "Test", "describe_"]
+# Whether dunder names (__init__, __str__, etc.) are always entry points.
+has_dunders = true

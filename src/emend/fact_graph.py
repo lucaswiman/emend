@@ -2968,14 +2968,19 @@ class FactGraph:
     def build_from_project(
         cls,
         project_path: str,
-        language: str = "python",
+        language: str | None = None,
         db_path: str | None = None,
+        languages: list[str] | None = None,
     ) -> FactGraph:
         """Populate a fact graph by visiting all files in a project.
 
         Uses emend's tree-sitter infrastructure (``emend_core``) to
         extract symbols, references, calls, and imports from every
         source file in the project.
+
+        ``language`` (singular) keeps backward compatibility.  Pass
+        ``languages`` (a list) or leave both as ``None`` to auto-detect
+        from the project directory.
 
         **Note**: This is a deliberate full-rebuild path used by tests and
         one-off analysis.  In steady-state indexing, ``_build_facts_db()``
@@ -2984,14 +2989,26 @@ class FactGraph:
         """
         from emend import emend_core as _rust
         from emend.transform import (
+            _collect_all_source_files,
             _collect_source_files,
             _file_to_module,
             _find_project_root,
+            detect_project_languages,
         )
 
         graph = cls(db_path=db_path)
         project_root = _find_project_root(project_path)
-        source_files = _collect_source_files(project_root, language=language)
+
+        # Resolve which languages to collect.
+        # Priority: explicit ``languages`` list > singular ``language`` > auto-detect.
+        if languages is not None:
+            effective_languages = list(languages)
+        elif language is not None:
+            effective_languages = [language]
+        else:
+            effective_languages = detect_project_languages(project_root)
+
+        source_files = _collect_all_source_files(project_root, languages=effective_languages)
 
         # The scope resolver may fail if pointed at a repo root with
         # incompatible config.  Use the user-supplied project_path as
@@ -3321,17 +3338,62 @@ def _find_containing_block(
     return best_func_qn, best_block_id
 
 
-def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
-    """Extract import facts from *content* using the stdlib ``ast`` module."""
-    import ast as stdlib_ast
+def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
+    """Extract imports from Python source using tree-sitter via ``emend_core``.
 
+    Falls back to ``stdlib ast`` when the Rust extension is unavailable (e.g.
+    during development without a compiled extension).
+    """
     facts: list[ImportFact] = []
+    try:
+        from emend import emend_core as ec  # type: ignore[attr-defined]
+        resolver = getattr(_extract_imports_python, "_resolver", None)
+        if resolver is None:
+            resolver = ec.PyScopeResolver(".", extension="py")
+            _extract_imports_python._resolver = resolver  # type: ignore[attr-defined]
+        structured = resolver.collect_structured_imports_from_source(content, ext="py")
+        for imp in structured:
+            line: int = imp["start_line"]
+            if imp["is_plain"]:
+                # ``import X`` or ``import X as Y`` — module is in names
+                for name, alias in imp["names"]:
+                    facts.append(ImportFact(
+                        importing_file=file_path,
+                        imported_module=name,
+                        imported_name=None,
+                        alias=alias,
+                        line=line,
+                    ))
+            else:
+                # ``from M import X`` — module field + names
+                level: int = imp["level"]
+                raw_module: str = imp["module"]
+                # Reconstruct leading dots for relative imports so that
+                # callers can distinguish absolute from relative paths.
+                module: str = ("." * level) + raw_module if level else raw_module
+                for name, alias in imp["names"]:
+                    facts.append(ImportFact(
+                        importing_file=file_path,
+                        imported_module=module,
+                        imported_name=name,
+                        alias=alias,
+                        line=line,
+                    ))
+        return facts
+    except Exception:
+        logger.debug(
+            "emend_core structured import extraction failed for %s, falling back to ast.parse",
+            file_path,
+            exc_info=True,
+        )
+
+    # Fallback: stdlib ast (Python only, but always available)
+    import ast as stdlib_ast
     try:
         tree = stdlib_ast.parse(content, filename=file_path)
     except Exception:
         logger.debug("ast.parse failed for %s", file_path, exc_info=True)
         return facts
-
     for node in stdlib_ast.walk(tree):
         if isinstance(node, stdlib_ast.Import):
             for alias in node.names:
@@ -3353,6 +3415,440 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
                     line=node.lineno,
                 ))
     return facts
+
+
+# ---------------------------------------------------------------------------
+# TypeScript / JavaScript import extraction
+# ---------------------------------------------------------------------------
+
+import re as _re
+from bisect import bisect_right as _bisect_right
+
+
+def _offset_to_line(content: str, offset: int, _newline_cache: dict[int, list[int]] = {}) -> int:
+    """Return 1-based line number for a character *offset* in *content*.
+
+    Uses a cached newline-position index keyed by ``id(content)`` so that
+    repeated calls on the same string are O(log n) instead of O(n).
+    """
+    cid = id(content)
+    positions = _newline_cache.get(cid)
+    if positions is None:
+        positions = [i for i, ch in enumerate(content) if ch == "\n"]
+        _newline_cache[cid] = positions
+        # Keep cache bounded — evict oldest if too large.
+        if len(_newline_cache) > 64:
+            oldest = next(iter(_newline_cache))
+            del _newline_cache[oldest]
+    return _bisect_right(positions, offset) + 1
+
+
+# Matches: import ... from "module" / import ... from 'module'
+# Groups: (import_body, module_path)
+_TS_IMPORT_FROM_RE = _re.compile(
+    r'^\s*(?:import\s+type\s+|import\s+)'   # import [type]
+    r'(.*?)'                                  # import clause (greedy captured below)
+    r'\s+from\s+'
+    r'["\']([^"\']+)["\']'                   # "module" or 'module'
+    r'\s*;?',
+    _re.MULTILINE | _re.DOTALL,
+)
+
+# Matches: import "module"; (side-effect import)
+_TS_SIDE_EFFECT_RE = _re.compile(
+    r'^\s*import\s+["\']([^"\']+)["\']\s*;?',
+    _re.MULTILINE,
+)
+
+# Matches: const/let/var X = require("module") or const { X } = require("module")
+_TS_REQUIRE_RE = _re.compile(
+    r'^\s*(?:const|let|var)\s+'
+    r'(\{[^}]*\}|\w+)'                       # binding (destructured or simple name)
+    r'\s*=\s*require\s*\(\s*["\']([^"\']+)["\']\s*\)',
+    _re.MULTILINE,
+)
+
+# Matches: export { X } from "module";
+_TS_EXPORT_FROM_RE = _re.compile(
+    r'^\s*export\s+\{([^}]*)\}\s+from\s+["\']([^"\']+)["\']\s*;?',
+    _re.MULTILINE,
+)
+
+# Full import-from pattern (multiline-safe)
+_TS_FULL_IMPORT_RE = _re.compile(
+    r'\bimport\s+(?:type\s+)?([\s\S]*?)\s+from\s+["\']([^"\']+)["\']',
+    _re.MULTILINE,
+)
+
+
+def _ts_parse_import_clause(
+    clause: str,
+    module: str,
+    file_path: str,
+    line: int,
+) -> list[ImportFact]:
+    """Convert a TypeScript import clause string into ``ImportFact`` objects.
+
+    Handles:
+    - ``{ X, Y as Z }``        — named imports
+    - ``* as X``               — namespace import
+    - ``X``                    — default import
+    - ``X, { Y, Z }``         — default + named
+    """
+    facts: list[ImportFact] = []
+    clause = clause.strip()
+
+    # Namespace import: * as X
+    ns_m = _re.match(r'^\*\s+as\s+(\w+)$', clause)
+    if ns_m:
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=module,
+            imported_name="*",
+            alias=ns_m.group(1),
+            line=line,
+        ))
+        return facts
+
+    # Split default import from named block if both present (X, { Y })
+    brace_start = clause.find("{")
+    if brace_start != -1:
+        pre_brace = clause[:brace_start].strip().rstrip(",").strip()
+        brace_end = clause.rfind("}")
+        named_part = clause[brace_start + 1:brace_end] if brace_end != -1 else ""
+
+        # Default import before the brace
+        if pre_brace and not pre_brace.startswith("{"):
+            facts.append(ImportFact(
+                importing_file=file_path,
+                imported_module=module,
+                imported_name="default",
+                alias=pre_brace,
+                line=line,
+            ))
+
+        # Named imports inside braces
+        for raw_item in named_part.split(","):
+            item = raw_item.strip()
+            if not item:
+                continue
+            alias_m = _re.match(r'^(\w+)\s+as\s+(\w+)$', item)
+            if alias_m:
+                facts.append(ImportFact(
+                    importing_file=file_path,
+                    imported_module=module,
+                    imported_name=alias_m.group(1),
+                    alias=alias_m.group(2),
+                    line=line,
+                ))
+            else:
+                ident = item.split()[0] if item.split() else item
+                facts.append(ImportFact(
+                    importing_file=file_path,
+                    imported_module=module,
+                    imported_name=ident,
+                    alias=None,
+                    line=line,
+                ))
+        return facts
+
+    # Pure default import: import X from "module"
+    if clause and not clause.startswith("{") and not clause.startswith("*"):
+        # Could be a plain identifier
+        ident = clause.split()[0]
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=module,
+            imported_name="default",
+            alias=ident,
+            line=line,
+        ))
+        return facts
+
+    return facts
+
+
+def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact]:
+    """Extract imports from TypeScript/JavaScript source using regex.
+
+    Handles all standard ES module import forms plus CommonJS ``require()``.
+    """
+    facts: list[ImportFact] = []
+
+    def _line(offset: int) -> int:
+        return _offset_to_line(content, offset)
+
+    # Side-effect imports: import "module";
+    for m in _TS_SIDE_EFFECT_RE.finditer(content):
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=m.group(1),
+            imported_name=None,
+            alias=None,
+            line=_line(m.start()),
+        ))
+
+    # Re-exports: export { X } from "module";
+    for m in _TS_EXPORT_FROM_RE.finditer(content):
+        module = m.group(2)
+        line = _line(m.start())
+        facts.extend(
+            _ts_parse_import_clause("{" + m.group(1) + "}", module, file_path, line)
+        )
+
+    # import [...] from "module" — multiline-safe scanner
+    seen_offsets: set[int] = set()
+    for m in _TS_FULL_IMPORT_RE.finditer(content):
+        start = m.start()
+        if start in seen_offsets:
+            continue
+        clause = m.group(1).strip()
+        module = m.group(2)
+        line = _line(start)
+        facts.extend(_ts_parse_import_clause(clause, module, file_path, line))
+        seen_offsets.add(start)
+
+    # CommonJS require: const X = require("module")
+    for m in _TS_REQUIRE_RE.finditer(content):
+        binding = m.group(1).strip()
+        module = m.group(2)
+        line = _line(m.start())
+        if binding.startswith("{"):
+            # Destructuring: const { A, B } = require('mod')
+            inner = binding[1:binding.rfind("}")].strip()
+            for raw_item in inner.split(","):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                facts.append(ImportFact(
+                    importing_file=file_path,
+                    imported_module=module,
+                    imported_name=item,
+                    alias=None,
+                    line=line,
+                ))
+        else:
+            facts.append(ImportFact(
+                importing_file=file_path,
+                imported_module=module,
+                imported_name=None,
+                alias=binding,
+                line=line,
+            ))
+
+    return facts
+
+
+# ---------------------------------------------------------------------------
+# Rust import extraction — helpers (module-level for performance)
+# ---------------------------------------------------------------------------
+
+_RUST_MOD_RE = _re.compile(
+    r'^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?\bmod\s+(\w+)\s*;', _re.MULTILINE
+)
+_RUST_USE_START_RE = _re.compile(r'\buse\b', _re.MULTILINE)
+
+
+def _rust_find_use_body(text: str, start_offset: int) -> tuple[str, int] | None:
+    """Return (body_str, end_offset) for a ``use`` statement."""
+    depth = 0
+    i = start_offset
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return text[start_offset:i].strip(), i
+        i += 1
+    return None
+
+
+def _rust_matching_brace(text: str, open_idx: int) -> int:
+    """Return the index of the ``}`` matching ``{`` at *open_idx*."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(text) - 1
+
+
+def _rust_split_top_level(text: str) -> list[str]:
+    """Split *text* by top-level commas (not inside braces)."""
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in text:
+        if ch == "{":
+            depth += 1
+            current.append(ch)
+        elif ch == "}":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        items.append("".join(current))
+    return items
+
+
+def _rust_join_path(prefix: str, suffix: str) -> str:
+    """Join two Rust path segments with ``::``."""
+    if prefix and suffix:
+        return prefix + "::" + suffix
+    return prefix or suffix
+
+
+def _rust_parse_use_tree(
+    prefix: str,
+    body: str,
+    file_path: str,
+    line: int,
+    result: list[ImportFact],
+) -> None:
+    """Recursively parse a Rust use-tree fragment into ``ImportFact``s."""
+    body = body.strip()
+    if not body:
+        return
+
+    brace_idx: int | None = None
+    for idx, ch in enumerate(body):
+        if ch == "{":
+            brace_idx = idx
+            break
+
+    if brace_idx is not None:
+        pre_raw = body[:brace_idx].rstrip(":").strip()
+        new_prefix = _rust_join_path(prefix, pre_raw)
+
+        brace_end = _rust_matching_brace(body, brace_idx)
+        inner = body[brace_idx + 1:brace_end]
+
+        for item in _rust_split_top_level(inner):
+            item = item.strip()
+            if not item:
+                continue
+            if item == "self":
+                last_sep = new_prefix.rfind("::")
+                if last_sep != -1:
+                    result.append(ImportFact(
+                        importing_file=file_path,
+                        imported_module=new_prefix[:last_sep],
+                        imported_name=new_prefix[last_sep + 2:],
+                        alias=None,
+                        line=line,
+                    ))
+                else:
+                    result.append(ImportFact(
+                        importing_file=file_path,
+                        imported_module=new_prefix,
+                        imported_name=None,
+                        alias=None,
+                        line=line,
+                    ))
+            else:
+                _rust_parse_use_tree(new_prefix, item, file_path, line, result)
+        return
+
+    as_m = _re.match(r'^(.*?)\s+as\s+(\w+)$', body)
+    if as_m:
+        path_part = _rust_join_path(prefix, as_m.group(1).strip())
+        alias = as_m.group(2)
+    else:
+        path_part = _rust_join_path(prefix, body)
+        alias = None
+
+    if path_part.endswith("::*"):
+        result.append(ImportFact(
+            importing_file=file_path,
+            imported_module=path_part[:-3],
+            imported_name="*",
+            alias=alias,
+            line=line,
+        ))
+        return
+
+    last_sep = path_part.rfind("::")
+    if last_sep == -1:
+        result.append(ImportFact(
+            importing_file=file_path,
+            imported_module=path_part,
+            imported_name=None,
+            alias=alias,
+            line=line,
+        ))
+    else:
+        result.append(ImportFact(
+            importing_file=file_path,
+            imported_module=path_part[:last_sep],
+            imported_name=path_part[last_sep + 2:],
+            alias=alias,
+            line=line,
+        ))
+
+
+def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
+    """Extract imports from Rust source.
+
+    Handles ``use`` declarations (plain, aliased, glob, grouped/nested),
+    ``pub use``, ``pub(crate) use``, and ``mod name;`` declarations.
+    """
+    facts: list[ImportFact] = []
+
+    def _line(offset: int) -> int:
+        return _offset_to_line(content, offset)
+
+    for m in _RUST_MOD_RE.finditer(content):
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=m.group(1),
+            imported_name=None,
+            alias=None,
+            line=_line(m.start()),
+        ))
+
+    processed: set[int] = set()
+    for m in _RUST_USE_START_RE.finditer(content):
+        use_end = m.end()
+        while use_end < len(content) and content[use_end] == " ":
+            use_end += 1
+        if use_end in processed:
+            continue
+        processed.add(use_end)
+        result = _rust_find_use_body(content, use_end)
+        if result is None:
+            continue
+        body_str, _end = result
+        _rust_parse_use_tree("", body_str, file_path, _line(m.start()), facts)
+
+    return facts
+
+
+def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
+    """Extract import facts from *content*, dispatching by language.
+
+    - Python files: tree-sitter via ``emend_core`` (falls back to ``ast.parse``)
+    - TypeScript / JavaScript files: regex-based extraction
+    - Rust files: regex-based extraction for ``use`` / ``mod`` declarations
+    - All others: treated as Python (best-effort)
+    """
+    from emend.language_registry import detect_language
+    lang = detect_language(file_path)
+    if lang == "typescript":
+        return _extract_imports_typescript(file_path, content)
+    elif lang == "rust":
+        return _extract_imports_rust(file_path, content)
+    else:
+        return _extract_imports_python(file_path, content)
 
 
 def _build_cfg_facts(

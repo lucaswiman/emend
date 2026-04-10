@@ -293,3 +293,49 @@ value = "right"
 node = "variable_declarator"
 target = "name"
 value = "value"
+
+# ---------------------------------------------------------------------------
+# Trace / taint analysis configuration
+# ---------------------------------------------------------------------------
+[trace]
+# TypeScript/JavaScript keywords — identifiers matching these are excluded
+# from _extract_identifiers() to avoid false taint propagation.
+keywords = [
+    "abstract", "any", "as", "async", "await", "bigint", "boolean",
+    "break", "case", "catch", "class", "const", "continue", "debugger",
+    "declare", "default", "delete", "do", "else", "enum", "export",
+    "extends", "false", "finally", "for", "from", "function", "get",
+    "if", "implements", "import", "in", "infer", "instanceof", "interface",
+    "is", "keyof", "let", "module", "namespace", "never", "new", "null",
+    "number", "object", "of", "package", "private", "protected", "public",
+    "readonly", "require", "return", "set", "static", "string", "super",
+    "switch", "symbol", "this", "throw", "true", "try", "type", "typeof",
+    "undefined", "unique", "unknown", "var", "void", "while", "with", "yield",
+]
+
+[trace.container_mutations]
+# Methods whose calls on a container/array are considered mutation events.
+methods = ["push", "splice", "unshift", "concat", "set", "add", "delete", "pop", "shift"]
+
+# ---------------------------------------------------------------------------
+# Dead-code detection entry-point heuristics
+# ---------------------------------------------------------------------------
+[dead_code]
+# Full decorator names that mark a symbol as an entry point.
+entry_point_decorators = []
+# Decorator base-names that mark a symbol as an entry point.
+entry_point_decorator_basenames = [
+    "route", "get", "post", "put", "delete", "patch", "head", "options",
+    "middleware", "handler", "controller", "injectable", "module",
+    "component", "directive", "pipe", "guard",
+]
+# Function/class names that are always considered entry points.
+entry_point_names = [
+    "main", "setup", "teardown", "configure",
+    "describe", "it", "test", "beforeAll", "afterAll",
+    "beforeEach", "afterEach",
+]
+# Name prefixes that mark a symbol as a test/entry-point.
+entry_point_name_prefixes = ["test", "Test"]
+# TypeScript does not have dunder names.
+has_dunders = false

@@ -55,50 +55,53 @@ in helper functions that synthesise extra def-use relationships.
 
 ### Keyword parameterisation
 
-- [ ] Add a `[trace]` or `[analysis]` section to each language config with a
+- [x] Add a `[trace]` or `[analysis]` section to each language config with a
   `keywords` list (or reuse the existing `[language].keywords`).
-- [ ] Update `_extract_identifiers()` to accept a language parameter and load
+- [x] Update `_extract_identifiers()` to accept a language parameter and load
   keywords from the config instead of `_PYTHON_KEYWORDS`.
-- [ ] Add TypeScript keywords (`undefined`, `null`, `true`, `false`, `this`,
+- [x] Add TypeScript keywords (`undefined`, `null`, `true`, `false`, `this`,
   `super`, `new`, `typeof`, `instanceof`, `void`, `delete`, `in`, `of`, etc.).
-- [ ] Add Rust keywords (`let`, `fn`, `struct`, `enum`, `impl`, `trait`,
+- [x] Add Rust keywords (`let`, `fn`, `struct`, `enum`, `impl`, `trait`,
   `self`, `Self`, `true`, `false`, `None`, `Some`, `Ok`, `Err`, etc.).
 
 ### Container mutation methods
 
-- [ ] Add a `[trace.container_mutations]` section to each language config:
+- [x] Add a `[trace.container_mutations]` section to each language config:
   - Python: `append`, `extend`, `update`, `insert`, `add`
   - TypeScript: `push`, `splice`, `unshift`, `concat`, `set`, `add`
   - Rust: `push`, `insert`, `extend`, `push_back`, `push_front`
-- [ ] Update any residual Python-specific container mutation handling in
-  `trace.py` to read from config.
+- [x] Update any residual Python-specific container mutation handling in
+  `trace.py` to read from config. (Container mutation tracking is handled by
+  the Rust CFG builder from config; `_extract_identifiers` was the only
+  Python-side gap, now fixed.)
 
 ### Entry point heuristics
 
-- [ ] Add a `[dead_code.entry_points]` section to each language config:
+- [x] Add a `[dead_code.entry_points]` section to each language config:
   - Python: existing `_ENTRY_POINT_DECORATORS`, `_ENTRY_POINT_NAMES`
   - TypeScript: `export default`, `module.exports`, test framework decorators
     (`describe`, `it`, `test`), Express/Fastify route handlers
   - Rust: `#[test]`, `#[tokio::main]`, `fn main`, `#[no_mangle]`,
     `#[export_name]`, `pub` visibility
-- [ ] Update `_is_likely_entry_point()` to load heuristics from config.
-- [ ] Update dunder detection (`_is_dunder()`) to be Python-only (skip for
-  TS/Rust).
+- [x] Update `_is_likely_entry_point()` to load heuristics from config.
+- [x] Update dunder detection (`_is_dunder()`) to be Python-only (skip for
+  TS/Rust). Controlled by `has_dunders` key in `[dead_code]` config section.
 
 ### Assignment extraction
 
-- [ ] Update `_find_assignments_in_source()` (trace.py:464) to accept
+- [x] Update `_find_assignments_in_source()` (trace.py:464) to accept
   `ext` parameter and handle TypeScript/Rust assignment forms, or remove
   it entirely if the Datalog engine's def-use facts make it redundant.
+  (Already accepts `ext` parameter; Datalog engine handles per-language facts.)
 
 ### Tests
 
-- [ ] Test that `_extract_identifiers()` with `language="typescript"` correctly
+- [x] Test that `_extract_identifiers()` with `language="typescript"` correctly
   filters TypeScript keywords.
-- [ ] Test that `_extract_identifiers()` with `language="rust"` correctly
+- [x] Test that `_extract_identifiers()` with `language="rust"` correctly
   filters Rust keywords.
-- [ ] Test that entry point detection works for TypeScript export patterns.
-- [ ] Test that entry point detection works for Rust `#[test]` and `fn main`.
+- [x] Test that entry point detection works for TypeScript export patterns.
+- [x] Test that entry point detection works for Rust `#[test]` and `fn main`.
 
 ## Exit Criteria
 
