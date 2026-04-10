@@ -146,8 +146,9 @@ impl PyScopeResolver {
     /// Returns structured import statements in a file.
     ///
     /// Each entry is a dict with keys: module, level, names, start_byte,
-    /// end_byte, start_line, end_line.  ``names`` is a list of (name, alias)
-    /// tuples where alias may be None.
+    /// end_byte, start_line, end_line, is_plain.  ``names`` is a list of
+    /// (name, alias) tuples where alias may be None.  ``is_plain`` is true
+    /// for plain ``import X`` statements, false for ``from X import Y``.
     fn structured_imports_in_file(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {
         let path_buf = PathBuf::from(path);
         let fs = match self.inner.file_scopes.get(&path_buf) {
@@ -179,6 +180,85 @@ impl PyScopeResolver {
             dict.set_item("end_byte", si.end_byte)?;
             dict.set_item("start_line", si.start_line)?;
             dict.set_item("end_line", si.end_line)?;
+            dict.set_item("is_plain", si.is_plain)?;
+            result.push(dict.into());
+        }
+        Ok(result)
+    }
+
+    /// Returns all identifier names with their annotation context for a file.
+    ///
+    /// Each entry is ``(name, in_annotation)``.  Includes every identifier
+    /// node that is not the attribute-field of an attribute access and not
+    /// a language keyword.  Used to replace ``ast.walk()`` for collecting
+    /// referenced names and classifying them as runtime vs annotation.
+    fn all_identifiers_in_file(&self, path: &str) -> Vec<(String, bool)> {
+        let path_buf = PathBuf::from(path);
+        let _fs = match self.inner.file_scopes.get(&path_buf) {
+            Some(fs) => fs,
+            None => return Vec::new(),
+        };
+        let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let source = std::fs::read_to_string(&path_buf).unwrap_or_default();
+        let tree = match crate::pattern::parse_by_extension(&source, ext) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        self.inner.collect_identifiers_with_annotation(&tree, &source)
+    }
+
+    /// Returns all identifier names with annotation context from a source string.
+    ///
+    /// Like ``all_identifiers_in_file`` but works on a source string directly
+    /// without requiring the file to be indexed.
+    #[pyo3(signature = (source, ext=None))]
+    fn collect_identifiers_from_source(
+        &self,
+        source: &str,
+        ext: Option<&str>,
+    ) -> Vec<(String, bool)> {
+        let ext = ext.unwrap_or("py");
+        let tree = match crate::pattern::parse_by_extension(source, ext) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        self.inner
+            .collect_identifiers_with_annotation(&tree, source)
+    }
+
+    /// Returns structured imports from a source string.
+    ///
+    /// Like ``structured_imports_in_file`` but works on a source string
+    /// directly without requiring the file to be indexed.
+    #[pyo3(signature = (source, ext=None))]
+    fn collect_structured_imports_from_source(
+        &self,
+        py: Python,
+        source: &str,
+        ext: Option<&str>,
+    ) -> PyResult<Vec<PyObject>> {
+        let ext = ext.unwrap_or("py");
+        let tree = match crate::pattern::parse_by_extension(source, ext) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        let structured = self.inner.collect_structured_imports(&tree, source);
+        let mut result = Vec::with_capacity(structured.len());
+        for si in &structured {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("module", &si.module)?;
+            dict.set_item("level", si.level)?;
+            let names: Vec<(String, Option<String>)> = si
+                .names
+                .iter()
+                .map(|n| (n.name.clone(), n.alias.clone()))
+                .collect();
+            dict.set_item("names", names)?;
+            dict.set_item("start_byte", si.start_byte)?;
+            dict.set_item("end_byte", si.end_byte)?;
+            dict.set_item("start_line", si.start_line)?;
+            dict.set_item("end_line", si.end_line)?;
+            dict.set_item("is_plain", si.is_plain)?;
             result.push(dict.into());
         }
         Ok(result)

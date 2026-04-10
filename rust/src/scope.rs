@@ -272,10 +272,13 @@ pub struct ImportedName {
 #[derive(Debug, Clone)]
 pub struct StructuredImport {
     /// Module path (e.g. "source_mod" or "pkg.helpers").
+    /// Empty for plain `import X` statements.
     pub module: String,
     /// Number of leading dots for relative imports (0 = absolute).
     pub level: usize,
     /// Imported names with optional aliases.
+    /// For `from X import a, b`: [("a", None), ("b", None)].
+    /// For `import X, Y as Z`: [("X", None), ("Y", Some("Z"))].
     pub names: Vec<ImportedName>,
     /// Byte offset of the start of the import statement node.
     pub start_byte: usize,
@@ -285,6 +288,8 @@ pub struct StructuredImport {
     pub start_line: usize,
     /// 1-based end line.
     pub end_line: usize,
+    /// True for plain `import X` statements, false for `from X import Y`.
+    pub is_plain: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2517,6 +2522,7 @@ impl ScopeResolver {
         ) {
             let nk = node.kind();
 
+            // Handle `from X import Y` statements.
             if !imports.import_from.is_empty() && nk == imports.import_from {
                 let mod_node = node.child_by_field_name(&imports.module_field);
                 let raw_module = mod_node
@@ -2590,6 +2596,52 @@ impl ScopeResolver {
                     end_byte: node.end_byte(),
                     start_line: node.start_position().row + 1,
                     end_line: node.end_position().row + 1,
+                    is_plain: false,
+                });
+                return;
+            }
+
+            // Handle plain `import X` statements.
+            if nk == imports.import_statement
+                && (imports.import_from.is_empty() || nk != imports.import_from)
+            {
+                let mut names = Vec::new();
+                for_each_child(&node, |child| {
+                    let ck = child.kind();
+                    if imports.dotted_name.as_deref() == Some(ck)
+                        || imports.identifier.as_deref() == Some(ck)
+                    {
+                        names.push(ImportedName {
+                            name: node_text(child, source).to_string(),
+                            alias: None,
+                        });
+                    } else if imports.aliased_import.as_deref() == Some(ck) {
+                        if let Some(name_node) = child.child_by_field_name("name") {
+                            let imported = node_text(name_node, source).to_string();
+                            let alias = if !imports.alias_field.is_empty() {
+                                child
+                                    .child_by_field_name(&imports.alias_field)
+                                    .map(|a| node_text(a, source).to_string())
+                            } else {
+                                None
+                            };
+                            names.push(ImportedName {
+                                name: imported,
+                                alias,
+                            });
+                        }
+                    }
+                });
+
+                result.push(StructuredImport {
+                    module: String::new(),
+                    level: 0,
+                    names,
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    is_plain: true,
                 });
                 return;
             }
@@ -2608,6 +2660,90 @@ impl ScopeResolver {
         }
 
         walk_for_imports(tree.root_node(), source_bytes, imports, &mut result);
+        result
+    }
+
+    /// Collect all identifiers in a source file with their annotation context.
+    ///
+    /// Returns `(name, in_annotation)` for every identifier node that is not
+    /// the attribute-field of an attribute access (i.e. the `b` in `a.b` is
+    /// skipped, but `a` is included) and is not a language keyword.
+    ///
+    /// This is used to replace Python's `ast.walk()` for collecting all
+    /// referenced names and classifying them as runtime vs annotation.
+    pub fn collect_identifiers_with_annotation(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> Vec<(String, bool)> {
+        let source_bytes = source.as_bytes();
+        let config = &self.config;
+        let mut result = Vec::new();
+
+        fn walk_idents(
+            node: tree_sitter::Node,
+            source: &[u8],
+            config: &LanguageConfig,
+            in_annotation: bool,
+            result: &mut Vec<(String, bool)>,
+        ) {
+            let nk = node.kind();
+            let ident_kind = &config.pattern_matching.identifier;
+            let attr_kind = &config.pattern_matching.attribute;
+            let attr_field = &config.pattern_matching.attr_field;
+
+            if !ident_kind.is_empty() && nk == ident_kind {
+                // Skip if this identifier is the attribute-name field of an
+                // attribute access (e.g. `b` in `a.b`).
+                let is_attr_name = node.parent().map_or(false, |p| {
+                    !attr_kind.is_empty()
+                        && p.kind() == attr_kind.as_str()
+                        && p.child_by_field_name(attr_field)
+                            .map_or(false, |f| f.id() == node.id())
+                });
+
+                // Skip if this identifier is the `name` field of a definition
+                // node (function_definition, class_definition) — these are
+                // binding sites, not references to imported names.
+                let def_name_field = &config.bindings.definitions.name_field;
+                let is_def_name = node.parent().map_or(false, |p| {
+                    let pk = p.kind();
+                    (pk == config.bindings.definitions.function_def
+                        || pk == config.bindings.definitions.class_def)
+                        && p.child_by_field_name(def_name_field)
+                            .map_or(false, |f| f.id() == node.id())
+                });
+
+                let name = node_text(node, source);
+                let is_keyword = config.language.keywords.iter().any(|k| k == name);
+
+                if !is_attr_name && !is_def_name && !is_keyword {
+                    result.push((name.to_string(), in_annotation));
+                }
+            }
+
+            // Recurse into children, updating annotation context.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    let child_in_ann = in_annotation || {
+                        let ann_fields = &config.pattern_matching.annotation_fields;
+                        !ann_fields.is_empty()
+                            && ann_fields.iter().any(|f| {
+                                node.child_by_field_name(f.as_str())
+                                    .map_or(false, |fnode| fnode.id() == child.id())
+                            })
+                    };
+                    walk_idents(child, source, config, child_in_ann, result);
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        walk_idents(tree.root_node(), source_bytes, config, false, &mut result);
         result
     }
 

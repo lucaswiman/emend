@@ -4465,23 +4465,15 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
 
 
 def _collect_names(source: str) -> set[str]:
-    """Collect all Name references in code using stdlib ast."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            # Collect the leftmost name in the chain
-            current = node.value
-            while isinstance(current, ast.Attribute):
-                current = current.value
-            if isinstance(current, ast.Name):
-                names.add(current.id)
-    return names
+    """Collect all Name references in code using tree-sitter.
+
+    Returns the set of simple identifier names (the leftmost name in
+    attribute chains) referenced anywhere in *source*, excluding
+    language keywords.
+    """
+    resolver = _rust.PyScopeResolver("/tmp", "py")
+    identifiers = resolver.collect_identifiers_from_source(source)
+    return {name for name, _ann in identifiers}
 
 
 def _collect_name_contexts(source: str) -> tuple[set[str], set[str]]:
@@ -4490,68 +4482,21 @@ def _collect_name_contexts(source: str) -> tuple[set[str], set[str]]:
     ``annotation_names`` only includes names that appear in annotation
     positions.  ``runtime_names`` includes names referenced in executable
     positions, including decorators, bases, defaults, and function bodies.
+
+    Uses tree-sitter's annotation_fields config to classify identifiers.
     """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set(), set()
+    resolver = _rust.PyScopeResolver("/tmp", "py")
+    identifiers = resolver.collect_identifiers_from_source(source)
 
     runtime_names: set[str] = set()
     annotation_names: set[str] = set()
 
-    def visit(node: ast.AST | None, *, annotation: bool = False) -> None:
-        if node is None:
-            return
-        if isinstance(node, ast.Name):
-            if annotation:
-                annotation_names.add(node.id)
-            else:
-                runtime_names.add(node.id)
-            return
-        if isinstance(node, ast.Attribute):
-            visit(node.value, annotation=annotation)
-            return
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for deco in node.decorator_list:
-                visit(deco, annotation=False)
-            for default in node.args.defaults:
-                visit(default, annotation=False)
-            for default in node.args.kw_defaults:
-                visit(default, annotation=False)
-            for arg in (
-                list(node.args.posonlyargs)
-                + list(node.args.args)
-                + list(node.args.kwonlyargs)
-            ):
-                visit(arg.annotation, annotation=True)
-            visit(node.args.vararg.annotation if node.args.vararg else None, annotation=True)
-            visit(node.args.kwarg.annotation if node.args.kwarg else None, annotation=True)
-            visit(node.returns, annotation=True)
-            for stmt in node.body:
-                visit(stmt, annotation=False)
-            return
-        if isinstance(node, ast.ClassDef):
-            for deco in node.decorator_list:
-                visit(deco, annotation=False)
-            for base in node.bases:
-                visit(base, annotation=False)
-            for kw in node.keywords:
-                visit(kw.value, annotation=False)
-            for stmt in node.body:
-                visit(stmt, annotation=False)
-            return
-        if isinstance(node, ast.AnnAssign):
-            visit(node.target, annotation=False)
-            visit(node.annotation, annotation=True)
-            visit(node.value, annotation=False)
-            return
-        if isinstance(node, ast.arg):
-            visit(node.annotation, annotation=True)
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, annotation=annotation)
+    for name, in_annotation in identifiers:
+        if in_annotation:
+            annotation_names.add(name)
+        else:
+            runtime_names.add(name)
 
-    visit(tree, annotation=False)
     return runtime_names, annotation_names
 
 
@@ -4632,44 +4577,54 @@ def analyze_imports(
     if not source_path.exists():
         return []
 
+    # Use tree-sitter scope resolver to parse imports from source file.
+    proj_root = _find_project_root(project_path or source_file)
+    resolver = _rust.PyScopeResolver(proj_root, "py")
     try:
-        source_tree = ast.parse(source_path.read_text())
+        source_content = source_path.read_text()
+        resolver.index_file(str(source_path.resolve()), source_content)
     except Exception:
         return []
+
+    structured_imports = resolver.structured_imports_in_file(
+        str(source_path.resolve())
+    )
 
     needed_imports = []
     covered_names: set[str] = set()
 
-    for stmt in source_tree.body:
-        if isinstance(stmt, ast.Import):
-            for alias in stmt.names:
-                effective_name = alias.asname or alias.name.split('.')[0]
+    for imp in structured_imports:
+        if imp["is_plain"]:
+            # Plain `import X` / `import X as A` statements.
+            for name, alias in imp["names"]:
+                effective_name = alias or name.split('.')[0]
                 if effective_name in used_names:
                     covered_names.add(effective_name)
-                    if alias.asname:
-                        needed_imports.append(f"import {alias.name} as {alias.asname}")
+                    if alias:
+                        needed_imports.append(f"import {name} as {alias}")
                     else:
-                        needed_imports.append(f"import {alias.name}")
-
-        elif isinstance(stmt, ast.ImportFrom):
-            if stmt.names and isinstance(stmt.names[0], ast.alias) and stmt.names[0].name == '*':
+                        needed_imports.append(f"import {name}")
+        else:
+            # `from X import Y` statements.
+            names = imp["names"]
+            if names and names[0][0] == '*':
                 continue
 
-            module_name = stmt.module or ''
+            module_name = imp["module"]
 
             # Resolve relative imports to absolute so they work from the
             # destination file (which is typically in a different package).
-            if stmt.level and stmt.level > 0:
+            if imp["level"] > 0:
                 module_name = _resolve_relative_module(
-                    stmt.level, module_name, source_file, project_path,
+                    imp["level"], module_name, source_file, project_path,
                 )
 
             used_import_names = []
-            for alias in stmt.names:
-                effective_name = alias.asname or alias.name
+            for name, alias in names:
+                effective_name = alias or name
                 if effective_name in used_names:
                     covered_names.add(effective_name)
-                    used_import_names.append((alias.name, alias.asname))
+                    used_import_names.append((name, alias))
 
             if used_import_names:
                 import_parts = []
@@ -4684,17 +4639,19 @@ def analyze_imports(
     # moved symbol references.  These need TYPE_CHECKING imports to avoid
     # circular imports at runtime.
     if source_module:
+        # Use definitions_in_file to find top-level defined names.
+        # Top-level definitions have qn = "module.name" (one component after
+        # the module prefix).  Nested definitions like "module.Class.method"
+        # have more components and must be excluded.
+        file_module = _file_to_module(str(source_path), project_path)
+        defs = resolver.definitions_in_file(str(source_path.resolve()))
         locally_defined: set[str] = set()
-        for stmt in source_tree.body:
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                locally_defined.add(stmt.name)
-            elif isinstance(stmt, ast.Assign):
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        locally_defined.add(target.id)
-            elif isinstance(stmt, ast.AnnAssign):
-                if isinstance(stmt.target, ast.Name):
-                    locally_defined.add(stmt.target.id)
+        prefix = file_module + "."
+        for qn, _line, _col in defs:
+            if qn.startswith(prefix):
+                remainder = qn[len(prefix):]
+                if "." not in remainder:
+                    locally_defined.add(remainder)
 
         local_refs_needed_runtime = sorted(
             n for n in locally_defined
@@ -7117,6 +7074,7 @@ def _split_or_retarget_import(
     source_module: str,
     dest_module: str,
     symbol_name: str,
+    resolver: object | None = None,
 ) -> str | None:
     """Rewrite ``from source_module import ...`` statements for a symbol move.
 
@@ -7129,64 +7087,78 @@ def _split_or_retarget_import(
       import lines so that sibling names are not inadvertently retargeted to
       ``dest_module`` (issue #138 Bug 1).
 
+    Uses tree-sitter ``structured_imports_in_file`` for import parsing and
+    byte-range-based replacement instead of Python's ``ast`` module.
+
     Returns the rewritten file content string, or ``None`` if no change was
-    needed or if AST parsing fails.
+    needed.
     """
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return None
+    # Use the provided resolver or create a temporary one.
+    if resolver is not None:
+        structured_imports = resolver.structured_imports_in_file(py_file)
+    else:
+        tmp_resolver = _rust.PyScopeResolver("/tmp", "py")
+        try:
+            tmp_resolver.index_file(py_file, content)
+        except Exception:
+            return None
+        structured_imports = tmp_resolver.structured_imports_in_file(py_file)
 
     original_content = content
     lines = content.splitlines(keepends=True)
 
-    # Collect (stmt_start_offset, stmt_end_offset, replacement_text) tuples;
-    # applied in reverse order to preserve earlier text offsets.
+    # Collect (stmt_start_byte, stmt_end_byte, replacement_text) tuples;
+    # applied in reverse order to preserve earlier byte offsets.
     replacements: list[tuple[int, int, str]] = []
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom):
+    for imp in structured_imports:
+        # Only handle from-imports, not plain imports.
+        if imp["is_plain"]:
             continue
-        if (node.module or "") != source_module:
+        if imp["module"] != source_module:
             continue
-        if node.level:
-            # Relative imports: skip (module name doesn't match as a simple string)
+        if imp["level"]:
+            # Relative imports: skip (module name doesn't match as simple string)
             continue
 
-        # Check if symbol_name is among the imported names
-        moved_aliases = [a for a in node.names if a.name == symbol_name]
+        names = imp["names"]
+        moved_aliases = [(n, a) for n, a in names if n == symbol_name]
         if not moved_aliases:
             continue
 
-        remaining_aliases = [a for a in node.names if a.name != symbol_name]
+        remaining_aliases = [(n, a) for n, a in names if n != symbol_name]
 
-        def _alias_str(a: ast.alias) -> str:
-            if a.asname:
-                return f"{a.name} as {a.asname}"
-            return a.name
+        def _alias_str(name: str, alias: str | None) -> str:
+            if alias:
+                return f"{name} as {alias}"
+            return name
 
         # Preserve the indentation of the original import statement.
-        orig_line = lines[node.lineno - 1] if node.lineno - 1 < len(lines) else ""
+        start_line = imp["start_line"]
+        orig_line = lines[start_line - 1] if start_line - 1 < len(lines) else ""
         indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
 
         moved_line = (
             f"{indent}from {dest_module} import "
-            + ", ".join(_alias_str(a) for a in moved_aliases)
+            + ", ".join(_alias_str(n, a) for n, a in moved_aliases)
         )
 
         if remaining_aliases:
             remaining_line = (
                 f"{indent}from {source_module} import "
-                + ", ".join(_alias_str(a) for a in remaining_aliases)
+                + ", ".join(_alias_str(n, a) for n, a in remaining_aliases)
             )
             replacement = moved_line + "\n" + remaining_line
         else:
             replacement = moved_line
 
-        # Compute text offsets for the import statement.
-        # ast gives 1-based line numbers; sum line lengths to get offsets.
-        stmt_start = sum(len(lines[i]) for i in range(node.lineno - 1))
-        stmt_end = sum(len(lines[i]) for i in range(node.end_lineno))
+        # Compute line-based byte offsets.  tree-sitter start_byte is at the
+        # first token (after indentation), but we need to replace the whole
+        # line(s) including leading whitespace and trailing newline.
+        start_line_idx = imp["start_line"] - 1
+        end_line_idx = imp["end_line"]  # exclusive
+        stmt_start = sum(len(lines[i]) for i in range(start_line_idx))
+        stmt_end = sum(len(lines[i]) for i in range(end_line_idx))
         replacements.append((stmt_start, stmt_end, replacement + "\n"))
 
     if not replacements:
@@ -7235,12 +7207,13 @@ def _update_imports_for_move(
 
         changed = False
 
-        # For Python files, use AST to handle multi-name imports correctly.
+        # Use tree-sitter to handle multi-name imports correctly.
         # When the consumer has 'from source_mod import A, B' and only A is
         # moved, we must split the statement instead of rewriting just the
         # module name (which would drag B to dest_mod — issue #138 Bug 1).
         new_content = _split_or_retarget_import(
-            content, py_file, source_module, dest_module, symbol_name
+            content, py_file, source_module, dest_module, symbol_name,
+            resolver=resolver,
         )
         if new_content is not None and new_content != content:
             changed = True
