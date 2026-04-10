@@ -842,3 +842,112 @@ def test_move_symbol_carries_dependencies(tmp_path, emend_cmd):
         f"dest_mod.py content:\n{dest_content}\n"
         f"Import error:\n{run.stderr}"
     )
+
+
+def test_move_symbol_adds_runtime_import_for_local_dependency(tmp_path, emend_cmd):
+    """Moved symbols must import local runtime dependencies, not TYPE_CHECKING-only.
+
+    If the moved symbol calls a helper still defined in the source module, the
+    destination module needs a real import so the moved code still runs.
+    """
+    source = tmp_path / "source.py"
+    source.write_text(
+        "def helper_runtime():\n"
+        "    return 7\n"
+        "\n"
+        "def moved():\n"
+        "    return helper_runtime()\n"
+    )
+    dest = tmp_path / "dest.py"
+    dest.write_text("")
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{source}::moved",
+            str(dest),
+            "--project",
+            str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    dest_content = dest.read_text()
+    assert "from source import helper_runtime" in dest_content, (
+        f"Runtime dependency import missing from dest.py:\n{dest_content}"
+    )
+    assert "if TYPE_CHECKING:\n    from source import helper_runtime" not in dest_content, (
+        f"Runtime dependency should not be TYPE_CHECKING-only.\n{dest_content}"
+    )
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                f"import sys; sys.path.insert(0, {str(tmp_path)!r}); "
+                "from dest import moved; "
+                "print(moved())"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, (
+        f"Moved function should remain executable.\nSTDERR:\n{run.stderr}\n"
+        f"dest.py:\n{dest_content}"
+    )
+    assert run.stdout.strip() == "7"
+
+
+def test_move_symbol_split_import_preserves_utf8_prefix(tmp_path, emend_cmd):
+    """Splitting imports must remain correct when earlier text uses multibyte UTF-8."""
+    (tmp_path / "source_mod.py").write_text(
+        "class Bundle:\n"
+        "    pass\n"
+        "\n"
+        "def load_bundle():\n"
+        "    return Bundle()\n"
+    )
+    (tmp_path / "dest_mod.py").write_text("")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text(
+        "# café\n"
+        "from source_mod import Bundle, load_bundle\n"
+    )
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{tmp_path / 'source_mod.py'}::Bundle",
+            str(tmp_path / "dest_mod.py"),
+            "--project",
+            str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    consumer_content = consumer.read_text()
+    assert consumer_content.startswith("# café\n"), (
+        f"UTF-8 prefix should remain intact.\nconsumer.py:\n{consumer_content}"
+    )
+    assert "from dest_mod import Bundle" in consumer_content, (
+        f"Moved import missing.\nconsumer.py:\n{consumer_content}"
+    )
+    assert "from source_mod import load_bundle" in consumer_content, (
+        f"Sibling import missing.\nconsumer.py:\n{consumer_content}"
+    )

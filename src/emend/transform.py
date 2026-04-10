@@ -4484,6 +4484,77 @@ def _collect_names(source: str) -> set[str]:
     return names
 
 
+def _collect_name_contexts(source: str) -> tuple[set[str], set[str]]:
+    """Return ``(runtime_names, annotation_names)`` used in *source*.
+
+    ``annotation_names`` only includes names that appear in annotation
+    positions.  ``runtime_names`` includes names referenced in executable
+    positions, including decorators, bases, defaults, and function bodies.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set(), set()
+
+    runtime_names: set[str] = set()
+    annotation_names: set[str] = set()
+
+    def visit(node: ast.AST | None, *, annotation: bool = False) -> None:
+        if node is None:
+            return
+        if isinstance(node, ast.Name):
+            if annotation:
+                annotation_names.add(node.id)
+            else:
+                runtime_names.add(node.id)
+            return
+        if isinstance(node, ast.Attribute):
+            visit(node.value, annotation=annotation)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for deco in node.decorator_list:
+                visit(deco, annotation=False)
+            for default in node.args.defaults:
+                visit(default, annotation=False)
+            for default in node.args.kw_defaults:
+                visit(default, annotation=False)
+            for arg in (
+                list(node.args.posonlyargs)
+                + list(node.args.args)
+                + list(node.args.kwonlyargs)
+            ):
+                visit(arg.annotation, annotation=True)
+            visit(node.args.vararg.annotation if node.args.vararg else None, annotation=True)
+            visit(node.args.kwarg.annotation if node.args.kwarg else None, annotation=True)
+            visit(node.returns, annotation=True)
+            for stmt in node.body:
+                visit(stmt, annotation=False)
+            return
+        if isinstance(node, ast.ClassDef):
+            for deco in node.decorator_list:
+                visit(deco, annotation=False)
+            for base in node.bases:
+                visit(base, annotation=False)
+            for kw in node.keywords:
+                visit(kw.value, annotation=False)
+            for stmt in node.body:
+                visit(stmt, annotation=False)
+            return
+        if isinstance(node, ast.AnnAssign):
+            visit(node.target, annotation=False)
+            visit(node.annotation, annotation=True)
+            visit(node.value, annotation=False)
+            return
+        if isinstance(node, ast.arg):
+            visit(node.annotation, annotation=True)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, annotation=annotation)
+
+    visit(tree, annotation=False)
+    return runtime_names, annotation_names
+
+
 def _resolve_relative_module(
     level: int,
     module: str,
@@ -4555,6 +4626,7 @@ def analyze_imports(
     used_names = _collect_names(symbol_source)
     if not used_names:
         return []
+    runtime_names, annotation_names = _collect_name_contexts(symbol_source)
 
     source_path = Path(source_file)
     if not source_path.exists():
@@ -4624,27 +4696,31 @@ def analyze_imports(
                 if isinstance(stmt.target, ast.Name):
                     locally_defined.add(stmt.target.id)
 
-        local_refs_needed = sorted(
+        local_refs_needed_runtime = sorted(
             n for n in locally_defined
-            if n in used_names and n not in covered_names
+            if n in runtime_names and n not in covered_names
         )
-        if local_refs_needed:
-            # Use TYPE_CHECKING to avoid circular imports at runtime.
-            # ``from __future__ import annotations`` makes all annotations
-            # lazy strings so that the TYPE_CHECKING-only import is sufficient
-            # for type-checking tools while the runtime never evaluates the
-            # annotation as an expression.
-            #
-            # We emit the __future__ import as a separate item so that
-            # copy_symbol can insert it before all other imports (position=0),
-            # and then the TYPE_CHECKING block after the last import (-1).
+        local_refs_needed_annotations = sorted(
+            n for n in locally_defined
+            if (
+                n in annotation_names
+                and n not in runtime_names
+                and n not in covered_names
+            )
+        )
+
+        if local_refs_needed_runtime:
+            needed_imports.append(
+                f"from {source_module} import {', '.join(local_refs_needed_runtime)}"
+            )
+        if local_refs_needed_annotations:
             needed_imports.append("from __future__ import annotations")
             type_checking_block = (
                 "from typing import TYPE_CHECKING\n"
                 "if TYPE_CHECKING:\n"
                 + "".join(
                     f"    from {source_module} import {n}\n"
-                    for n in local_refs_needed
+                    for n in local_refs_needed_annotations
                 )
             )
             needed_imports.append(type_checking_block)
@@ -7024,10 +7100,11 @@ def _split_or_retarget_import(
     except SyntaxError:
         return None
 
+    original_content = content
     lines = content.splitlines(keepends=True)
 
     # Collect (stmt_start_offset, stmt_end_offset, replacement_text) tuples;
-    # applied in reverse order to preserve earlier byte offsets.
+    # applied in reverse order to preserve earlier text offsets.
     replacements: list[tuple[int, int, str]] = []
 
     for node in ast.walk(tree):
@@ -7065,7 +7142,7 @@ def _split_or_retarget_import(
         else:
             replacement = moved_line
 
-        # Compute byte offsets for the import statement.
+        # Compute text offsets for the import statement.
         # ast gives 1-based line numbers; sum line lengths to get offsets.
         stmt_start = sum(len(lines[i]) for i in range(node.lineno - 1))
         stmt_end = sum(len(lines[i]) for i in range(node.end_lineno))
@@ -7075,12 +7152,11 @@ def _split_or_retarget_import(
         return None
 
     replacements.sort(key=lambda x: x[0], reverse=True)
-    content_bytes = content.encode("utf-8")
     for start, end, repl in replacements:
-        content_bytes = content_bytes[:start] + repl.encode("utf-8") + content_bytes[end:]
+        content = content[:start] + repl + content[end:]
 
-    new_content = content_bytes.decode("utf-8")
-    return new_content if new_content != content else None
+    new_content = content
+    return new_content if new_content != original_content else None
 
 
 def _update_imports_for_move(
