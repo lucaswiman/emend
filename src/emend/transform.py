@@ -589,7 +589,8 @@ def _build_fact_sym_rows(
     if lang == "python":
         exported_names = _extract_all_exports_text(content)
     else:
-        exported_names = _detect_exported_names_text(content, lang)
+        from emend.language_registry import detect_exported_names
+        exported_names = detect_exported_names(content, lang)
     noqa_lines = _extract_noqa_lines(content)
 
     def _walk(symbols: list[dict], parent_prefix: str = "") -> None:
@@ -669,6 +670,8 @@ def _extract_file_facts(
             tuples from parse.db's reference_index.  When provided, skips
             the expensive scope_resolver.references_in_file() call.
     """
+    from emend.fact_graph import _normalize_qn
+
     import_re = re.compile(
         r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
         re.MULTILINE,
@@ -680,6 +683,7 @@ def _extract_file_facts(
         "calls": [], "calls_by_callee": [], "calls_by_file": [],
         "def_uses": [], "method_calls": [], "source_locs": [],
         "imports": [], "ref_by_block": [], "module_level_refs": [],
+        "exported_qns": [],
     }
 
     # -- Extract symbols via Rust
@@ -712,18 +716,29 @@ def _extract_file_facts(
     for df in dec_facts_for_file:
         result["dec"].append([df.symbol_qn, df.decorator])
 
+    # Collect exported symbol QNs (for TS/Rust visibility-based entry points)
+    from emend.language_registry import detect_language as _detect_lang_eff
+    _lang_eff = _detect_lang_eff(abs_path) or "python"
+    if _lang_eff != "python":
+        from emend.language_registry import detect_exported_names as _detect_exports_eff
+        exported_names = _detect_exports_eff(content, _lang_eff)
+        if exported_names:
+            for sf in sym_facts_for_file:
+                if sf.name in exported_names:
+                    result["exported_qns"].append([sf.qualified_name])
+
     # -- Extract references (pre-computed or via Rust scope resolver)
     file_refs: list[tuple] = []
     if precomputed_refs is not None:
         for qn_str, line, col, kind in precomputed_refs:
-            qn_str = qn_str.replace("::", ".").replace("/", ".")
+            qn_str = _normalize_qn(qn_str)
             file_refs.append((qn_str, line, col, kind))
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
             for qn_str, line, col, _offset, _end_offset, kind, _ann in \
                     scope_resolver.references_in_file(abs_path):
-                qn_str = qn_str.replace("::", ".").replace("/", ".")
+                qn_str = _normalize_qn(qn_str)
                 file_refs.append((qn_str, line, col, kind))
                 result["fact_ref"].append([qn_str, rel_path, line, col, kind])
         except Exception:
@@ -913,6 +928,7 @@ def _build_facts_db(
         _enclosing_symbol,
         _extract_imports,
         _build_symbol_line_index,
+        _normalize_qn,
         _walk_symbols,
         SymbolFact,
         DecoratorOnFact,
@@ -1014,6 +1030,7 @@ def _build_facts_db(
         all_imports: list[list] = []
         all_ref_by_block: list[list] = []
         all_module_level_refs: list[list] = []
+        all_exported_qns: list[list] = []
 
         _KEYS_TO_LISTS = {
             "fact_sym": cozo_fact_sym, "fact_ref": cozo_fact_ref,
@@ -1025,6 +1042,7 @@ def _build_facts_db(
             "method_calls": all_method_calls, "source_locs": all_source_locs,
             "imports": all_imports, "ref_by_block": all_ref_by_block,
             "module_level_refs": all_module_level_refs,
+            "exported_qns": all_exported_qns,
         }
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1171,30 +1189,11 @@ def _build_facts_db(
             {"rows": all_module_level_refs},
         )
 
-        # -- Populate exported_symbol for TS/Rust visibility-based entry points
-        from emend.language_registry import detect_language as _detect_lang_fdb
-        exported_qn_rows: list[list] = []
-        # Build a quick lookup from (rel_path, name) -> qualified_name using
-        # the cozo_fg_sym rows we already collected.
-        _sym_by_file_name: dict[tuple[str, str], str] = {}
-        for row in cozo_fg_sym:
-            # row = [qn, fp, name, kind, line, end_line, parent]
-            _sym_by_file_name[(row[1], row[2])] = row[0]
-
-        for abs_path, rel_path, ext, content in file_contents:
-            _lang = _detect_lang_fdb(abs_path) or "python"
-            if _lang == "python":
-                continue
-            exported_names = _detect_exported_names_text(content, _lang)
-            for ename in exported_names:
-                qn = _sym_by_file_name.get((rel_path, ename))
-                if qn:
-                    exported_qn_rows.append([qn])
-        if exported_qn_rows:
+        if all_exported_qns:
             fdb.run(
                 "?[qualified_name] <- $rows "
                 ":replace exported_symbol {qualified_name}",
-                {"rows": exported_qn_rows},
+                {"rows": all_exported_qns},
             )
 
     except BaseException:
@@ -1234,51 +1233,6 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     except Exception:
         pass
     return None
-
-
-def _detect_exported_names_text(content: str, language: str) -> set[str]:
-    """Detect exported/public symbol names from source text.
-
-    For Python, returns empty (Python uses ``__all__`` which is handled separately).
-    For TypeScript, detects ``export function/class/const/...`` declarations.
-    For Rust, detects ``pub fn/struct/enum/...`` declarations.
-    """
-    if language == "python":
-        return set()
-
-    exported: set[str] = set()
-    if language == "typescript":
-        # export [default] function/class/const/let/var/interface/type/enum NAME
-        export_re = re.compile(
-            r'^\s*export\s+(?:default\s+)?'
-            r'(?:function\*?\s+|class\s+|const\s+|let\s+|var\s+'
-            r'|interface\s+|type\s+|enum\s+|abstract\s+class\s+)'
-            r'(\w+)',
-            re.MULTILINE,
-        )
-        for m in export_re.finditer(content):
-            exported.add(m.group(1))
-        # export { name1, name2 }
-        named_re = re.compile(r'^\s*export\s*\{([^}]+)\}', re.MULTILINE)
-        for m in named_re.finditer(content):
-            for name in m.group(1).split(','):
-                name = name.strip().split(' as ')[0].strip()
-                if name and name.isidentifier():
-                    exported.add(name)
-    elif language == "rust":
-        # pub [(...)] [async] fn/struct/enum/trait/type/const/static/mod NAME
-        pub_re = re.compile(
-            r'^\s*pub(?:\s*\([^)]*\))?\s+'
-            r'(?:async\s+)?'
-            r'(?:unsafe\s+)?'
-            r'(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+'
-            r'|static\s+|mod\s+|use\s+|extern\s+"[^"]*"\s+fn\s+)'
-            r'(\w+)',
-            re.MULTILINE,
-        )
-        for m in pub_re.finditer(content):
-            exported.add(m.group(1))
-    return exported
 
 
 _ALL_RE = re.compile(
@@ -5866,14 +5820,11 @@ def _is_test_file(file_path: str) -> bool:
     """Check if a file is a test file by path heuristics."""
     p = Path(file_path)
     name = p.name
-    # Python: test_*.py, *_test.py
     if name.startswith('test_') or name.endswith('_test.py'):
         return True
-    # TypeScript/JavaScript: *.test.ts, *.spec.ts, *.test.tsx, *.spec.tsx, *.test.js, *.spec.js
-    stem = p.stem  # e.g., "foo.test" for "foo.test.ts"
+    stem = p.stem
     if stem.endswith('.test') or stem.endswith('.spec'):
         return True
-    # Directory-based: tests/, test/, __tests__/
     parts = p.parts
     if 'tests' in parts or 'test' in parts or '__tests__' in parts:
         return True
@@ -6717,7 +6668,6 @@ def find_dead_code(
     _file_lines_cache: dict[str, list[str]] = {}
 
     def _has_noqa(fp: str, line: int) -> bool:
-        """Check if the definition line has a # noqa comment."""
         if fp not in _file_lines_cache:
             try:
                 _file_lines_cache[fp] = Path(fp).read_text(errors="replace").splitlines()
@@ -6725,8 +6675,7 @@ def find_dead_code(
                 _file_lines_cache[fp] = []
         lines = _file_lines_cache[fp]
         if 0 < line <= len(lines):
-            line_text = lines[line - 1]
-            if "# noqa" in line_text or "// noqa" in line_text:
+            if _NOQA_RE.search(lines[line - 1]):
                 return True
         return False
 

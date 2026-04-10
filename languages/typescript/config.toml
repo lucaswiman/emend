@@ -94,6 +94,14 @@ locals_marker = ""
 export_statement = "export_statement"
 public_by_default = false
 private_prefix = "_"
+# Regex patterns whose first capture group yields an exported symbol name.
+# Applied with re.MULTILINE against the file content.
+export_patterns = [
+    '^\s*export\s+(?:default\s+)?(?:function\*?\s+|class\s+|const\s+|let\s+|var\s+|interface\s+|type\s+|enum\s+|abstract\s+class\s+)(\w+)',
+]
+# Pattern to extract named exports from `export { A, B as C }` blocks.
+# First capture group is the comma-separated list inside braces.
+named_export_pattern = '^\s*export\s*\{([^}]+)\}'
 
 [symbols]
 function_node = "function_declaration"

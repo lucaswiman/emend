@@ -3033,6 +3033,9 @@ class FactGraph:
         # the detected project_root.
         resolver_root = str(Path(project_path).resolve())
 
+        from emend.language_registry import detect_language as _detect_lang
+        from emend.language_registry import detect_exported_names
+
         for abs_file_path in source_files:
             try:
                 content = Path(abs_file_path).read_text(encoding="utf-8")
@@ -3065,9 +3068,8 @@ class FactGraph:
 
             # -- Exported symbol facts (for TS/Rust visibility) ----------
             try:
-                from emend.language_registry import detect_language as _detect_lang
                 _lang = _detect_lang(abs_file_path) or "python"
-                exported_names = _detect_exported_names_text(content, _lang)
+                exported_names = detect_exported_names(content, _lang)
                 if exported_names:
                     exported_qns = [
                         sf.qualified_name for sf in sym_facts
@@ -3131,8 +3133,7 @@ class FactGraph:
                 ref_facts: list[ReferenceFact] = []
                 call_facts: list[CallFact] = []
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    # Normalize QN separators to match symbol conventions (always '.')
-                    qn = qn.replace("::", ".").replace("/", ".")
+                    qn = _normalize_qn(qn)
                     ref_kind = _map_ref_kind(kind)
                     fq, bid = _find_containing_block(block_ranges, line)
                     ref_facts.append(ReferenceFact(
@@ -3165,8 +3166,7 @@ class FactGraph:
                 from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
                 from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    # Normalize QN separators to match symbol conventions (always '.')
-                    qn = qn.replace("::", ".").replace("/", ".")
+                    qn = _normalize_qn(qn)
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
@@ -3229,48 +3229,6 @@ class FactGraph:
 # ---------------------------------------------------------------------------
 # Internal helpers for build_from_project
 # ---------------------------------------------------------------------------
-
-def _detect_exported_names_text(content: str, language: str) -> set[str]:
-    """Detect exported symbol names from source text for non-Python languages.
-
-    For Python, returns empty (Python uses __all__ which is handled separately).
-    For TypeScript, detects ``export function/class/const/let/var/default/interface/type/enum``.
-    For Rust, detects ``pub fn/struct/enum/trait/type/const/static/mod``.
-    """
-    if language == "python":
-        return set()
-
-    exported: set[str] = set()
-    if language in ("typescript", "javascript"):
-        # Match: export [default] function/class/const/let/var/interface/type/enum NAME
-        export_re = re.compile(
-            r'^\s*export\s+(?:default\s+)?'
-            r'(?:function\*?\s+|class\s+|const\s+|let\s+|var\s+|interface\s+|type\s+|enum\s+|abstract\s+class\s+)'
-            r'(\w+)',
-            re.MULTILINE,
-        )
-        for m in export_re.finditer(content):
-            exported.add(m.group(1))
-        # Also: export { name1, name2 as alias, ... }
-        named_re = re.compile(r'^\s*export\s*\{([^}]+)\}', re.MULTILINE)
-        for m in named_re.finditer(content):
-            for name in m.group(1).split(','):
-                name = name.strip().split(' as ')[0].strip()
-                if name and name.isidentifier():
-                    exported.add(name)
-    elif language == "rust":
-        # Match: pub [(...)] [async] fn/struct/enum/trait/type/const/static/mod NAME
-        pub_re = re.compile(
-            r'^\s*pub(?:\s*\([^)]*\))?\s+'
-            r'(?:async\s+)?'
-            r'(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+|static\s+|mod\s+|use\s+|unsafe\s+fn\s+|extern\s+"[^"]*"\s+fn\s+)'
-            r'(\w+)',
-            re.MULTILINE,
-        )
-        for m in pub_re.finditer(content):
-            exported.add(m.group(1))
-    return exported
-
 
 def _walk_symbols(
     out: list[SymbolFact],
@@ -3359,6 +3317,15 @@ def _enclosing_symbol(
         if start <= line <= end:
             return qn
     return None
+
+
+def _normalize_qn(qn: str) -> str:
+    """Normalize language-specific QN separators to dots.
+
+    The Rust scope resolver uses ``::`` (Rust) and ``/`` (TypeScript) as
+    separators, but ``_walk_symbols`` always uses ``.``.
+    """
+    return qn.replace("::", ".").replace("/", ".")
 
 
 def _find_containing_block(

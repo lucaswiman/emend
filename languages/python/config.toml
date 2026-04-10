@@ -192,13 +192,11 @@ locals_marker = "<locals>"
 # Export rules
 # ---------------------------------------------------------------------------
 [exports]
-# Python uses __all__ to define public API
 all_variable = "__all__"
-# By default, names without leading underscore are public
 public_by_default = true
 private_prefix = "_"
-# Dunder methods are always considered public/entry-points
 dunder_is_public = true
+export_patterns = []
 
 [symbols]
 function_node = "function_definition"
