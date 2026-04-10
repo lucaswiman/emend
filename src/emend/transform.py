@@ -6008,14 +6008,6 @@ _CACHE_DECORATORS = frozenset({
 # Regex for detecting a name inside string literals (matches dead code approach)
 _STRING_LITERAL_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 
-# Regex matching string literals including triple-quoted variants.
-_STRING_RE = re.compile(
-    r'("""[\s\S]*?"""'
-    r"|'''[\s\S]*?'''"
-    r'|"(?:[^"\\]|\\.)*"'
-    r"|'(?:[^'\\]|\\.)*')"
-)
-
 
 def _parse_decorator_name(dec: str) -> tuple[str, str]:
     """Return (full_name, basename) from a raw decorator string."""
@@ -7366,56 +7358,78 @@ def _replace_module_in_strings(
     old_module: str,
     new_module: str,
     full_name_only: bool = False,
+    file_path: str = "_.py",
+    language: str = "python",
 ) -> str:
     """Replace occurrences of old_module inside string literals in *content*.
 
+    Uses tree-sitter to identify string literal nodes (via the
+    ``{type: string, value: null}`` any-string pattern), so comments and
+    non-string contexts are correctly ignored regardless of language.
+
     Handles:
     - Full dotted module path inside strings (for ``importlib.import_module("pkg.models")``).
-    - Bare module name in single/double-quoted strings (for ``__all__`` entries like
-      ``"models"`` or ``'models'``) — only when *full_name_only* is False.
+    - Bare module name when it is the entire string content (for ``__all__``
+      entries like ``"models"``) — only when *full_name_only* is False.
 
     When *full_name_only* is True, only the full dotted module path is replaced.
     This avoids false positives when scanning files that have no import
     relationship with the module (e.g. an unrelated ``TABLE = "models"``).
-
-    Only replaces exact-match occurrences surrounded by word boundaries to avoid
-    partial replacements.
     """
-    new_content_parts: list[str] = []
+    from emend.language_registry import get_extensions
+
+    exts = get_extensions(language)
+    ext = exts[0] if exts else Path(file_path).suffix.lstrip(".")
+    any_string_ir: dict = {"type": "string", "value": None}
+    matches = _rust.find_pattern_in_files(
+        [(file_path, content)], any_string_ir, extension=ext,
+    )
 
     old_bare = old_module.rsplit(".", 1)[-1]
     new_bare = new_module.rsplit(".", 1)[-1]
 
-    def replace_in_string(m: re.Match) -> str:
-        s = m.group(0)
-        if s[:3] in ('"""', "'''"):
-            inner = s[3:-3]
-        else:
-            inner = s[1:-1]
+    lines = content.splitlines(keepends=True)
 
+    # Collect (char_start, char_end, replacement) tuples.
+    replacements: list[tuple[int, int, str]] = []
+
+    for _file, start_line, start_col, end_line, end_col, text, _caps in matches:
+        char_start = sum(len(lines[i]) for i in range(start_line - 1)) + start_col
+        char_end = sum(len(lines[i]) for i in range(end_line - 1)) + end_col
+
+        # Determine the string's inner content (without surrounding quotes).
+        if text[:3] in ('"""', "'''"):
+            inner = text[3:-3]
+        else:
+            inner = text[1:-1]
+
+        new_text = text
         # Replace full dotted module path (most specific).
-        if old_module in s:
-            s = re.sub(
+        if old_module in text:
+            new_text = re.sub(
                 r'(?<![.\w])' + re.escape(old_module) + r'(?![.\w])',
                 new_module,
-                s,
+                text,
             )
-        # Replace bare module name only when it's the entire string content
-        # and we're not in full_name_only mode.
+        # Replace bare module name only when it is the entire string content.
         elif not full_name_only and inner == old_bare:
-            if s[:3] in ('"""', "'''"):
-                s = s[:3] + new_bare + s[-3:]
+            if text[:3] in ('"""', "'''"):
+                new_text = text[:3] + new_bare + text[-3:]
             else:
-                s = s[0] + new_bare + s[0]
-        return s
+                new_text = text[0] + new_bare + text[-1]
 
-    last_end = 0
-    for m in _STRING_RE.finditer(content):
-        new_content_parts.append(content[last_end : m.start()])
-        new_content_parts.append(replace_in_string(m))
-        last_end = m.end()
-    new_content_parts.append(content[last_end:])
-    return "".join(new_content_parts)
+        if new_text != text:
+            replacements.append((char_start, char_end, new_text))
+
+    if not replacements:
+        return content
+
+    # Apply in reverse order to preserve earlier offsets.
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    for start, end, repl in replacements:
+        content = content[:start] + repl + content[end:]
+
+    return content
 
 
 def _rename_module_references(
@@ -7502,9 +7516,15 @@ def _rename_module_references(
         if changed:
             final_content = transform.apply() or content
             if strings_may_need_update:
-                final_content = _replace_module_in_strings(final_content, old_module, new_module)
+                final_content = _replace_module_in_strings(
+                    final_content, old_module, new_module,
+                    file_path=py_file, language=language,
+                )
         elif strings_may_need_update:
-            final_content = _replace_module_in_strings(content, old_module, new_module)
+            final_content = _replace_module_in_strings(
+                content, old_module, new_module,
+                file_path=py_file, language=language,
+            )
         else:
             continue
 
@@ -7534,11 +7554,12 @@ def _rename_module_references(
             content = Path(py_file).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        # Quick substring check before the heavier regex scan.
+        # Quick substring check before the heavier tree-sitter scan.
         if old_module not in content:
             continue
         final_content = _replace_module_in_strings(
             content, old_module, new_module, full_name_only=True,
+            file_path=py_file, language=language,
         )
         if final_content == content:
             continue
