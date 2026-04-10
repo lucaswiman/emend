@@ -1088,3 +1088,82 @@ def test_move_symbol_split_indented_import(tmp_path, emend_cmd):
             f"consumer.py is not valid Python after move:\n{consumer_content}\n"
             f"Error: {exc}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug: _update_imports_for_move skips annotation-only references on def lines
+# ---------------------------------------------------------------------------
+
+
+def test_move_class_adds_import_for_annotation_only_reference(tmp_path, emend_cmd):
+    """Moving a class must add an import when it's only used in annotations.
+
+    The ``_update_imports_for_move`` function checks if the source file still
+    references the moved symbol.  It skips all lines starting with ``def`` or
+    ``class`` to avoid matching the definition itself.  But this also skips
+    return-type and parameter-type annotations on ``def`` lines, causing a
+    ``NameError`` at runtime when the annotation is evaluated.
+
+    Example: after moving ``MyType`` out of source.py, the remaining function
+    ``def process(x) -> MyType:`` still references ``MyType`` in its return
+    annotation.  An import must be added so the annotation resolves.
+    """
+    source = tmp_path / "source.py"
+    source.write_text(
+        "class MyType:\n"
+        "    pass\n"
+        "\n"
+        "def process(x) -> MyType:\n"
+        "    return x\n"
+    )
+    dest = tmp_path / "dest.py"
+    dest.write_text("")
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{source}::MyType",
+            str(dest),
+            "--project",
+            str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    dest_content = dest.read_text()
+    assert "class MyType" in dest_content, (
+        f"MyType should have been moved to dest.py:\n{dest_content}"
+    )
+
+    src_content = source.read_text()
+
+    # MyType is used in the return annotation of process(), so source.py must
+    # import it from dest.  Without the import, `import source` raises
+    # NameError because the annotation `-> MyType` is evaluated at function
+    # definition time.
+    assert "from dest import MyType" in src_content, (
+        f"source.py should import MyType from dest because process() uses it "
+        f"in a return annotation.\nsource.py content:\n{src_content}"
+    )
+
+    # Verify that source.py is actually importable without errors.
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, {str(tmp_path)!r}); import source",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 0, (
+        f"source.py should be importable after the move.\n"
+        f"STDERR:\n{check.stderr}\nsource.py:\n{src_content}"
+    )
