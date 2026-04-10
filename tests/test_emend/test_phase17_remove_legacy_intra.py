@@ -92,6 +92,5 @@ class TestLegacyPythonEngineRemoved:
 
     def test_shared_helpers_preserved(self):
         """Shared helpers used by Datalog engine are still available."""
-        from emend.trace import _extract_identifiers, _find_assignments_in_source
+        from emend.trace import _extract_identifiers
         assert callable(_extract_identifiers)
-        assert callable(_find_assignments_in_source)

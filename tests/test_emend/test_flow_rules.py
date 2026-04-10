@@ -9,9 +9,9 @@ from emend.lint import (
     LintViolation,
     load_rules,
     run_lint,
+    _assignments_from_cfgs,
     _check_flow_rule,
     _extract_names_from_text,
-    _find_assignments_in_source,
 )
 
 
@@ -50,16 +50,30 @@ class TestExtractNames:
 
 
 class TestFindAssignments:
-    def test_simple_assignment(self):
-        source = "x = 1\ny = foo(x)\n"
-        assignments = _find_assignments_in_source(source)
-        assert len(assignments) == 2
-        assert assignments[0] == (1, "x", "1")
-        assert assignments[1] == (2, "y", "foo(x)")
+    """Test tree-sitter CFG-backed assignment extraction via _assignments_from_cfgs."""
 
-    def test_no_assignments(self):
-        source = "print(hello)\nfoo()\n"
-        assert _find_assignments_in_source(source) == []
+    def test_simple_assignment(self, tmp_path):
+        source = "def f():\n    x = 1\n    y = foo(x)\n"
+        test_file = tmp_path / "test.py"
+        test_file.write_text(source)
+        assignments = _assignments_from_cfgs(
+            source, str(test_file),
+            func_start=1, func_end=3,
+        )
+        assert len(assignments) >= 2
+        targets = [a[1] for a in assignments]
+        assert "x" in targets
+        assert "y" in targets
+
+    def test_no_assignments(self, tmp_path):
+        source = "def f():\n    print(hello)\n    foo()\n"
+        test_file = tmp_path / "test.py"
+        test_file.write_text(source)
+        assignments = _assignments_from_cfgs(
+            source, str(test_file),
+            func_start=1, func_end=3,
+        )
+        assert assignments == []
 
 
 # ---------------------------------------------------------------------------

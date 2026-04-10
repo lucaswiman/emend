@@ -4,7 +4,7 @@ Tests cover:
 - `kind` field on DefUseFact and CozoDB def_use schema
 - MethodCallFact dataclass and method_call CozoDB relation
 - Effect-based sinks in trace_propagation_datalog()
-- Augmented assignment detection in _find_assignments_in_source()
+- Augmented assignment detection via DefUseFact (tree-sitter backed)
 - is_var_or_attr Datalog pattern (dotted-name prefix matching)
 - Effect sinks replace the old attribute_mutation_sinks mechanism
 """
@@ -24,7 +24,6 @@ from emend.trace import (
     TraceConfig,
     TraceSink,
     TraceSource,
-    _find_assignments_in_source,
     load_trace_config,
     run_trace_analysis,
 )
@@ -327,38 +326,45 @@ class TestEffectBasedSinks:
 
 
 # ---------------------------------------------------------------------------
-# Augmented assignment in _find_assignments_in_source
+# Augmented assignment via DefUseFact (tree-sitter backed)
 # ---------------------------------------------------------------------------
 
 
 class TestAugmentedAssignment:
-    """_find_assignments_in_source detects augmented assignments."""
+    """DefUseFact detects augmented assignments as aug_write."""
 
-    def test_augmented_assignment_detected(self):
-        """x += 1 is detected as a 'mutate' op."""
-        source = "x = 0\nx += 1\n"
-        ops = _find_assignments_in_source(source)
-        # Should have at least 2 entries: the initial assignment and the aug assign
-        assert len(ops) >= 2
-        # The augmented assignment should have a marker
-        aug_ops = [o for o in ops if "+=" in o[2] or o[1].endswith("+=")]
-        # At minimum, x += 1 should appear
-        targets = [o[1] for o in ops]
+    def test_augmented_assignment_detected(self, tmp_path):
+        """x += 1 is detected as an aug_write DefUseFact."""
+        source = "def f():\n    x = 0\n    x += 1\n"
+        test_file = tmp_path / "test.py"
+        test_file.write_text(source)
+        graph = FactGraph.build_from_files([str(test_file)], language="python")
+        facts = graph.def_uses(file_path=str(test_file))
+        write_facts = [f for f in facts if f.kind in ("write", "aug_write")]
+        targets = [f.var_name for f in write_facts]
         assert "x" in targets
+        aug_facts = [f for f in write_facts if f.kind == "aug_write"]
+        assert len(aug_facts) >= 1
 
-    def test_dotted_augmented_assignment(self):
+    def test_dotted_augmented_assignment(self, tmp_path):
         """obj.count += 1 is detected."""
-        source = "obj.count += 1\n"
-        ops = _find_assignments_in_source(source)
-        assert len(ops) >= 1
-        targets = [o[1] for o in ops]
-        assert any("obj.count" in t or "obj" in t for t in targets)
+        source = "def f():\n    obj.count += 1\n"
+        test_file = tmp_path / "test.py"
+        test_file.write_text(source)
+        graph = FactGraph.build_from_files([str(test_file)], language="python")
+        facts = graph.def_uses(file_path=str(test_file))
+        targets = [f.var_name for f in facts if f.kind in ("write", "aug_write")]
+        assert any("obj" in t or "count" in t for t in targets)
 
-    def test_various_aug_operators(self):
+    def test_various_aug_operators(self, tmp_path):
         """All augmented operators are detected: -=, *=, /=, etc."""
-        source = "a -= 1\nb *= 2\nc //= 3\nd **= 2\ne &= 0xff\n"
-        ops = _find_assignments_in_source(source)
-        assert len(ops) >= 5
+        source = "def f():\n    a -= 1\n    b *= 2\n    c //= 3\n    d **= 2\n    e &= 0xff\n"
+        test_file = tmp_path / "test.py"
+        test_file.write_text(source)
+        graph = FactGraph.build_from_files([str(test_file)], language="python")
+        facts = graph.def_uses(file_path=str(test_file))
+        write_facts = [f for f in facts if f.kind in ("write", "aug_write")]
+        assert len(write_facts) >= 5
 
 
 # ---------------------------------------------------------------------------

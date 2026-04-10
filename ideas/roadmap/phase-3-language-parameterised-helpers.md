@@ -89,16 +89,11 @@ in helper functions that synthesise extra def-use relationships.
 
 ### Assignment extraction
 
-- [ ] **REOPENED**: `_find_assignments_in_source()` still uses three hardcoded
-  Python-specific regexes to parse assignment targets from statement text.
-  The `ext` parameter only controls which tree-sitter grammar
-  `get_statement_ranges()` uses — the regexes themselves don't work for
-  TypeScript (`let x = ...`, `const x = ...`) or Rust (`let x = ...`,
-  `let mut x = ...`).  Per the design philosophy, replace the regex-based
-  approach with `DefUseFact` queries from the fact graph, which are
-  populated by tree-sitter `def_use_rules` in each language's `config.toml`.
-  This function is only called from interprocedural analysis, so the fix
-  is deferred to **Phase 9** where it is a prerequisite.
+- [x] **REOPENED**: `_find_assignments_in_source()` replaced with tree-sitter
+  CFG block defs extracted via `_defs_from_cfgs()` (trace.py) and
+  `_assignments_from_cfgs()` (lint.py).  Return-statement detection replaced
+  with `find_pattern("return $X", ...)` via tree-sitter pattern matching.
+  The function and `_AUG_ASSIGN_RE` regex have been fully removed.
 
 ### Tests
 
@@ -119,8 +114,9 @@ in helper functions that synthesise extra def-use relationships.
 
 ## Known Remaining Issue
 
-`_find_assignments_in_source()` still contains Python-specific regexes.  This
-is deferred to Phase 9 (interprocedural trace) where the function is used.
-The fix is to replace regex parsing with `DefUseFact` queries from the
-tree-sitter–backed fact graph.  See Phase 4 for the analogous fix applied to
-`_run_trace_datalog()`'s inline assignment-target regex.
+*(Resolved.)* `_find_assignments_in_source()` and `_AUG_ASSIGN_RE` have been
+removed.  Assignment extraction now uses `_defs_from_cfgs()` (tree-sitter
+CFG block defs) in both `trace.py` and `lint.py`.  Return-statement detection
+uses `find_pattern("return $X", ...)` (tree-sitter pattern matching).  All
+three approaches are language-agnostic and configured via
+`languages/<lang>/config.toml`.

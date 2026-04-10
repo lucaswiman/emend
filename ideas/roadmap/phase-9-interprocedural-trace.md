@@ -71,16 +71,15 @@ for parsing assignments.  Per the design philosophy, replace this with
 `DefUseFact` queries from the tree-sitter–backed fact graph — the same
 approach Phase 4 uses for the intraprocedural assignment-target regex.
 
-- [ ] Replace `_find_assignments_in_source()` calls in `_compute_function_summary()`
-  with `DefUseFact` queries for write targets.
-- [ ] Replace `_find_assignments_in_source()` calls in `_compute_return_reachable_vars()`
-  with `DefUseFact` queries.
-- [ ] Replace `_find_assignments_in_source()` calls in `_collect_param_to_return_dependencies()`
-  with `DefUseFact` queries.
-- [ ] Replace `re.match(r"return\s+(.+)", ...)` return-statement detection with
-  tree-sitter node type queries (each language config has `return_node` in its
-  CFG section).
-- [ ] Remove `_find_assignments_in_source()` once all callers are migrated.
+- [x] Replace `_find_assignments_in_source()` calls in `_compute_function_summary()`
+  with tree-sitter CFG defs via `_defs_from_cfgs()`.
+- [x] Replace `_find_assignments_in_source()` calls in `_compute_return_reachable_vars()`
+  with tree-sitter CFG defs via `_defs_from_cfgs()`.
+- [x] Replace `_find_assignments_in_source()` calls in `_collect_param_to_return_dependencies()`
+  with tree-sitter CFG defs via `_defs_from_cfgs()`.
+- [x] Replace `re.match(r"return\s+(.+)", ...)` return-statement detection with
+  tree-sitter `find_pattern("return $X", ...)` pattern matching.
+- [x] Remove `_find_assignments_in_source()` and `_AUG_ASSIGN_RE` — fully deleted.
 
 ### Core interprocedural plumbing
 

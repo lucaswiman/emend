@@ -269,18 +269,29 @@ def load_rules(
 _extract_names_from_text = _extract_identifiers
 
 
-def _find_assignments_in_source(source: str) -> list[tuple[int, str, str]]:
-    """Find simple assignments in source code via line-by-line regex.
+def _assignments_from_cfgs(
+    source: str,
+    file_path: str,
+    func_start: int,
+    func_end: int,
+) -> list[tuple[int, str, str]]:
+    """Find assignments via tree-sitter CFG block defs.
 
-    Returns list of (line_number, target_name, rhs_text).
+    Returns list of ``(abs_line, target_name, rhs_text)`` for writes/aug_writes
+    within the given function's line range.
     """
+    from emend.trace import _defs_from_cfgs, _extract_rhs_from_line
+
+    ext = Path(file_path).suffix.lstrip('.') or 'py'
+    source_lines = source.splitlines()
     assignments: list[tuple[int, str, str]] = []
-    for i, line_text in enumerate(source.splitlines(), 1):
-        stripped = line_text.strip()
-        m = re.match(r'^([a-zA-Z_]\w*)\s*=\s*(.+)$', stripped)
-        if m:
-            assignments.append((i, m.group(1), m.group(2)))
-    return assignments
+
+    for abs_line, var_name in _defs_from_cfgs(source, func_start, func_end, ext=ext):
+        rhs = _extract_rhs_from_line(source_lines, abs_line)
+        if rhs is not None:
+            assignments.append((abs_line, var_name, rhs))
+
+    return sorted(assignments, key=lambda a: a[0])
 
 
 def _check_flow_rule(
@@ -349,17 +360,12 @@ def _check_flow_rule(
         if not func_sources or not func_sinks:
             continue
 
-        # Extract function body for assignment tracking
-        func_lines = all_lines[sym.line_start - 1:sym.line_end]
-        func_source_text = '\n'.join(func_lines)
-
-        # Find assignments within the function
-        assignments = _find_assignments_in_source(func_source_text)
-        # Adjust line numbers to be absolute
-        assignments = [
-            (line_num + sym.line_start - 1, target, rhs)
-            for line_num, target, rhs in assignments
-        ]
+        # Find assignments within the function via tree-sitter CFG defs.
+        assignments = _assignments_from_cfgs(
+            source, file_path,
+            func_start=sym.line_start,
+            func_end=sym.line_end,
+        )
 
         for src_match in func_sources:
             src_line = src_match.line or 0
