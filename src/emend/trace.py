@@ -424,12 +424,6 @@ _DOTTED_IDENT_RE = re.compile(
 _SUBSCRIPT_IDENT_RE = re.compile(
     r"\b([A-Za-z_][A-Za-z_0-9]*)\[(['\"])(.*?)\2\]"
 )
-# Augmented assignment regex: ``x += expr``, ``obj.field -= expr``, etc.
-_AUG_ASSIGN_RE = re.compile(
-    r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*"
-    r"(\+|-|\*|/|//|%|\*\*|&|\||\^|>>|<<)=\s*(.+)",
-    re.DOTALL,
-)
 
 _PYTHON_KEYWORDS = frozenset({
     "False", "None", "True", "and", "as", "assert", "async", "await",
@@ -484,59 +478,6 @@ def _extract_identifiers(expr: str, language: str = "python") -> set[str]:
     return result
 
 
-def _find_assignments_in_source(source: str, ext: str = "py") -> list[tuple[int, str, str]]:
-    """Find assignments in source using tree-sitter statement ranges.
-
-    Returns a list of (line, target_name, rhs_text) tuples for simple
-    assignments like ``x = expr`` or ``x = func(expr)``, as well as dotted
-    attribute assignments like ``obj.field = expr`` (returned as
-    ``"obj.field"`` in the target position for field-sensitive tracking).
-    """
-    from emend import emend_core
-
-    assignments: list[tuple[int, str, str]] = []
-    lines = source.split("\n")
-    ranges = emend_core.get_statement_ranges(source, ext=ext)
-
-    for start, end in ranges:
-        # Extract the statement text (1-based lines from tree-sitter)
-        stmt_lines = lines[start - 1 : end]
-        stmt_text = "\n".join(stmt_lines).strip()
-
-        # Simple assignment: target = value (skip augmented assignments +=, etc.)
-        # Match patterns like ``x = ...`` or ``x: type = ...``
-        m = re.match(
-            r"^([A-Za-z_][A-Za-z_0-9]*)\s*(?::\s*[^=]+)?\s*=\s*(?!=)(.+)",
-            stmt_text,
-            re.DOTALL,
-        )
-        if m:
-            target = m.group(1)
-            rhs = m.group(2).strip()
-            assignments.append((start, target, rhs))
-            continue
-
-        # Dotted attribute assignment: obj.field = value (field-sensitive)
-        # Matches ``obj.field = ...`` or ``obj.field.sub = ...``
-        m_dotted = re.match(
-            r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*=\s*(?!=)(.+)",
-            stmt_text,
-            re.DOTALL,
-        )
-        if m_dotted:
-            target = m_dotted.group(1)
-            rhs = m_dotted.group(2).strip()
-            assignments.append((start, target, rhs))
-            continue
-
-        # Augmented assignment: target op= value (+=, -=, *=, etc.)
-        m_aug = _AUG_ASSIGN_RE.match(stmt_text)
-        if m_aug:
-            target = m_aug.group(1)
-            rhs = m_aug.group(3).strip()
-            assignments.append((start, target, rhs))
-
-    return assignments
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +734,47 @@ def _extract_rhs_from_line(source_lines: list[str], line: int) -> str | None:
     return None
 
 
+def _defs_from_cfgs(
+    source: str,
+    func_start: int,
+    func_end: int,
+    ext: str = "py",
+) -> list[tuple[int, str]]:
+    """Extract all write/aug_write defs from tree-sitter CFG blocks.
+
+    Returns ``[(1-based-line, var_name), ...]`` for all defs (writes and
+    augmented writes) within the given line range, regardless of whether
+    the variable is used later.  This is strictly more complete than
+    ``DefUseFact`` queries, which only record def-use *pairs*.
+    """
+    from emend.cfg import build_cfgs_for_source
+
+    defs: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    try:
+        cfgs = build_cfgs_for_source(source, ext=ext)
+    except Exception:
+        return defs
+
+    for cfg in cfgs:
+        for block in cfg.get_blocks():
+            for d in block.get("defs", []) or []:
+                var_name = d[0] if isinstance(d, (list, tuple)) else d
+                line0 = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
+                kind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
+                if kind not in ("write", "aug_write"):
+                    continue
+                abs_line = line0 + 1  # CFG lines are 0-indexed
+                if not (func_start <= abs_line <= func_end):
+                    continue
+                key = (abs_line, var_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                defs.append((abs_line, var_name))
+    return defs
+
+
 def _assignments_from_graph(
     graph: "FactGraph",
     file_path: str,
@@ -835,21 +817,31 @@ def _get_assignments_by_line(
     func_start: int,
     func_end: int,
 ) -> "dict[int, list[tuple[str, str]]]":
-    """Return ``{abs_line: [(target, rhs), ...]}`` using the graph or regex fallback."""
+    """Return ``{abs_line: [(target, rhs), ...]}`` using tree-sitter CFG defs.
+
+    When a *graph* is available, uses DefUseFact queries (fast, avoids
+    rebuilding the CFG).  Otherwise, builds CFGs on-the-fly from source
+    via the Rust extension and extracts defs directly from CFG blocks.
+    """
     if graph is not None and file_path:
         return _assignments_from_graph(
             graph, file_path, func_qn,
             source.split("\n"), func_start, func_end,
         )
-    import textwrap
-    lines = source.split("\n")
-    body_start = func_start + 1
-    body_text = "\n".join(lines[body_start - 1 : func_end]) + "\n"
-    body_dedented = textwrap.dedent(body_text)
-    body_assignments = _find_assignments_in_source(body_dedented)
+
+    # Fallback: extract defs directly from tree-sitter CFG blocks.
+    from emend.language_registry import detect_language
+
+    ext = Path(file_path).suffix.lstrip(".") if file_path else "py"
+    if not ext:
+        ext = "py"
+
+    source_lines = source.split("\n")
     result: dict[int, list[tuple[str, str]]] = {}
-    for stmt_line_rel, target, rhs in body_assignments:
-        result.setdefault(stmt_line_rel + body_start - 1, []).append((target, rhs))
+    for abs_line, var_name in _defs_from_cfgs(source, func_start, func_end, ext=ext):
+        rhs = _extract_rhs_from_line(source_lines, abs_line)
+        if rhs is not None:
+            result.setdefault(abs_line, []).append((var_name, rhs))
     return result
 
 
@@ -1515,8 +1507,6 @@ def _compute_function_summary(
     Returns:
         A FunctionSummary describing the function's taint behavior.
     """
-    import textwrap
-
     summary = FunctionSummary(qualified_name=func_qn, file_path=file_path)
 
     if not param_names or not config.labels:
@@ -1527,24 +1517,42 @@ def _compute_function_summary(
     if body_start > func_end:
         return summary
 
-    body_text_lines = lines[body_start - 1 : func_end]
-    body_text = "\n".join(body_text_lines) + "\n"
-    body_dedented = textwrap.dedent(body_text)
-
     assignments_by_line = _get_assignments_by_line(
         graph, file_path, func_qn, source, func_start, func_end,
     )
 
     returns_by_line: dict[int, set[str]] = {}
-    for line_idx in range(func_start, func_end + 1):
-        if line_idx - 1 >= len(lines):
-            break
-        stripped = lines[line_idx - 1].strip()
-        ret_m = re.match(r"return\s+(.+)", stripped)
-        if ret_m:
-            returns_by_line.setdefault(line_idx, set()).update(
-                _extract_identifiers(ret_m.group(1))
+    _ret_pattern = "return $X"
+    if pattern_cache is not None:
+        _ret_key = (file_path, _ret_pattern)
+        if _ret_key not in pattern_cache:
+            try:
+                pattern_cache[_ret_key] = find_pattern(
+                    _ret_pattern, file_path,
+                    source_override=source, language=language,
+                )
+            except (ValueError, RuntimeError):
+                pattern_cache[_ret_key] = []
+        return_matches = pattern_cache[_ret_key]
+    else:
+        try:
+            return_matches = find_pattern(
+                _ret_pattern, file_path,
+                source_override=source, language=language,
             )
+        except (ValueError, RuntimeError):
+            return_matches = []
+    for match in return_matches:
+        match_line = match.line or 0
+        if not (func_start <= match_line <= func_end):
+            continue
+        idents: set[str] = set()
+        if match.captures:
+            for _cap_name, _cap_val in match.captures.items():
+                if _cap_val:
+                    idents |= _extract_identifiers(_cap_val)
+        if idents:
+            returns_by_line.setdefault(match_line, set()).update(idents)
 
     sinks_by_line: dict[int, list[tuple[TraceSink, set[str]]]] = {}
     for sink_def in config.sinks:
@@ -1637,9 +1645,9 @@ def _compute_return_reachable_vars(
     graph: "FactGraph | None" = None,
     file_path: str = "",
     func_qn: str = "",
+    language: str = "python",
 ) -> set[str]:
     """Return variables whose values can still reach a later return."""
-    lines = source.split("\n")
     body_start = func_start + 1
     if body_start > func_end:
         return set()
@@ -1648,14 +1656,30 @@ def _compute_return_reachable_vars(
         graph, file_path, func_qn, source, func_start, func_end,
     )
 
+    # Find return statements via tree-sitter pattern matching.
+    returns_by_line: dict[int, set[str]] = {}
+    try:
+        return_matches = find_pattern(
+            "return $X", file_path,
+            source_override=source, language=language,
+        )
+    except (ValueError, RuntimeError):
+        return_matches = []
+    for match in return_matches:
+        match_line = match.line or 0
+        if not (func_start <= match_line <= func_end):
+            continue
+        idents: set[str] = set()
+        if match.captures:
+            for _cap_name, _cap_val in match.captures.items():
+                if _cap_val:
+                    idents |= _extract_identifiers(_cap_val)
+        if idents:
+            returns_by_line.setdefault(match_line, set()).update(idents)
+
     reachable: set[str] = set()
     for line_idx in range(func_end, func_start - 1, -1):
-        if line_idx - 1 >= len(lines):
-            continue
-        stripped = lines[line_idx - 1].strip()
-        ret_m = re.match(r"return\s+(.+)", stripped)
-        if ret_m:
-            reachable |= _extract_identifiers(ret_m.group(1))
+        reachable |= returns_by_line.get(line_idx, set())
         for target, rhs in reversed(assignments_by_line.get(line_idx, [])):
             if target in reachable:
                 reachable.discard(target)
@@ -1677,6 +1701,7 @@ def _collect_param_to_return_dependencies(
     func_kinds: dict[str, str],
     graph: "FactGraph | None" = None,
     file_path: str = "",
+    language: str = "python",
 ) -> list[tuple[str, str, str, str]]:
     """Collect ``caller_param -> callee_param`` return-summary edges."""
     if not param_names:
@@ -1692,7 +1717,9 @@ def _collect_param_to_return_dependencies(
     )
 
     return_reachable = _compute_return_reachable_vars(
-        source, func_start, func_end, graph=graph, file_path=file_path, func_qn=func_qn,
+        source, func_start, func_end,
+        graph=graph, file_path=file_path, func_qn=func_qn,
+        language=language,
     )
     deps: set[tuple[str, str, str, str]] = set()
 
@@ -1878,6 +1905,7 @@ def _run_interprocedural_trace_datalog(
                 func_kinds=func_kinds,
                 graph=graph,
                 file_path=_fp,
+                language=language,
             )
         )
 
