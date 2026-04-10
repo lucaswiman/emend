@@ -37,11 +37,11 @@ TypeScript and Rust are **missing**:
 
 - [x] [Phase 1: Tree-Sitter Import Extraction](./phase-1-treesitter-import-extraction.md)
 - [x] [Phase 2: Language-Aware Fact Graph Building](./phase-2-language-aware-fact-graph.md)
-- [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md)
+- [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md) *(reopened: `_find_assignments_in_source()` regex → deferred to Phase 9)*
 
 ### Core Analysis
 
-- [ ] [Phase 4: Intraprocedural Trace for TS & Rust](./phase-4-intraprocedural-trace.md)
+- [x] [Phase 4: Intraprocedural Trace for TS & Rust](./phase-4-intraprocedural-trace.md)
 - [ ] [Phase 5: Cross-Language Dead Code Detection](./phase-5-cross-language-dead-code.md)
 - [ ] [Phase 6: Cross-Language Lint & Flow Rules](./phase-6-cross-language-lint-flow.md)
 

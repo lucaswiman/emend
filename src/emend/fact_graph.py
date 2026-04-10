@@ -340,11 +340,11 @@ _SCHEMA_INIT = """\
     var_name: String,
     kind: String default "write",
     def_block: Int,
-    use_block: Int
-    =>
+    use_block: Int,
     def_line: Int default 0,
+    use_line: Int default 0
+    =>
     def_col: Int default 0,
-    use_line: Int default 0,
     use_col: Int default 0
 }}
 
@@ -620,7 +620,7 @@ class FactGraph:
         self._client.run(
             "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- "
             "[[$fp, $fq, $vn, $k, $db, $ub, $dl, $dc, $ul, $uc]] "
-            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block => def_line, def_col, use_line, use_col}",
+            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col}",
             {
                 "fp": fact.file_path,
                 "fq": fact.func_qn,
@@ -730,7 +730,7 @@ class FactGraph:
         ]
         self._client.run(
             "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- $rows "
-            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block => def_line, def_col, use_line, use_col}",
+            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col}",
             {"rows": rows},
         )
 
@@ -1047,7 +1047,7 @@ class FactGraph:
         file_path: str | None = None,
     ) -> list[DefUseFact]:
         """Query def-use facts with optional filters."""
-        clauses = ["*def_use[fp, fq, vn, k, db, ub, dl, dc, ul, uc]"]
+        clauses = ["*def_use[fp, fq, vn, k, db, ub, dl, ul, dc, uc]"]
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
@@ -1891,7 +1891,7 @@ class FactGraph:
                 # Cross-variable taint via assignment (some_path variant)
                 "tainted[fp, fq, def_var, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
@@ -1904,8 +1904,8 @@ class FactGraph:
                 # genuine LHS=RHS assignment rather than coincidental same-line.
                 "tainted[fp, fq, def_var, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "def_col < use_col, "
@@ -1915,7 +1915,7 @@ class FactGraph:
                 "tainted[fp, fq, receiver, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
                 "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "use_line == call_line, "
                 "receiver != use_var, "
                 "not scope_kill[fp, fq, lbl, block]\n"
@@ -1988,7 +1988,7 @@ class FactGraph:
                 # to determine whether its taint should propagate.
                 "tainted[fp, fq, def_var, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
@@ -2000,8 +2000,8 @@ class FactGraph:
                 # ``obj.field = tainted_var`` with column ordering guard.
                 "tainted[fp, fq, def_var, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "def_col < use_col, "
@@ -2012,7 +2012,7 @@ class FactGraph:
                 # unsanitized (unless it has its own sanitizer).
                 "unsanitized[fp, fq, def_var, lbl, block] := "
                 "unsanitized[fp, fq, use_var, lbl, block], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
@@ -2023,8 +2023,8 @@ class FactGraph:
                 # Inherit unsanitized for field/subscript assignments.
                 "unsanitized[fp, fq, def_var, lbl, block] := "
                 "unsanitized[fp, fq, use_var, lbl, block], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, def_col, _, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
+                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
                 "use_var != def_var, "
                 "use_line == def_line, "
                 "def_col < use_col, "
@@ -2034,7 +2034,7 @@ class FactGraph:
                 "tainted[fp, fq, receiver, block, lbl] := "
                 "tainted[fp, fq, use_var, block, lbl], "
                 "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "use_line == call_line, "
                 "receiver != use_var, "
                 "unsanitized[fp, fq, use_var, lbl, block]\n"
@@ -2043,7 +2043,7 @@ class FactGraph:
                 "unsanitized[fp, fq, receiver, lbl, block] := "
                 "unsanitized[fp, fq, use_var, lbl, block], "
                 "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, _, use_line, _], "
+                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
                 "use_line == call_line, "
                 "receiver != use_var, "
                 "not sanitizer_var[fp, fq, receiver, block, lbl]\n"
@@ -2505,7 +2505,7 @@ class FactGraph:
 
     def _all_def_uses(self) -> list[DefUseFact]:
         result = self._client.run(
-            "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := *def_use[fp, fq, vn, k, db, ub, dl, dc, ul, uc]"
+            "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := *def_use[fp, fq, vn, k, db, ub, dl, ul, dc, uc]"
         )
         return [
             DefUseFact(
@@ -2708,10 +2708,10 @@ class FactGraph:
                 "file_path == $fp  :rm cfg_edge "
                 "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
                 # def_use
-                "?[file_path, func_qn, var_name, kind, def_block, use_block] := "
-                "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, _, _, _, _], "
+                "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
+                "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
                 "file_path == $fp  :rm def_use "
-                "{file_path, func_qn, var_name, kind, def_block, use_block => }",
+                "{file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => }",
                 # method_call (all keys)
                 "?[file_path, func_qn, receiver, method, block_id, line] := "
                 "*method_call[file_path, func_qn, receiver, method, block_id, line], "

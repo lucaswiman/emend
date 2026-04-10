@@ -89,10 +89,16 @@ in helper functions that synthesise extra def-use relationships.
 
 ### Assignment extraction
 
-- [x] Update `_find_assignments_in_source()` (trace.py:464) to accept
-  `ext` parameter and handle TypeScript/Rust assignment forms, or remove
-  it entirely if the Datalog engine's def-use facts make it redundant.
-  (Already accepts `ext` parameter; Datalog engine handles per-language facts.)
+- [ ] **REOPENED**: `_find_assignments_in_source()` still uses three hardcoded
+  Python-specific regexes to parse assignment targets from statement text.
+  The `ext` parameter only controls which tree-sitter grammar
+  `get_statement_ranges()` uses — the regexes themselves don't work for
+  TypeScript (`let x = ...`, `const x = ...`) or Rust (`let x = ...`,
+  `let mut x = ...`).  Per the design philosophy, replace the regex-based
+  approach with `DefUseFact` queries from the fact graph, which are
+  populated by tree-sitter `def_use_rules` in each language's `config.toml`.
+  This function is only called from interprocedural analysis, so the fix
+  is deferred to **Phase 9** where it is a prerequisite.
 
 ### Tests
 
@@ -110,3 +116,11 @@ in helper functions that synthesise extra def-use relationships.
 - Container mutation method names come from config.
 - All three languages have complete `[trace]` / `[dead_code]` config sections.
 - All existing Python tests still pass.
+
+## Known Remaining Issue
+
+`_find_assignments_in_source()` still contains Python-specific regexes.  This
+is deferred to Phase 9 (interprocedural trace) where the function is used.
+The fix is to replace regex parsing with `DefUseFact` queries from the
+tree-sitter–backed fact graph.  See Phase 4 for the analogous fix applied to
+`_run_trace_datalog()`'s inline assignment-target regex.

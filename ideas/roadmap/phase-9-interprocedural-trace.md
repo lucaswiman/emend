@@ -62,6 +62,26 @@ specific to those languages.
 
 ## Todo
 
+### Replace `_find_assignments_in_source()` with fact-graph queries
+
+The interprocedural trace functions (`_compute_function_summary`,
+`_compute_return_reachable_vars`, `_collect_param_to_return_dependencies`)
+use `_find_assignments_in_source()` which contains Python-specific regexes
+for parsing assignments.  Per the design philosophy, replace this with
+`DefUseFact` queries from the tree-sitter–backed fact graph — the same
+approach Phase 4 uses for the intraprocedural assignment-target regex.
+
+- [ ] Replace `_find_assignments_in_source()` calls in `_compute_function_summary()`
+  with `DefUseFact` queries for write targets.
+- [ ] Replace `_find_assignments_in_source()` calls in `_compute_return_reachable_vars()`
+  with `DefUseFact` queries.
+- [ ] Replace `_find_assignments_in_source()` calls in `_collect_param_to_return_dependencies()`
+  with `DefUseFact` queries.
+- [ ] Replace `re.match(r"return\s+(.+)", ...)` return-statement detection with
+  tree-sitter node type queries (each language config has `return_node` in its
+  CFG section).
+- [ ] Remove `_find_assignments_in_source()` once all callers are migrated.
+
 ### Core interprocedural plumbing
 
 - [ ] Verify `run_interprocedural_trace_analysis()` accepts non-Python files.

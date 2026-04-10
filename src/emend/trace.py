@@ -695,6 +695,13 @@ def run_trace_analysis(
     if not config.sources or not config.sinks:
         return []
 
+    # Auto-detect language from file extensions if still the default.
+    if language == "python" and paths:
+        from emend.language_registry import detect_language
+        detected = detect_language(paths[0])
+        if detected is not None:
+            language = detected
+
     if config.exclude_paths:
         paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
         if not paths:
@@ -732,6 +739,118 @@ def _resolve_match_to_location(
     except Exception:
         pass
     return MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK
+
+
+def _write_targets_on_line(
+    graph: "FactGraph",
+    file_path: str,
+    line: int,
+    _cached_facts: "list | None" = None,
+) -> set[str]:
+    """Return variable names written on *line* according to DefUseFacts.
+
+    Uses tree-sitter-backed def-use facts from the fact graph instead of
+    regex parsing, so it works correctly for all supported languages
+    (Python, TypeScript, Rust).
+
+    Pass *_cached_facts* (from a prior ``graph.def_uses()`` call) to avoid
+    repeated CozoSQL queries when called in a per-match loop.
+    """
+    try:
+        facts = _cached_facts if _cached_facts is not None else graph.def_uses(
+            file_path=str(Path(file_path).resolve()),
+        )
+        # DefUseFact.def_line is 0-indexed; *line* is 1-indexed.
+        zero_indexed = line - 1
+        return {
+            f.var_name
+            for f in facts
+            if f.kind in ("write", "aug_write") and f.def_line == zero_indexed
+        }
+    except AttributeError:
+        return set()
+
+
+def _extract_rhs_from_line(source_lines: list[str], line: int) -> str | None:
+    """Extract text after the first assignment ``=`` (skipping ``==``, ``!=``, etc.)."""
+    if line < 1 or line > len(source_lines):
+        return None
+    text = source_lines[line - 1]
+    i = 0
+    while i < len(text):
+        if text[i] == "=":
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            # Skip ==, =>, !=, <=, >=
+            if nxt in ("=", ">"):
+                i += 2
+                continue
+            if prev in ("!", "<", ">"):
+                i += 1
+                continue
+            return text[i + 1 :].strip()
+        i += 1
+    return None
+
+
+def _assignments_from_graph(
+    graph: "FactGraph",
+    file_path: str,
+    func_qn: str,
+    source_lines: list[str],
+    func_start: int,
+    func_end: int,
+) -> dict[int, list[tuple[str, str]]]:
+    """Build ``{abs_line: [(target, rhs_text), ...]}`` from DefUseFact writes.
+    """
+    facts = graph.def_uses(file_path=file_path, func_qn=func_qn)
+    result: dict[int, list[tuple[str, str]]] = {}
+    seen: set[tuple[int, str]] = set()
+
+    for f in facts:
+        if f.kind not in ("write", "aug_write"):
+            continue
+        # DefUseFact.def_line is 0-indexed; func_start/func_end are 1-indexed.
+        # Convert to 1-indexed for consistent comparisons and dict keys.
+        abs_line = f.def_line + 1
+        if not (func_start <= abs_line <= func_end):
+            continue
+        key = (abs_line, f.var_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rhs = _extract_rhs_from_line(source_lines, abs_line)
+        if rhs is not None:
+            result.setdefault(abs_line, []).append((f.var_name, rhs))
+
+    return result
+
+
+def _get_assignments_by_line(
+    graph: "FactGraph | None",
+    file_path: str,
+    func_qn: str,
+    source: str,
+    func_start: int,
+    func_end: int,
+) -> "dict[int, list[tuple[str, str]]]":
+    """Return ``{abs_line: [(target, rhs), ...]}`` using the graph or regex fallback."""
+    if graph is not None and file_path:
+        return _assignments_from_graph(
+            graph, file_path, func_qn,
+            source.split("\n"), func_start, func_end,
+        )
+    import textwrap
+    lines = source.split("\n")
+    body_start = func_start + 1
+    body_text = "\n".join(lines[body_start - 1 : func_end]) + "\n"
+    body_dedented = textwrap.dedent(body_text)
+    body_assignments = _find_assignments_in_source(body_dedented)
+    result: dict[int, list[tuple[str, str]]] = {}
+    for stmt_line_rel, target, rhs in body_assignments:
+        result.setdefault(stmt_line_rel + body_start - 1, []).append((target, rhs))
+    return result
 
 
 def _build_trace_fact_graph(
@@ -793,30 +912,31 @@ def _run_trace_datalog(
         except Exception:
             continue
 
+        source_lines = source_text.split("\n")
+        # Cache def-use facts for this file to avoid repeated CozoSQL queries.
+        resolved_path = str(path_obj.resolve())
+        try:
+            _file_def_uses = graph.def_uses(file_path=resolved_path)
+        except AttributeError:
+            _file_def_uses = None
+
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
             matched_sources: list[tuple[str, str, str, int, str]] = []
-            source_lines = source_text.split("\n")
             matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     # Extract variable names from captures
                     var_names: set[str] = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_identifiers(ct)
-                    # Also extract the assignment target on the same line,
-                    # mirroring the Python engine's behaviour: for
-                    # ``user_input = request.args.get("name")``, the
-                    # tainted variable is ``user_input``, not ``name``.
-                    if m.line <= len(source_lines):
-                        stmt_line = source_lines[m.line - 1]
-                        assign_match = re.match(
-                            r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
-                            stmt_line,
-                        )
-                        if assign_match:
-                            var_names.add(assign_match.group(1))
+                        var_names |= _extract_identifiers(ct, language=language)
+                    # Also taint the assignment target (e.g. ``user_input`` in
+                    # ``user_input = request.args.get("name")``).
+                    var_names |= _write_targets_on_line(
+                        graph, file_path, m.line,
+                        _cached_facts=_file_def_uses,
+                    )
                     # Type constraint filtering on sources
                     if src_def.type_constraint and type_oracle and var_names:
                         var_names = _filter_vars_by_type(
@@ -848,7 +968,7 @@ def _run_trace_datalog(
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_identifiers(ct)
+                        var_names |= _extract_identifiers(ct, language=language)
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
                         match_tuple = (file_path, fq, var, bid, sink_def.label)
@@ -880,23 +1000,17 @@ def _run_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            san_source_lines = source_text.split("\n")
             matches = find_pattern(san_def.pattern, file_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     var_names = set()
                     for _cn, ct in m.captures.items():
-                        var_names |= _extract_identifiers(ct)
-                    # Also sanitize the assignment target on the same line:
-                    # ``clean = sanitize(name)`` means ``clean`` is safe too.
-                    if m.line <= len(san_source_lines):
-                        san_stmt = san_source_lines[m.line - 1]
-                        san_assign = re.match(
-                            r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*",
-                            san_stmt,
-                        )
-                        if san_assign:
-                            var_names.add(san_assign.group(1))
+                        var_names |= _extract_identifiers(ct, language=language)
+                    # Also sanitize the assignment target on the same line.
+                    var_names |= _write_targets_on_line(
+                        graph, file_path, m.line,
+                        _cached_facts=_file_def_uses,
+                    )
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
                         sanitizers.append((file_path, fq, var, bid, san_def.label))
@@ -1380,6 +1494,7 @@ def _compute_function_summary(
     param_names: list[str],
     language: str = "python",
     pattern_cache: dict[tuple[str, str], list] | None = None,
+    graph: "FactGraph | None" = None,
 ) -> FunctionSummary:
     """Compute a taint summary for a single function.
 
@@ -1416,11 +1531,9 @@ def _compute_function_summary(
     body_text = "\n".join(body_text_lines) + "\n"
     body_dedented = textwrap.dedent(body_text)
 
-    body_assignments = _find_assignments_in_source(body_dedented)
-    assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-    for stmt_line_rel, target, rhs in body_assignments:
-        stmt_line_abs = stmt_line_rel + body_start - 1
-        assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
     returns_by_line: dict[int, set[str]] = {}
     for line_idx in range(func_start, func_end + 1):
@@ -1521,6 +1634,9 @@ def _compute_return_reachable_vars(
     source: str,
     func_start: int,
     func_end: int,
+    graph: "FactGraph | None" = None,
+    file_path: str = "",
+    func_qn: str = "",
 ) -> set[str]:
     """Return variables whose values can still reach a later return."""
     lines = source.split("\n")
@@ -1528,15 +1644,9 @@ def _compute_return_reachable_vars(
     if body_start > func_end:
         return set()
 
-    import textwrap as _textwrap
-
-    body_text_lines = lines[body_start - 1 : func_end]
-    body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
-    body_assignments = _find_assignments_in_source(body_dedented)
-    assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-    for stmt_line_rel, target, rhs in body_assignments:
-        stmt_line_abs = stmt_line_rel + body_start - 1
-        assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
     reachable: set[str] = set()
     for line_idx in range(func_end, func_start - 1, -1):
@@ -1565,6 +1675,8 @@ def _collect_param_to_return_dependencies(
     name_to_qn: dict[str, list[str]],
     func_paths: dict[str, tuple[str, ...]],
     func_kinds: dict[str, str],
+    graph: "FactGraph | None" = None,
+    file_path: str = "",
 ) -> list[tuple[str, str, str, str]]:
     """Collect ``caller_param -> callee_param`` return-summary edges."""
     if not param_names:
@@ -1575,17 +1687,13 @@ def _collect_param_to_return_dependencies(
     if body_start > func_end:
         return []
 
-    import textwrap as _textwrap
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
 
-    body_text_lines = lines[body_start - 1 : func_end]
-    body_dedented = _textwrap.dedent("\n".join(body_text_lines) + "\n")
-    body_assignments = _find_assignments_in_source(body_dedented)
-    assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-    for stmt_line_rel, target, rhs in body_assignments:
-        stmt_line_abs = stmt_line_rel + body_start - 1
-        assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
-
-    return_reachable = _compute_return_reachable_vars(source, func_start, func_end)
+    return_reachable = _compute_return_reachable_vars(
+        source, func_start, func_end, graph=graph, file_path=file_path, func_qn=func_qn,
+    )
     deps: set[tuple[str, str, str, str]] = set()
 
     for param_name in param_names:
@@ -1728,6 +1836,11 @@ def _run_interprocedural_trace_datalog(
 
     _pattern_cache: dict[tuple[str, str], list] = {}
 
+    # Build a fact graph so interprocedural helpers can use tree-sitter
+    # backed def-use facts instead of regex-based assignment parsing.
+    _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
+    graph = _build_trace_fact_graph(paths, language, _proj)
+
     direct_summaries: dict[str, FunctionSummary] = {}
     for qn, (fp, src, fs, fe, params) in func_info.items():
         direct_summaries[qn] = _compute_function_summary(
@@ -1740,6 +1853,7 @@ def _run_interprocedural_trace_datalog(
             param_names=params,
             language=language,
             pattern_cache=_pattern_cache,
+            graph=graph,
         )
 
     name_to_qn: dict[str, list[str]] = {}
@@ -1762,6 +1876,8 @@ def _run_interprocedural_trace_datalog(
                 name_to_qn=name_to_qn,
                 func_paths=func_paths,
                 func_kinds=func_kinds,
+                graph=graph,
+                file_path=_fp,
             )
         )
 
@@ -1781,8 +1897,6 @@ def _run_interprocedural_trace_datalog(
     )
     if intra_result:
         violations.extend(intra_result)
-
-    import textwrap as _textwrap
 
     for caller_qn, (fp, src, fs, fe, _caller_params) in func_info.items():
         lines = src.split("\n")
@@ -1890,14 +2004,9 @@ def _run_interprocedural_trace_datalog(
                         (sink_def, match_col, sink_idents)
                     )
 
-        body_text_lines = lines[body_start - 1 : fe]
-        body_text = "\n".join(body_text_lines) + "\n"
-        body_dedented = _textwrap.dedent(body_text)
-        body_assignments = _find_assignments_in_source(body_dedented)
-        assignments_by_line: dict[int, list[tuple[str, str]]] = {}
-        for stmt_line_rel, target, rhs in body_assignments:
-            stmt_line_abs = stmt_line_rel + body_start - 1
-            assignments_by_line.setdefault(stmt_line_abs, []).append((target, rhs))
+        assignments_by_line = _assignments_from_graph(
+            graph, fp, caller_qn, lines, fs, fe,
+        )
 
         for line_idx in range(fs, fe + 1):
             if line_idx - 1 >= len(lines):
