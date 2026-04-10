@@ -38,50 +38,57 @@ everything together.
 
 ### Language-aware dead code core
 
-- [ ] Update `find_dead_code()` to accept and auto-detect language.
-- [ ] Update `_is_likely_entry_point()` to use config-driven entry point lists
+- [x] Update `find_dead_code()` to accept and auto-detect language.
+- [x] Update `_is_likely_entry_point()` to use config-driven entry point lists
   (from Phase 3).  For Python, keep existing behaviour; for TS/Rust, use
   language-specific heuristics.
-- [ ] Skip `_is_dunder()` for non-Python languages.
-- [ ] Update test file detection: Python uses `test_` prefix and `tests/`
+- [x] Skip `_is_dunder()` for non-Python languages.
+- [x] Update test file detection: Python uses `test_` prefix and `tests/`
   directory; TypeScript uses `.test.ts`, `.spec.ts`, `__tests__/` directory;
   Rust uses `#[test]` attribute and `tests/` directory.
 
 ### TypeScript dead code
 
-- [ ] Handle `export` visibility: exported symbols are entry points.
+- [x] Handle `export` visibility: exported symbols are entry points.
 - [ ] Handle `module.exports` / `exports.X` as entry points.
-- [ ] Handle framework-specific entry points (React components, Express
+- [x] Handle framework-specific entry points (React components, Express
   handlers) via config.
-- [ ] Handle `// noqa: emend:deadcode` comment suppression.
+- [x] Handle `// noqa: emend:deadcode` comment suppression.
 - [ ] String literal scanning for TypeScript string nodes.
-- [ ] Tests: unreferenced function, unreferenced class, exported function
+- [x] Tests: unreferenced function, unreferenced class, exported function
   (not dead), test function (not dead), framework handler (not dead).
 
 ### Rust dead code
 
-- [ ] Handle `pub` visibility: `pub` items are entry points.
-- [ ] Handle `#[test]` functions as entry points.
-- [ ] Handle `fn main` as entry point.
-- [ ] Handle `#[no_mangle]`, `#[export_name]` as entry points.
+- [x] Handle `pub` visibility: `pub` items are entry points.
+- [x] Handle `#[test]` functions as entry points.
+- [x] Handle `fn main` as entry point.
+- [x] Handle `#[no_mangle]`, `#[export_name]` as entry points.
 - [ ] Handle `pub use` re-exports.
-- [ ] Handle trait implementations: methods implementing a trait are not dead.
-- [ ] Inline suppression: `#[allow(dead_code)]` attribute (or `// noqa`).
-- [ ] Tests: unreferenced function, unreferenced struct, pub function (not dead),
+- [x] Handle trait implementations: methods implementing a trait are not dead.
+- [x] Inline suppression: `// noqa: emend:deadcode` comment support.
+- [x] Tests: unreferenced function, unreferenced struct, pub function (not dead),
   test function (not dead), trait impl (not dead), `fn main` (not dead).
 
 ### Unreachable block detection
 
-- [ ] Verify `dead_code_unified()` Datalog query handles TypeScript CFGs
+- [x] Verify `dead_code_unified()` Datalog query handles TypeScript CFGs
   (unreachable blocks after `return`/`throw`).
-- [ ] Verify same for Rust CFGs (unreachable after `return`/`break`/`continue`,
+- [x] Verify same for Rust CFGs (unreachable after `return`/`break`/`continue`,
   diverging expressions like `panic!()`).
-- [ ] Tests for unreachable blocks in both languages.
+- [x] Tests for unreachable blocks in both languages.
+
+### Known limitations (Rust emend_core CFG builder)
+
+- [ ] CFG builder emits incorrect fallthrough edges from `else` blocks ending
+  with `return` in TypeScript (test: `test_unreachable_after_if_else_both_return_ts`).
+- [ ] CFG builder emits incorrect fallthrough edges from `match` arms ending
+  with `return` in Rust (test: `test_unreachable_after_match_all_return_rs`).
 
 ## Exit Criteria
 
-- `emend deadcode /path/to/ts-project` reports unreferenced TypeScript symbols.
-- `emend deadcode /path/to/rust-project` reports unreferenced Rust symbols.
-- Entry point heuristics correctly exclude exported/pub/test/main symbols.
-- Unreachable block detection works for both languages.
-- All existing Python dead code tests still pass.
+- [x] `emend deadcode /path/to/ts-project` reports unreferenced TypeScript symbols.
+- [x] `emend deadcode /path/to/rust-project` reports unreferenced Rust symbols.
+- [x] Entry point heuristics correctly exclude exported/pub/test/main symbols.
+- [x] Unreachable block detection works for both languages (basic cases; if/else-both-return and match-all-return blocked by CFG backend bugs).
+- [x] All existing Python dead code tests still pass.

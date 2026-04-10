@@ -395,6 +395,10 @@ _SCHEMA_INIT = """\
 
 {:create entry_point_name { name: String }}
 
+{:create entry_point_prefix { prefix: String }}
+
+{:create exported_symbol { qualified_name: String }}
+
 {:create ref_by_block {
     file_path: String,
     func_qn: String,
@@ -878,6 +882,17 @@ class FactGraph:
             {"rows": rows},
         )
 
+    def add_exported_symbols_batch(self, qns: list[str]) -> None:
+        """Bulk-insert exported symbol qualified names."""
+        if not qns:
+            return
+        rows = [[qn] for qn in qns]
+        self._client.run(
+            "?[qualified_name] <- $rows "
+            ":put exported_symbol {qualified_name}",
+            {"rows": rows},
+        )
+
     # -- Queries ----------------------------------------------------------
 
     def symbols(
@@ -1252,6 +1267,7 @@ class FactGraph:
         entry_point_names: list[str] | None = None,
         exclude_reference_paths: list[str] | None = None,
         exclude_reference_segments: list[str] | None = None,
+        entry_point_prefixes: list[str] | None = None,
     ) -> tuple[list[SymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
@@ -1273,6 +1289,9 @@ class FactGraph:
         if entry_point_names:
             name_rows = ", ".join(f'["{n}"]' for n in entry_point_names)
             setup_rules.append(f"?[name] <- [{name_rows}] :put entry_point_name {{name}}")
+        if entry_point_prefixes:
+            pfx_rows = ", ".join(f'["{p}"]' for p in entry_point_prefixes)
+            setup_rules.append(f"?[prefix] <- [{pfx_rows}] :put entry_point_prefix {{prefix}}")
 
         # Run setup rules if any
         for rule in setup_rules:
@@ -1328,28 +1347,26 @@ class FactGraph:
             '*symbol[qn, _, name, _, _, _, _], '
             'starts_with(name, "__"), ends_with(name, "__")\n'
 
-            # Entry points: test functions (test_, Test, describe_)
+            # Entry points: dynamic prefix rules (test_, Test, describe_, etc.)
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "test_")\n'
+            '*entry_point_prefix[pfx], '
+            'starts_with(name, pfx)\n'
 
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "Test")\n'
-
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "describe_")\n'
-
-            # Entry points: decorated symbols
+            # Entry points: decorated symbols (case-insensitive for TS PascalCase)
             'entry_point[qn] := '
             '*decorator_on[qn, dec], '
-            '*entry_point_decorator[dec]\n'
+            '*entry_point_decorator[ep_dec], '
+            'lowercase(dec) == lowercase(ep_dec)\n'
 
             # Entry points: named symbols
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
             '*entry_point_name[name]\n'
+
+            # Entry points: explicitly exported symbols
+            'entry_point[qn] := '
+            '*exported_symbol[qn]\n'
 
             # Dead symbols: top-level only (parent == ""), no live reference, not entry point
             "dead[qn, fp, name, kind, line, end_line, parent] := "
@@ -3046,6 +3063,20 @@ class FactGraph:
             graph.add_symbols_batch(sym_facts)
             graph.add_decorator_on_batch(dec_facts)
 
+            # -- Exported symbol facts (for TS/Rust visibility) ----------
+            try:
+                from emend.language_registry import detect_language as _detect_lang
+                _lang = _detect_lang(abs_file_path) or "python"
+                exported_names = _detect_exported_names_text(content, _lang)
+                if exported_names:
+                    exported_qns = [
+                        sf.qualified_name for sf in sym_facts
+                        if sf.name in exported_names
+                    ]
+                    graph.add_exported_symbols_batch(exported_qns)
+            except Exception:
+                logger.debug("Could not detect exported symbols for %s", abs_file_path, exc_info=True)
+
             # -- Source location facts for symbols -----------------------
             source_loc_facts: list[SourceLocFact] = []
             for sf in sym_facts:
@@ -3100,6 +3131,8 @@ class FactGraph:
                 ref_facts: list[ReferenceFact] = []
                 call_facts: list[CallFact] = []
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
+                    # Normalize QN separators to match symbol conventions (always '.')
+                    qn = qn.replace("::", ".").replace("/", ".")
                     ref_kind = _map_ref_kind(kind)
                     fq, bid = _find_containing_block(block_ranges, line)
                     ref_facts.append(ReferenceFact(
@@ -3132,6 +3165,8 @@ class FactGraph:
                 from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
                 from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
                 for qn, line, col, _offset, _end_offset, kind, _ann in refs:
+                    # Normalize QN separators to match symbol conventions (always '.')
+                    qn = qn.replace("::", ".").replace("/", ".")
                     if _map_ref_kind(kind) == "call" and "." in qn:
                         parts = qn.rsplit(".", 1)
                         if len(parts) == 2:
@@ -3194,6 +3229,48 @@ class FactGraph:
 # ---------------------------------------------------------------------------
 # Internal helpers for build_from_project
 # ---------------------------------------------------------------------------
+
+def _detect_exported_names_text(content: str, language: str) -> set[str]:
+    """Detect exported symbol names from source text for non-Python languages.
+
+    For Python, returns empty (Python uses __all__ which is handled separately).
+    For TypeScript, detects ``export function/class/const/let/var/default/interface/type/enum``.
+    For Rust, detects ``pub fn/struct/enum/trait/type/const/static/mod``.
+    """
+    if language == "python":
+        return set()
+
+    exported: set[str] = set()
+    if language in ("typescript", "javascript"):
+        # Match: export [default] function/class/const/let/var/interface/type/enum NAME
+        export_re = re.compile(
+            r'^\s*export\s+(?:default\s+)?'
+            r'(?:function\*?\s+|class\s+|const\s+|let\s+|var\s+|interface\s+|type\s+|enum\s+|abstract\s+class\s+)'
+            r'(\w+)',
+            re.MULTILINE,
+        )
+        for m in export_re.finditer(content):
+            exported.add(m.group(1))
+        # Also: export { name1, name2 as alias, ... }
+        named_re = re.compile(r'^\s*export\s*\{([^}]+)\}', re.MULTILINE)
+        for m in named_re.finditer(content):
+            for name in m.group(1).split(','):
+                name = name.strip().split(' as ')[0].strip()
+                if name and name.isidentifier():
+                    exported.add(name)
+    elif language == "rust":
+        # Match: pub [(...)] [async] fn/struct/enum/trait/type/const/static/mod NAME
+        pub_re = re.compile(
+            r'^\s*pub(?:\s*\([^)]*\))?\s+'
+            r'(?:async\s+)?'
+            r'(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+|static\s+|mod\s+|use\s+|unsafe\s+fn\s+|extern\s+"[^"]*"\s+fn\s+)'
+            r'(\w+)',
+            re.MULTILINE,
+        )
+        for m in pub_re.finditer(content):
+            exported.add(m.group(1))
+    return exported
+
 
 def _walk_symbols(
     out: list[SymbolFact],

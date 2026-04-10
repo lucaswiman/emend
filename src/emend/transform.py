@@ -584,7 +584,12 @@ def _build_fact_sym_rows(
     Includes all symbol kinds (function, class, variable, etc.) with full
     metadata, matching what the old parse.db symbol_index contained.
     """
-    exported_names = _extract_all_exports_text(content)
+    from emend.language_registry import detect_language
+    lang = detect_language(abs_path) or "python"
+    if lang == "python":
+        exported_names = _extract_all_exports_text(content)
+    else:
+        exported_names = _detect_exported_names_text(content, lang)
     noqa_lines = _extract_noqa_lines(content)
 
     def _walk(symbols: list[dict], parent_prefix: str = "") -> None:
@@ -711,12 +716,14 @@ def _extract_file_facts(
     file_refs: list[tuple] = []
     if precomputed_refs is not None:
         for qn_str, line, col, kind in precomputed_refs:
+            qn_str = qn_str.replace("::", ".").replace("/", ".")
             file_refs.append((qn_str, line, col, kind))
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
             for qn_str, line, col, _offset, _end_offset, kind, _ann in \
                     scope_resolver.references_in_file(abs_path):
+                qn_str = qn_str.replace("::", ".").replace("/", ".")
                 file_refs.append((qn_str, line, col, kind))
                 result["fact_ref"].append([qn_str, rel_path, line, col, kind])
         except Exception:
@@ -967,9 +974,21 @@ def _build_facts_db(
             abs_path, rel_path, ext, content = file_tuple
             module_name = _file_to_module(abs_path, project_root)
             file_refs = precomputed_refs.get(abs_path) if precomputed_refs else None
+
+            # For files not covered by precomputed_refs, create a per-file
+            # scope resolver with the correct extension so that TS/Rust
+            # files get proper reference extraction.
+            file_resolver = scope_resolver
+            if file_refs is None and ext != "py":
+                try:
+                    file_resolver = _rust.PyScopeResolver(resolved_root, ext)
+                    file_resolver.index_file(abs_path, content)
+                except Exception:
+                    file_resolver = scope_resolver
+
             return _extract_file_facts(
                 abs_path, rel_path, ext, content,
-                project_root, module_name, scope_resolver,
+                project_root, module_name, file_resolver,
                 _rust, build_cfgs_for_source, _walk_symbols,
                 _find_containing_block, _enclosing_symbol,
                 _extract_imports, _build_symbol_line_index,
@@ -1152,6 +1171,32 @@ def _build_facts_db(
             {"rows": all_module_level_refs},
         )
 
+        # -- Populate exported_symbol for TS/Rust visibility-based entry points
+        from emend.language_registry import detect_language as _detect_lang_fdb
+        exported_qn_rows: list[list] = []
+        # Build a quick lookup from (rel_path, name) -> qualified_name using
+        # the cozo_fg_sym rows we already collected.
+        _sym_by_file_name: dict[tuple[str, str], str] = {}
+        for row in cozo_fg_sym:
+            # row = [qn, fp, name, kind, line, end_line, parent]
+            _sym_by_file_name[(row[1], row[2])] = row[0]
+
+        for abs_path, rel_path, ext, content in file_contents:
+            _lang = _detect_lang_fdb(abs_path) or "python"
+            if _lang == "python":
+                continue
+            exported_names = _detect_exported_names_text(content, _lang)
+            for ename in exported_names:
+                qn = _sym_by_file_name.get((rel_path, ename))
+                if qn:
+                    exported_qn_rows.append([qn])
+        if exported_qn_rows:
+            fdb.run(
+                "?[qualified_name] <- $rows "
+                ":replace exported_symbol {qualified_name}",
+                {"rows": exported_qn_rows},
+            )
+
     except BaseException:
         logger.debug("facts db build failed", exc_info=True)
 
@@ -1191,6 +1236,51 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     return None
 
 
+def _detect_exported_names_text(content: str, language: str) -> set[str]:
+    """Detect exported/public symbol names from source text.
+
+    For Python, returns empty (Python uses ``__all__`` which is handled separately).
+    For TypeScript, detects ``export function/class/const/...`` declarations.
+    For Rust, detects ``pub fn/struct/enum/...`` declarations.
+    """
+    if language == "python":
+        return set()
+
+    exported: set[str] = set()
+    if language == "typescript":
+        # export [default] function/class/const/let/var/interface/type/enum NAME
+        export_re = re.compile(
+            r'^\s*export\s+(?:default\s+)?'
+            r'(?:function\*?\s+|class\s+|const\s+|let\s+|var\s+'
+            r'|interface\s+|type\s+|enum\s+|abstract\s+class\s+)'
+            r'(\w+)',
+            re.MULTILINE,
+        )
+        for m in export_re.finditer(content):
+            exported.add(m.group(1))
+        # export { name1, name2 }
+        named_re = re.compile(r'^\s*export\s*\{([^}]+)\}', re.MULTILINE)
+        for m in named_re.finditer(content):
+            for name in m.group(1).split(','):
+                name = name.strip().split(' as ')[0].strip()
+                if name and name.isidentifier():
+                    exported.add(name)
+    elif language == "rust":
+        # pub [(...)] [async] fn/struct/enum/trait/type/const/static/mod NAME
+        pub_re = re.compile(
+            r'^\s*pub(?:\s*\([^)]*\))?\s+'
+            r'(?:async\s+)?'
+            r'(?:unsafe\s+)?'
+            r'(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+'
+            r'|static\s+|mod\s+|use\s+|extern\s+"[^"]*"\s+fn\s+)'
+            r'(\w+)',
+            re.MULTILINE,
+        )
+        for m in pub_re.finditer(content):
+            exported.add(m.group(1))
+    return exported
+
+
 _ALL_RE = re.compile(
     r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
     re.MULTILINE | re.DOTALL,
@@ -1206,7 +1296,7 @@ def _extract_all_exports_text(source: str) -> set[str]:
     return set(_ALL_NAME_RE.findall(m.group(1)))
 
 
-_NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+_NOQA_RE = re.compile(r'(?:#|//)\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
 
 
 def _extract_noqa_lines(source: str) -> set[int]:
@@ -5776,10 +5866,16 @@ def _is_test_file(file_path: str) -> bool:
     """Check if a file is a test file by path heuristics."""
     p = Path(file_path)
     name = p.name
+    # Python: test_*.py, *_test.py
     if name.startswith('test_') or name.endswith('_test.py'):
         return True
+    # TypeScript/JavaScript: *.test.ts, *.spec.ts, *.test.tsx, *.spec.tsx, *.test.js, *.spec.js
+    stem = p.stem  # e.g., "foo.test" for "foo.test.ts"
+    if stem.endswith('.test') or stem.endswith('.spec'):
+        return True
+    # Directory-based: tests/, test/, __tests__/
     parts = p.parts
-    if 'tests' in parts or 'test' in parts:
+    if 'tests' in parts or 'test' in parts or '__tests__' in parts:
         return True
     return False
 
@@ -6564,15 +6660,24 @@ def find_dead_code(
     # Build the FactGraph and run the unified Datalog dead code query.
     graph = _get_or_build_fact_graph(project_path)
 
-    # Combine built-in + user-supplied entry point info for the Datalog query.
-    all_ep_decorators = list(_ENTRY_POINT_DECORATORS)
-    all_ep_basenames = list(_ENTRY_POINT_DECORATOR_BASENAMES)
+    # Detect project languages and merge entry-point configs from all.
+    detected_langs = detect_project_languages(scan_root)
+    all_ep_decorators: list[str] = []
+    all_ep_basenames: list[str] = []
+    all_ep_names: list[str] = []
+    all_ep_prefixes: list[str] = []
+    for lang in (detected_langs or ["python"]):
+        ep = _get_entry_point_config(lang)
+        all_ep_decorators.extend(ep["decorators"])
+        all_ep_basenames.extend(ep["decorator_basenames"])
+        all_ep_names.extend(ep["names"])
+        all_ep_prefixes.extend(ep["name_prefixes"])
+    # Add user-supplied overrides
     if entry_point_decorators:
         all_ep_decorators.extend(entry_point_decorators)
         all_ep_basenames.extend(
             d.rsplit(".", 1)[-1] for d in entry_point_decorators
         )
-    all_ep_names = list(_ENTRY_POINT_NAMES)
     if entry_point_names:
         all_ep_names.extend(entry_point_names)
 
@@ -6603,6 +6708,7 @@ def find_dead_code(
     raw_dead, raw_unreachable = graph.dead_code_unified(
         entry_point_decorators=all_ep_decorators + all_ep_basenames,
         entry_point_names=all_ep_names,
+        entry_point_prefixes=all_ep_prefixes,
         exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
         exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
     )
@@ -6620,7 +6726,7 @@ def find_dead_code(
         lines = _file_lines_cache[fp]
         if 0 < line <= len(lines):
             line_text = lines[line - 1]
-            if "# noqa" in line_text:
+            if "# noqa" in line_text or "// noqa" in line_text:
                 return True
         return False
 
@@ -6661,6 +6767,10 @@ def find_dead_code(
 
         # noqa suppression
         if _has_noqa(abs_fp, sym.line):
+            continue
+
+        # Skip symbols in test files — they are entry points by convention
+        if _is_test_file(abs_fp):
             continue
 
         dead_symbols.append(DeadSymbol(
