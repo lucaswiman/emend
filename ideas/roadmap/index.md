@@ -35,7 +35,7 @@ TypeScript and Rust are **missing**:
 
 ### Foundation: Language-Agnostic Fact Population
 
-- [ ] [Phase 1: Tree-Sitter Import Extraction](./phase-1-treesitter-import-extraction.md)
+- [x] [Phase 1: Tree-Sitter Import Extraction](./phase-1-treesitter-import-extraction.md)
 - [ ] [Phase 2: Language-Aware Fact Graph Building](./phase-2-language-aware-fact-graph.md)
 - [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md)
 
