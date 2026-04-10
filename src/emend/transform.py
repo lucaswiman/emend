@@ -7324,13 +7324,22 @@ def _resolve_relative_import_qn(
         return sep.join(base_parts) if base_parts else None
 
 
-def _replace_module_in_strings(content: str, old_module: str, new_module: str) -> str:
+def _replace_module_in_strings(
+    content: str,
+    old_module: str,
+    new_module: str,
+    full_name_only: bool = False,
+) -> str:
     """Replace occurrences of old_module inside string literals in *content*.
 
     Handles:
-    - Bare module name in single/double-quoted strings (for ``__all__`` entries like
-      ``"models"`` or ``'models'``).
     - Full dotted module path inside strings (for ``importlib.import_module("pkg.models")``).
+    - Bare module name in single/double-quoted strings (for ``__all__`` entries like
+      ``"models"`` or ``'models'``) — only when *full_name_only* is False.
+
+    When *full_name_only* is True, only the full dotted module path is replaced.
+    This avoids false positives when scanning files that have no import
+    relationship with the module (e.g. an unrelated ``TABLE = "models"``).
 
     Only replaces exact-match occurrences surrounded by word boundaries to avoid
     partial replacements.
@@ -7354,8 +7363,9 @@ def _replace_module_in_strings(content: str, old_module: str, new_module: str) -
                 new_module,
                 s,
             )
-        # Replace bare module name only when it's the entire string content.
-        elif inner == old_bare:
+        # Replace bare module name only when it's the entire string content
+        # and we're not in full_name_only mode.
+        elif not full_name_only and inner == old_bare:
             if s[:3] in ('"""', "'''"):
                 s = s[:3] + new_bare + s[-3:]
             else:
@@ -7473,9 +7483,13 @@ def _rename_module_references(
     # Third pass: string-literal replacements in files that the structural pre-filter
     # may have excluded (e.g. files with importlib.import_module("pkg.models") but no
     # import statement mentioning "models" as an identifier that tree-sitter picks up).
+    #
+    # Only match the full dotted module name here — NOT the bare name.  Files
+    # processed in the first/second pass already get bare-name string updates
+    # (for __all__ entries etc.), but files with no import relationship should
+    # not have coincidental bare-name strings like TABLE = "models" rewritten.
     already_processed = set(diffs.keys())
     all_source_files = _collect_source_files(project_root, language=language)
-    old_bare = old_module.rsplit(sep, 1)[-1]
     for py_file in all_source_files:
         if py_file in already_processed:
             continue
@@ -7484,9 +7498,11 @@ def _rename_module_references(
         except OSError:
             continue
         # Quick substring check before the heavier regex scan.
-        if old_module not in content and old_bare not in content:
+        if old_module not in content:
             continue
-        final_content = _replace_module_in_strings(content, old_module, new_module)
+        final_content = _replace_module_in_strings(
+            content, old_module, new_module, full_name_only=True,
+        )
         if final_content == content:
             continue
         diff = _generate_diff(py_file, content, final_content)
