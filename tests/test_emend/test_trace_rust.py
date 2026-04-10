@@ -59,7 +59,7 @@ def test_rust_trace_basic_let_binding(tmp_path):
     config = _make_rust_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="rust")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     v = violations[0]
     assert v.label == "user_input"
     assert "SQL injection" in v.message
@@ -96,18 +96,16 @@ def test_rust_trace_sanitizer_blocks(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_rust_trace_match_arm(tmp_path):
-    """Taint propagates through a plain intermediate variable assignment.
-
-    A full ``match`` arm analysis may not yet be supported; we use a plain
-    intermediate variable (``let y = x``) which exercises the same
-    reassignment propagation that a match-arm binding would require.
-    """
+    """Taint flows through a match arm binding into a sink."""
     test_file = tmp_path / "handler.rs"
     test_file.write_text(
         "fn handler() {\n"
-        "    let x = get_input(\"name\");\n"
-        "    let y = x;\n"
-        "    execute_query(y);\n"
+        "    let input = get_input(\"name\");\n"
+        "    let result = match input.len() {\n"
+        "        0 => get_input(\"default\"),\n"
+        "        _ => input,\n"
+        "    };\n"
+        "    execute_query(result);\n"
         "}\n"
     )
 
@@ -135,7 +133,7 @@ def test_rust_trace_method_call(tmp_path):
     config = _make_rust_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="rust")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     v = violations[0]
     assert v.label == "user_input"
     assert "SQL injection" in v.message
@@ -159,7 +157,7 @@ def test_rust_trace_variable_reassignment(tmp_path):
     config = _make_rust_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="rust")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     assert violations[0].label == "user_input"
 
 
@@ -168,18 +166,14 @@ def test_rust_trace_variable_reassignment(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_rust_trace_loop(tmp_path):
-    """Taint propagates through a let binding before a loop, reaching a sink.
-
-    We use a simple two-step rebinding (``data`` -> ``x``) rather than relying
-    on for-loop variable extraction, which may not yet be tracked by the Rust
-    CFG builder.
-    """
+    """Taint propagates through a for-loop body into a sink."""
     test_file = tmp_path / "handler.rs"
     test_file.write_text(
         "fn handler() {\n"
         "    let data = get_input(\"list\");\n"
-        "    let x = data;\n"
-        "    execute_query(x);\n"
+        "    for _i in 0..10 {\n"
+        "        execute_query(data);\n"
+        "    }\n"
         "}\n"
     )
 

@@ -61,7 +61,7 @@ def test_ts_trace_basic_source_to_sink(tmp_path):
     config = _make_ts_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="typescript")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     v = violations[0]
     assert v.label == "user_input"
     assert "SQL injection" in v.message
@@ -106,7 +106,7 @@ def test_ts_trace_arrow_function(tmp_path):
     config = _make_ts_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="typescript")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     v = violations[0]
     assert v.label == "user_input"
     assert v.file_path == str(test_file)
@@ -129,7 +129,7 @@ def test_ts_trace_method_call(tmp_path):
     config = _make_ts_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="typescript")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     v = violations[0]
     assert v.label == "user_input"
 
@@ -153,7 +153,7 @@ def test_ts_trace_destructuring(tmp_path):
     violations = run_trace_analysis([str(test_file)], config, language="typescript")
 
     # Taint should propagate: data <- source, y <- data, db.execute(y) <- sink.
-    assert len(violations) >= 1
+    assert len(violations) == 1
     assert violations[0].label == "user_input"
 
 
@@ -203,7 +203,7 @@ def test_ts_trace_try_catch(tmp_path):
     config = _make_ts_trace_config()
     violations = run_trace_analysis([str(test_file)], config, language="typescript")
 
-    assert len(violations) >= 1
+    assert len(violations) == 1
     assert violations[0].label == "user_input"
     assert violations[0].file_path == str(test_file)
 
