@@ -1004,3 +1004,87 @@ def test_rename_module_does_not_modify_unrelated_bare_name_strings(tmp_path, run
         f"String containing module name as word in unrelated file was modified.\n"
         f"unrelated.py content:\n{unrelated_content}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug: _split_or_retarget_import loses indentation for indented imports
+# ---------------------------------------------------------------------------
+
+
+def test_move_symbol_split_indented_import(tmp_path, emend_cmd):
+    """Splitting an indented import must preserve the original indentation.
+
+    When a consumer file has an import inside an ``if TYPE_CHECKING:`` block::
+
+        if TYPE_CHECKING:
+            from source_mod import Bundle, load_bundle
+
+    and only ``Bundle`` is moved, the split must keep both replacement lines
+    indented so the result is still valid Python::
+
+        if TYPE_CHECKING:
+            from dest_mod import Bundle
+            from source_mod import load_bundle
+
+    Without the fix, the replacement lines lose their indentation, producing
+    a ``SyntaxError`` or semantically incorrect code (imports outside the
+    TYPE_CHECKING guard).
+    """
+    (tmp_path / "source_mod.py").write_text(
+        "class Bundle:\n"
+        "    pass\n"
+        "\n"
+        "def load_bundle():\n"
+        "    return Bundle()\n"
+    )
+    (tmp_path / "dest_mod.py").write_text("")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "if TYPE_CHECKING:\n"
+        "    from source_mod import Bundle, load_bundle\n"
+        "\n"
+        "def use(b: 'Bundle') -> None:\n"
+        "    pass\n"
+    )
+
+    result = subprocess.run(
+        [
+            emend_cmd,
+            "move",
+            f"{tmp_path / 'source_mod.py'}::Bundle",
+            str(tmp_path / "dest_mod.py"),
+            "--project",
+            str(tmp_path),
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, (
+        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    )
+
+    consumer_content = consumer.read_text()
+
+    # Both replacement import lines must be inside the TYPE_CHECKING block,
+    # i.e. they must be indented.
+    assert "    from dest_mod import Bundle" in consumer_content, (
+        f"Moved import should be indented inside TYPE_CHECKING block.\n"
+        f"consumer.py:\n{consumer_content}"
+    )
+    assert "    from source_mod import load_bundle" in consumer_content, (
+        f"Remaining import should be indented inside TYPE_CHECKING block.\n"
+        f"consumer.py:\n{consumer_content}"
+    )
+
+    # The result must be syntactically valid Python.
+    try:
+        ast.parse(consumer_content)
+    except SyntaxError as exc:
+        pytest.fail(
+            f"consumer.py is not valid Python after move:\n{consumer_content}\n"
+            f"Error: {exc}"
+        )
