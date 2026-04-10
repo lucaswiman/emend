@@ -715,7 +715,7 @@ def _extract_file_facts(
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
-            for qn_str, line, col, _offset, _end_offset, kind in \
+            for qn_str, line, col, _offset, _end_offset, kind, _ann in \
                     scope_resolver.references_in_file(abs_path):
                 file_refs.append((qn_str, line, col, kind))
                 result["fact_ref"].append([qn_str, rel_path, line, col, kind])
@@ -1420,7 +1420,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
         if need_ref and scope_indexed:
             try:
-                for qn_str, line, col, offset, end_offset, kind in scope_resolver.references_in_file(py_file):
+                for qn_str, line, col, offset, end_offset, kind, _ann in scope_resolver.references_in_file(py_file):
                     ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
             except Exception:
                 pass
@@ -4067,7 +4067,7 @@ def _filter_matches_by_import(
         references = resolver.references_in_file(file_path)
         
         match_qn = None
-        for qn, line, col, offset, end_offset, kind in references:
+        for qn, line, col, offset, end_offset, kind, _ann in references:
             if line == match.line and col == match.col:
                 match_qn = qn
                 break
@@ -4106,7 +4106,7 @@ def _filter_matches_by_scope_local(
     # Build a set of names that are imported (defined via import statements).
     imported_names: set[str] = set()
     references = resolver.references_in_file(file_path)
-    for qn, line, col, offset, end_offset, kind in references:
+    for qn, line, col, offset, end_offset, kind, _ann in references:
         if kind == "import":
             # Extract the local name from the qualified name
             # (e.g., "os.path.join" → "join")
@@ -6966,7 +6966,7 @@ def rename_symbol(
         transform = _rust.PyFileTransform(content)
         changed = False
 
-        for qn, line, col, offset, end_offset, kind in references:
+        for qn, line, col, offset, end_offset, kind, _ann in references:
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
@@ -7105,7 +7105,7 @@ def _source_has_remaining_refs(
     target_suffix = f".{symbol_name}"
     return any(
         kind in ("read", "write", "call")
-        for qn, _line, _col, _off, _end, kind
+        for qn, _line, _col, _off, _end, kind, _ann
         in resolver.references_in_file(resolved)
         if qn.endswith(target_suffix) or qn == symbol_name
     )
@@ -7251,7 +7251,7 @@ def _update_imports_for_move(
 
             references = resolver.references_in_file(py_file)
 
-            for i, (qn, line, col, offset, end_offset, kind) in enumerate(references):
+            for i, (qn, line, col, offset, end_offset, kind, _ann) in enumerate(references):
                 if kind != "import":
                     continue
 
@@ -7459,7 +7459,7 @@ def _rename_module_references(
         old_bare_mod = old_module.rsplit(sep, 1)[-1]
         new_bare_mod = new_module.rsplit(sep, 1)[-1]
 
-        for qn, line, col, offset, end_offset, kind in resolver.references_in_file(py_file):
+        for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(py_file):
             # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
             # the comparison against old_module works correctly.
             resolved_qn = qn

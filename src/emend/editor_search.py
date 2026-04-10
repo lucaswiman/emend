@@ -1632,7 +1632,7 @@ class EditorSearchEngine:
                         logger.debug(f"goto_definition: extracted identifier='{identifier}' from cursor at col={col}")
 
                         # Find the reference with matching identifier (last component of QN)
-                        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+                        for qn, r_line, r_col, r_offset, r_end_offset, r_kind, _ann in refs:
                             if r_line == line:
                                 qn_parts = qn.split(qn_sep)
                                 qn_last = qn_parts[-1]
@@ -1677,7 +1677,7 @@ class EditorSearchEngine:
         all_refs = []
         import_refs = []
         resolved_qn = target_qn
-        for qn, r_line, r_col, r_offset, r_end_offset, r_kind in refs:
+        for qn, r_line, r_col, r_offset, r_end_offset, r_kind, _ann in refs:
             # Match by exact QN, or by suffix when target_qn is a bare name from bindings
             if qn == target_qn or (qn_sep not in target_qn and qn.endswith(qn_sep + target_qn)):
                 resolved_qn = qn  # upgrade to fully-qualified name

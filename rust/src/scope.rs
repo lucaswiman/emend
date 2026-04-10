@@ -199,6 +199,9 @@ pub struct Reference {
     pub end_byte: usize,
     pub qn: QualifiedName,
     pub kind: ReferenceKind,
+    /// True when this reference appears in a type-annotation context
+    /// (e.g. parameter type, return type, variable annotation).
+    pub in_annotation: bool,
 }
 
 /// Whether a reference is a read, write, or call.
@@ -253,6 +256,35 @@ pub struct ImportBinding {
     pub module_path: String,
     pub imported_name: Option<String>,
     pub is_star: bool,
+}
+
+/// A name imported within a single import statement.
+#[derive(Debug, Clone)]
+pub struct ImportedName {
+    pub name: String,
+    pub alias: Option<String>,
+}
+
+/// A structured import statement with byte-range information.
+///
+/// Captures the full statement structure so Python code does not need
+/// to re-parse with `ast.parse()` to split or retarget imports.
+#[derive(Debug, Clone)]
+pub struct StructuredImport {
+    /// Module path (e.g. "source_mod" or "pkg.helpers").
+    pub module: String,
+    /// Number of leading dots for relative imports (0 = absolute).
+    pub level: usize,
+    /// Imported names with optional aliases.
+    pub names: Vec<ImportedName>,
+    /// Byte offset of the start of the import statement node.
+    pub start_byte: usize,
+    /// Byte offset of the end of the import statement node.
+    pub end_byte: usize,
+    /// 1-based start line.
+    pub start_line: usize,
+    /// 1-based end line.
+    pub end_line: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +436,12 @@ pub struct PatternMatchingSection {
     pub operator_field: String,
     #[serde(default)]
     pub annotation_field: String,
+    /// Field names whose subtrees are type-annotation context (e.g.
+    /// ``["type", "return_type"]`` for Python's parameter types and
+    /// return types).  References within these fields get
+    /// ``in_annotation = true``.
+    #[serde(default)]
+    pub annotation_fields: Vec<String>,
     #[serde(default)]
     pub value_field: String,
     #[serde(default)]
@@ -1389,6 +1427,7 @@ impl ScopeResolver {
             module_path, scopes, scope_index, imports,
             ScopeId(0), // Start with Module scope
             false, // not in import
+            false, // not in annotation
             &mut refs, &mut qn_set,
         );
 
@@ -1408,6 +1447,7 @@ impl ScopeResolver {
         imports: &HashMap<String, ImportBinding>,
         current_scope: ScopeId,
         in_import: bool,
+        in_annotation: bool,
         refs: &mut Vec<Reference>,
         qn_set: &mut std::collections::HashSet<String>,
     ) {
@@ -1446,6 +1486,7 @@ impl ScopeResolver {
                         end_byte: child.end_byte(),
                         qn: QualifiedName { name: qn },
                         kind: ReferenceKind::Import,
+                        in_annotation: false,
                     });
                 } else if cfg_imports.aliased_import.as_deref() == Some(ck) {
                     if let Some(name_node) = child.child_by_field_name("name") {
@@ -1459,6 +1500,7 @@ impl ScopeResolver {
                             end_byte: name_node.end_byte(),
                             qn: QualifiedName { name: qn },
                             kind: ReferenceKind::Import,
+                            in_annotation: false,
                         });
                     }
                     // Alias part will be processed as a definition in collect_bindings,
@@ -1481,6 +1523,7 @@ impl ScopeResolver {
                     end_byte: mod_node.end_byte(),
                     qn: QualifiedName { name: qn },
                     kind: ReferenceKind::Import,
+                    in_annotation: false,
                 });
                 Some(mod_node.id())
             } else {
@@ -1501,6 +1544,7 @@ impl ScopeResolver {
                     self.walk_references(
                         &mut child.walk(), file_path, source, module_path,
                         scopes, scope_index, imports, current_scope, true,
+                        false, // imports are not annotations
                         refs, qn_set,
                     );
                 }
@@ -1539,6 +1583,7 @@ impl ScopeResolver {
                         end_byte: node.end_byte(),
                         qn: QualifiedName { name: qn },
                         kind,
+                        in_annotation,
                     });
                 }
             }
@@ -1564,6 +1609,7 @@ impl ScopeResolver {
                         end_byte: node.end_byte(),
                         qn: QualifiedName { name: qn },
                         kind,
+                        in_annotation,
                     });
                 }
             }
@@ -1597,9 +1643,20 @@ impl ScopeResolver {
                     current_scope
                 };
 
+                // Check if this child is in an annotation context.
+                // A child is an annotation if it is a field listed in
+                // config.pattern_matching.annotation_fields on the parent.
+                let child_in_annotation = in_annotation || {
+                    let ann_fields = &self.config.pattern_matching.annotation_fields;
+                    !ann_fields.is_empty() && ann_fields.iter().any(|f| {
+                        node.child_by_field_name(f.as_str()) == Some(child)
+                    })
+                };
+
                 self.walk_references(
                     cursor, file_path, source, module_path,
                     scopes, scope_index, imports, next_scope, child_in_import,
+                    child_in_annotation,
                     refs, qn_set,
                 );
                 if !cursor.goto_next_sibling() {
@@ -2436,6 +2493,124 @@ impl ScopeResolver {
         }
     }
 
+    /// Collect structured import statements from a parsed tree.
+    ///
+    /// Unlike `collect_import` (which populates `ImportBinding`s for scope
+    /// resolution), this returns a list of [`StructuredImport`]s that
+    /// capture the full statement structure — module, imported names with
+    /// aliases, byte ranges — so callers can split or retarget imports
+    /// without re-parsing with a language-specific AST library.
+    pub fn collect_structured_imports(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> Vec<StructuredImport> {
+        let source_bytes = source.as_bytes();
+        let imports = &self.config.imports;
+        let mut result = Vec::new();
+
+        fn walk_for_imports(
+            node: tree_sitter::Node,
+            source: &[u8],
+            imports: &ImportsSection,
+            result: &mut Vec<StructuredImport>,
+        ) {
+            let nk = node.kind();
+
+            if !imports.import_from.is_empty() && nk == imports.import_from {
+                let mod_node = node.child_by_field_name(&imports.module_field);
+                let raw_module = mod_node
+                    .map(|n| node_text(n, source).to_string())
+                    .unwrap_or_default();
+                let mod_node_id = mod_node.map(|n| n.id());
+
+                // Count leading dots for relative imports.  In some grammars
+                // (e.g. Python) the dots are embedded in the module_name text
+                // (e.g. ".helpers"); in others they may be separate child
+                // nodes.  We check both.
+                let mut level: usize = raw_module.chars().take_while(|ch| *ch == '.').count();
+                if level == 0 {
+                    let mut c = node.walk();
+                    for child in node.children(&mut c) {
+                        if child.kind() == "." || child.kind() == "import_prefix" {
+                            let dots = node_text(child, source);
+                            level += dots.chars().filter(|ch| *ch == '.').count();
+                        }
+                    }
+                }
+                // Strip leading dots from the module name.
+                let module = raw_module.trim_start_matches('.').to_string();
+
+                let mut names = Vec::new();
+                for_each_child(&node, |child| {
+                    // Skip the module_name field — it's the module, not an imported name.
+                    if mod_node_id == Some(child.id()) {
+                        return;
+                    }
+                    let ck = child.kind();
+                    if !imports.star_import.is_empty() && ck == imports.star_import {
+                        names.push(ImportedName {
+                            name: "*".to_string(),
+                            alias: None,
+                        });
+                    } else if imports.identifier.as_deref() == Some(ck)
+                        || imports.dotted_name.as_deref() == Some(ck)
+                    {
+                        names.push(ImportedName {
+                            name: node_text(child, source).to_string(),
+                            alias: None,
+                        });
+                    } else if imports.aliased_import.as_deref() == Some(ck) {
+                        if let Some(name_node) = child.child_by_field_name("name") {
+                            let imported = node_text(name_node, source).to_string();
+                            let alias = if !imports.alias_field.is_empty() {
+                                child
+                                    .child_by_field_name(&imports.alias_field)
+                                    .map(|a| node_text(a, source).to_string())
+                            } else {
+                                None
+                            };
+                            names.push(ImportedName {
+                                name: imported,
+                                alias,
+                            });
+                        }
+                    }
+                });
+
+                // The module_field child is handled separately above and is
+                // not added to ``names`` by the for_each_child loop, so no
+                // filtering is needed here.
+
+                result.push(StructuredImport {
+                    module,
+                    level,
+                    names,
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                });
+                return;
+            }
+
+            // Recurse into children to find nested import statements
+            // (e.g. inside if TYPE_CHECKING blocks).
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    walk_for_imports(cursor.node(), source, imports, result);
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        walk_for_imports(tree.root_node(), source_bytes, imports, &mut result);
+        result
+    }
+
     /// Compute a qualified name for a binding in a given scope.
     fn compute_qn(
         &self,
@@ -2889,6 +3064,7 @@ impl LanguageConfig {
                 right_field: "right".to_string(),
                 operator_field: "operator".to_string(),
                 annotation_field: "type".to_string(),
+                annotation_fields: vec!["type".to_string(), "return_type".to_string()],
                 value_field: "value".to_string(),
                 condition_field: "condition".to_string(),
                 target_field: "left".to_string(),

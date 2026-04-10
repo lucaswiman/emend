@@ -128,8 +128,8 @@ impl PyScopeResolver {
             .unwrap_or_default()
     }
 
-    /// Returns all references in a file as (target_qn, line, col, start_byte, end_byte, kind).
-    fn references_in_file(&self, path: &str) -> Vec<(String, usize, usize, usize, usize, &'static str)> {
+    /// Returns all references in a file as (target_qn, line, col, start_byte, end_byte, kind, in_annotation).
+    fn references_in_file(&self, path: &str) -> Vec<(String, usize, usize, usize, usize, &'static str, bool)> {
         let path = PathBuf::from(path);
         self.inner
             .file_scopes
@@ -137,10 +137,51 @@ impl PyScopeResolver {
             .map(|fs| {
                 fs.references
                     .iter()
-                    .map(|r| (r.qn.name.clone(), r.line, r.column, r.byte_offset, r.end_byte, r.kind.as_str()))
+                    .map(|r| (r.qn.name.clone(), r.line, r.column, r.byte_offset, r.end_byte, r.kind.as_str(), r.in_annotation))
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Returns structured import statements in a file.
+    ///
+    /// Each entry is a dict with keys: module, level, names, start_byte,
+    /// end_byte, start_line, end_line.  ``names`` is a list of (name, alias)
+    /// tuples where alias may be None.
+    fn structured_imports_in_file(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {
+        let path_buf = PathBuf::from(path);
+        let fs = match self.inner.file_scopes.get(&path_buf) {
+            Some(fs) => fs,
+            None => return Ok(Vec::new()),
+        };
+        // Re-parse the file to get the tree (FileScope doesn't store it).
+        let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let source = std::fs::read_to_string(&path_buf).unwrap_or_default();
+        let tree = match crate::pattern::parse_by_extension(&source, ext) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        let _ = fs; // we only needed to verify the file was indexed
+
+        let structured = self.inner.collect_structured_imports(&tree, &source);
+        let mut result = Vec::with_capacity(structured.len());
+        for si in &structured {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("module", &si.module)?;
+            dict.set_item("level", si.level)?;
+            let names: Vec<(String, Option<String>)> = si
+                .names
+                .iter()
+                .map(|n| (n.name.clone(), n.alias.clone()))
+                .collect();
+            dict.set_item("names", names)?;
+            dict.set_item("start_byte", si.start_byte)?;
+            dict.set_item("end_byte", si.end_byte)?;
+            dict.set_item("start_line", si.start_line)?;
+            dict.set_item("end_line", si.end_line)?;
+            result.push(dict.into());
+        }
+        Ok(result)
     }
 
     /// Returns all qualified name strings mentioned in a file (for pre-filter index).
