@@ -103,7 +103,7 @@ approach Phase 4 uses for the intraprocedural assignment-target regex.
 - [x] Test: async/await taint (`async function get() { return source() }; sink(await get())`).
 - [x] Test: late sanitizer ordering (sanitizer after sink still reports violation).
 - [x] Test: multi-hop call chain (A → B → C, source in A, sink in C).
-  - Known limitation: 3-hop chains don't propagate (same in Python).
+  - Fixed: transitive `param_to_sink` Datalog closure now propagates through arbitrary depth.
 
 ### Rust interprocedural tests
 
@@ -114,7 +114,8 @@ approach Phase 4 uses for the intraprocedural assignment-target regex.
 - [x] Test: impl method taint (`impl Foo { fn process(&self, x: String) -> String }`).
   - Uses standalone functions (impl methods not extracted by symbol extractor).
 - [x] Test: multi-hop call chain.
-  - Known limitation: 3-hop chains limited; test uses 2-hop pattern.
+  - Fixed: 3-hop chains now work via transitive `param_to_sink` closure.
+  - Note: `param_to_return` is still limited for Rust (implicit returns).
 
 ### CLI integration
 

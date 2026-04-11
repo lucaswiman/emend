@@ -233,15 +233,14 @@ def test_rust_interproc_impl_method_taint(tmp_path):
 
 
 def test_rust_interproc_multi_hop_chain(tmp_path):
-    """Taint crosses a two-function chain: handler → sink_helper → sink.
+    """Taint crosses a two-function chain: handler -> sink_helper -> sink.
 
     Tests that the engine detects a violation when a tainted value is passed
     through a helper function whose parameter flows directly to a sink.
 
-    Note: Three-function chains (A→B→C where B only calls C) are a known
-    limitation for Rust because ``param_to_return`` tracking requires the
-    ``return $X`` pattern which does not match Rust's implicit return
-    expressions.  This test uses a two-hop chain which works correctly.
+    Note: Three-function chains for ``param_to_return`` are still limited
+    for Rust because ``return $X`` doesn't match implicit return expressions.
+    However, ``param_to_sink`` transitive closure works for arbitrary depth.
     """
     test_file = tmp_path / "handler.rs"
     test_file.write_text(
@@ -262,3 +261,32 @@ def test_rust_interproc_multi_hop_chain(tmp_path):
     result = run_interprocedural_trace([str(test_file)], config, language="rust")
     assert isinstance(result, InterproceduralResult)
     assert len(result.violations) >= 1
+
+
+def test_rust_interproc_three_hop_chain(tmp_path):
+    """Taint crosses a 3-function chain: handler -> mid -> leaf -> sink.
+
+    The transitive param_to_sink Datalog closure enables this for all
+    languages, including Rust.
+    """
+    test_file = tmp_path / "handler.rs"
+    test_file.write_text(
+        "fn leaf(value: String) {\n"
+        "    execute_query(value);\n"
+        "}\n"
+        "\n"
+        "fn mid(data: String) {\n"
+        "    leaf(data);\n"
+        "}\n"
+        "\n"
+        "fn handler() {\n"
+        "    let name = get_input(\"name\");\n"
+        "    mid(name);\n"
+        "}\n"
+    )
+    config = _make_rust_interproc_config()
+    result = run_interprocedural_trace([str(test_file)], config, language="rust")
+    assert isinstance(result, InterproceduralResult)
+    assert len(result.violations) >= 1, (
+        f"Expected at least 1 violation for 3-hop Rust chain, got {len(result.violations)}"
+    )

@@ -1702,6 +1702,94 @@ def _compute_return_reachable_vars(
     return reachable
 
 
+def _collect_call_dependencies(
+    *,
+    source: str,
+    func_start: int,
+    func_end: int,
+    func_qn: str,
+    param_names: list[str],
+    func_info: dict[str, tuple[str, str, int, int, list[str]]],
+    name_to_qn: dict[str, list[str]],
+    func_paths: dict[str, tuple[str, ...]],
+    func_kinds: dict[str, str],
+    graph: "FactGraph | None" = None,
+    file_path: str = "",
+) -> list[tuple[str, str, str, str]]:
+    """Collect ``caller_param -> callee_param`` edges at all call sites.
+
+    Unlike ``_collect_param_to_return_dependencies`` which only considers
+    calls whose result flows to a return value, this function captures
+    every call site where a tainted parameter is passed to a callee —
+    including bare calls like ``step2(data)`` and calls in assignments.
+    This is used for transitive ``param_to_sink`` propagation.
+    """
+    if not param_names:
+        return []
+
+    lines = source.split("\n")
+    body_start = func_start + 1
+    if body_start > func_end:
+        return []
+
+    assignments_by_line = _get_assignments_by_line(
+        graph, file_path, func_qn, source, func_start, func_end,
+    )
+
+    deps: set[tuple[str, str, str, str]] = set()
+
+    for param_name in param_names:
+        tainted_vars: set[str] = {param_name}
+        for line_idx in range(func_start, func_end + 1):
+            # Propagate taint through assignments
+            for target, rhs in assignments_by_line.get(line_idx, []):
+                rhs_idents = _extract_identifiers(rhs)
+                if any(ident in tainted_vars for ident in rhs_idents):
+                    tainted_vars.add(target)
+
+            # Find all call sites on this line (both bare and assigned)
+            if line_idx - 1 >= len(lines):
+                continue
+            line_text = lines[line_idx - 1]
+            for call_match in re.finditer(
+                r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)", line_text,
+            ):
+                callee_name = call_match.group(1)
+                arg_strs = [
+                    a.strip()
+                    for a in call_match.group(2).split(",")
+                    if a.strip()
+                ]
+                callee_qns = _select_interprocedural_callee_qns(
+                    func_qn,
+                    callee_name,
+                    name_to_qn=name_to_qn,
+                    func_paths=func_paths,
+                    func_kinds=func_kinds,
+                    include_methods=call_match.start() > 0
+                    and line_text[call_match.start() - 1] == ".",
+                )
+                for callee_qn in callee_qns:
+                    callee_params = func_info.get(
+                        callee_qn, ("", "", 0, 0, []),
+                    )[4]
+                    for arg_idx, arg_str in enumerate(arg_strs):
+                        if arg_idx >= len(callee_params):
+                            break
+                        if any(
+                            ident in tainted_vars
+                            for ident in _extract_identifiers(arg_str)
+                        ):
+                            deps.add((
+                                func_qn,
+                                param_name,
+                                callee_qn,
+                                callee_params[arg_idx],
+                            ))
+
+    return sorted(deps)
+
+
 def _collect_param_to_return_dependencies(
     *,
     source: str,
@@ -1830,12 +1918,125 @@ def _run_interprocedural_return_datalog(
     return updated
 
 
+def _run_interprocedural_sink_datalog(
+    summaries: dict[str, FunctionSummary],
+    call_dependencies: list[tuple[str, str, str, str]],
+    *,
+    label_filter: str | None,
+    max_depth: int | None = None,
+) -> dict[str, FunctionSummary]:
+    """Use Datalog to compute the transitive ``param_to_sink`` closure.
+
+    Given direct ``param_to_sink`` entries (computed per-function) and
+    ``call_dependencies`` edges (caller_param -> callee_param at call sites),
+    this function recursively propagates sink reachability: if callee's
+    param flows to a sink, and caller passes a tainted value to that param,
+    then caller's param also transitively flows to a sink.
+
+    Args:
+        summaries: Function summaries with direct param_to_sink entries.
+        call_dependencies: (caller_qn, caller_param, callee_qn, callee_param) tuples.
+        label_filter: Optional label to restrict analysis to.
+        max_depth: Maximum chain depth for transitive propagation.
+            None means unlimited.  1 means only direct sinks (no transitivity).
+    """
+    if not call_dependencies:
+        return summaries
+
+    from emend.fact_graph import FactGraph
+
+    # Collect direct sink entries from summaries
+    direct_sinks: list[tuple[str, str, str, str, int]] = []
+    for summary in summaries.values():
+        for param_name, entries in summary.param_to_sink.items():
+            for label, pattern, line in entries:
+                if label_filter and label != label_filter:
+                    continue
+                direct_sinks.append((
+                    summary.qualified_name, param_name, label, pattern, line,
+                ))
+
+    if not direct_sinks:
+        return summaries
+
+    graph = FactGraph()
+    ir = graph._inline_relation
+    query = (
+        ir("direct_sink", ["fq", "param", "lbl", "pat", "line"], direct_sinks)
+        + ir(
+            "call_dep",
+            ["caller_fq", "caller_param", "callee_fq", "callee_param"],
+            call_dependencies,
+        )
+    )
+
+    if max_depth is None or max_depth < 1:
+        # Unlimited: full recursive transitive closure
+        query += (
+            "param_to_sink[fq, param, lbl, pat, line] := "
+            "direct_sink[fq, param, lbl, pat, line]\n"
+            "param_to_sink[caller_fq, caller_param, lbl, pat, line] := "
+            "call_dep[caller_fq, caller_param, callee_fq, callee_param], "
+            "param_to_sink[callee_fq, callee_param, lbl, pat, line]\n"
+            "?[fq, param, lbl, pat, line] := param_to_sink[fq, param, lbl, pat, line]"
+        )
+    else:
+        # Depth-limited: unfold the recursion up to max_depth levels.
+        # depth=1 means only direct sinks; depth=2 means one hop; etc.
+        query += (
+            "sink_d0[fq, param, lbl, pat, line] := "
+            "direct_sink[fq, param, lbl, pat, line]\n"
+        )
+        for d in range(1, max_depth):
+            prev = f"sink_d{d - 1}"
+            curr = f"sink_d{d}"
+            query += (
+                f"{curr}[caller_fq, caller_param, lbl, pat, line] := "
+                f"call_dep[caller_fq, caller_param, callee_fq, callee_param], "
+                f"{prev}[callee_fq, callee_param, lbl, pat, line]\n"
+            )
+        # Union all depth levels into the output
+        for d in range(max_depth):
+            query += (
+                f"?[fq, param, lbl, pat, line] := "
+                f"sink_d{d}[fq, param, lbl, pat, line]\n"
+            )
+
+    result = graph._client.run(query)
+
+    updated: dict[str, FunctionSummary] = {
+        qn: FunctionSummary(
+            qualified_name=summary.qualified_name,
+            file_path=summary.file_path,
+            param_to_return={k: set(v) for k, v in summary.param_to_return.items()},
+            param_to_sink={k: list(v) for k, v in summary.param_to_sink.items()},
+            param_to_param={k: set(v) for k, v in summary.param_to_param.items()},
+        )
+        for qn, summary in summaries.items()
+    }
+    for fq, param, lbl, pat, line in result["rows"]:
+        summary = updated.setdefault(
+            fq,
+            FunctionSummary(
+                qualified_name=fq,
+                file_path=summaries.get(fq, FunctionSummary(fq, "")).file_path,
+            ),
+        )
+        entry = (lbl, pat, line)
+        if param not in summary.param_to_sink:
+            summary.param_to_sink[param] = [entry]
+        elif entry not in summary.param_to_sink[param]:
+            summary.param_to_sink[param].append(entry)
+    return updated
+
+
 def _run_interprocedural_trace_datalog(
     paths: list[str],
     config: TraceConfig,
     label_filter: str | None = None,
     language: str = "python",
     max_iterations: int = 10,
+    max_chain_depth: int | None = None,
     project_path: str | None = None,
 ) -> InterproceduralResult:
     """Datalog interprocedural trace engine with public-style witnesses."""
@@ -1905,6 +2106,7 @@ def _run_interprocedural_trace_datalog(
         name_to_qn[short_name].append(qn)
 
     return_dependencies: list[tuple[str, str, str, str]] = []
+    call_dependencies: list[tuple[str, str, str, str]] = []
     for qn, (_fp, src, fs, fe, params) in func_info.items():
         return_dependencies.extend(
             _collect_param_to_return_dependencies(
@@ -1922,11 +2124,33 @@ def _run_interprocedural_trace_datalog(
                 language=language,
             )
         )
+        call_dependencies.extend(
+            _collect_call_dependencies(
+                source=src,
+                func_start=fs,
+                func_end=fe,
+                func_qn=qn,
+                param_names=params,
+                func_info=func_info,
+                name_to_qn=name_to_qn,
+                func_paths=func_paths,
+                func_kinds=func_kinds,
+                graph=graph,
+                file_path=_fp,
+            )
+        )
 
     summaries = _run_interprocedural_return_datalog(
         direct_summaries,
         return_dependencies,
         label_filter=label_filter,
+    )
+
+    summaries = _run_interprocedural_sink_datalog(
+        summaries,
+        call_dependencies,
+        label_filter=label_filter,
+        max_depth=max_chain_depth,
     )
     violations: list[TraceViolation] = []
 
@@ -2250,9 +2474,17 @@ def run_interprocedural_trace(
     label_filter: str | None = None,
     language: str = "python",
     max_iterations: int = 10,
+    max_chain_depth: int | None = None,
     project_path: str | None = None,
 ) -> InterproceduralResult:
-    """Run interprocedural trace analysis using the Datalog engine."""
+    """Run interprocedural trace analysis using the Datalog engine.
+
+    Args:
+        max_chain_depth: Maximum depth for transitive ``param_to_sink``
+            propagation across call chains.  ``None`` (default) means
+            unlimited depth.  ``1`` means only direct callee sinks are
+            considered (no transitivity).
+    """
     if config.exclude_paths:
         paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
         if not paths:
@@ -2262,5 +2494,6 @@ def run_interprocedural_trace(
         label_filter=label_filter,
         language=language,
         max_iterations=max_iterations,
+        max_chain_depth=max_chain_depth,
         project_path=project_path,
     )

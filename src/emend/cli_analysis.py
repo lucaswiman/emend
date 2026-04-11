@@ -37,6 +37,7 @@ def _trace_cmd_impl(
     max_iterations: int,
     preset: str | None,
     exclude_path: list[str] | None = None,
+    max_chain_depth: int | None = None,
 ) -> None:
     """Shared implementation for ``trace`` (and ``taint`` alias) commands."""
     try:
@@ -80,6 +81,7 @@ def _trace_cmd_impl(
                 label_filter=label,
                 language=_lang,
                 max_iterations=max_iterations,
+                max_chain_depth=max_chain_depth,
                 project_path=_proj_root,
             )
             violations = result.violations
@@ -124,6 +126,7 @@ def trace_cmd(
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
+    max_chain_depth: Annotated[Optional[int], typer.Option("--max-chain-depth", help="Max call-chain depth for transitive sink propagation (default: unlimited)")] = None,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules. Python: django, flask, sqlalchemy, fastapi. TypeScript/Node.js: express, react, nextjs, node-sql. Rust: actix-web, axum, sqlx, diesel. Special: all")] = None,
     exclude_path: Annotated[Optional[list[str]], typer.Option("--exclude-path", help="Glob patterns for paths to exclude from analysis (repeatable)")] = None,
 ):
@@ -136,6 +139,10 @@ def trace_cmd(
     With --interprocedural, tracks values across function boundaries using
     function summaries and Datalog-based analysis.
 
+    Use --max-chain-depth to limit transitive sink propagation depth.
+    For example, --max-chain-depth 2 detects sinks up to 2 call levels
+    deep (A calls B which has a sink).  Default is unlimited.
+
     Configuration is read from .emend/rules.yaml by default, falling back to
     the legacy trace section in .emend/patterns.yaml. Use --preset to load
     built-in rules for a specific framework (django, flask, sqlalchemy,
@@ -147,11 +154,13 @@ def trace_cmd(
         emend trace src/ --trace
         emend trace src/ --json
         emend trace src/ --interprocedural
+        emend trace src/ --interprocedural --max-chain-depth 3
         emend trace app.py --preset flask
         emend trace src/ --exclude-path "*/migrations/*.py"
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
-                    interprocedural, max_iterations, preset, exclude_path)
+                    interprocedural, max_iterations, preset, exclude_path,
+                    max_chain_depth=max_chain_depth)
 
 
 

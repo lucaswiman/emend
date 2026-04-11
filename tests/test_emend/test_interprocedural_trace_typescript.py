@@ -262,14 +262,8 @@ def test_ts_interproc_late_sanitizer_ordering(tmp_path):
 def test_ts_interproc_multi_hop_chain(tmp_path):
     """Taint declared in handler flows through step1 -> step2 -> db.execute().
 
-    The current interprocedural engine computes function summaries (param_to_sink)
-    in a single fixed-point pass.  Summary propagation is limited to two levels:
-    a callee's direct sink entries are not automatically hoisted into a caller's
-    summary in the same pass, so a strict 3-hop chain (handler->step1->step2)
-    may not produce a violation.  This test documents the current behaviour:
-    - No crash occurs.
-    - The result is a valid InterproceduralResult.
-    - step2's summary correctly records that its 'data' param flows to the sink.
+    The transitive param_to_sink Datalog closure propagates sink reachability
+    through call chains of arbitrary depth, so this 3-hop chain is detected.
     """
     test_file = tmp_path / "app.ts"
     test_file.write_text(
@@ -300,11 +294,19 @@ def test_ts_interproc_multi_hop_chain(tmp_path):
     assert any("handler" in qn for qn in qns), f"handler not summarised; got: {qns}"
 
     # The leaf function (step2) should record 'data' flows to the sink.
-    step2_summary = next(s for qn, s in result.summaries.items() if "step2" in qn)
+    step2_summary = next(s for qn, s in result.summaries.items() if qn.endswith("::step2"))
     assert "data" in step2_summary.param_to_sink, (
         f"Expected step2 'data' param to flow to sink, got: {step2_summary.param_to_sink}"
     )
 
-    # Any violations that do appear must carry the correct label.
-    for v in result.violations:
-        assert v.label == "user_input"
+    # step1 should gain transitive param_to_sink via step2.
+    step1_summary = next(s for qn, s in result.summaries.items() if qn.endswith("::step1"))
+    assert "value" in step1_summary.param_to_sink, (
+        f"Expected step1 'value' to have transitive param_to_sink, got: {step1_summary.param_to_sink}"
+    )
+
+    # The 3-hop chain should now be detected.
+    assert len(result.violations) >= 1, (
+        f"Expected at least 1 violation for 3-hop chain, got {len(result.violations)}"
+    )
+    assert all(v.label == "user_input" for v in result.violations)
