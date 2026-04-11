@@ -293,6 +293,105 @@ pub fn files_importing_module_from_source(source: &str, target_module: &str) -> 
     modules.contains(&target_module.to_string())
 }
 
+/// A single call site extracted from source code.
+#[derive(Clone, Debug)]
+pub struct CallSiteInfo {
+    /// The callee expression text (e.g. "foo", "obj.method").
+    pub callee: String,
+    /// Individual argument texts, parsed via tree-sitter.
+    pub args: Vec<String>,
+    /// 1-based line number.
+    pub line: usize,
+    /// 0-based column offset.
+    pub col: usize,
+    /// True if the callee is an attribute access (e.g. `obj.method()`).
+    pub is_method: bool,
+}
+
+/// Extract all call sites from source code using tree-sitter.
+///
+/// Walks the parse tree to find call expression nodes, then extracts the
+/// callee name and individual arguments as separate strings.  This avoids
+/// error-prone regex or string-splitting approaches for argument extraction.
+///
+/// The `call_node_type` and `args_field_name` parameters are read from
+/// the language config (e.g. `"call"` / `"arguments"` for Python,
+/// `"call_expression"` / `"arguments"` for TypeScript/Rust).
+pub fn extract_call_sites(
+    source: &str,
+    lang_name: &str,
+    call_node_type: &str,
+    args_field_name: &str,
+) -> Vec<CallSiteInfo> {
+    let mut parser = get_parser(lang_name);
+    let tree = match parser.parse(source.as_bytes(), None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let source_bytes = source.as_bytes();
+    let mut results = Vec::new();
+
+    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+        if node.kind() != call_node_type {
+            return;
+        }
+
+        // Extract the callee (function field)
+        let func_node = match node.child_by_field_name("function") {
+            Some(n) => n,
+            None => return,
+        };
+        let callee = std::str::from_utf8(&source_bytes[func_node.start_byte()..func_node.end_byte()])
+            .unwrap_or("")
+            .to_string();
+        if callee.is_empty() {
+            return;
+        }
+
+        let is_method = func_node.kind() == "attribute"
+            || func_node.kind() == "field_expression"  // Rust
+            || func_node.kind() == "member_expression"; // TS
+
+        // Extract individual arguments from the arguments node
+        let args_node = match node.child_by_field_name(args_field_name) {
+            Some(n) => n,
+            None => {
+                // Fallback: try "arguments" directly if field name didn't work
+                match node.child_by_field_name("arguments") {
+                    Some(n) => n,
+                    None => return,
+                }
+            }
+        };
+
+        let mut args = Vec::new();
+        let child_count = args_node.named_child_count();
+        for i in 0..child_count {
+            if let Some(arg_node) = args_node.named_child(i) {
+                let arg_text = std::str::from_utf8(
+                    &source_bytes[arg_node.start_byte()..arg_node.end_byte()],
+                )
+                .unwrap_or("")
+                .to_string();
+                if !arg_text.is_empty() {
+                    args.push(arg_text);
+                }
+            }
+        }
+
+        results.push(CallSiteInfo {
+            callee,
+            args,
+            line: node.start_position().row + 1,
+            col: node.start_position().column,
+            is_method,
+        });
+    });
+
+    results
+}
+
 /// Collect callees for all top-level functions/classes in a Python source file.
 ///
 /// Returns Vec<(symbol_name, Vec<callee_name>)> where each callee_name is

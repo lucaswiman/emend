@@ -245,6 +245,31 @@ fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, us
     Ok(pattern::collect_identifier_positions(source))
 }
 
+/// Extract all call sites from source code using tree-sitter.
+///
+/// Returns a list of (callee, [arg1, arg2, ...], line, col, is_method) tuples.
+/// Each argument is the exact text of a single argument node, correctly handling
+/// nested expressions like tuples, dicts, and function calls.
+///
+/// Parameters:
+/// - source: the source code text
+/// - lang_name: tree-sitter language name ("python", "typescript", "rust")
+/// - call_node_type: the tree-sitter node type for calls (e.g. "call", "call_expression")
+/// - args_field_name: the field name for the arguments node (e.g. "arguments")
+#[pyfunction]
+fn extract_call_sites(
+    source: &str,
+    lang_name: &str,
+    call_node_type: &str,
+    args_field_name: &str,
+) -> PyResult<Vec<(String, Vec<String>, usize, usize, bool)>> {
+    let sites = pattern::extract_call_sites(source, lang_name, call_node_type, args_field_name);
+    Ok(sites
+        .into_iter()
+        .map(|s| (s.callee, s.args, s.line, s.col, s.is_method))
+        .collect())
+}
+
 /// Python module definition.
 #[pymodule(gil_used = false)]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -266,6 +291,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbols::get_symbol_component_list_items, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_call_sites, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::compile_pattern_treesitter, m)?)?;

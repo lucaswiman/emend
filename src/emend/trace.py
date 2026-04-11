@@ -478,6 +478,73 @@ def _extract_identifiers(expr: str, language: str = "python") -> set[str]:
     return result
 
 
+@dataclass(frozen=True)
+class _CallSite:
+    """A function call site found by tree-sitter."""
+    callee_name: str
+    args: list[str]
+    line: int
+    col: int
+    is_method: bool  # True if callee is ``obj.method``
+
+
+@functools.lru_cache(maxsize=8)
+def _get_call_node_config(language: str) -> tuple[str, str, str]:
+    """Return (ts_language_name, call_node_type, args_field_name) for *language*."""
+    from emend.language_registry import load_config
+    config = load_config(language)
+    pm = config.get("pattern_matching", {})
+    call_type = pm.get("call", "call")
+    args_field = pm.get("args_field", "arguments")
+    # Map emend language names to tree-sitter parser names
+    ts_lang = language
+    if language in ("tsx", "jsx", "js"):
+        ts_lang = "typescript"
+    return ts_lang, call_type, args_field
+
+
+def _find_calls_in_range(
+    file_path: str,
+    source: str,
+    start_line: int,
+    end_line: int,
+    language: str = "python",
+    pattern_cache: dict[tuple[str, str], list] | None = None,
+) -> dict[int, list[_CallSite]]:
+    """Find all call expressions in a line range using tree-sitter.
+
+    Uses the Rust ``extract_call_sites()`` function to parse the source
+    with tree-sitter and extract individual arguments as separate strings,
+    correctly handling nested expressions (tuples, dicts, nested calls).
+
+    Returns a dict mapping line number -> list of ``_CallSite`` objects.
+    """
+    cache_key = (file_path, "_call_sites")
+    if pattern_cache is not None and cache_key in pattern_cache:
+        raw_sites = pattern_cache[cache_key]
+    else:
+        from emend import emend_core
+        ts_lang, call_type, args_field = _get_call_node_config(language)
+        raw_sites = emend_core.extract_call_sites(
+            source, ts_lang, call_type, args_field,
+        )
+        if pattern_cache is not None:
+            pattern_cache[cache_key] = raw_sites
+
+    calls_by_line: dict[int, list[_CallSite]] = {}
+    for callee, args, line, col, is_method in raw_sites:
+        if not (start_line <= line <= end_line):
+            continue
+        if not callee:
+            continue
+        calls_by_line.setdefault(line, []).append(_CallSite(
+            callee_name=callee,
+            args=args,
+            line=line,
+            col=col,
+            is_method=is_method,
+        ))
+    return calls_by_line
 
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1782,8 @@ def _collect_call_dependencies(
     func_kinds: dict[str, str],
     graph: "FactGraph | None" = None,
     file_path: str = "",
+    language: str = "python",
+    pattern_cache: dict[tuple[str, str], list] | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Collect ``caller_param -> callee_param`` edges at all call sites.
 
@@ -1723,11 +1792,13 @@ def _collect_call_dependencies(
     every call site where a tainted parameter is passed to a callee —
     including bare calls like ``step2(data)`` and calls in assignments.
     This is used for transitive ``param_to_sink`` propagation.
+
+    Uses tree-sitter ``find_pattern("$F($...ARGS)")`` for call detection
+    instead of regexes over source lines.
     """
     if not param_names:
         return []
 
-    lines = source.split("\n")
     body_start = func_start + 1
     if body_start > func_end:
         return []
@@ -1736,44 +1807,37 @@ def _collect_call_dependencies(
         graph, file_path, func_qn, source, func_start, func_end,
     )
 
+    calls_by_line = _find_calls_in_range(
+        file_path, source, func_start, func_end,
+        language=language, pattern_cache=pattern_cache,
+    )
+
     deps: set[tuple[str, str, str, str]] = set()
 
     for param_name in param_names:
         tainted_vars: set[str] = {param_name}
         for line_idx in range(func_start, func_end + 1):
-            # Propagate taint through assignments
             for target, rhs in assignments_by_line.get(line_idx, []):
                 rhs_idents = _extract_identifiers(rhs)
                 if any(ident in tainted_vars for ident in rhs_idents):
                     tainted_vars.add(target)
 
-            # Find all call sites on this line (both bare and assigned)
-            if line_idx - 1 >= len(lines):
-                continue
-            line_text = lines[line_idx - 1]
-            for call_match in re.finditer(
-                r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)", line_text,
-            ):
-                callee_name = call_match.group(1)
-                arg_strs = [
-                    a.strip()
-                    for a in call_match.group(2).split(",")
-                    if a.strip()
-                ]
+            for call_site in calls_by_line.get(line_idx, []):
+                # Extract the short name for callee resolution
+                short_name = call_site.callee_name.rsplit(".", 1)[-1]
                 callee_qns = _select_interprocedural_callee_qns(
                     func_qn,
-                    callee_name,
+                    short_name,
                     name_to_qn=name_to_qn,
                     func_paths=func_paths,
                     func_kinds=func_kinds,
-                    include_methods=call_match.start() > 0
-                    and line_text[call_match.start() - 1] == ".",
+                    include_methods=call_site.is_method,
                 )
                 for callee_qn in callee_qns:
                     callee_params = func_info.get(
                         callee_qn, ("", "", 0, 0, []),
                     )[4]
-                    for arg_idx, arg_str in enumerate(arg_strs):
+                    for arg_idx, arg_str in enumerate(call_site.args):
                         if arg_idx >= len(callee_params):
                             break
                         if any(
@@ -1804,12 +1868,16 @@ def _collect_param_to_return_dependencies(
     graph: "FactGraph | None" = None,
     file_path: str = "",
     language: str = "python",
+    pattern_cache: dict[tuple[str, str], list] | None = None,
 ) -> list[tuple[str, str, str, str]]:
-    """Collect ``caller_param -> callee_param`` return-summary edges."""
+    """Collect ``caller_param -> callee_param`` return-summary edges.
+
+    Uses tree-sitter ``find_pattern("$F($...ARGS)")`` for call detection
+    instead of regexes over assignment RHS text.
+    """
     if not param_names:
         return []
 
-    lines = source.split("\n")
     body_start = func_start + 1
     if body_start > func_end:
         return []
@@ -1823,6 +1891,12 @@ def _collect_param_to_return_dependencies(
         graph=graph, file_path=file_path, func_qn=func_qn,
         language=language,
     )
+
+    calls_by_line = _find_calls_in_range(
+        file_path, source, func_start, func_end,
+        language=language, pattern_cache=pattern_cache,
+    )
+
     deps: set[tuple[str, str, str, str]] = set()
 
     for param_name in param_names:
@@ -1836,29 +1910,24 @@ def _collect_param_to_return_dependencies(
                 if target not in return_reachable:
                     continue
 
-                call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
-                if not call_m:
-                    continue
-                callee_name = call_m.group(1)
-                args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
-                if not args_m:
-                    continue
-                arg_strs = [a.strip() for a in args_m.group(1).split(",") if a.strip()]
-                callee_qns = _select_interprocedural_callee_qns(
-                    func_qn,
-                    callee_name,
-                    name_to_qn=name_to_qn,
-                    func_paths=func_paths,
-                    func_kinds=func_kinds,
-                    include_methods=False,
-                )
-                for callee_qn in callee_qns:
-                    callee_params = func_info.get(callee_qn, ("", "", 0, 0, []))[4]
-                    for arg_idx, arg_str in enumerate(arg_strs):
-                        if arg_idx >= len(callee_params):
-                            break
-                        if any(ident in tainted_vars for ident in _extract_identifiers(arg_str)):
-                            deps.add((func_qn, param_name, callee_qn, callee_params[arg_idx]))
+                # Check call sites on this line for calls in this assignment
+                for call_site in calls_by_line.get(line_idx, []):
+                    short_name = call_site.callee_name.rsplit(".", 1)[-1]
+                    callee_qns = _select_interprocedural_callee_qns(
+                        func_qn,
+                        short_name,
+                        name_to_qn=name_to_qn,
+                        func_paths=func_paths,
+                        func_kinds=func_kinds,
+                        include_methods=call_site.is_method,
+                    )
+                    for callee_qn in callee_qns:
+                        callee_params = func_info.get(callee_qn, ("", "", 0, 0, []))[4]
+                        for arg_idx, arg_str in enumerate(call_site.args):
+                            if arg_idx >= len(callee_params):
+                                break
+                            if any(ident in tainted_vars for ident in _extract_identifiers(arg_str)):
+                                deps.add((func_qn, param_name, callee_qn, callee_params[arg_idx]))
 
     return sorted(deps)
 
@@ -2122,6 +2191,7 @@ def _run_interprocedural_trace_datalog(
                 graph=graph,
                 file_path=_fp,
                 language=language,
+                pattern_cache=_pattern_cache,
             )
         )
         call_dependencies.extend(
@@ -2137,6 +2207,8 @@ def _run_interprocedural_trace_datalog(
                 func_kinds=func_kinds,
                 graph=graph,
                 file_path=_fp,
+                language=language,
+                pattern_cache=_pattern_cache,
             )
         )
 
@@ -2274,6 +2346,11 @@ def _run_interprocedural_trace_datalog(
             graph, fp, caller_qn, lines, fs, fe,
         )
 
+        calls_by_line = _find_calls_in_range(
+            fp, src, fs, fe,
+            language=language, pattern_cache=_pattern_cache,
+        )
+
         for line_idx in range(fs, fe + 1):
             if line_idx - 1 >= len(lines):
                 break
@@ -2305,49 +2382,46 @@ def _run_interprocedural_trace_datalog(
                                 variable=target,
                             )
 
-                call_m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
-                if call_m:
-                    callee_name = call_m.group(1)
-                    args_m = re.match(r"[A-Za-z_]\w*\s*\(([^)]*)\)", rhs)
-                    if args_m:
-                        arg_strs = [a.strip() for a in args_m.group(1).split(",") if a.strip()]
-                        for callee_qn in _select_interprocedural_callee_qns(
-                            caller_qn,
-                            callee_name,
-                            name_to_qn=name_to_qn,
-                            func_paths=func_paths,
-                            func_kinds=func_kinds,
-                            include_methods=False,
-                        ):
-                            callee_summary = summaries.get(callee_qn)
-                            if not callee_summary:
+                # Check tree-sitter call sites on this line for return-value propagation
+                for call_site in calls_by_line.get(line_idx, []):
+                    short_name = call_site.callee_name.rsplit(".", 1)[-1]
+                    for callee_qn in _select_interprocedural_callee_qns(
+                        caller_qn,
+                        short_name,
+                        name_to_qn=name_to_qn,
+                        func_paths=func_paths,
+                        func_kinds=func_kinds,
+                        include_methods=call_site.is_method,
+                    ):
+                        callee_summary = summaries.get(callee_qn)
+                        if not callee_summary:
+                            continue
+                        callee_params = func_info[callee_qn][4]
+                        for arg_idx, arg_str in enumerate(call_site.args):
+                            if arg_idx >= len(callee_params):
+                                break
+                            callee_param = callee_params[arg_idx]
+                            if callee_param not in callee_summary.param_to_return:
                                 continue
-                            callee_params = func_info[callee_qn][4]
-                            for arg_idx, arg_str in enumerate(arg_strs):
-                                if arg_idx >= len(callee_params):
-                                    break
-                                callee_param = callee_params[arg_idx]
-                                if callee_param not in callee_summary.param_to_return:
+                            arg_idents = _extract_identifiers(arg_str)
+                            for ai in arg_idents:
+                                if ai not in taint_state:
                                     continue
-                                arg_idents = _extract_identifiers(arg_str)
-                                for ai in arg_idents:
-                                    if ai not in taint_state:
+                                for lbl in taint_state[ai]:
+                                    if label_filter and lbl != label_filter:
                                         continue
-                                    for lbl in taint_state[ai]:
-                                        if label_filter and lbl != label_filter:
-                                            continue
-                                        if lbl not in callee_summary.param_to_return[callee_param]:
-                                            continue
-                                        propagated[lbl] = TraceStep(
-                                            file_path=fp,
-                                            line=line_idx,
-                                            col=0,
-                                            description=(
-                                                f"propagation: {target} = {callee_name}(...) "
-                                                f"returns tainted '{ai}'"
-                                            ),
-                                            variable=target,
-                                        )
+                                    if lbl not in callee_summary.param_to_return[callee_param]:
+                                        continue
+                                    propagated[lbl] = TraceStep(
+                                        file_path=fp,
+                                        line=line_idx,
+                                        col=call_site.col,
+                                        description=(
+                                            f"propagation: {target} = {short_name}(...) "
+                                            f"returns tainted '{ai}'"
+                                        ),
+                                        variable=target,
+                                    )
                 if propagated:
                     for lbl, step in propagated.items():
                         taint_state.setdefault(target, {})
@@ -2388,24 +2462,22 @@ def _run_interprocedural_trace_datalog(
                     ))
                     break
 
-            line_text = lines[line_idx - 1]
-            for call_match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)", line_text):
-                callee_name = call_match.group(1)
-                arg_list = [a.strip() for a in call_match.group(2).split(",") if a.strip()]
+            for call_site in calls_by_line.get(line_idx, []):
+                short_name = call_site.callee_name.rsplit(".", 1)[-1]
                 callee_qns = _select_interprocedural_callee_qns(
                     caller_qn,
-                    callee_name,
+                    short_name,
                     name_to_qn=name_to_qn,
                     func_paths=func_paths,
                     func_kinds=func_kinds,
-                    include_methods=call_match.start() > 0 and line_text[call_match.start() - 1] == ".",
+                    include_methods=call_site.is_method,
                 )
                 for callee_qn in callee_qns:
                     callee_summary = summaries.get(callee_qn)
                     if not callee_summary:
                         continue
                     callee_params = func_info[callee_qn][4]
-                    for arg_idx, arg_str in enumerate(arg_list):
+                    for arg_idx, arg_str in enumerate(call_site.args):
                         if arg_idx >= len(callee_params):
                             break
                         callee_param = callee_params[arg_idx]
@@ -2426,9 +2498,9 @@ def _run_interprocedural_trace_datalog(
                                         TraceStep(
                                             file_path=fp,
                                             line=line_idx,
-                                            col=call_match.start(),
+                                            col=call_site.col,
                                             description=(
-                                                f"call: {callee_name}({arg_str}) passes tainted "
+                                                f"call: {short_name}({arg_str}) passes tainted "
                                                 f"'{ai}' as param '{callee_param}'"
                                             ),
                                             variable=ai,
@@ -2439,7 +2511,7 @@ def _run_interprocedural_trace_datalog(
                                             col=0,
                                             description=(
                                                 f"sink: {sink_label} via {sink_pat} "
-                                                f"(in callee {callee_name})"
+                                                f"(in callee {short_name})"
                                             ),
                                             variable=callee_param,
                                         ),
@@ -2447,12 +2519,12 @@ def _run_interprocedural_trace_datalog(
                                     sink_msg = "Traced value reaches sink via function call"
                                     for sd in config.sinks:
                                         if sd.pattern == sink_pat and sd.label == sink_label:
-                                            sink_msg = sd.message + f" (via {callee_name})"
+                                            sink_msg = sd.message + f" (via {short_name})"
                                             break
                                     violations.append(TraceViolation(
                                         file_path=fp,
                                         line=line_idx,
-                                        col=call_match.start(),
+                                        col=call_site.col,
                                         label=lbl,
                                         sink_pattern=sink_pat,
                                         message=sink_msg,
