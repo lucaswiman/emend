@@ -434,3 +434,154 @@ class TestInterproceduralCozoEscaping:
 
         result = run_interprocedural_trace([str(test_file)], config)
         assert isinstance(result, InterproceduralResult)
+
+
+class TestMultiHopChainPropagation:
+    """Tests for transitive param_to_sink propagation across 3+ function hops."""
+
+    def test_three_hop_chain_detects_violation(self, tmp_path):
+        """handler() -> step1() -> step2() -> cursor.execute() is detected.
+
+        Previously this was a known limitation: param_to_sink was only
+        computed per-function and never composed transitively.  The engine
+        now uses a recursive Datalog rule to propagate param_to_sink through
+        call chains of arbitrary depth.
+        """
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def step2(query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def step1(data):\n"
+            "    step2(data)\n"
+            "\n"
+            "def handler():\n"
+            "    name = request.args.get('name')\n"
+            "    step1(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)
+        assert len(result.violations) >= 1, (
+            f"Expected at least 1 violation for 3-hop chain, got {len(result.violations)}"
+        )
+        assert any(v.label == "user_input" for v in result.violations)
+
+    def test_four_hop_chain_detects_violation(self, tmp_path):
+        """handler() -> a() -> b() -> c() -> cursor.execute() is detected."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def c(query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def b(data):\n"
+            "    c(data)\n"
+            "\n"
+            "def a(val):\n"
+            "    b(val)\n"
+            "\n"
+            "def handler():\n"
+            "    name = request.args.get('name')\n"
+            "    a(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)
+        assert len(result.violations) >= 1, (
+            f"Expected at least 1 violation for 4-hop chain, got {len(result.violations)}"
+        )
+
+    def test_three_hop_chain_with_sanitizer(self, tmp_path):
+        """A sanitizer in the middle of a 3-hop chain should suppress the violation."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def step2(query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def step1(data):\n"
+            "    safe = escape(data)\n"
+            "    step2(safe)\n"
+            "\n"
+            "def handler():\n"
+            "    name = request.args.get('name')\n"
+            "    step1(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace([str(test_file)], config)
+        assert isinstance(result, InterproceduralResult)
+        # The sanitizer in step1 should prevent taint from reaching step2's sink.
+        # step1's summary should NOT record param_to_sink for 'data' since
+        # the taint is sanitized before being passed to step2.
+        unsanitized = [v for v in result.violations if "step1" in v.message or "step2" in v.message]
+        assert len(unsanitized) == 0, (
+            f"Expected sanitizer to suppress violation, but got: {unsanitized}"
+        )
+
+    def test_step1_gains_transitive_param_to_sink(self, tmp_path):
+        """step1 should gain a transitive param_to_sink entry via step2."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def leaf(query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def mid(data):\n"
+            "    leaf(data)\n"
+            "\n"
+            "def top():\n"
+            "    name = request.args.get('name')\n"
+            "    mid(name)\n"
+        )
+
+        config = _make_sql_config()
+        result = run_interprocedural_trace([str(test_file)], config)
+
+        # leaf has direct param_to_sink
+        leaf_summary = next(
+            s for qn, s in result.summaries.items() if qn.endswith("::leaf")
+        )
+        assert "query" in leaf_summary.param_to_sink
+
+        # mid should now also have transitive param_to_sink
+        mid_summary = next(
+            s for qn, s in result.summaries.items() if qn.endswith("::mid")
+        )
+        assert "data" in mid_summary.param_to_sink, (
+            f"Expected mid 'data' to have transitive param_to_sink, "
+            f"got: {mid_summary.param_to_sink}"
+        )
+
+    def test_max_chain_depth_limits_propagation(self, tmp_path):
+        """max_chain_depth=1 should only detect direct callee sinks, not transitive."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def step2(query):\n"
+            "    cursor.execute(query)\n"
+            "\n"
+            "def step1(data):\n"
+            "    step2(data)\n"
+            "\n"
+            "def handler():\n"
+            "    name = request.args.get('name')\n"
+            "    step1(name)\n"
+        )
+
+        config = _make_sql_config()
+        # With depth=1, step1's transitive sink through step2 should NOT
+        # be propagated, so handler -> step1 should not produce a violation
+        # (but handler directly calling step2 would still work).
+        result = run_interprocedural_trace(
+            [str(test_file)], config, max_chain_depth=1,
+        )
+        assert isinstance(result, InterproceduralResult)
+        # Only violations through direct callee sinks (depth 1) should appear.
+        # handler -> step1 is depth 2 (step1 -> step2 -> sink), so no violation.
+        chain_violations = [
+            v for v in result.violations
+            if "step1" in (v.message or "") or "step2" in (v.message or "")
+        ]
+        assert len(chain_violations) == 0, (
+            f"Expected no chain violations at depth 1, got: {chain_violations}"
+        )
