@@ -48,6 +48,10 @@ class LintRule:
     # inside embedded DSL regions rather than host-language code.
     dsl: str | None = None
     files: list[str] | None = None
+    # Language scope: restrict this rule to files of a specific language.
+    # Can be a single string ("typescript"), a list (["python", "typescript"]),
+    # or None (applies to all languages where the pattern parses).
+    language: str | list[str] | None = None
 
 
 @dataclass
@@ -124,7 +128,10 @@ def is_noqa_suppressed(
     """Check whether a violation at *line* for *rule_name* is suppressed."""
     for start, end, rules in noqa_ranges:
         if start <= line <= end:
-            if rules is None or rule_name in rules:
+            if rules is None:
+                return True
+            # Match both bare name and emend:-prefixed variant
+            if rule_name in rules or f"emend:{rule_name}" in rules:
                 return True
     return False
 
@@ -165,6 +172,22 @@ def _parse_deadcode_config(raw_dc: object, *, rule_name: str = "deadcode") -> De
         entry_point_names=_coerce_optional_str_list(ep_names),
         exclude_paths=_coerce_optional_str_list(yaml_key(raw_dc, "exclude_paths")),
     )
+
+
+def _rule_matches_language(rule: LintRule, file_language: str) -> bool:
+    """Return True if *rule* should apply to a file with *file_language*."""
+    if rule.language is None:
+        return True
+    if isinstance(rule.language, str):
+        return rule.language == file_language
+    return file_language in rule.language
+
+
+def _detect_file_language(file_path: str, fallback: str = "python") -> str:
+    """Detect language from file extension, falling back to *fallback*."""
+    from emend.language_registry import detect_language
+
+    return detect_language(file_path) or fallback
 
 
 def _path_matches_rule_globs(file_path: str, globs: list[str] | None) -> bool:
@@ -249,6 +272,14 @@ def load_rules(
 
         rule_files = _coerce_optional_str_list(rule_def.get("files"))
 
+        raw_language = rule_def.get("language")
+        if isinstance(raw_language, str):
+            rule_language: str | list[str] | None = raw_language
+        elif isinstance(raw_language, list):
+            rule_language = [str(l) for l in raw_language]
+        else:
+            rule_language = None
+
         rules.append(LintRule(
             name=name,
             find=find_pattern_str,
@@ -260,6 +291,7 @@ def load_rules(
             not_through=not_through if not_through else None,
             dsl=rule_def.get("dsl"),
             files=rule_files,
+            language=rule_language,
         ))
 
     return rules, macros, deadcode_config
@@ -345,8 +377,22 @@ def _check_flow_rule(
 
     # Intraprocedural flow analysis
     all_lines = source.splitlines()
+    total_lines = len(all_lines)
 
-    for sym in _all_functions(symbols):
+    # Build the list of scopes to analyze.  When collect_symbols_from_str
+    # doesn't detect any functions (e.g. TypeScript arrow functions or
+    # top-level Rust code), fall back to analyzing the entire file as one
+    # scope so that source→sink pairs are still checked.
+    class _FakeScope:
+        def __init__(self, start: int, end: int):
+            self.line_start = start
+            self.line_end = end
+
+    function_scopes = list(_all_functions(symbols))
+    if not function_scopes and all_source_matches and all_sink_matches:
+        function_scopes = [_FakeScope(1, total_lines)]
+
+    for sym in function_scopes:
         # Filter to matches within this function's line range
         func_sources = [
             m for m in all_source_matches
@@ -377,7 +423,11 @@ def _check_flow_rule(
 
             if src_match.matched_text:
                 matched_line_text = all_lines[src_line - 1].strip() if src_line <= len(all_lines) else ""
-                assign_match = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', matched_line_text)
+                # Handle declaration keywords: const/let/var (TS), let/let mut (Rust)
+                assign_match = re.match(
+                    r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',
+                    matched_line_text,
+                )
                 if assign_match:
                     tainted[assign_match.group(1)] = src_line
 
@@ -427,7 +477,10 @@ def _check_flow_rule(
                                 break
                             if san_line <= len(all_lines):
                                 san_line_text = all_lines[san_line - 1].strip()
-                                san_assign = re.match(r'^([a-zA-Z_]\w*)\s*=\s*', san_line_text)
+                                san_assign = re.match(
+                                    r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',
+                                    san_line_text,
+                                )
                                 if san_assign and san_assign.group(1) in tainted_at_sink:
                                     sanitized = True
                                     break
@@ -508,6 +561,11 @@ def run_lint(
     if rule_filter:
         rules = [r for r in rules if r.name == rule_filter]
 
+    # Build per-file language map for auto-detection
+    file_languages: dict[str, str] = {}
+    for fp in paths:
+        file_languages[fp] = _detect_file_language(fp, fallback=language)
+
     # Separate flow rules, DSL rules, and pattern rules
     flow_rules = [r for r in rules if r.flows_from and r.flows_to]
     dsl_rules = [r for r in rules if r.dsl and not (r.flows_from and r.flows_to)]
@@ -523,7 +581,15 @@ def run_lint(
     from emend import emend_core
     all_file_contents: dict[str, str] = dict(emend_core.read_and_filter_files(paths, []))
 
-    # Pre-filter per rule using already-read content (no extra I/O)
+    # Update file_languages for files resolved by the Rust reader (may
+    # differ from the input paths when symlinks or canonical paths are
+    # involved).
+    for fp in all_file_contents:
+        if fp not in file_languages:
+            file_languages[fp] = _detect_file_language(fp, fallback=language)
+
+    # Pre-filter per rule using already-read content (no extra I/O).
+    # Also respects per-rule language scope.
     rule_file_sets: dict[str, set[str]] = {}
     for rule in find_only_rules:
         literals = extract_pattern_literals(rule.find)
@@ -531,93 +597,124 @@ def run_lint(
         for fpath, content in all_file_contents.items():
             if not _path_matches_rule_globs(fpath, rule.files):
                 continue
+            if not _rule_matches_language(rule, file_languages.get(fpath, language)):
+                continue
             if all(lit in content for lit in literals):
                 matching.add(fpath)
         rule_file_sets[rule.name] = matching
 
     # --- Rust fast-path: batch process compatible find-only rules ---
-    # Rules whose patterns compile to Rust IR are handled here; patterns too
-    # complex for the batch Rust engine fall through to the single-file path below.
+    # Group files by detected language so pattern compilation uses the
+    # correct tree-sitter grammar.
     from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
 
-    rust_rules = []
-    fallback_rules = []
+    # Discover which languages are present among candidate files
+    langs_present: set[str] = set()
     for rule in find_only_rules:
-        ir = compile_pattern_to_rust_ir(rule.find, language=language)
-        if ir is None:
-            fallback_rules.append(rule)
-            continue
-        ni_ir = compile_constraint_to_rust_ir(rule.not_inside, language=language) if rule.not_inside else None
-        if rule.not_inside is not None and ni_ir is None:
-            # not_inside constraint didn't compile to batch Rust IR — use single-file path
-            fallback_rules.append(rule)
-            continue
-        rust_rules.append((rule, ir, ni_ir))
-
-    # Single-pass batched scan: parse each file once, apply all rules.
-    # Union of per-rule file sets — extra files cost one extra tree walk
-    # but save N_rules-1 re-parses for every file in the intersection.
-    all_rust_files = set()
-    for rule, _ir, _ni_ir in rust_rules:
-        all_rust_files |= rule_file_sets.get(rule.name, set())
-    rust_file_pairs = [
-        (fp, all_file_contents[fp])
-        for fp in all_rust_files
-        if fp in all_file_contents
-    ]
+        for fp in rule_file_sets.get(rule.name, set()):
+            langs_present.add(file_languages.get(fp, language))
 
     # noqa_ranges cache: lazily built per file when matches are found
     noqa_ranges_cache: dict[str, list[tuple[int, int, set[str] | None]]] = {}
 
-    if rust_file_pairs and rust_rules:
-        patterns_for_batch = [(ir, ni_ir) for _rule, ir, ni_ir in rust_rules]
-        batch_matches = emend_core.find_multi_patterns_in_files(
-            rust_file_pairs, patterns_for_batch
-        )
-        for rule_idx, file_path_str, line, _col, _end_line, _end_col, text in batch_matches:
-            # Skip if this file wasn't in the per-rule candidate set
-            rule = rust_rules[rule_idx][0]
-            if file_path_str not in rule_file_sets.get(rule.name, set()):
+    # Track fallback rules per language
+    all_fallback_rules_by_lang: dict[str, list[LintRule]] = {}
+
+    for lang in langs_present:
+        lang_files = {fp for fp in all_file_contents
+                      if file_languages.get(fp, language) == lang}
+
+        rust_rules = []
+        fallback_rules = []
+        for rule in find_only_rules:
+            if not _rule_matches_language(rule, lang):
                 continue
-
-            if file_path_str not in noqa_ranges_cache:
-                src = all_file_contents.get(file_path_str, "")
-                noqa_comments = parse_noqa_comments(src, language=language)
-                noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
-                if noqa_comments:
-                    line_map = _build_statement_line_map(src)
-                    noqa_ranges_for_file = build_noqa_ranges(
-                        noqa_comments, line_map
-                    )
-                noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
-
-            if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
+            # Only consider this rule if it has candidate files in this language
+            rule_lang_files = rule_file_sets.get(rule.name, set()) & lang_files
+            if not rule_lang_files:
                 continue
+            # The Rust batch scanner (find_multi_patterns_in_files) only
+            # supports Python files.  Route non-Python languages to the
+            # single-file fallback path which uses find_pattern().
+            if lang != "python":
+                fallback_rules.append(rule)
+                continue
+            ir = compile_pattern_to_rust_ir(rule.find, language=lang)
+            if ir is None:
+                fallback_rules.append(rule)
+                continue
+            ni_ir = compile_constraint_to_rust_ir(rule.not_inside, language=lang) if rule.not_inside else None
+            if rule.not_inside is not None and ni_ir is None:
+                fallback_rules.append(rule)
+                continue
+            rust_rules.append((rule, ir, ni_ir))
 
-            violations.append(LintViolation(
-                rule_name=rule.name,
-                message=rule.message,
-                file_path=file_path_str,
-                line=line,
-                match_text=text.strip(),
-            ))
+        all_fallback_rules_by_lang[lang] = fallback_rules
 
-    # Determine files that need single-file processing (remaining find rules + fix rules)
+        # Batched scan for this language group
+        all_rust_files = set()
+        for rule, _ir, _ni_ir in rust_rules:
+            all_rust_files |= (rule_file_sets.get(rule.name, set()) & lang_files)
+        rust_file_pairs = [
+            (fp, all_file_contents[fp])
+            for fp in all_rust_files
+            if fp in all_file_contents
+        ]
+
+        if rust_file_pairs and rust_rules:
+            patterns_for_batch = [(ir, ni_ir) for _rule, ir, ni_ir in rust_rules]
+            batch_matches = emend_core.find_multi_patterns_in_files(
+                rust_file_pairs, patterns_for_batch
+            )
+            for rule_idx, file_path_str, line, _col, _end_line, _end_col, text in batch_matches:
+                rule = rust_rules[rule_idx][0]
+                if file_path_str not in rule_file_sets.get(rule.name, set()):
+                    continue
+
+                if file_path_str not in noqa_ranges_cache:
+                    src = all_file_contents.get(file_path_str, "")
+                    file_lang = file_languages.get(file_path_str, language)
+                    noqa_comments = parse_noqa_comments(src, language=file_lang)
+                    noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
+                    if noqa_comments:
+                        line_map = _build_statement_line_map(src)
+                        noqa_ranges_for_file = build_noqa_ranges(
+                            noqa_comments, line_map
+                        )
+                    noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
+
+                if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
+                    continue
+
+                violations.append(LintViolation(
+                    rule_name=rule.name,
+                    message=rule.message,
+                    file_path=file_path_str,
+                    line=line,
+                    match_text=text.strip(),
+                ))
+
+    # Determine files that need single-file processing (remaining find rules)
     files_needing_processing: set[str] = set()
-    for rule in fallback_rules:
-        files_needing_processing |= rule_file_sets.get(rule.name, set())
+    for lang, fb_rules in all_fallback_rules_by_lang.items():
+        lang_files = {fp for fp in all_file_contents
+                      if file_languages.get(fp, language) == lang}
+        for rule in fb_rules:
+            files_needing_processing |= (rule_file_sets.get(rule.name, set()) & lang_files)
 
     # --- Single-file find rules ---
     def _process_file_fallback(file_path: str) -> list[LintViolation]:
         source = all_file_contents.get(file_path)
         if source is None:
             return []
+        file_lang = file_languages.get(file_path, language)
+        fb_rules = all_fallback_rules_by_lang.get(file_lang, [])
         file_violations: list[LintViolation] = []
         # Build noqa ranges lazily: only when a rule actually produces matches.
         noqa_ranges: list[tuple[int, int, set[str] | None]] | None = None
         # Build line-offset table lazily for extracting match text from source.
         line_starts: list[int] | None = None
-        for rule in fallback_rules:
+        for rule in fb_rules:
             if file_path not in rule_file_sets.get(rule.name, set()):
                 continue
             try:
@@ -626,7 +723,7 @@ def run_lint(
                     file_path,
                     not_inside=rule.not_inside,
                     source_override=source,
-                    language=language,
+                    language=file_lang,
                 )
             except Exception:
                 logger.debug(
@@ -638,7 +735,7 @@ def run_lint(
             # First match for this file: build noqa ranges now
             if noqa_ranges is None:
                 noqa_ranges = []
-                noqa_comments = parse_noqa_comments(source, language=language)
+                noqa_comments = parse_noqa_comments(source, language=file_lang)
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)
                     noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
@@ -681,7 +778,8 @@ def run_lint(
         source = all_file_contents.get(file_path)
         if source is None:
             continue
-        noqa_comments = parse_noqa_comments(source, language=language)
+        file_lang = file_languages.get(file_path, language)
+        noqa_comments = parse_noqa_comments(source, language=file_lang)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
             line_map = _build_statement_line_map(source)
@@ -690,12 +788,14 @@ def run_lint(
         for rule in fix_rules:
             if not _path_matches_rule_globs(file_path, rule.files):
                 continue
+            if not _rule_matches_language(rule, file_lang):
+                continue
             try:
                 matches = find_pattern(
                     rule.find,
                     file_path,
                     not_inside=rule.not_inside,
-                    language=language,
+                    language=file_lang,
                 )
             except Exception:
                 logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
@@ -720,7 +820,7 @@ def run_lint(
                 file_path,
                 not_inside=rule.not_inside,
                 apply=True,
-                language=language,
+                language=file_lang,
             )
             if count > 0 and suppressed_lines:
                 fixed_lines = Path(file_path).read_text().splitlines(keepends=True)
@@ -749,10 +849,11 @@ def run_lint(
             source = all_file_contents.get(file_path)
             if source is None:
                 continue
+            file_lang = file_languages.get(file_path, language)
 
             # Build noqa ranges for this file (reuse cache if available)
             if file_path not in noqa_ranges_cache:
-                noqa_comments = parse_noqa_comments(source, language=language)
+                noqa_comments = parse_noqa_comments(source, language=file_lang)
                 noqa_ranges_for_file_flow: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)
@@ -763,6 +864,8 @@ def run_lint(
 
             for rule in flow_rules:
                 if not _path_matches_rule_globs(file_path, rule.files):
+                    continue
+                if not _rule_matches_language(rule, file_lang):
                     continue
                 # Pre-filter: check if source and sink literals exist in file
                 from_literals = extract_pattern_literals(rule.flows_from or "")
@@ -775,7 +878,7 @@ def run_lint(
                 try:
                     spec = from_lint_rule(rule)
                     flow_results = execute_flow_spec(
-                        spec, file_path, source, language, fact_graph=None
+                        spec, file_path, source, file_lang, fact_graph=None
                     )
                 except Exception:
                     logger.debug(
@@ -823,10 +926,11 @@ def run_lint(
             source = all_file_contents.get(file_path)
             if source is None:
                 continue
+            file_lang = file_languages.get(file_path, language)
 
             # Build noqa ranges for this file
             if file_path not in noqa_ranges_cache:
-                noqa_comments = parse_noqa_comments(source, language=language)
+                noqa_comments = parse_noqa_comments(source, language=file_lang)
                 noqa_ranges_for_dsl: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
                     line_map = _build_statement_line_map(source)

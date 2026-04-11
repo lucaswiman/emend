@@ -41,18 +41,18 @@ Remaining issues:
 
 ### Lint engine language support
 
-- [ ] Update `run_lint()` to scan files of all supported languages, not just
+- [x] Update `run_lint()` to scan files of all supported languages, not just
   `.py` files.
-- [ ] Update `_check_flow_rule()` to pass the correct language to the trace
+- [x] Update `_check_flow_rule()` to pass the correct language to the trace
   engine.
-- [ ] Verify pattern matching works correctly in lint rules for TypeScript
+- [x] Verify pattern matching works correctly in lint rules for TypeScript
   (e.g., `find: "console.log($X)"` matches `console.log(secret)`).
-- [ ] Verify pattern matching works for Rust lint rules (e.g.,
-  `find: "unwrap()"` matches `.unwrap()` calls).
+- [x] Verify pattern matching works for Rust lint rules (e.g.,
+  `find: "$X.unwrap()"` matches `.unwrap()` calls).
 
 ### Multi-language rule files
 
-- [ ] Support language scoping in `.emend/patterns.yaml`:
+- [x] Support language scoping in `.emend/patterns.yaml`:
   ```yaml
   rules:
     - name: no-console-log
@@ -60,31 +60,31 @@ Remaining issues:
       find: "console.log($X)"
       message: "Remove console.log before merging"
   ```
-- [ ] If no `language` key is specified, apply rule to all languages where
+- [x] If no `language` key is specified, apply rule to all languages where
   the pattern parses successfully.  (A Python-syntax pattern won't parse
   as TypeScript, so it naturally filters.)
-- [ ] Support `language: [python, typescript]` for rules that apply to
+- [x] Support `language: [python, typescript]` for rules that apply to
   multiple languages.
 
 ### TypeScript lint tests
 
-- [ ] Test: simple pattern rule (`find: "console.log($X)"`).
-- [ ] Test: pattern rule with `not-inside` constraint.
-- [ ] Test: flow rule (`flows-from: "req.query.$X"`, `flows-to: "res.send($X)"`).
-- [ ] Test: `--fix` with replacement pattern.
+- [x] Test: simple pattern rule (`find: "console.log($X)"`).
+- [x] Test: pattern rule with `not-inside` constraint.
+- [x] Test: flow rule (`flows-from: "req.query.get($X)"`, `flows-to: "res.send($X)"`).
+- [x] Test: `--fix` with replacement pattern.
 
 ### Rust lint tests
 
-- [ ] Test: simple pattern rule (`find: "unwrap()"`).
-- [ ] Test: pattern rule with `not-inside` constraint.
-- [ ] Test: flow rule for unsafe patterns.
-- [ ] Test: `--fix` with replacement pattern.
+- [x] Test: simple pattern rule (`find: "$X.unwrap()"`).
+- [x] Test: pattern rule with `not-inside` constraint.
+- [x] Test: flow rule for unsafe patterns.
+- [x] Test: `--fix` with replacement pattern.
 
 ### Dead code lint integration
 
-- [ ] Verify `deadcode` section in `patterns.yaml` works when the project
+- [x] Verify `deadcode` section in `patterns.yaml` works when the project
   contains TypeScript or Rust files.
-- [ ] Test: `deadcode` section with `entry-point-decorators` for each language.
+- [x] Test: `deadcode` section with `entry-point-names` for each language.
 
 ## Exit Criteria
 
