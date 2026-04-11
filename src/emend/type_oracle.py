@@ -180,12 +180,12 @@ class LSPClient:
         except OSError:
             pass
 
-    def did_open(self, path: Path, text: str):
+    def did_open(self, path: Path, text: str, language_id: str = "python"):
         """Send textDocument/didOpen."""
         self.send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": path.as_uri(),
-                "languageId": "python",
+                "languageId": language_id,
                 "version": 1,
                 "text": text,
             }
@@ -289,6 +289,9 @@ class TypeDescriptor:
         if self.kind == "named":
             return self.name
         if self.kind == "parameterized":
+            # Special-case Rust reference: &[str] -> &str
+            if self.name == "&" and self.params:
+                return f"&{self.params[0].display()}"
             inner = ", ".join(p.display() for p in self.params)
             return f"{self.name}[{inner}]"
         if self.kind == "union":
@@ -464,34 +467,71 @@ class TypeOracle(ABC):
 def parse_type_string(raw: str) -> TypeDescriptor:
     """Parse a type checker result type string into a TypeDescriptor tree.
 
-    Handles output from Pyrefly, Pyright, and ty: named types, parameterized
-    types, union types, and callable signatures.  Falls back to
-    ``TypeDescriptor.named(raw)`` for anything unparseable.
+    Handles output from Pyrefly, Pyright, ty, TypeScript (tsc), and
+    rust-analyzer: named types, parameterized types (both ``[]`` and ``<>``
+    syntax), union types, callable signatures (``->`` and ``=>``), Rust
+    reference types (``&``), and TypeScript array shorthand (``T[]``).
+
+    Falls back to ``TypeDescriptor.named(raw)`` for anything unparseable.
     """
     raw = raw.strip()
     if not raw or raw == "Unknown":
         return TypeDescriptor.unknown()
 
-    # Handle union: "str | None"
+    # Rust reference types: &str, &'a str, &mut T
+    if raw.startswith("&"):
+        inner = raw[1:].lstrip()
+        # Strip lifetime: &'a str -> str
+        if inner.startswith("'"):
+            space_idx = inner.find(" ")
+            if space_idx != -1:
+                inner = inner[space_idx + 1:]
+        # Strip mut: &mut T -> T
+        if inner.startswith("mut "):
+            inner = inner[4:]
+        return TypeDescriptor.parameterized("&", (parse_type_string(inner),))
+
+    # TypeScript array shorthand: string[] -> Array[string]
+    # Don't match callable returns like (x: T) => U[] — skip if starts with (
+    if raw.endswith("[]") and not raw.startswith("("):
+        inner = raw[:-2]
+        if inner:
+            return TypeDescriptor.parameterized("Array", (parse_type_string(inner),))
+
+    # Handle union: "str | None", "string | null"
     # But we need to be careful not to split inside brackets
     if " | " in raw and not raw.startswith("("):
         parts = _split_union(raw)
         if len(parts) > 1:
             return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
 
-    # Handle callable: "(args...) -> ReturnType"
+    # Handle callable: "(args...) -> ReturnType" (Python/Rust)
     if raw.startswith("(") and " -> " in raw:
         return _parse_callable(raw)
+
+    # Handle TypeScript arrow function: "(args...) => ReturnType"
+    if raw.startswith("(") and " => " in raw:
+        return _parse_callable_arrow(raw)
 
     # Handle Overload[...] — just return the first overload signature for now
     if raw.startswith("Overload["):
         return TypeDescriptor.named("Overload")
 
-    # Handle parameterized: "list[Connection]", "dict[str, int]", "type[X]"
+    # Handle parameterized with square brackets: "list[Connection]", "dict[str, int]"
     bracket_pos = raw.find("[")
     if bracket_pos != -1 and raw.endswith("]"):
         name = raw[:bracket_pos].strip()
         inner = raw[bracket_pos + 1:-1]
+        params = _split_params(inner)
+        return TypeDescriptor.parameterized(
+            name, tuple(parse_type_string(p) for p in params)
+        )
+
+    # Handle parameterized with angle brackets: "Array<string>", "Vec<T>"
+    angle_pos = raw.find("<")
+    if angle_pos != -1 and raw.endswith(">"):
+        name = raw[:angle_pos].strip()
+        inner = raw[angle_pos + 1:-1]
         params = _split_params(inner)
         return TypeDescriptor.parameterized(
             name, tuple(parse_type_string(p) for p in params)
@@ -506,14 +546,18 @@ def parse_type_string(raw: str) -> TypeDescriptor:
 
 
 def _split_balanced(raw: str, delimiter: str) -> list[str]:
-    """Split *raw* on *delimiter* respecting bracket/paren nesting.
+    """Split *raw* on *delimiter* respecting bracket/paren/angle/brace nesting.
 
-    Handles ``[...]`` and ``(...)`` nesting.  The final token is always
-    appended (stripped) even if *delimiter* is not found.
+    Handles ``[...]``, ``(...)``, ``<...>`` (TS/Rust generics), and
+    ``{...}`` (TS object types) nesting.  The ``>`` character only
+    decrements angle depth when a matching ``<`` was seen, so ``=>``
+    arrow tokens are not misinterpreted.
     """
     parts: list[str] = []
     depth = 0
     paren_depth = 0
+    angle_depth = 0
+    brace_depth = 0
     current: list[str] = []
     i = 0
     dlen = len(delimiter)
@@ -535,7 +579,24 @@ def _split_balanced(raw: str, delimiter: str) -> list[str]:
             paren_depth -= 1
             current.append(ch)
             i += 1
-        elif depth == 0 and paren_depth == 0 and raw[i:i + dlen] == delimiter:
+        elif ch == "<":
+            angle_depth += 1
+            current.append(ch)
+            i += 1
+        elif ch == ">" and angle_depth > 0:
+            angle_depth -= 1
+            current.append(ch)
+            i += 1
+        elif ch == "{":
+            brace_depth += 1
+            current.append(ch)
+            i += 1
+        elif ch == "}":
+            brace_depth -= 1
+            current.append(ch)
+            i += 1
+        elif (depth == 0 and paren_depth == 0 and angle_depth == 0
+              and brace_depth == 0 and raw[i:i + dlen] == delimiter):
             parts.append("".join(current).strip())
             current = []
             i += dlen
@@ -599,6 +660,75 @@ def _parse_callable(raw: str) -> TypeDescriptor:
                 param_types.append(parse_type_string(param))
 
     return TypeDescriptor.callable_(tuple(param_types), parse_type_string(ret_str))
+
+
+def _parse_callable_arrow(raw: str) -> TypeDescriptor:
+    """Parse a TypeScript arrow function type like '(a: string, b: number) => string'."""
+    depth = 0
+    close_paren = -1
+    for i, ch in enumerate(raw):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = i
+                break
+    if close_paren == -1:
+        return TypeDescriptor.named(raw)
+
+    params_str = raw[1:close_paren]
+    rest = raw[close_paren + 1:].strip()
+    if rest.startswith("=> "):
+        ret_str = rest[3:].strip()
+    elif rest.startswith("=>"):
+        ret_str = rest[2:].strip()
+    else:
+        ret_str = "void"
+
+    param_types: list[TypeDescriptor] = []
+    if params_str.strip():
+        for param in _split_params(params_str):
+            param = param.strip()
+            if not param:
+                continue
+            if ": " in param:
+                type_part = param.split(": ", 1)[1]
+                param_types.append(parse_type_string(type_part))
+            else:
+                param_types.append(parse_type_string(param))
+
+    return TypeDescriptor.callable_(tuple(param_types), parse_type_string(ret_str))
+
+
+def _parse_rust_fn_signature(sig: str) -> str | None:
+    """Extract a callable type string from a Rust function signature.
+
+    Input:  ``"fn add(a: i32, b: i32) -> i32"``
+    Output: ``"(i32, i32) -> i32"``
+    """
+    paren_start = sig.find("(")
+    paren_end = sig.rfind(")")
+    if paren_start == -1 or paren_end == -1:
+        return None
+
+    params_str = sig[paren_start + 1:paren_end]
+    ret = sig[paren_end + 1:].strip()
+    if ret.startswith("->"):
+        ret = ret[2:].strip()
+    else:
+        ret = "()"
+
+    param_types: list[str] = []
+    for param in _split_balanced(params_str, ","):
+        param = param.strip()
+        if not param or param in ("self", "&self", "&mut self"):
+            continue
+        if ": " in param:
+            param_types.append(param.split(": ", 1)[1].strip())
+
+    types_str = ", ".join(param_types)
+    return f"({types_str}) -> {ret}"
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1239,7 @@ class _LSPTypeOracle(TypeOracle):
     """
 
     _tool_name: str = ""  # For logging and error messages
+    _language_id: str = "python"  # LSP languageId for textDocument/didOpen
 
     def __init__(
         self,
@@ -1158,7 +1289,7 @@ class _LSPTypeOracle(TypeOracle):
         try:
             logger.info("Building type index for %s via %s", path, self._tool_name)
             source = path.read_text(encoding="utf-8")
-            lsp.did_open(path, source)
+            lsp.did_open(path, source, language_id=self._language_id)
 
             symbols = _collect_symbols(source)
             ft = FileTypes(path=str(path))
@@ -1301,6 +1432,224 @@ class TyAdapter(_LSPTypeOracle):
 
 
 # ---------------------------------------------------------------------------
+# TypeScript adapter (batch subprocess via Compiler API)
+# ---------------------------------------------------------------------------
+
+# Helper Node.js script that uses the TypeScript Compiler API to extract type
+# information for all identifiers in a single pass.  This avoids per-symbol
+# LSP round-trips, making it significantly faster than an LSP-based approach.
+_TS_TYPE_HELPER = """\
+"use strict";
+var ts;
+try { ts = require("typescript"); } catch(e) {
+    process.stdout.write("[]"); process.exit(0);
+}
+var path = require("path");
+var filePath = path.resolve(process.argv[2]);
+var projectRoot = process.argv[3] || path.dirname(filePath);
+var configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
+var options = {target:ts.ScriptTarget.ES2020, module:ts.ModuleKind.CommonJS,
+    allowJs:true, noEmit:true, strict:false, skipLibCheck:true};
+if (configPath) {
+    try {
+        var cf = ts.readConfigFile(configPath, ts.sys.readFile);
+        if (cf.config) {
+            var pc = ts.parseJsonConfigFileContent(cf.config, ts.sys, path.dirname(configPath));
+            Object.assign(options, pc.options);
+        }
+    } catch(e) {}
+}
+options.noEmit = true;
+var program = ts.createProgram([filePath], options);
+var checker = program.getTypeChecker();
+var sf = program.getSourceFile(filePath);
+if (!sf) { process.stdout.write("[]"); process.exit(0); }
+var bindings = [];
+var seen = {};
+function visit(node) {
+    if (ts.isIdentifier(node) && node.text) {
+        var p = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+        var k = p.line + ":" + p.character;
+        if (!seen[k]) {
+            seen[k] = true;
+            try {
+                var sym = checker.getSymbolAtLocation(node);
+                if (sym) {
+                    var type = checker.getTypeOfSymbolAtLocation(sym, node);
+                    var s = checker.typeToString(type, node, ts.TypeFormatFlags.NoTruncation);
+                    if (s && s !== "any" && s !== "error") {
+                        var kind = "reference";
+                        var par = node.parent;
+                        if (par && (ts.isVariableDeclaration(par) ||
+                            ts.isFunctionDeclaration(par) || ts.isClassDeclaration(par) ||
+                            ts.isMethodDeclaration(par) || ts.isParameter(par) ||
+                            ts.isPropertyDeclaration(par) || ts.isInterfaceDeclaration(par) ||
+                            ts.isTypeAliasDeclaration(par)) && par.name === node)
+                            kind = "definition";
+                        bindings.push({name:node.text, line:p.line+1, col_start:p.character+1,
+                            col_end:p.character+1+node.text.length, type:s, kind:kind});
+                    }
+                }
+            } catch(e) {}
+        }
+    }
+    ts.forEachChild(node, visit);
+}
+visit(sf);
+process.stdout.write(JSON.stringify(bindings));
+"""
+
+
+class TypeScriptAdapter(TypeOracle):
+    """TypeOracle implementation using the TypeScript Compiler API via Node.js.
+
+    Runs a helper script that creates a TypeScript program and extracts type
+    information for all identifiers in a single pass.  This is significantly
+    faster than an LSP-based approach because it avoids per-symbol hover
+    round-trips.
+
+    Requires ``node`` on PATH and ``typescript`` installed in the project's
+    ``node_modules`` or globally.
+    """
+
+    def __init__(
+        self,
+        node_path: str | None = None,
+        cache_size: int = 256,
+        extra_args: list[str] | None = None,
+        db_path: str | None = None,
+    ):
+        self._node = node_path or shutil.which("node") or "node"
+        self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
+        self._extra_args = extra_args or []
+        self._script_path: str | None = None
+
+    def is_available(self) -> bool:
+        return shutil.which(self._node) is not None
+
+    def _get_script(self) -> str:
+        """Write the helper script to a temp file and return its path."""
+        if self._script_path and os.path.exists(self._script_path):
+            return self._script_path
+        fd, path = tempfile.mkstemp(suffix=".js", prefix="emend_ts_types_")
+        os.write(fd, _TS_TYPE_HELPER.encode("utf-8"))
+        os.close(fd)
+        self._script_path = path
+        return path
+
+    def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
+        path = path.resolve()
+        if not path.exists():
+            return FileTypes(path=str(path))
+
+        content_hash = _content_hash(path)
+        cached = self._cache.get(content_hash)
+        if cached is not None:
+            return cached
+
+        logger.info("Building type index for %s via TypeScript", path)
+        ft = self._run_tsc(path, project_root)
+        self._cache.put(content_hash, ft)
+        return ft
+
+    def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes:
+        """Run the TypeScript helper script and parse its output."""
+        script = self._get_script()
+        cwd = str(project_root) if project_root else str(path.parent)
+        cmd = [self._node, script, str(path), cwd, *self._extra_args]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                logger.debug(
+                    "TypeScript helper returned %d: %s",
+                    result.returncode, result.stderr[:500] if result.stderr else "",
+                )
+                return FileTypes(path=str(path))
+
+            bindings_data = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
+            logger.debug("TypeScript helper failed: %s", exc)
+            return FileTypes(path=str(path))
+
+        ft = FileTypes(path=str(path))
+        for entry in bindings_data:
+            type_desc = parse_type_string(entry["type"])
+            ft.bindings.append(TypeBinding(
+                name=entry["name"],
+                line=entry["line"],
+                col_start=entry["col_start"],
+                col_end=entry.get("col_end"),
+                type_descriptor=type_desc,
+                raw_type=entry["type"],
+                binding_kind=entry.get("kind", "inferred"),
+            ))
+        ft.build_index()
+        return ft
+
+    def type_at(self, path: Path, line: int, col: int,
+                project_root: Path | None = None) -> TypeBinding | None:
+        ft = self.infer_file(path, project_root)
+        return ft.type_at(line, col)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+    def __del__(self):
+        if self._script_path:
+            try:
+                os.unlink(self._script_path)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# rust-analyzer adapter
+# ---------------------------------------------------------------------------
+
+class RustAnalyzerAdapter(_LSPTypeOracle):
+    """TypeOracle implementation backed by the rust-analyzer LSP.
+
+    Starts a rust-analyzer instance and queries individual symbols
+    via textDocument/hover to build a type index for Rust source files.
+    """
+
+    _tool_name = "rust-analyzer"
+    _language_id = "rust"
+
+    def __init__(
+        self,
+        rust_analyzer_path: str | None = None,
+        cache_size: int = 256,
+        extra_args: list[str] | None = None,
+        db_path: str | None = None,
+    ):
+        tool = rust_analyzer_path or shutil.which("rust-analyzer") or "rust-analyzer"
+        super().__init__(tool, cache_size=cache_size, extra_args=extra_args, db_path=db_path)
+
+    def _lsp_command(self) -> list[str]:
+        return [self._tool, *self._extra_args]
+
+    def _parse_hover_type(self, hover_text: str) -> str | None:
+        """Extract the type part from rust-analyzer's hover markdown."""
+        # rust-analyzer wraps hover in ```rust ... ``` blocks
+        match = re.search(r"```rust\n(.*?)\n```", hover_text, re.DOTALL)
+        if not match:
+            return None
+
+        line = match.group(1).strip()
+        # "fn add(a: i32, b: i32) -> i32" -> callable type string
+        if line.startswith("fn "):
+            return _parse_rust_fn_signature(line)
+        # "let x: i32" or "x: Vec<String>" -> type after colon
+        if ": " in line:
+            return line.rsplit(": ", 1)[1].strip()
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Autodetection
 # ---------------------------------------------------------------------------
 
@@ -1310,6 +1659,21 @@ _ENGINE_CONFIG_SIGNALS: list[tuple[str, str | None, str]] = [
     ("pyrefly.toml", "tool.pyrefly", "pyrefly"),
     ("pyrightconfig.json", "tool.pyright", "pyright"),
     ("ty.toml", "tool.ty", "ty"),
+]
+
+# File extensions → engine mapping for per-file autodetection.
+_EXT_TO_ENGINE: dict[str, str] = {
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "typescript",
+    ".jsx": "typescript",
+    ".rs": "rust-analyzer",
+}
+
+# Project-root config files that indicate a language-specific project.
+_PROJECT_CONFIG_SIGNALS: list[tuple[str, str]] = [
+    ("tsconfig.json", "typescript"),
+    ("Cargo.toml", "rust-analyzer"),
 ]
 
 
@@ -1325,22 +1689,42 @@ def _pyproject_has_section(pyproject: Path, dotted_key: str) -> bool:
     return bool(re.search(pattern, text, re.MULTILINE))
 
 
-def detect_type_engine(project_root: Path | None = None) -> str:
+def detect_type_engine(
+    project_root: Path | None = None,
+    *,
+    file_path: Path | None = None,
+) -> str:
     """Detect which type checking engine a project is configured for.
 
-    Detection order (per engine, in priority order: pyrefly → pyright → ty):
+    When *file_path* is given, the file extension is used first to pick
+    a language-specific engine (``"typescript"`` for ``.ts``/``.tsx``/``.js``,
+    ``"rust-analyzer"`` for ``.rs``).
+
+    For Python projects, detection order (per engine, in priority order:
+    pyrefly → pyright → ty):
     1. Standalone config file in the project root (e.g. ``pyrefly.toml``,
        ``pyrightconfig.json``, ``ty.toml``).
-    2. Matching ``[tool.*]`` section in ``pyproject.toml`` (e.g.
-       ``[tool.pyright]``, ``[tool.ty]``, ``[tool.pyrefly]``).
+    2. Matching ``[tool.*]`` section in ``pyproject.toml``.
     3. First available tool on PATH (pyrefly → ty → pyright).
 
     Returns the engine name: ``"pyrefly"``, ``"pyright"``, ``"ty"``,
-    or ``"pyrefly"`` as the fallback default.
+    ``"typescript"``, ``"rust-analyzer"``, or ``"pyrefly"`` as fallback.
     """
+    # Per-file extension detection takes priority
+    if file_path is not None:
+        ext = Path(file_path).suffix.lower()
+        engine = _EXT_TO_ENGINE.get(ext)
+        if engine:
+            return engine
+
     root = project_root or Path.cwd()
 
-    # Phase 1: config file presence
+    # Project-root config files for TS/Rust projects
+    for filename, engine in _PROJECT_CONFIG_SIGNALS:
+        if (root / filename).exists():
+            return engine
+
+    # Python engine detection: config file presence
     pyproject = root / "pyproject.toml"
     for filename, pyproject_section, engine in _ENGINE_CONFIG_SIGNALS:
         if (root / filename).exists():
@@ -1349,7 +1733,7 @@ def detect_type_engine(project_root: Path | None = None) -> str:
             if _pyproject_has_section(pyproject, pyproject_section):
                 return engine
 
-    # Phase 2: tool availability on PATH
+    # Python engine detection: tool availability on PATH
     for tool, engine in [("pyrefly", "pyrefly"), ("ty", "ty"), ("pyright", "pyright")]:
         if shutil.which(tool):
             return engine
@@ -1362,22 +1746,28 @@ def detect_type_engine(project_root: Path | None = None) -> str:
 # Factory function
 # ---------------------------------------------------------------------------
 
-_ENGINE_NAMES = ("pyrefly", "pyright", "ty", "auto")
+_ENGINE_NAMES = ("pyrefly", "pyright", "ty", "typescript", "rust-analyzer", "auto")
 
 
 def create_type_oracle(
     engine: str = "pyrefly",
     project_root: Path | None = None,
+    *,
+    file_path: Path | None = None,
     **kwargs,
 ) -> TypeOracle:
     """Create a TypeOracle instance for the specified engine.
 
     Args:
         engine: The type inference engine to use.  Defaults to ``"pyrefly"``.
-                ``"auto"`` detects the engine from project config files and
-                installed tools.  Other choices: ``"pyright"``, ``"ty"``.
+                ``"auto"`` detects the engine from project config files,
+                installed tools, and (when given) the target file extension.
+                Other choices: ``"pyright"``, ``"ty"``, ``"typescript"``,
+                ``"rust-analyzer"``.
         project_root: Project root directory used for config-file detection
                       when *engine* is ``"auto"``.
+        file_path: Target file path used for per-file autodetection when
+                   *engine* is ``"auto"``.
         **kwargs: Additional keyword arguments passed to the adapter constructor.
 
     Returns:
@@ -1387,7 +1777,7 @@ def create_type_oracle(
         ValueError: If the engine is not recognized.
     """
     if engine == "auto":
-        engine = detect_type_engine(project_root)
+        engine = detect_type_engine(project_root, file_path=file_path)
 
     # Inject disk cache path when not explicitly provided
     if "db_path" not in kwargs:
@@ -1399,6 +1789,10 @@ def create_type_oracle(
         return PyrightAdapter(**kwargs)
     if engine == "ty":
         return TyAdapter(**kwargs)
+    if engine == "typescript":
+        return TypeScriptAdapter(**kwargs)
+    if engine == "rust-analyzer":
+        return RustAnalyzerAdapter(**kwargs)
     raise ValueError(
         f"Unknown type inference engine: {engine!r}. "
         f"Supported engines: {', '.join(_ENGINE_NAMES)}"

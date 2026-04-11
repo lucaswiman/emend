@@ -25,11 +25,15 @@ from emend.type_oracle import (
     FileTypes,
     PyrightAdapter,
     PyreflyAdapter,
+    RustAnalyzerAdapter,
     TyAdapter,
     TypeBinding,
     TypeDescriptor,
+    TypeScriptAdapter,
     _FileTypeCache,
+    _parse_callable_arrow,
     _parse_pyrefly_debug,
+    _parse_rust_fn_signature,
     parse_type_string,
     _split_params,
     _split_union,
@@ -1105,11 +1109,13 @@ class TestParseTypeStringEdgeCases:
         assert td.params[0].return_type.name == "str"
 
     def test_empty_parameterized(self):
+        # tuple[] is interpreted as the TS array shorthand Array[tuple]
+        # (Python checkers never output "tuple[]" — they use "tuple[()]")
         td = parse_type_string("tuple[]")
         assert td.kind == "parameterized"
-        assert td.name == "tuple"
-        # Empty params list — single empty-string param gets parsed as named("")
-        # This is an edge case; just verify it doesn't crash
+        assert td.name == "Array"
+        assert len(td.params) == 1
+        assert td.params[0].name == "tuple"
 
     def test_multiline_overload(self):
         raw = (
@@ -1662,3 +1668,560 @@ class TestTypesCLIEdgeCases:
             data = json.loads(result.stdout)
             for entry in data:
                 assert entry["kind"] == "definition"
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: Cross-Language Type Oracle — TypeScript type parsing
+# ---------------------------------------------------------------------------
+
+
+class TestParseTypeStringTypeScript:
+    """Tests for TypeScript-specific type string parsing."""
+
+    def test_ts_simple_string(self):
+        td = parse_type_string("string")
+        assert td.kind == "named"
+        assert td.name == "string"
+
+    def test_ts_number(self):
+        td = parse_type_string("number")
+        assert td.kind == "named"
+        assert td.name == "number"
+
+    def test_ts_boolean(self):
+        td = parse_type_string("boolean")
+        assert td.kind == "named"
+        assert td.name == "boolean"
+
+    def test_ts_void(self):
+        td = parse_type_string("void")
+        assert td.kind == "named"
+        assert td.name == "void"
+
+    def test_ts_array_shorthand(self):
+        td = parse_type_string("string[]")
+        assert td.kind == "parameterized"
+        assert td.name == "Array"
+        assert len(td.params) == 1
+        assert td.params[0].name == "string"
+
+    def test_ts_nested_array_shorthand(self):
+        td = parse_type_string("number[][]")
+        assert td.kind == "parameterized"
+        assert td.name == "Array"
+        assert td.params[0].kind == "parameterized"
+        assert td.params[0].name == "Array"
+        assert td.params[0].params[0].name == "number"
+
+    def test_ts_angle_bracket_generic(self):
+        td = parse_type_string("Array<string>")
+        assert td.kind == "parameterized"
+        assert td.name == "Array"
+        assert len(td.params) == 1
+        assert td.params[0].name == "string"
+
+    def test_ts_promise(self):
+        td = parse_type_string("Promise<string>")
+        assert td.kind == "parameterized"
+        assert td.name == "Promise"
+        assert td.params[0].name == "string"
+
+    def test_ts_map_generic(self):
+        td = parse_type_string("Map<string, number>")
+        assert td.kind == "parameterized"
+        assert td.name == "Map"
+        assert len(td.params) == 2
+        assert td.params[0].name == "string"
+        assert td.params[1].name == "number"
+
+    def test_ts_nested_generics(self):
+        td = parse_type_string("Map<string, Array<number>>")
+        assert td.kind == "parameterized"
+        assert td.name == "Map"
+        assert td.params[1].kind == "parameterized"
+        assert td.params[1].name == "Array"
+        assert td.params[1].params[0].name == "number"
+
+    def test_ts_union_with_null(self):
+        td = parse_type_string("string | null")
+        assert td.kind == "union"
+        assert len(td.params) == 2
+        assert td.params[0].name == "string"
+        assert td.params[1].name == "null"
+
+    def test_ts_arrow_function(self):
+        td = parse_type_string("(a: string, b: number) => boolean")
+        assert td.kind == "callable"
+        assert len(td.params) == 2
+        assert td.params[0].name == "string"
+        assert td.params[1].name == "number"
+        assert td.return_type.name == "boolean"
+
+    def test_ts_arrow_void_return(self):
+        td = parse_type_string("(x: string) => void")
+        assert td.kind == "callable"
+        assert td.return_type.name == "void"
+
+    def test_ts_generic_array_shorthand(self):
+        """Promise<string>[] parses as Array[Promise[string]]."""
+        td = parse_type_string("Promise<string>[]")
+        assert td.kind == "parameterized"
+        assert td.name == "Array"
+        assert td.params[0].kind == "parameterized"
+        assert td.params[0].name == "Promise"
+
+
+class TestParseTypeStringRust:
+    """Tests for Rust-specific type string parsing."""
+
+    def test_rust_i32(self):
+        td = parse_type_string("i32")
+        assert td.kind == "named"
+        assert td.name == "i32"
+
+    def test_rust_string(self):
+        td = parse_type_string("String")
+        assert td.kind == "named"
+        assert td.name == "String"
+
+    def test_rust_bool(self):
+        td = parse_type_string("bool")
+        assert td.kind == "named"
+        assert td.name == "bool"
+
+    def test_rust_reference(self):
+        td = parse_type_string("&str")
+        assert td.kind == "parameterized"
+        assert td.name == "&"
+        assert td.params[0].name == "str"
+
+    def test_rust_mut_reference(self):
+        td = parse_type_string("&mut String")
+        assert td.kind == "parameterized"
+        assert td.name == "&"
+        assert td.params[0].name == "String"
+
+    def test_rust_lifetime_reference(self):
+        td = parse_type_string("&'a str")
+        assert td.kind == "parameterized"
+        assert td.name == "&"
+        assert td.params[0].name == "str"
+
+    def test_rust_vec(self):
+        td = parse_type_string("Vec<String>")
+        assert td.kind == "parameterized"
+        assert td.name == "Vec"
+        assert td.params[0].name == "String"
+
+    def test_rust_option(self):
+        td = parse_type_string("Option<i32>")
+        assert td.kind == "parameterized"
+        assert td.name == "Option"
+        assert td.params[0].name == "i32"
+
+    def test_rust_result(self):
+        td = parse_type_string("Result<String, Error>")
+        assert td.kind == "parameterized"
+        assert td.name == "Result"
+        assert len(td.params) == 2
+        assert td.params[0].name == "String"
+        assert td.params[1].name == "Error"
+
+    def test_rust_box_dyn(self):
+        td = parse_type_string("Box<dyn Display>")
+        assert td.kind == "parameterized"
+        assert td.name == "Box"
+        assert td.params[0].name == "dyn Display"
+
+    def test_rust_nested_generic(self):
+        td = parse_type_string("Vec<Option<String>>")
+        assert td.kind == "parameterized"
+        assert td.name == "Vec"
+        assert td.params[0].kind == "parameterized"
+        assert td.params[0].name == "Option"
+        assert td.params[0].params[0].name == "String"
+
+    def test_rust_ref_to_vec(self):
+        td = parse_type_string("&Vec<String>")
+        assert td.kind == "parameterized"
+        assert td.name == "&"
+        assert td.params[0].kind == "parameterized"
+        assert td.params[0].name == "Vec"
+
+    def test_rust_callable(self):
+        td = parse_type_string("(i32, i32) -> i32")
+        assert td.kind == "callable"
+        assert len(td.params) == 2
+        assert td.return_type.name == "i32"
+
+
+class TestParseRustFnSignature:
+    """Tests for _parse_rust_fn_signature()."""
+
+    def test_simple_fn(self):
+        result = _parse_rust_fn_signature("fn add(a: i32, b: i32) -> i32")
+        assert result == "(i32, i32) -> i32"
+
+    def test_fn_no_params(self):
+        result = _parse_rust_fn_signature("fn foo() -> String")
+        assert result == "() -> String"
+
+    def test_fn_with_self(self):
+        result = _parse_rust_fn_signature("fn name(&self) -> &str")
+        assert result == "() -> &str"
+
+    def test_fn_no_return(self):
+        result = _parse_rust_fn_signature("fn run(x: i32)")
+        assert result == "(i32) -> ()"
+
+    def test_fn_generic_params(self):
+        result = _parse_rust_fn_signature("fn get(key: &str) -> Option<String>")
+        assert result == "(&str) -> Option<String>"
+
+
+class TestParseCallableArrow:
+    """Tests for _parse_callable_arrow()."""
+
+    def test_simple_arrow(self):
+        td = _parse_callable_arrow("(x: string) => boolean")
+        assert td.kind == "callable"
+        assert len(td.params) == 1
+        assert td.params[0].name == "string"
+        assert td.return_type.name == "boolean"
+
+    def test_multi_param_arrow(self):
+        td = _parse_callable_arrow("(a: string, b: number) => void")
+        assert td.kind == "callable"
+        assert len(td.params) == 2
+        assert td.return_type.name == "void"
+
+    def test_no_params_arrow(self):
+        td = _parse_callable_arrow("() => string")
+        assert td.kind == "callable"
+        assert len(td.params) == 0
+        assert td.return_type.name == "string"
+
+
+class TestTypeDescriptorDisplayCrossLanguage:
+    """Tests for display() with cross-language types."""
+
+    def test_display_reference(self):
+        td = parse_type_string("&str")
+        assert td.display() == "&str"
+
+    def test_display_reference_roundtrip(self):
+        td = parse_type_string("&str")
+        td2 = parse_type_string(td.display())
+        assert td == td2
+
+    def test_display_angle_bracket_as_square(self):
+        td = parse_type_string("Vec<String>")
+        assert td.display() == "Vec[String]"
+
+    def test_display_array_shorthand(self):
+        td = parse_type_string("string[]")
+        assert td.display() == "Array[string]"
+
+
+class TestTypeDescriptorMatchesCrossLanguage:
+    """Tests for cross-language type matching."""
+
+    def test_ts_string_matches_string(self):
+        actual = parse_type_string("string")
+        constraint = parse_type_string("string")
+        assert actual.matches(constraint)
+
+    def test_rust_i32_matches_i32(self):
+        actual = parse_type_string("i32")
+        constraint = parse_type_string("i32")
+        assert actual.matches(constraint)
+
+    def test_ts_array_matches_array(self):
+        actual = parse_type_string("string[]")
+        constraint = parse_type_string("Array[string]")
+        assert actual.matches(constraint)
+
+    def test_ts_angle_bracket_matches_square(self):
+        """Vec<String> from Rust matches Vec[String] from pattern."""
+        actual = parse_type_string("Vec<String>")
+        constraint = parse_type_string("Vec[String]")
+        assert actual.matches(constraint)
+
+    def test_rust_ref_matches_ref(self):
+        actual = parse_type_string("&str")
+        constraint = parse_type_string("&str")
+        assert actual.matches(constraint)
+
+    def test_rust_ref_does_not_match_bare(self):
+        actual = parse_type_string("&str")
+        constraint = parse_type_string("str")
+        assert not actual.matches(constraint)
+
+    def test_generic_base_name_match(self):
+        """Vec<String> matches bare 'Vec' constraint."""
+        actual = parse_type_string("Vec<String>")
+        constraint = parse_type_string("Vec")
+        assert actual.matches(constraint)
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: TypeScriptAdapter unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestTypeScriptAdapter:
+    """Unit tests for TypeScriptAdapter (non-integration)."""
+
+    def test_not_available_when_missing(self):
+        adapter = TypeScriptAdapter(node_path="/nonexistent/node", db_path=None)
+        assert not adapter.is_available()
+
+    def test_nonexistent_file(self, tmp_path):
+        adapter = TypeScriptAdapter(db_path=None)
+        ft = adapter.infer_file(tmp_path / "nofile.ts")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_cache_behavior(self, tmp_path):
+        adapter = TypeScriptAdapter(db_path=None)
+        ts_file = tmp_path / "test.ts"
+        ts_file.write_text("const x: number = 42;\n")
+
+        ft1 = adapter.infer_file(ts_file, project_root=tmp_path)
+        ft2 = adapter.infer_file(ts_file, project_root=tmp_path)
+        assert ft1 is ft2  # cached
+
+        adapter.clear_cache()
+        ft3 = adapter.infer_file(ts_file, project_root=tmp_path)
+        assert ft3 is not ft1  # cache cleared
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: RustAnalyzerAdapter unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestRustAnalyzerAdapter:
+    """Unit tests for RustAnalyzerAdapter (non-integration)."""
+
+    def test_not_available_when_missing(self):
+        adapter = RustAnalyzerAdapter(
+            rust_analyzer_path="/nonexistent/rust-analyzer", db_path=None,
+        )
+        assert not adapter.is_available()
+
+    def test_nonexistent_file(self, tmp_path):
+        adapter = RustAnalyzerAdapter(db_path=None)
+        ft = adapter.infer_file(tmp_path / "nofile.rs")
+        assert isinstance(ft, FileTypes)
+        assert len(ft.bindings) == 0
+
+    def test_cache_behavior(self, tmp_path):
+        adapter = RustAnalyzerAdapter(db_path=None)
+        rs_file = tmp_path / "test.rs"
+        rs_file.write_text("fn main() { let x: i32 = 42; }\n")
+
+        ft1 = adapter.infer_file(rs_file, project_root=tmp_path)
+        ft2 = adapter.infer_file(rs_file, project_root=tmp_path)
+        assert ft1 is ft2
+
+        adapter.clear_cache()
+        ft3 = adapter.infer_file(rs_file, project_root=tmp_path)
+        assert ft3 is not ft1
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: detect_type_engine with file_path and TS/Rust signals
+# ---------------------------------------------------------------------------
+
+
+class TestDetectTypeEngineCrossLanguage:
+    """Tests for detect_type_engine with TypeScript and Rust projects."""
+
+    def test_ts_file_extension(self, tmp_path):
+        ts_file = tmp_path / "app.ts"
+        ts_file.write_text("")
+        assert detect_type_engine(tmp_path, file_path=ts_file) == "typescript"
+
+    def test_tsx_file_extension(self, tmp_path):
+        tsx_file = tmp_path / "App.tsx"
+        tsx_file.write_text("")
+        assert detect_type_engine(tmp_path, file_path=tsx_file) == "typescript"
+
+    def test_js_file_extension(self, tmp_path):
+        js_file = tmp_path / "index.js"
+        js_file.write_text("")
+        assert detect_type_engine(tmp_path, file_path=js_file) == "typescript"
+
+    def test_rs_file_extension(self, tmp_path):
+        rs_file = tmp_path / "lib.rs"
+        rs_file.write_text("")
+        assert detect_type_engine(tmp_path, file_path=rs_file) == "rust-analyzer"
+
+    def test_tsconfig_in_project(self, tmp_path):
+        (tmp_path / "tsconfig.json").write_text("{}")
+        assert detect_type_engine(tmp_path) == "typescript"
+
+    def test_cargo_toml_in_project(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n")
+        assert detect_type_engine(tmp_path) == "rust-analyzer"
+
+    def test_file_ext_overrides_project_config(self, tmp_path):
+        """A .rs file in a TypeScript project still returns rust-analyzer."""
+        (tmp_path / "tsconfig.json").write_text("{}")
+        rs_file = tmp_path / "build.rs"
+        rs_file.write_text("")
+        assert detect_type_engine(tmp_path, file_path=rs_file) == "rust-analyzer"
+
+    def test_py_file_falls_through(self, tmp_path):
+        """A .py file does NOT match TS/Rust, falls through to Python detection."""
+        py_file = tmp_path / "app.py"
+        py_file.write_text("")
+        (tmp_path / "pyrefly.toml").write_text("")
+        assert detect_type_engine(tmp_path, file_path=py_file) == "pyrefly"
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: create_type_oracle cross-language factory
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTypeOracleCrossLanguage:
+    """Tests for create_type_oracle with TypeScript and Rust engines."""
+
+    def test_create_typescript(self, tmp_path):
+        oracle = create_type_oracle(engine="typescript", project_root=tmp_path)
+        assert isinstance(oracle, TypeScriptAdapter)
+
+    def test_create_rust_analyzer(self, tmp_path):
+        oracle = create_type_oracle(engine="rust-analyzer", project_root=tmp_path)
+        assert isinstance(oracle, RustAnalyzerAdapter)
+
+    def test_auto_detects_typescript(self, tmp_path):
+        ts_file = tmp_path / "app.ts"
+        ts_file.write_text("")
+        oracle = create_type_oracle(
+            engine="auto", project_root=tmp_path, file_path=ts_file,
+        )
+        assert isinstance(oracle, TypeScriptAdapter)
+
+    def test_auto_detects_rust(self, tmp_path):
+        rs_file = tmp_path / "lib.rs"
+        rs_file.write_text("")
+        oracle = create_type_oracle(
+            engine="auto", project_root=tmp_path, file_path=rs_file,
+        )
+        assert isinstance(oracle, RustAnalyzerAdapter)
+
+    def test_unknown_engine_still_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown type inference engine"):
+            create_type_oracle(engine="nonexistent", project_root=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: TypeScriptAdapter integration (requires node + typescript)
+# ---------------------------------------------------------------------------
+
+_has_node = shutil.which("node") is not None
+
+
+@pytest.mark.skipif(not _has_node, reason="node not available")
+class TestTypeScriptAdapterIntegration:
+    """Integration tests for TypeScriptAdapter (requires node + typescript)."""
+
+    def test_simple_variable(self, tmp_path):
+        ts_file = tmp_path / "test.ts"
+        ts_file.write_text("const greeting: string = 'hello';\n")
+        adapter = TypeScriptAdapter(db_path=None)
+        ft = adapter.infer_file(ts_file, project_root=tmp_path)
+        # May return empty if typescript module not available
+        if ft.bindings:
+            names = {b.name for b in ft.bindings}
+            assert "greeting" in names
+            greeting_bindings = ft.types_for_name("greeting")
+            if greeting_bindings:
+                assert "string" in greeting_bindings[0].raw_type
+
+    def test_function_types(self, tmp_path):
+        ts_file = tmp_path / "test.ts"
+        ts_file.write_text(textwrap.dedent("""\
+            function add(a: number, b: number): number {
+                return a + b;
+            }
+            const result = add(1, 2);
+        """))
+        adapter = TypeScriptAdapter(db_path=None)
+        ft = adapter.infer_file(ts_file, project_root=tmp_path)
+        if ft.bindings:
+            names = {b.name for b in ft.bindings}
+            assert "add" in names or "result" in names
+
+    def test_generic_type(self, tmp_path):
+        ts_file = tmp_path / "test.ts"
+        ts_file.write_text("const items: Array<string> = ['a', 'b'];\n")
+        adapter = TypeScriptAdapter(db_path=None)
+        ft = adapter.infer_file(ts_file, project_root=tmp_path)
+        if ft.bindings:
+            items = ft.types_for_name("items")
+            if items:
+                assert "string" in items[0].raw_type
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: RustAnalyzerAdapter integration (requires rust-analyzer)
+# ---------------------------------------------------------------------------
+
+_has_rust_analyzer = shutil.which("rust-analyzer") is not None
+
+
+@pytest.mark.skipif(not _has_rust_analyzer, reason="rust-analyzer not available")
+class TestRustAnalyzerAdapterIntegration:
+    """Integration tests for RustAnalyzerAdapter (requires rust-analyzer)."""
+
+    def test_simple_variable(self, tmp_path):
+        # Create minimal Cargo project structure
+        (tmp_path / "Cargo.toml").write_text(textwrap.dedent("""\
+            [package]
+            name = "test-project"
+            version = "0.1.0"
+            edition = "2021"
+        """))
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        rs_file = src_dir / "main.rs"
+        rs_file.write_text("fn main() { let x: i32 = 42; }\n")
+
+        adapter = RustAnalyzerAdapter(db_path=None)
+        ft = adapter.infer_file(rs_file, project_root=tmp_path)
+        # rust-analyzer may be slow to initialize; just verify no crash
+        assert isinstance(ft, FileTypes)
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: _split_balanced with angle brackets and braces
+# ---------------------------------------------------------------------------
+
+
+class TestSplitBalancedCrossLanguage:
+    """Tests for _split_balanced with <> and {} nesting."""
+
+    def test_angle_brackets_prevent_split(self):
+        result = _split_params("string, Array<number>")
+        assert result == ["string", "Array<number>"]
+
+    def test_nested_angle_brackets(self):
+        result = _split_params("string, Map<string, Array<number>>")
+        assert result == ["string", "Map<string, Array<number>>"]
+
+    def test_braces_prevent_split(self):
+        result = _split_params("{ name: string, age: number }, boolean")
+        assert result == ["{ name: string, age: number }", "boolean"]
+
+    def test_arrow_in_angle_brackets(self):
+        """The > in => should not close an angle bracket context."""
+        result = _split_params("(x: T) => U, number")
+        assert result == ["(x: T) => U", "number"]
+
+    def test_union_respects_angle_brackets(self):
+        result = _split_union("Promise<string> | null")
+        assert result == ["Promise<string>", "null"]

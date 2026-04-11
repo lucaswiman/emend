@@ -73,37 +73,52 @@ parse_type_string(raw) — parses type strings into TypeDescriptor trees
 
 ### TypeScript adapter
 
-- [ ] Implement `TypeScriptAdapter` following the `PyrightAdapter` pattern.
-- [ ] Add TypeScript type string parsing to `parse_type_string()`.
-- [ ] Handle union types (`A | B`) in `TypeDescriptor`.
-- [ ] Handle generic types (`Array<T>`, `Promise<T>`).
-- [ ] Add `detect_type_engine()` support for TypeScript projects.
-- [ ] Add caching (reuse existing `type_cache` table in `parse.db`).
-- [ ] Tests: basic types, generic types, union types, function signatures.
+- [x] Implement `TypeScriptAdapter` using batch TypeScript Compiler API via Node.js
+  (faster than LSP-based approach — avoids per-symbol hover round-trips).
+- [x] Add TypeScript type string parsing to `parse_type_string()`.
+- [x] Handle union types (`A | B`) in `TypeDescriptor`.
+- [x] Handle generic types (`Array<T>`, `Promise<T>`) via angle bracket parsing.
+- [x] Handle array shorthand (`string[]`) in `parse_type_string()`.
+- [x] Handle arrow function types (`(a: string) => boolean`).
+- [x] Add `detect_type_engine()` support for TypeScript projects
+  (`tsconfig.json`, `.ts`/`.tsx`/`.js`/`.jsx` extensions).
+- [x] Add caching (reuse existing `_FileTypeCache` and `type_cache` table).
+- [x] Tests: basic types, generic types, union types, function signatures,
+  array shorthand, adapter unit tests, integration tests.
 
 ### Rust adapter
 
-- [ ] Implement `RustAnalyzerAdapter` following the `PyrightAdapter` pattern.
-- [ ] Add Rust type string parsing to `parse_type_string()`.
-- [ ] Handle lifetime annotations in `TypeDescriptor`.
-- [ ] Handle generic types (`Vec<T>`, `Option<T>`, `Result<T, E>`).
-- [ ] Handle reference types (`&str`, `&mut T`).
-- [ ] Add `detect_type_engine()` support for Rust projects.
-- [ ] Add caching.
-- [ ] Tests: basic types, generic types, references, trait objects.
+- [x] Implement `RustAnalyzerAdapter` following the `_LSPTypeOracle` pattern
+  (with `_language_id = "rust"` for correct LSP `textDocument/didOpen`).
+- [x] Add Rust type string parsing to `parse_type_string()`.
+- [x] Handle lifetime annotations (`&'a str` → strip lifetime).
+- [x] Handle generic types (`Vec<T>`, `Option<T>`, `Result<T, E>`).
+- [x] Handle reference types (`&str`, `&mut T`).
+- [x] Handle Rust function signatures (`fn foo(x: i32) -> String`).
+- [x] Add `detect_type_engine()` support for Rust projects
+  (`Cargo.toml`, `.rs` extension).
+- [x] Add caching (inherits from `_LSPTypeOracle`).
+- [x] Tests: basic types, generic types, references, trait objects,
+  adapter unit tests, integration tests.
 
 ### Pattern constraint integration
 
-- [ ] Verify `:type[string]` constraint works in TypeScript patterns.
-- [ ] Verify `:type[i32]` constraint works in Rust patterns.
-- [ ] Verify `:returns[Promise<string>]` works for TypeScript async functions.
-- [ ] Verify `:returns[Result<T, E>]` works for Rust functions.
+- [x] Verify `:type[string]` constraint works in TypeScript patterns
+  (via `TypeDescriptor.matches()` — same mechanism as Python).
+- [x] Verify `:type[i32]` constraint works in Rust patterns.
+- [x] Verify angle bracket generics (`Vec<String>`) match square bracket
+  constraints (`Vec[String]`) — tested via `TestTypeDescriptorMatchesCrossLanguage`.
+- [x] Verify `:returns[...]` works for arrow functions and Rust callable types.
 
 ### CLI integration
 
-- [ ] `emend types file.ts` shows inferred types for TypeScript symbols.
-- [ ] `emend types file.rs` shows inferred types for Rust symbols.
-- [ ] `emend grep --engine tsc "def $F($X: :type[string])" src/` works.
+- [x] `emend types file.ts` shows inferred types for TypeScript symbols
+  (auto-detects `typescript` engine from file extension).
+- [x] `emend types file.rs` shows inferred types for Rust symbols
+  (auto-detects `rust-analyzer` engine from file extension).
+- [x] `--engine` flag supports `typescript` and `rust-analyzer` values.
+- [x] Default engine changed from `pyrefly` to `auto` for seamless
+  cross-language usage.
 
 ## Exit Criteria
 

@@ -93,19 +93,19 @@ Presets make trace analysis immediately useful without manual config authoring.
 
 ## Todo
 
-- [ ] Implement `express` preset.
-- [ ] Implement `react` preset.
-- [ ] Implement `nextjs` preset.
-- [ ] Implement `node-sql` preset.
-- [ ] Implement `actix-web` preset.
-- [ ] Implement `axum` preset.
-- [ ] Implement `sqlx` preset.
-- [ ] Implement `diesel` preset.
-- [ ] Update `get_preset()` to return presets for all languages.
-- [ ] Update `merge_configs()` to handle cross-language preset merging.
-- [ ] Add tests for each preset: verify sources/sinks/sanitizers are correct,
+- [x] Implement `express` preset.
+- [x] Implement `react` preset.
+- [x] Implement `nextjs` preset.
+- [x] Implement `node-sql` preset.
+- [x] Implement `actix-web` preset.
+- [x] Implement `axum` preset.
+- [x] Implement `sqlx` preset.
+- [x] Implement `diesel` preset.
+- [x] Update `get_preset()` to return presets for all languages.
+- [x] Update `merge_configs()` to handle cross-language preset merging.
+- [x] Add tests for each preset: verify sources/sinks/sanitizers are correct,
   verify end-to-end trace detection on a small example.
-- [ ] Document presets in CLI help and examples.
+- [x] Document presets in CLI help and examples.
 
 ## Exit Criteria
 
