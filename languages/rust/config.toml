@@ -7,6 +7,9 @@ file_extensions = ["rs"]
 comment_prefix = "//"
 keywords = ["let", "fn", "struct", "enum", "trait", "impl", "mod", "use", "pub", "crate", "self", "Self", "where", "type", "async", "await", "mut", "ref", "static", "const", "extern", "unsafe", "move"]
 
+[comments]
+line_prefix = "//"
+
 [scoping]
 [[scoping.scope_creators]]
 node = "source_file"
@@ -98,9 +101,6 @@ locals_marker = ""
 [exports]
 public_by_default = false
 private_prefix = ""
-export_patterns = [
-    '^\s*pub(?:\s*\([^)]*\))?\s+(?:async\s+)?(?:unsafe\s+)?(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+|static\s+|mod\s+|use\s+|extern\s+"[^"]*"\s+fn\s+)(\w+)',
-]
 
 [symbols]
 function_node = "function_item"

@@ -2736,6 +2736,321 @@ impl ScopeResolver {
         result
     }
 
+    /// Collect Rust `use` and `mod` declarations from a parsed tree.
+    ///
+    /// Returns a flat list of `(ImportBinding, line)` pairs representing every
+    /// leaf import in the (possibly nested) use tree, plus `mod name;`
+    /// declarations.  This is language-specific because Rust's
+    /// `use_declaration` uses a recursive tree structure
+    /// (`scoped_use_list`, `use_wildcard`, `use_as_clause`, …) that the
+    /// generic `collect_import` path cannot handle.
+    pub fn collect_rust_imports(
+        &self,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> Vec<(ImportBinding, usize)> {
+        let source_bytes = source.as_bytes();
+        let mut result = Vec::new();
+
+        /// Extract the UTF-8 text of a node from the byte slice.
+        fn node_text_str<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
+            node.utf8_text(src).unwrap_or("")
+        }
+
+        /// Build a `::` path string from a node that is one of:
+        /// - `identifier`
+        /// - `scoped_identifier` (path :: name)
+        /// - `crate` / `super` / `self` keywords
+        fn node_to_path(node: tree_sitter::Node, src: &[u8]) -> String {
+            match node.kind() {
+                "identifier" | "type_identifier" | "crate" | "super" | "self" => {
+                    node_text_str(node, src).to_string()
+                }
+                "scoped_identifier" => {
+                    let path = node.child_by_field_name("path");
+                    let name = node.child_by_field_name("name");
+                    match (path, name) {
+                        (Some(p), Some(n)) => {
+                            format!("{}::{}", node_to_path(p, src), node_text_str(n, src))
+                        }
+                        (Some(p), None) => node_to_path(p, src),
+                        (None, Some(n)) => node_text_str(n, src).to_string(),
+                        (None, None) => node_text_str(node, src).to_string(),
+                    }
+                }
+                _ => node_text_str(node, src).to_string(),
+            }
+        }
+
+        /// Recursively expand a use-tree node into flat `ImportBinding`s.
+        ///
+        /// `prefix` is the accumulated `::` path up to this point.
+        /// `line` is the 1-based line of the enclosing `use_declaration`.
+        fn expand_use_tree(
+            node: tree_sitter::Node,
+            prefix: &str,
+            src: &[u8],
+            line: usize,
+            result: &mut Vec<(ImportBinding, usize)>,
+        ) {
+            match node.kind() {
+                // `use std::io;`  —  the argument is a scoped_identifier
+                "scoped_identifier" => {
+                    let full = node_to_path(node, src);
+                    let joined = if prefix.is_empty() {
+                        full.clone()
+                    } else {
+                        format!("{}::{}", prefix, full)
+                    };
+                    if let Some(sep) = joined.rfind("::") {
+                        let module_path = joined[..sep].to_string();
+                        let imported_name = joined[sep + 2..].to_string();
+                        result.push((
+                            ImportBinding {
+                                local_name: imported_name.clone(),
+                                module_path,
+                                imported_name: Some(imported_name),
+                                is_star: false,
+                            },
+                            line,
+                        ));
+                    } else {
+                        result.push((
+                            ImportBinding {
+                                local_name: joined.clone(),
+                                module_path: joined.clone(),
+                                imported_name: None,
+                                is_star: false,
+                            },
+                            line,
+                        ));
+                    }
+                }
+
+                // `use io;`  —  bare identifier or Rust path keyword
+                "identifier" | "type_identifier" | "crate" | "super" => {
+                    let name = node_text_str(node, src).to_string();
+                    let (module_path, imported_name, local_name) = if prefix.is_empty() {
+                        (name.clone(), None, name.clone())
+                    } else {
+                        (prefix.to_string(), Some(name.clone()), name.clone())
+                    };
+                    result.push((
+                        ImportBinding {
+                            local_name,
+                            module_path,
+                            imported_name,
+                            is_star: false,
+                        },
+                        line,
+                    ));
+                }
+
+                // `use std::io::*;`  —  wildcard
+                // The `use_wildcard` node contains the path prefix as its first
+                // named child (no dedicated "path" field in the grammar).
+                "use_wildcard" => {
+                    // Find the path prefix by looking at named children.
+                    let mut cursor = node.walk();
+                    let path_prefix = if cursor.goto_first_child() {
+                        let mut path_str = String::new();
+                        loop {
+                            let child = cursor.node();
+                            let ck = child.kind();
+                            // Skip punctuation
+                            if ck != "*" && ck != "::" && child.is_named() {
+                                path_str = node_to_path(child, src);
+                                break;
+                            }
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                        path_str
+                    } else {
+                        String::new()
+                    };
+
+                    let module_path = if !prefix.is_empty() && !path_prefix.is_empty() {
+                        format!("{}::{}", prefix, path_prefix)
+                    } else if !prefix.is_empty() {
+                        prefix.to_string()
+                    } else {
+                        path_prefix
+                    };
+
+                    result.push((
+                        ImportBinding {
+                            local_name: "*".to_string(),
+                            module_path,
+                            imported_name: Some("*".to_string()),
+                            is_star: true,
+                        },
+                        line,
+                    ));
+                }
+
+                // `use std::io as my_io;`
+                "use_as_clause" => {
+                    let path_node = node.child_by_field_name("path");
+                    let alias_node = node.child_by_field_name("alias");
+                    if let Some(path_n) = path_node {
+                        let raw_path = node_to_path(path_n, src);
+                        let full = if prefix.is_empty() {
+                            raw_path.clone()
+                        } else {
+                            format!("{}::{}", prefix, raw_path)
+                        };
+                        let alias = alias_node.map(|a| node_text_str(a, src).to_string());
+                        if let Some(sep) = full.rfind("::") {
+                            let module_path = full[..sep].to_string();
+                            let imported_name = full[sep + 2..].to_string();
+                            let local_name = alias.clone().unwrap_or_else(|| imported_name.clone());
+                            result.push((
+                                ImportBinding {
+                                    local_name,
+                                    module_path,
+                                    imported_name: Some(imported_name),
+                                    is_star: false,
+                                },
+                                line,
+                            ));
+                        } else {
+                            let local_name = alias.clone().unwrap_or_else(|| full.clone());
+                            result.push((
+                                ImportBinding {
+                                    local_name,
+                                    module_path: full.clone(),
+                                    imported_name: None,
+                                    is_star: false,
+                                },
+                                line,
+                            ));
+                        }
+                    }
+                }
+
+                // `use std::{io, fmt};`  —  scoped use list
+                "scoped_use_list" => {
+                    let path_node = node.child_by_field_name("path");
+                    let new_prefix = if let Some(p) = path_node {
+                        let raw = node_to_path(p, src);
+                        if prefix.is_empty() { raw } else { format!("{}::{}", prefix, raw) }
+                    } else {
+                        prefix.to_string()
+                    };
+                    if let Some(list_node) = node.child_by_field_name("list") {
+                        expand_use_tree(list_node, &new_prefix, src, line, result);
+                    }
+                }
+
+                // `{io, fmt::Display}`  —  the `use_list` node
+                "use_list" => {
+                    let mut cursor = node.walk();
+                    if cursor.goto_first_child() {
+                        loop {
+                            let child = cursor.node();
+                            let ck = child.kind();
+                            // Skip punctuation tokens
+                            if ck != "{" && ck != "}" && ck != "," {
+                                if ck == "self" {
+                                    // `use foo::{self, bar}` — the `self` item imports
+                                    // the module itself. The module path is the prefix.
+                                    if let Some(sep) = prefix.rfind("::") {
+                                        let module_path = prefix[..sep].to_string();
+                                        let imported_name = prefix[sep + 2..].to_string();
+                                        result.push((
+                                            ImportBinding {
+                                                local_name: imported_name.clone(),
+                                                module_path,
+                                                imported_name: Some(imported_name),
+                                                is_star: false,
+                                            },
+                                            line,
+                                        ));
+                                    } else if !prefix.is_empty() {
+                                        result.push((
+                                            ImportBinding {
+                                                local_name: prefix.to_string(),
+                                                module_path: prefix.to_string(),
+                                                imported_name: None,
+                                                is_star: false,
+                                            },
+                                            line,
+                                        ));
+                                    }
+                                } else {
+                                    expand_use_tree(child, prefix, src, line, result);
+                                }
+                            }
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        // Walk the tree top-level to find `use_declaration` and `mod_item` nodes.
+        fn walk_top(
+            node: tree_sitter::Node,
+            src: &[u8],
+            result: &mut Vec<(ImportBinding, usize)>,
+        ) {
+            let nk = node.kind();
+
+            if nk == "use_declaration" {
+                let line = node.start_position().row + 1;
+                // The `argument` field holds the use tree.
+                if let Some(arg) = node.child_by_field_name("argument") {
+                    expand_use_tree(arg, "", src, line, result);
+                }
+                return;
+            }
+
+            if nk == "mod_item" {
+                // `mod name;`  —  only semicolon-terminated mod declarations.
+                // Inline `mod name { ... }` create a new module scope; we skip those.
+                // We detect semicolon-terminated mods by checking that there is no
+                // `body` field.
+                if node.child_by_field_name("body").is_none() {
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let mod_name = node_text_str(name_node, src).to_string();
+                        let line = node.start_position().row + 1;
+                        result.push((
+                            ImportBinding {
+                                local_name: mod_name.clone(),
+                                module_path: mod_name.clone(),
+                                imported_name: None,
+                                is_star: false,
+                            },
+                            line,
+                        ));
+                    }
+                }
+                // Don't recurse into mod_item children at this level.
+                return;
+            }
+
+            // Recurse into children to find top-level use_declarations/mod_items.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    walk_top(cursor.node(), src, result);
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        walk_top(tree.root_node(), source_bytes, &mut result);
+        result
+    }
+
     /// Collect all identifiers in a source file with their annotation context.
     ///
     /// Returns `(name, in_annotation)` for every identifier node that is not

@@ -94,8 +94,8 @@ anything that can be replaced with tree-sitter.
 
 ## Acceptance Criteria
 
-- [ ] `import ast` removed from `python_plugin.py`.
-- [ ] `PythonImportHandler.extract_imports()` uses `PyScopeResolver` or `find_pattern`.
-- [ ] `PythonImportHandler.add_import_text()` uses tree-sitter line numbers.
-- [ ] All import-related tests pass (copy, add, primitives).
-- [ ] Syntax-error graceful-degradation test added.
+- [x] `import ast` removed from `python_plugin.py`.
+- [x] `PythonImportHandler.extract_imports()` uses `PyScopeResolver` or `find_pattern`.
+- [x] `PythonImportHandler.add_import_text()` uses tree-sitter line numbers.
+- [x] All import-related tests pass (copy, add, primitives).
+- [x] Syntax-error graceful-degradation test added.

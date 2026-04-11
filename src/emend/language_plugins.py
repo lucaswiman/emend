@@ -13,12 +13,26 @@ Phase 2c extracts Python-specific code into ``PythonImportHandler``,
 ``PythonCommentHandler``, and ``PythonPatternCompiler`` in ``python_plugin.py``.
 Phase 2d rewires the original call sites in ``transform.py`` and ``lint.py``
 to delegate through the plugin system.
+
+Phase 6 (noqa consolidation): ``NOQA_PATTERN`` is the canonical core regex for
+noqa suppression comments.  Importers should build their own ``re.compile``
+using this string rather than duplicating the pattern.
 """
 from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Canonical noqa pattern core (Phase 6)
+# ---------------------------------------------------------------------------
+
+#: Core regex fragment that matches ``noqa`` followed by an optional tag list.
+#: Does **not** include the comment-prefix (``#``, ``//``) — callers add that.
+#:
+#: Group 1 (optional): the tag string after the colon, e.g. ``"emend:deadcode"``.
+NOQA_PATTERN: str = r'noqa\b(?:\s*:\s*(.*))?'
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +171,12 @@ class TreeSitterImportHandler(ImportHandler):
             if stripped.startswith(kw + " ") or stripped.startswith(kw + "("):
                 return True
             # Handle lines that begin with visibility modifiers (e.g. ``pub use``)
-            # Use word-boundary check to avoid "use" matching "excuse"
-            if stripped.startswith("pub ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
+            # Use word-boundary check to avoid "use" matching "excuse".
+            # Split on whitespace to get words (no regex needed for whole-word check).
+            words = stripped.split()
+            if stripped.startswith("pub ") and kw in words:
                 return True
-            if stripped.startswith("export ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
+            if stripped.startswith("export ") and kw in words:
                 return True
         # TypeScript/JavaScript re-exports: ``export { X } from 'Y'``
         # These act as imports and should be included.
@@ -287,16 +303,31 @@ class TreeSitterImportHandler(ImportHandler):
 
         Uses a simple heuristic: drop lines that contain both *module* and
         *name* and look like imports.
+
+        Module is checked with ``in`` (it may appear as a quoted string or
+        path fragment).  Name is checked as a whole word by splitting on
+        punctuation/whitespace to avoid false positives on substrings.
+
+        TODO: replace with tree-sitter byte-range editing once ``emend_core``
+        exposes an ``import_node_range(source, module, name, ext)`` helper.
+        That would correctly handle grouped imports such as
+        ``import { A, B } from "mod"`` where only one name must be removed.
         """
         lines = source.splitlines(keepends=True)
         result: list[str] = []
-        mod_pat = re.compile(r'\b' + re.escape(module) + r'\b')
-        name_pat = re.compile(r'\b' + re.escape(name) + r'\b')
         for line in lines:
             stripped = line.strip()
+            # Split on common punctuation as well as whitespace so that
+            # ``{ foo }`` yields the word ``foo`` and ``std::io;`` yields
+            # both ``std`` and ``io`` (Rust path separator ``::`` acts as
+            # a word boundary in identifier matching).
+            words = stripped.replace(",", " ").replace("{", " ").replace(
+                "}", " ").replace("(", " ").replace(")", " ").replace(
+                "'", " ").replace('"', " ").replace("::", " ").replace(
+                ";", " ").split()
             if (self._is_import_line(stripped)
-                    and mod_pat.search(stripped)
-                    and name_pat.search(stripped)):
+                    and module in stripped
+                    and name in words):
                 continue
             result.append(line)
         return "".join(result)
@@ -307,9 +338,20 @@ class RegexCommentHandler(CommentHandler):
 
     Recognises ``<prefix> noqa: tag1,tag2`` comments.  Does not handle
     block-style docstrings (returns empty list for ``find_docstrings``).
+
+    The comment prefix can be supplied directly via *prefix*, or derived from
+    a language name via *language* (reads ``config.toml``).  When neither is
+    given, the prefix defaults to ``"#"``.
     """
 
-    def __init__(self, prefix: str) -> None:
+    def __init__(
+        self,
+        prefix: str | None = None,
+        *,
+        language: str | None = None,
+    ) -> None:
+        if prefix is None:
+            prefix = _get_comment_prefix(language or "")
         self._prefix = prefix
         escaped = re.escape(prefix)
         # Match "noqa: tag1,tag2" with tags
@@ -356,18 +398,33 @@ class DocCommentHandler(RegexCommentHandler):
     """
 
     # JSDoc: /** ... */ (multiline, non-greedy)
+    # TODO(phase-8): replace with tree-sitter ``comment`` node traversal once
+    # ``emend_core`` exposes a helper that returns (start_byte, end_byte, text)
+    # for all comment nodes in a source string.  JSDoc comments are ``comment``
+    # nodes whose text starts with ``/**``; no regex needed at that point.
     _JSDOC_RE = re.compile(r'/\*\*.*?\*/', re.DOTALL)
     # Rust doc comments: consecutive lines starting with /// or //!
+    # TODO(phase-8): replace with tree-sitter ``line_comment`` node traversal
+    # (node text starting with ``///`` or ``//!``) once emend_core exposes it.
     _RUST_DOC_LINE_RE = re.compile(r'^[ \t]*(?:///|//!)', re.MULTILINE)
 
-    def __init__(self, prefix: str, doc_style: str = "block") -> None:
+    def __init__(
+        self,
+        prefix: str | None = None,
+        doc_style: str = "block",
+        *,
+        language: str | None = None,
+    ) -> None:
         """
         Args:
-            prefix: line comment prefix (e.g. ``//``)
+            prefix: line comment prefix (e.g. ``//``); if omitted, *language*
+                is used to read the prefix from ``config.toml``.
             doc_style: ``"block"`` for ``/** */`` style (JS/TS),
                 ``"line"`` for ``///`` style (Rust)
+            language: language name to look up prefix from config (used when
+                *prefix* is not supplied).
         """
-        super().__init__(prefix)
+        super().__init__(prefix, language=language)
         self._doc_style = doc_style
 
     def _find_doc_comment_ranges(
@@ -652,9 +709,8 @@ def load_plugin(language: str) -> "LanguagePlugin":
         if plugin is not None:
             return plugin
 
-    prefix = _get_comment_prefix(language)
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),
-        comment_handler=RegexCommentHandler(prefix),
+        comment_handler=RegexCommentHandler(language=language),
         pattern_compiler=TreeSitterPatternCompiler(language),
     )

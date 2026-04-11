@@ -165,6 +165,112 @@ class TestImportQueries:
         assert g.imports_in("lib.py") == []
 
 
+class TestRustImportExtraction:
+    """Tests for Rust import extraction via tree-sitter (Phase 4 migration)."""
+
+    def _extract(self, content: str) -> list[ImportFact]:
+        from emend.fact_graph import _extract_imports_rust
+        # Reset the cached resolver between tests to ensure isolation
+        if hasattr(_extract_imports_rust, "_resolver"):
+            del _extract_imports_rust._resolver
+        return _extract_imports_rust("test.rs", content)
+
+    def test_simple_use(self):
+        """``use std::io;`` — plain scoped import."""
+        facts = self._extract("use std::io;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std"
+        assert f.imported_name == "io"
+        assert f.alias is None
+        assert f.line == 1
+
+    def test_nested_use_tree(self):
+        """``use std::{io, fmt::{self, Display}}`` — nested use tree."""
+        src = "use std::{io, fmt::{self, Display}};\n"
+        facts = self._extract(src)
+        by_name = {f.imported_name: f for f in facts}
+        # io from std
+        assert "io" in by_name
+        assert by_name["io"].imported_module == "std"
+        # fmt (self) from std::fmt
+        assert "fmt" in by_name
+        assert by_name["fmt"].imported_module == "std"
+        # Display from std::fmt
+        assert "Display" in by_name
+        assert by_name["Display"].imported_module == "std::fmt"
+
+    def test_pub_use_reexport(self):
+        """``pub use crate::foo::Bar`` — re-export."""
+        facts = self._extract("pub use crate::foo::Bar;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "crate::foo"
+        assert f.imported_name == "Bar"
+        assert f.alias is None
+
+    def test_aliased_import(self):
+        """``use std::collections::HashMap as HM`` — aliased import."""
+        facts = self._extract("use std::collections::HashMap as HM;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::collections"
+        assert f.imported_name == "HashMap"
+        assert f.alias == "HM"
+
+    def test_glob_import(self):
+        """``use std::io::*;`` — wildcard/glob import."""
+        facts = self._extract("use std::io::*;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::io"
+        assert f.imported_name == "*"
+        assert f.alias is None
+
+    def test_mod_declaration(self):
+        """``mod sub_module;`` — external module declaration."""
+        facts = self._extract("mod sub_module;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "sub_module"
+        assert f.imported_name is None
+        assert f.alias is None
+        assert f.line == 1
+
+    def test_aliased_relative_import(self):
+        """``use super::baz as b;`` — aliased relative import."""
+        facts = self._extract("use super::baz as b;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "super"
+        assert f.imported_name == "baz"
+        assert f.alias == "b"
+
+    def test_pub_crate_visibility(self):
+        """``pub(crate) use std::sync::Arc;`` — visibility modifier ignored."""
+        facts = self._extract("pub(crate) use std::sync::Arc;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::sync"
+        assert f.imported_name == "Arc"
+
+    def test_line_numbers(self):
+        """Line numbers are correctly reported for each import."""
+        src = "use std::io;\nuse std::fmt;\nmod helper;\n"
+        facts = self._extract(src)
+        lines = {f.imported_module: f.line for f in facts}
+        assert lines["std"] == 1 or lines.get("std") in (1, 2)
+        # Check at least two different lines appear
+        line_vals = [f.line for f in facts]
+        assert len(set(line_vals)) >= 2
+
+    def test_inline_mod_not_extracted(self):
+        """``mod name { ... }`` inline modules are NOT extracted as imports."""
+        src = "mod inner {\n    pub fn foo() {}\n}\n"
+        facts = self._extract(src)
+        assert len(facts) == 0
+
+
 class TestSerialization:
     def test_roundtrip(self):
         g = _make_graph()
@@ -1132,3 +1238,162 @@ class TestDeadCodeExcludePathsWithFp:
             "which is in the exclusion segment list. The buggy .replace('fp','ref_fp') "
             "corrupted 'fp_tests/' to 'ref_fp_tests/'."
         )
+
+
+class TestMultiLineImportExtraction:
+    """Verify that multi-line parenthesised imports are correctly extracted.
+
+    The old hand-rolled regex matched only single-line imports and missed
+    multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
+    statement. The tree-sitter based ``_extract_imports_python`` must handle
+    all such cases.
+    """
+
+    def _imports(self, source: str) -> list[str]:
+        """Return a sorted list of (module, imported_name) string pairs."""
+        from emend.fact_graph import _extract_imports_python
+        facts = _extract_imports_python("test_module.py", source)
+        return sorted(
+            f"{f.imported_module}:{f.imported_name or ''}"
+            for f in facts
+        )
+
+    def test_single_line_from_import(self):
+        src = "from foo import bar\n"
+        pairs = self._imports(src)
+        assert "foo:bar" in pairs
+
+    def test_multi_line_parenthesised_import(self):
+        src = "from foo import (\n    bar,\n    baz\n)\n"
+        pairs = self._imports(src)
+        assert "foo:bar" in pairs, f"Expected foo:bar in {pairs}"
+        assert "foo:baz" in pairs, f"Expected foo:baz in {pairs}"
+
+    def test_plain_import(self):
+        src = "import os\n"
+        pairs = self._imports(src)
+        assert "os:" in pairs
+
+    def test_mixed_imports(self):
+        src = (
+            "import sys\n"
+            "from foo import (\n"
+            "    bar,\n"
+            "    baz,\n"
+            ")\n"
+            "from qux import quux\n"
+        )
+        pairs = self._imports(src)
+        assert "sys:" in pairs
+        assert "foo:bar" in pairs
+        assert "foo:baz" in pairs
+        assert "qux:quux" in pairs
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: TypeScript import extraction via PyScopeResolver
+# ---------------------------------------------------------------------------
+
+
+class TestTypescriptImportExtraction:
+    """Verify that TypeScript/JavaScript imports are extracted via the
+    tree-sitter-backed PyScopeResolver (no hand-rolled regexes).
+    """
+
+    def _imports(self, filename: str, source: str):
+        """Return ImportFact list from _extract_imports_typescript."""
+        from emend.fact_graph import _extract_imports_typescript
+        return _extract_imports_typescript(filename, source)
+
+    def _modules(self, source: str) -> set[str]:
+        """Return the set of imported module paths from a TypeScript snippet."""
+        return {f.imported_module for f in self._imports("/tmp/app.ts", source)}
+
+    def _names(self, source: str) -> set[str]:
+        """Return the set of imported name values (imported_name field)."""
+        return {f.imported_name for f in self._imports("/tmp/app.ts", source)
+                if f.imported_name is not None}
+
+    def test_named_imports_extract_module_and_names(self):
+        """import { Foo, Bar } from './foo' should produce two facts."""
+        source = 'import { Foo, Bar } from "./foo";'
+        facts = self._imports("/tmp/app.ts", source)
+        modules = {f.imported_module for f in facts}
+        names = {f.imported_name for f in facts}
+        assert "./foo" in modules
+        assert "Foo" in names
+        assert "Bar" in names
+
+    def test_type_only_import_produces_fact(self):
+        """import type { Foo } from './foo' should be handled like a regular import."""
+        source = 'import type { Foo } from "./foo";'
+        facts = self._imports("/tmp/app.ts", source)
+        assert len(facts) == 1
+        assert facts[0].imported_module == "./foo"
+        assert facts[0].imported_name == "Foo"
+
+    def test_multi_line_import_extracts_all_names(self):
+        """Multi-line import { foo,\\n  bar } from 'baz' should produce two facts."""
+        source = 'import {\n  foo,\n  bar\n} from "baz";'
+        names = self._names(source)
+        assert "foo" in names, f"'foo' not found in {names}"
+        assert "bar" in names, f"'bar' not found in {names}"
+
+    def test_module_path_quotes_are_stripped(self):
+        """Module paths should not include surrounding quote characters."""
+        source = 'import { X } from "./mymodule";'
+        facts = self._imports("/tmp/app.ts", source)
+        assert len(facts) >= 1
+        for f in facts:
+            assert not f.imported_module.startswith('"'), (
+                f"Module path should not have leading quote: {f.imported_module!r}"
+            )
+            assert not f.imported_module.endswith('"'), (
+                f"Module path should not have trailing quote: {f.imported_module!r}"
+            )
+
+    def test_line_numbers_are_zero(self):
+        """PyScopeResolver.imports_in_file() does not return line numbers; line=0."""
+        source = 'import { A } from "./a";'
+        facts = self._imports("/tmp/app.ts", source)
+        for f in facts:
+            assert f.line == 0, f"Expected line=0, got line={f.line}"
+
+    def test_tsx_extension_works(self):
+        """TSX files (.tsx) should also be handled."""
+        source = 'import React from "react";'
+        facts = self._imports("/tmp/Component.tsx", source)
+        assert any(f.imported_module == "react" for f in facts), (
+            f"Expected 'react' in facts, got: {facts}"
+        )
+
+    def test_js_extension_works(self):
+        """JS files (.js) should also be handled."""
+        source = 'import { helper } from "./utils";'
+        facts = self._imports("/tmp/app.js", source)
+        modules = {f.imported_module for f in facts}
+        assert "./utils" in modules, f"Expected './utils' in {modules}"
+
+    def test_side_effect_import_omitted(self):
+        """Side-effect imports (import './side-effect') are not supported by
+        PyScopeResolver.imports_in_file() and are silently omitted."""
+        source = 'import "./side-effect";'
+        facts = self._imports("/tmp/app.ts", source)
+        # The scope resolver does not track side-effect imports; result may be
+        # empty.  We just verify no exception is raised.
+        assert isinstance(facts, list)
+
+    def test_export_from_omitted(self):
+        """Re-export statements (export { X } from './bar') are not supported by
+        PyScopeResolver.imports_in_file() and are silently omitted."""
+        source = 'export { X } from "./bar";'
+        facts = self._imports("/tmp/app.ts", source)
+        # May be empty — just verify no exception is raised.
+        assert isinstance(facts, list)
+
+    def test_require_omitted(self):
+        """CommonJS require() calls are not handled by PyScopeResolver."""
+        source = 'const { a, b } = require("./c");'
+        facts = self._imports("/tmp/app.ts", source)
+        # May be empty — just verify no exception is raised.
+        assert isinstance(facts, list)

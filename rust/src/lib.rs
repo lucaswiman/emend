@@ -245,6 +245,32 @@ fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, us
     Ok(pattern::collect_identifier_positions(source))
 }
 
+/// Collect all string literal nodes from source code.
+///
+/// Returns a list of (start_byte, end_byte, start_line, start_col, end_line, end_col, content)
+/// tuples where content is the unquoted inner text of the string.
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
+/// Defaults to "py" if not provided.
+#[pyfunction]
+#[pyo3(signature = (source, ext="py"))]
+fn collect_string_literals(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, u32, u32, u32, u32, String)>> {
+    Ok(pattern::collect_string_literals(source, ext))
+}
+
+/// Collect all comment nodes from source code.
+///
+/// Returns a list of (start_line, start_col, text) tuples where text is the
+/// full comment text including the leading comment prefix (e.g. `# ...`).
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
+/// Defaults to "py" if not provided.
+#[pyfunction]
+#[pyo3(signature = (source, ext="py"))]
+fn collect_comments(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, String)>> {
+    Ok(pattern::collect_comments(source, ext))
+}
+
 /// Extract all call sites from source code using tree-sitter.
 ///
 /// Returns a list of (callee, [arg1, arg2, ...], line, col, is_method) tuples.
@@ -291,6 +317,8 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbols::get_symbol_component_list_items, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_string_literals, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_comments, m)?)?;
     m.add_function(wrap_pyfunction!(extract_call_sites, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;

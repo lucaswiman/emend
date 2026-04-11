@@ -111,7 +111,7 @@ improvement and can be added incrementally without changing the regex logic.
 
 ## Acceptance Criteria
 
-- [ ] `_NOQA_RE` has a single canonical definition (not duplicated).
-- [ ] Comment prefix (`#`, `//`) read from `config.toml` in each language.
-- [ ] `RegexCommentHandler` no longer takes a hardcoded prefix argument.
-- [ ] All existing noqa/dead-code tests pass.
+- [x] `_NOQA_RE` has a single canonical definition (not duplicated).
+- [x] Comment prefix (`#`, `//`) read from `config.toml` in each language.
+- [x] `RegexCommentHandler` no longer takes a hardcoded prefix argument.
+- [x] All existing noqa/dead-code tests pass.

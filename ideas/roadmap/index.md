@@ -33,21 +33,21 @@ code.
 
 ### High Priority (Source Code Parsing Regressions Most Likely)
 
-- [ ] [Phase 1: Python `fact_imp` Import Regex](./phase-1-python-fact-imp-import-regex.md)
-- [ ] [Phase 2: Python `__all__` Export Detection](./phase-2-python-all-export-detection.md)
-- [ ] [Phase 3: TypeScript Import Parsing](./phase-3-typescript-import-parsing.md)
-- [ ] [Phase 4: Rust Module/Import Parsing](./phase-4-rust-import-parsing.md)
+- [x] [Phase 1: Python `fact_imp` Import Regex](./phase-1-python-fact-imp-import-regex.md)
+- [x] [Phase 2: Python `__all__` Export Detection](./phase-2-python-all-export-detection.md)
+- [x] [Phase 3: TypeScript Import Parsing](./phase-3-typescript-import-parsing.md)
+- [x] [Phase 4: Rust Module/Import Parsing](./phase-4-rust-import-parsing.md)
 
 ### Medium Priority (Structural Improvements)
 
-- [ ] [Phase 5: Config-Driven Export Detection](./phase-5-config-driven-export-detection.md)
-- [ ] [Phase 6: noqa Comment Detection](./phase-6-noqa-comment-detection.md)
-- [ ] [Phase 7: Python Plugin `ast.parse` Migration](./phase-7-python-plugin-ast-migration.md)
-- [ ] [Phase 8: `language_plugins.py` Import Handling](./phase-8-language-plugins-import-handling.md)
+- [x] [Phase 5: Config-Driven Export Detection](./phase-5-config-driven-export-detection.md)
+- [x] [Phase 6: noqa Comment Detection](./phase-6-noqa-comment-detection.md)
+- [x] [Phase 7: Python Plugin `ast.parse` Migration](./phase-7-python-plugin-ast-migration.md)
+- [x] [Phase 8: `language_plugins.py` Import Handling](./phase-8-language-plugins-import-handling.md)
 
 ### Lower Priority (Complex / Needs Rust Extension Work)
 
-- [ ] [Phase 9: DSL Region Detection](./phase-9-dsl-region-detection.md)
+- [x] [Phase 9: DSL Region Detection](./phase-9-dsl-region-detection.md)
 
 ## Design Principles
 

@@ -1825,3 +1825,87 @@ class TestDeadCodeUnreachableBlocks:
             f"False-positive unreachable blocks: "
             f"{[(b.func_qn, b.start_line, b.end_line) for b in unreachable]}"
         )
+
+
+class TestExtractAllExportsText:
+    """Unit tests for _extract_all_exports_text (Phase 2: tree-sitter migration)."""
+
+    def test_basic_list(self):
+        """Basic __all__ = ['foo', 'bar'] is extracted correctly."""
+        from emend.transform import _extract_all_exports_text
+
+        source = "__all__ = ['foo', 'bar']\n"
+        result = _extract_all_exports_text(source)
+        assert result == {"foo", "bar"}
+
+    def test_basic_double_quotes(self):
+        """Double-quoted names in __all__ are extracted."""
+        from emend.transform import _extract_all_exports_text
+
+        source = '__all__ = ["alpha", "beta"]\n'
+        result = _extract_all_exports_text(source)
+        assert result == {"alpha", "beta"}
+
+    def test_multiline_tuple(self):
+        """Multi-line tuple assignment is handled correctly."""
+        from emend.transform import _extract_all_exports_text
+
+        source = '__all__ = (\n    "foo",\n    "bar",\n)\n'
+        result = _extract_all_exports_text(source)
+        assert result == {"foo", "bar"}
+
+    def test_multiline_list(self):
+        """Multi-line list assignment is handled correctly."""
+        from emend.transform import _extract_all_exports_text
+
+        source = "__all__ = [\n    'alpha',\n    'beta',\n    'gamma',\n]\n"
+        result = _extract_all_exports_text(source)
+        assert result == {"alpha", "beta", "gamma"}
+
+    def test_no_all(self):
+        """Files without __all__ return an empty set."""
+        from emend.transform import _extract_all_exports_text
+
+        source = "def foo():\n    pass\n"
+        result = _extract_all_exports_text(source)
+        assert result == set()
+
+    def test_all_in_docstring_no_false_positive(self):
+        """__all__ appearing inside a string literal must not be detected."""
+        from emend.transform import _extract_all_exports_text
+
+        source = (
+            'def helper():\n'
+            '    """Example: __all__ = ["not_exported"]"""\n'
+            '    pass\n'
+        )
+        result = _extract_all_exports_text(source)
+        assert result == set(), (
+            "False positive: __all__ inside a docstring should not be detected"
+        )
+
+    def test_all_exports_used_by_dead_code_detection(self, tmp_path):
+        """Integration: symbols in __all__ (multi-line tuple) must not be flagged as dead.
+
+        Uses names longer than 3 characters to exercise the string-literal
+        filter path (which skips names of length <= 3).
+        """
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(
+            '__all__ = (\n'
+            '    "public_alpha",\n'
+            '    "public_beta",\n'
+            ')\n\n'
+            'def public_alpha():\n    return 1\n\n'
+            'def public_beta():\n    return 2\n\n'
+            'def hidden_func():\n    return 3\n'
+        )
+
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "public_alpha" not in dead_names, "__all__ member 'public_alpha' should not be dead"
+        assert "public_beta" not in dead_names, "__all__ member 'public_beta' should not be dead"
+        assert "hidden_func" in dead_names, "non-exported function should be dead"

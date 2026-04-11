@@ -14,6 +14,6 @@ def create_plugin() -> LanguagePlugin:
             extensions=["ts", "tsx", "js", "jsx"],
             import_keywords=("import", "require"),
         ),
-        comment_handler=DocCommentHandler("//", doc_style="block"),
+        comment_handler=DocCommentHandler(doc_style="block", language="typescript"),
         pattern_compiler=TreeSitterPatternCompiler("typescript"),
     )

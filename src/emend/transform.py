@@ -16,6 +16,7 @@ import io
 import json
 import time
 from .component_selector import ExtendedSelector, parse_extended_selector
+from .language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from .pattern import (
     parse_pattern,
     compile_pattern_to_rust_ir,
@@ -589,7 +590,7 @@ def _build_fact_sym_rows(
     from emend.language_registry import detect_language
     lang = detect_language(abs_path) or "python"
     if lang == "python":
-        exported_names = _extract_all_exports_text(content)
+        exported_names = _extract_all_exports_text(content, abs_path)
     else:
         from emend.language_registry import detect_exported_names
         exported_names = detect_exported_names(content, lang)
@@ -674,11 +675,6 @@ def _extract_file_facts(
     """
     from emend.fact_graph import _normalize_qn
 
-    import_re = re.compile(
-        r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
-        re.MULTILINE,
-    )
-
     result: dict[str, list] = {
         "fact_sym": [], "fact_ref": [], "fact_imp": [], "fg_sym": [],
         "dec": [], "cfg_blocks": [], "cfg_edges": [], "fg_refs": [],
@@ -747,16 +743,6 @@ def _extract_file_facts(
             pass
 
     # -- Extract imports (all languages)
-    # Fast Python-regex import graph (fact_imp) is only used for Python.
-    if ext == "py":
-        try:
-            for m_match in import_re.finditer(content):
-                mod = m_match.group(1) or m_match.group(2)
-                if mod:
-                    result["fact_imp"].append([rel_path, mod])
-        except Exception:
-            pass
-
     # Detailed imports via _extract_imports (dispatches by language for TS/Rust).
     for imp in _extract_imports(rel_path, content):
         result["imports"].append([
@@ -764,6 +750,16 @@ def _extract_file_facts(
             imp.imported_name or "", imp.line,
             imp.alias or "",
         ])
+
+    # Populate fact_imp from structured imports (Python only).
+    # Uses the already-computed _extract_imports results to avoid a second regex pass.
+    if ext == "py":
+        seen_modules: set[str] = set()
+        for imp_row in result["imports"]:
+            mod = imp_row[1]  # imported_module
+            if mod and mod not in seen_modules:
+                seen_modules.add(mod)
+                result["fact_imp"].append([rel_path, mod])
 
     # -- source_loc (from symbol facts)
     for sf in sym_facts_for_file:
@@ -1250,22 +1246,35 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     return None
 
 
-_ALL_RE = re.compile(
-    r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
-    re.MULTILINE | re.DOTALL,
-)
-_ALL_NAME_RE = re.compile(r"""['"](\w+)['"]""")
+def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> set[str]:
+    """Extract names from ``__all__`` using tree-sitter pattern matching.
+
+    Uses ``find_pattern`` so that the match is tree-sitter-based and respects
+    syntactic boundaries (won't match ``__all__`` inside string literals or
+    comments).  The small inner regex that pulls quoted names out of the
+    already-parsed ``$NAMES`` captured text is acceptable because it operates
+    on a structurally extracted sub-tree, not raw source.
+    """
+    names: set[str] = set()
+    try:
+        matches = find_pattern(
+            "__all__ = $NAMES",
+            file_path,
+            source_override=source,
+            language="python",
+        )
+    except Exception:
+        return names
+    for m in matches:
+        raw = m.captures.get("NAMES", "")
+        for n in re.findall(r"""['"](\w+)['"]""", raw):
+            names.add(n)
+    return names
 
 
-def _extract_all_exports_text(source: str) -> set[str]:
-    """Extract names from ``__all__`` using regex (no AST dependency)."""
-    m = _ALL_RE.search(source)
-    if m is None:
-        return set()
-    return set(_ALL_NAME_RE.findall(m.group(1)))
-
-
-_NOQA_RE = re.compile(r'(?:#|//)\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+# Build from the canonical pattern so the noqa fragment is not duplicated.
+# Matches both Python (#) and C-style (//) comment prefixes.
+_NOQA_RE = re.compile(r'(?:#|//)\s*' + _NOQA_PATTERN, re.IGNORECASE)
 
 
 def _extract_noqa_lines(source: str) -> set[int]:
@@ -1427,7 +1436,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 )
 
                 # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports_text(content)
+                exported_names = _extract_all_exports_text(content, py_file)
                 noqa_lines = _extract_noqa_lines(content)
 
                 for sym in syms_for_file:
@@ -1464,18 +1473,11 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
-        if need_import:
+        if need_import and scope_indexed:
             try:
-                # Use a lightweight regex-based import extraction
-                # (avoids importing the Rust module in subprocesses)
-                import_re = re.compile(
-                    r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
-                    re.MULTILINE,
-                )
-                for m_match in import_re.finditer(content):
-                    mod = m_match.group(1) or m_match.group(2)
-                    if mod:
-                        import_rows.append((content_hash, py_file, mod))
+                for _local, _mod, _imp_name, _is_star in scope_resolver.imports_in_file(py_file):
+                    if _mod:
+                        import_rows.append((content_hash, py_file, _mod))
             except Exception:
                 pass
 

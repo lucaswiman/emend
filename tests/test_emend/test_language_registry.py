@@ -7,6 +7,7 @@ from emend.language_registry import (
     get_all_languages,
     matches_language,
     is_source_file,
+    detect_exported_names,
 )
 from emend.cli import resolve_files
 
@@ -139,3 +140,124 @@ def test_resolve_files_glob_typescript(tmp_path):
     names = {f.name for f in files}
     assert "b.ts" in names
     assert "a.py" not in names
+
+
+# ---------------------------------------------------------------------------
+# detect_exported_names — TypeScript
+# ---------------------------------------------------------------------------
+
+def test_detect_exported_names_ts_function():
+    code = "export function foo(): void {}\nfunction internal(): void {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "foo" in result
+    assert "internal" not in result
+
+
+def test_detect_exported_names_ts_class():
+    code = "export class Bar {}\nclass NotExported {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "Bar" in result
+    assert "NotExported" not in result
+
+
+def test_detect_exported_names_ts_const():
+    code = "export const baz = 42;\nconst hidden = 1;\n"
+    result = detect_exported_names(code, "typescript")
+    assert "baz" in result
+    assert "hidden" not in result
+
+
+def test_detect_exported_names_ts_let_var():
+    code = "export let x = 3;\nlet y = 4;\nexport var z = 5;\nvar w = 6;\n"
+    result = detect_exported_names(code, "typescript")
+    assert "x" in result
+    assert "z" in result
+    assert "y" not in result
+    assert "w" not in result
+
+
+def test_detect_exported_names_ts_interface():
+    code = "export interface IFoo { x: number; }\ninterface IBar {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "IFoo" in result
+    assert "IBar" not in result
+
+
+def test_detect_exported_names_ts_type():
+    code = "export type MyType = string;\ntype Other = number;\n"
+    result = detect_exported_names(code, "typescript")
+    assert "MyType" in result
+    assert "Other" not in result
+
+
+def test_detect_exported_names_ts_enum():
+    code = "export enum Color { Red, Green, Blue }\nenum Status { On, Off }\n"
+    result = detect_exported_names(code, "typescript")
+    assert "Color" in result
+    assert "Status" not in result
+
+
+def test_detect_exported_names_ts_named_block():
+    code = "function foo() {}\nfunction bar() {}\nexport { foo, bar };\n"
+    result = detect_exported_names(code, "typescript")
+    assert "foo" in result
+    assert "bar" in result
+
+
+def test_detect_exported_names_ts_named_block_with_alias():
+    code = "function foo() {}\nexport { foo as f };\n"
+    result = detect_exported_names(code, "typescript")
+    # Original name (before 'as') should be in the result
+    assert "foo" in result
+    assert "f" not in result
+
+
+def test_detect_exported_names_ts_default_class():
+    code = "export default class Anonymous {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "Anonymous" in result
+
+
+def test_detect_exported_names_ts_abstract_class():
+    code = "export abstract class AbstractFoo {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "AbstractFoo" in result
+
+
+def test_detect_exported_names_ts_reexport_not_included():
+    # Re-exports: `export { X } from "module"` — X is from another module,
+    # not defined here, so it should NOT be in the result.
+    code = 'export { Foo } from "./other";\n'
+    result = detect_exported_names(code, "typescript")
+    assert "Foo" not in result
+
+
+def test_detect_exported_names_ts_python_empty():
+    # Python always returns empty set
+    py_code = "def foo(): pass\n__all__ = ['foo']\n"
+    assert detect_exported_names(py_code, "python") == set()
+
+
+# ---------------------------------------------------------------------------
+# detect_exported_names — Rust
+# ---------------------------------------------------------------------------
+
+def test_detect_exported_names_rust_pub_fn():
+    code = "pub fn exported_fn() {}\nfn private_fn() {}\n"
+    result = detect_exported_names(code, "rust")
+    assert "exported_fn" in result
+    assert "private_fn" not in result
+
+
+def test_detect_exported_names_rust_pub_struct():
+    code = "pub struct ExportedStruct {}\nstruct PrivateStruct {}\n"
+    result = detect_exported_names(code, "rust")
+    assert "ExportedStruct" in result
+    assert "PrivateStruct" not in result
+
+
+def test_detect_exported_names_rust_pub_crate():
+    code = "pub(crate) fn crate_fn() {}\nfn private_fn() {}\n"
+    result = detect_exported_names(code, "rust")
+    assert "crate_fn" in result
+    assert "private_fn" not in result

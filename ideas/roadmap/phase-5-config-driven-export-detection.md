@@ -109,9 +109,9 @@ a `visibility` or `is_public` field; if not, extend `emend_core`.
 
 ## Acceptance Criteria
 
-- [ ] `_get_export_patterns()` removed.
-- [ ] `_export_pattern_cache` removed.
-- [ ] `export_patterns` and `named_export_pattern` keys removed from all `config.toml` files.
-- [ ] `detect_exported_names()` uses tree-sitter node types / `find_pattern`.
-- [ ] All existing export detection tests pass.
-- [ ] New edge-case export tests added and passing.
+- [x] `_get_export_patterns()` removed.
+- [x] `_export_pattern_cache` removed.
+- [x] `export_patterns` and `named_export_pattern` keys removed from all `config.toml` files.
+- [x] `detect_exported_names()` uses tree-sitter node types / `find_pattern`.
+- [x] All existing export detection tests pass.
+- [x] New edge-case export tests added and passing.
