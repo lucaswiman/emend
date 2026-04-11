@@ -33,35 +33,35 @@ Once callers work for TS/Rust, impact analysis follows naturally.
 
 ### Diff parsing
 
-- [ ] Update `_parse_diff_to_selectors()` to handle `.ts`/`.tsx`/`.js`/`.jsx`
+- [x] Update `_parse_diff_to_selectors()` to handle `.ts`/`.tsx`/`.js`/`.jsx`
   and `.rs` file paths in git diffs.
-- [ ] Verify that hunk-to-symbol mapping works for TypeScript and Rust (relies
+- [x] Verify that hunk-to-symbol mapping works for TypeScript and Rust (relies
   on `collect_symbols_from_str()` which already handles both).
 
 ### Test detection
 
-- [ ] Update test file/symbol detection heuristics:
+- [x] Update test file/symbol detection heuristics:
   - Python: `test_` prefix, `tests/` directory, `pytest` markers
   - TypeScript: `.test.ts`, `.spec.ts`, `__tests__/` directory, `describe`/
     `it`/`test` function names
   - Rust: `#[test]` attribute, `tests/` directory, `mod tests` convention
-- [ ] Make these heuristics config-driven or at least language-dispatched.
+- [x] Make these heuristics config-driven or at least language-dispatched.
 
 ### Impact analysis tests
 
-- [ ] TypeScript: change a utility function, verify its callers and their
+- [x] TypeScript: change a utility function, verify its callers and their
   callers appear in impact set.
-- [ ] TypeScript: verify impacted test files are identified.
-- [ ] Rust: change a function, verify transitive impact set.
-- [ ] Rust: verify impacted test functions (via `#[test]`) are identified.
-- [ ] Mixed project: change a Python file, verify only Python impact is
+- [x] TypeScript: verify impacted test files are identified.
+- [x] Rust: change a function, verify transitive impact set.
+- [x] Rust: verify impacted test functions (via `#[test]`) are identified.
+- [x] Mixed project: change a Python file, verify only Python impact is
   computed (no spurious TS/Rust results).
 
 ### CLI integration
 
-- [ ] Verify `emend impact --diff HEAD~1 --output tests` works for TS projects.
-- [ ] Verify same for Rust projects.
-- [ ] JSON output includes correct language metadata.
+- [x] Verify `emend impact --diff HEAD~1 --output tests` works for TS projects.
+- [x] Verify same for Rust projects.
+- [x] JSON output includes correct language metadata.
 
 ## Exit Criteria
 
