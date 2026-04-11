@@ -171,10 +171,12 @@ class TreeSitterImportHandler(ImportHandler):
             if stripped.startswith(kw + " ") or stripped.startswith(kw + "("):
                 return True
             # Handle lines that begin with visibility modifiers (e.g. ``pub use``)
-            # Use word-boundary check to avoid "use" matching "excuse"
-            if stripped.startswith("pub ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
+            # Use word-boundary check to avoid "use" matching "excuse".
+            # Split on whitespace to get words (no regex needed for whole-word check).
+            words = stripped.split()
+            if stripped.startswith("pub ") and kw in words:
                 return True
-            if stripped.startswith("export ") and re.search(r'\b' + re.escape(kw) + r'\b', stripped):
+            if stripped.startswith("export ") and kw in words:
                 return True
         # TypeScript/JavaScript re-exports: ``export { X } from 'Y'``
         # These act as imports and should be included.
@@ -301,16 +303,31 @@ class TreeSitterImportHandler(ImportHandler):
 
         Uses a simple heuristic: drop lines that contain both *module* and
         *name* and look like imports.
+
+        Module is checked with ``in`` (it may appear as a quoted string or
+        path fragment).  Name is checked as a whole word by splitting on
+        punctuation/whitespace to avoid false positives on substrings.
+
+        TODO: replace with tree-sitter byte-range editing once ``emend_core``
+        exposes an ``import_node_range(source, module, name, ext)`` helper.
+        That would correctly handle grouped imports such as
+        ``import { A, B } from "mod"`` where only one name must be removed.
         """
         lines = source.splitlines(keepends=True)
         result: list[str] = []
-        mod_pat = re.compile(r'\b' + re.escape(module) + r'\b')
-        name_pat = re.compile(r'\b' + re.escape(name) + r'\b')
         for line in lines:
             stripped = line.strip()
+            # Split on common punctuation as well as whitespace so that
+            # ``{ foo }`` yields the word ``foo`` and ``std::io;`` yields
+            # both ``std`` and ``io`` (Rust path separator ``::`` acts as
+            # a word boundary in identifier matching).
+            words = stripped.replace(",", " ").replace("{", " ").replace(
+                "}", " ").replace("(", " ").replace(")", " ").replace(
+                "'", " ").replace('"', " ").replace("::", " ").replace(
+                ";", " ").split()
             if (self._is_import_line(stripped)
-                    and mod_pat.search(stripped)
-                    and name_pat.search(stripped)):
+                    and module in stripped
+                    and name in words):
                 continue
             result.append(line)
         return "".join(result)
@@ -381,8 +398,14 @@ class DocCommentHandler(RegexCommentHandler):
     """
 
     # JSDoc: /** ... */ (multiline, non-greedy)
+    # TODO(phase-8): replace with tree-sitter ``comment`` node traversal once
+    # ``emend_core`` exposes a helper that returns (start_byte, end_byte, text)
+    # for all comment nodes in a source string.  JSDoc comments are ``comment``
+    # nodes whose text starts with ``/**``; no regex needed at that point.
     _JSDOC_RE = re.compile(r'/\*\*.*?\*/', re.DOTALL)
     # Rust doc comments: consecutive lines starting with /// or //!
+    # TODO(phase-8): replace with tree-sitter ``line_comment`` node traversal
+    # (node text starting with ``///`` or ``//!``) once emend_core exposes it.
     _RUST_DOC_LINE_RE = re.compile(r'^[ \t]*(?:///|//!)', re.MULTILINE)
 
     def __init__(

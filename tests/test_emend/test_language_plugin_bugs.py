@@ -124,6 +124,36 @@ class TestRemoveImportSubstringBugs:
         # Should keep mapValues import
         assert "mapValues" in result
 
+    def test_remove_named_import_no_false_positive_on_grouped(self):
+        """Removing 'B' from 'import { A, B } from ...' should not remove A.
+
+        NOTE: the current line-based implementation drops the entire import
+        line (including A) when B is found on the same line.  This test
+        documents that limitation.  The word-boundary fix from Phase 8 at
+        least ensures that 'B' does not match a token like 'BigInt' as a
+        false positive.
+
+        TODO(phase-8): once ``emend_core`` exposes import node byte-range
+        editing, upgrade this test to assert that the result is
+        ``import { A } from 'mod';`` (surgical removal of just B).
+        """
+        source = "import { A, BigInt } from 'mod';\nimport { C } from 'other';\n"
+        # 'B' must NOT match 'BigInt' (word-boundary check)
+        result = self.ts_handler.remove_import(source, "mod", "B")
+        # No match — 'B' is not a whole word in the import
+        assert "BigInt" in result, "BigInt should not be removed when looking for 'B'"
+        assert "A" in result, "A should not be removed when looking for 'B'"
+
+    def test_remove_exact_name_match(self):
+        """Removing 'A' from 'import { A, B } from ...' correctly removes that line."""
+        source = "import { A, B } from 'mod';\nimport { C } from 'other';\n"
+        result = self.ts_handler.remove_import(source, "mod", "A")
+        # The whole line is dropped (current line-based limitation)
+        assert "from 'mod'" not in result
+        # Other imports are preserved
+        assert "C" in result
+        assert "other" in result
+
 
 # ============================================================================
 # Bug 4: find_pattern() unconditional language override

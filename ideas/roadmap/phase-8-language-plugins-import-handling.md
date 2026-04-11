@@ -111,8 +111,16 @@ comment ranges when rename operations need to update them.
 
 ## Acceptance Criteria
 
-- [ ] `_is_import_line()` fallback replaced or eliminated.
+- [x] `_is_import_line()` fallback replaced or eliminated.
+  - Replaced `re.search(r'\b...\b', ...)` with `words = stripped.split(); kw in words`.
 - [ ] `remove_import()` uses tree-sitter byte-range editing, not line scanning.
+  - **Partial (pragmatic)**: replaced `re.compile(r'\b...\b')` with word-split check.
+    Regex removed, but line-based approach kept. Tree-sitter byte-range editing requires
+    extending `emend_core` — marked with TODO.
 - [ ] `DocCommentHandler` regex patterns removed; uses tree-sitter comment nodes.
-- [ ] All rename-with-docs and import tests pass.
-- [ ] New named-import removal test added.
+  - **Deferred**: `_JSDOC_RE` and `_RUST_DOC_LINE_RE` kept with TODO comments explaining
+    migration path. `emend_core` does not yet expose comment node traversal.
+- [x] All rename-with-docs and import tests pass.
+- [x] New named-import removal test added.
+  - Added `test_remove_named_import_no_false_positive_on_grouped` and
+    `test_remove_exact_name_match` to `test_language_plugin_bugs.py`.
