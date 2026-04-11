@@ -98,9 +98,6 @@ locals_marker = ""
 [exports]
 public_by_default = false
 private_prefix = ""
-export_patterns = [
-    '^\s*pub(?:\s*\([^)]*\))?\s+(?:async\s+)?(?:unsafe\s+)?(?:fn\s+|struct\s+|enum\s+|trait\s+|type\s+|const\s+|static\s+|mod\s+|use\s+|extern\s+"[^"]*"\s+fn\s+)(\w+)',
-]
 
 [symbols]
 function_node = "function_item"

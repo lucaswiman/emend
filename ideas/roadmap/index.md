@@ -40,7 +40,7 @@ code.
 
 ### Medium Priority (Structural Improvements)
 
-- [ ] [Phase 5: Config-Driven Export Detection](./phase-5-config-driven-export-detection.md)
+- [x] [Phase 5: Config-Driven Export Detection](./phase-5-config-driven-export-detection.md)
 - [ ] [Phase 6: noqa Comment Detection](./phase-6-noqa-comment-detection.md)
 - [x] [Phase 7: Python Plugin `ast.parse` Migration](./phase-7-python-plugin-ast-migration.md)
 - [ ] [Phase 8: `language_plugins.py` Import Handling](./phase-8-language-plugins-import-handling.md)
