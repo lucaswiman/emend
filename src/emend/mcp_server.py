@@ -568,7 +568,7 @@ def move(
 def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | None, format: str, project: str | None) -> str:
     """Symbol-level call graph query."""
     from emend.component_selector import parse_extended_selector
-    from emend.transform import _find_project_root, _file_to_module, _get_or_build_fact_graph
+    from emend.transform import _find_project_root, _file_to_module, _normalize_module_qn, _get_or_build_fact_graph
 
     sel = parse_extended_selector(symbol)
     sym_name = sel.symbol_path[-1] if sel.symbol_path else None
@@ -581,7 +581,7 @@ def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | No
     fg = _get_or_build_fact_graph(scan_root)
 
     if sel.file_path:
-        target_module = _file_to_module(sel.file_path, module_root)
+        target_module = _normalize_module_qn(_file_to_module(sel.file_path, module_root))
         qn = ".".join([target_module] + sel.symbol_path) if target_module else ".".join(sel.symbol_path)
     else:
         qn = ".".join(sel.symbol_path)
