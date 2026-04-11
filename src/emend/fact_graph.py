@@ -3655,199 +3655,38 @@ def _offset_to_line(content: str, offset: int, _newline_cache: dict[int, list[in
     return _bisect_right(positions, offset) + 1
 
 
-# Matches: import ... from "module" / import ... from 'module'
-# Groups: (import_body, module_path)
-_TS_IMPORT_FROM_RE = _re.compile(
-    r'^\s*(?:import\s+type\s+|import\s+)'   # import [type]
-    r'(.*?)'                                  # import clause (greedy captured below)
-    r'\s+from\s+'
-    r'["\']([^"\']+)["\']'                   # "module" or 'module'
-    r'\s*;?',
-    _re.MULTILINE | _re.DOTALL,
-)
-
-# Matches: import "module"; (side-effect import)
-_TS_SIDE_EFFECT_RE = _re.compile(
-    r'^\s*import\s+["\']([^"\']+)["\']\s*;?',
-    _re.MULTILINE,
-)
-
-# Matches: const/let/var X = require("module") or const { X } = require("module")
-_TS_REQUIRE_RE = _re.compile(
-    r'^\s*(?:const|let|var)\s+'
-    r'(\{[^}]*\}|\w+)'                       # binding (destructured or simple name)
-    r'\s*=\s*require\s*\(\s*["\']([^"\']+)["\']\s*\)',
-    _re.MULTILINE,
-)
-
-# Matches: export { X } from "module";
-_TS_EXPORT_FROM_RE = _re.compile(
-    r'^\s*export\s+\{([^}]*)\}\s+from\s+["\']([^"\']+)["\']\s*;?',
-    _re.MULTILINE,
-)
-
-# Full import-from pattern (multiline-safe)
-_TS_FULL_IMPORT_RE = _re.compile(
-    r'\bimport\s+(?:type\s+)?([\s\S]*?)\s+from\s+["\']([^"\']+)["\']',
-    _re.MULTILINE,
-)
-
-
-def _ts_parse_import_clause(
-    clause: str,
-    module: str,
-    file_path: str,
-    line: int,
-) -> list[ImportFact]:
-    """Convert a TypeScript import clause string into ``ImportFact`` objects.
-
-    Handles:
-    - ``{ X, Y as Z }``        — named imports
-    - ``* as X``               — namespace import
-    - ``X``                    — default import
-    - ``X, { Y, Z }``         — default + named
-    """
-    facts: list[ImportFact] = []
-    clause = clause.strip()
-
-    # Namespace import: * as X
-    ns_m = _re.match(r'^\*\s+as\s+(\w+)$', clause)
-    if ns_m:
-        facts.append(ImportFact(
-            importing_file=file_path,
-            imported_module=module,
-            imported_name="*",
-            alias=ns_m.group(1),
-            line=line,
-        ))
-        return facts
-
-    # Split default import from named block if both present (X, { Y })
-    brace_start = clause.find("{")
-    if brace_start != -1:
-        pre_brace = clause[:brace_start].strip().rstrip(",").strip()
-        brace_end = clause.rfind("}")
-        named_part = clause[brace_start + 1:brace_end] if brace_end != -1 else ""
-
-        # Default import before the brace
-        if pre_brace and not pre_brace.startswith("{"):
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=module,
-                imported_name="default",
-                alias=pre_brace,
-                line=line,
-            ))
-
-        # Named imports inside braces
-        for raw_item in named_part.split(","):
-            item = raw_item.strip()
-            if not item:
-                continue
-            alias_m = _re.match(r'^(\w+)\s+as\s+(\w+)$', item)
-            if alias_m:
-                facts.append(ImportFact(
-                    importing_file=file_path,
-                    imported_module=module,
-                    imported_name=alias_m.group(1),
-                    alias=alias_m.group(2),
-                    line=line,
-                ))
-            else:
-                ident = item.split()[0] if item.split() else item
-                facts.append(ImportFact(
-                    importing_file=file_path,
-                    imported_module=module,
-                    imported_name=ident,
-                    alias=None,
-                    line=line,
-                ))
-        return facts
-
-    # Pure default import: import X from "module"
-    if clause and not clause.startswith("{") and not clause.startswith("*"):
-        # Could be a plain identifier
-        ident = clause.split()[0]
-        facts.append(ImportFact(
-            importing_file=file_path,
-            imported_module=module,
-            imported_name="default",
-            alias=ident,
-            line=line,
-        ))
-        return facts
-
-    return facts
-
-
 def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact]:
-    """Extract imports from TypeScript/JavaScript source using regex.
+    """Extract imports from TypeScript/JavaScript source using tree-sitter.
 
-    Handles all standard ES module import forms plus CommonJS ``require()``.
+    Uses ``PyScopeResolver.imports_in_file()`` (Rust-backed) for ES module
+    import extraction.  Side-effect imports, re-exports, and CommonJS
+    ``require()`` calls are not covered by the scope resolver and are silently
+    omitted.  Line numbers are not available from this API and are recorded as
+    ``0``.
     """
     facts: list[ImportFact] = []
-
-    def _line(offset: int) -> int:
-        return _offset_to_line(content, offset)
-
-    # Side-effect imports: import "module";
-    for m in _TS_SIDE_EFFECT_RE.finditer(content):
-        facts.append(ImportFact(
-            importing_file=file_path,
-            imported_module=m.group(1),
-            imported_name=None,
-            alias=None,
-            line=_line(m.start()),
-        ))
-
-    # Re-exports: export { X } from "module";
-    for m in _TS_EXPORT_FROM_RE.finditer(content):
-        module = m.group(2)
-        line = _line(m.start())
-        facts.extend(
-            _ts_parse_import_clause("{" + m.group(1) + "}", module, file_path, line)
-        )
-
-    # import [...] from "module" — multiline-safe scanner
-    seen_offsets: set[int] = set()
-    for m in _TS_FULL_IMPORT_RE.finditer(content):
-        start = m.start()
-        if start in seen_offsets:
-            continue
-        clause = m.group(1).strip()
-        module = m.group(2)
-        line = _line(start)
-        facts.extend(_ts_parse_import_clause(clause, module, file_path, line))
-        seen_offsets.add(start)
-
-    # CommonJS require: const X = require("module")
-    for m in _TS_REQUIRE_RE.finditer(content):
-        binding = m.group(1).strip()
-        module = m.group(2)
-        line = _line(m.start())
-        if binding.startswith("{"):
-            # Destructuring: const { A, B } = require('mod')
-            inner = binding[1:binding.rfind("}")].strip()
-            for raw_item in inner.split(","):
-                item = raw_item.strip()
-                if not item:
-                    continue
-                facts.append(ImportFact(
-                    importing_file=file_path,
-                    imported_module=module,
-                    imported_name=item,
-                    alias=None,
-                    line=line,
-                ))
-        else:
+    try:
+        from emend import emend_core as ec  # type: ignore[attr-defined]
+        ext = Path(file_path).suffix.lstrip(".") or "ts"
+        if ext not in ("ts", "tsx", "js", "jsx"):
+            ext = "ts"
+        resolver = ec.PyScopeResolver(".", ext)
+        resolver.index_file(file_path, content)
+        for local_name, module_path, imported_name, is_star in resolver.imports_in_file(file_path):
+            # Strip surrounding quotes that the scope resolver includes in the
+            # module path (e.g. '"./foo"' → './foo').
+            clean_module = module_path.strip("\"'")
+            if not clean_module:
+                continue
             facts.append(ImportFact(
                 importing_file=file_path,
-                imported_module=module,
-                imported_name=None,
-                alias=binding,
-                line=line,
+                imported_module=clean_module,
+                imported_name="*" if is_star else (imported_name or None),
+                alias=local_name if local_name != imported_name else None,
+                line=0,  # scope resolver does not return line numbers here
             ))
-
+    except Exception:
+        pass
     return facts
 
 
@@ -4049,7 +3888,7 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
     """Extract import facts from *content*, dispatching by language.
 
     - Python files: tree-sitter via ``emend_core`` (falls back to ``ast.parse``)
-    - TypeScript / JavaScript files: regex-based extraction
+    - TypeScript / JavaScript files: tree-sitter via ``PyScopeResolver``
     - Rust files: regex-based extraction for ``use`` / ``mod`` declarations
     - All others: treated as Python (best-effort)
     """

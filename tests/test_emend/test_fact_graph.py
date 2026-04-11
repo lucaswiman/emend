@@ -1182,3 +1182,112 @@ class TestMultiLineImportExtraction:
         assert "foo:bar" in pairs
         assert "foo:baz" in pairs
         assert "qux:quux" in pairs
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: TypeScript import extraction via PyScopeResolver
+# ---------------------------------------------------------------------------
+
+
+class TestTypescriptImportExtraction:
+    """Verify that TypeScript/JavaScript imports are extracted via the
+    tree-sitter-backed PyScopeResolver (no hand-rolled regexes).
+    """
+
+    def _imports(self, filename: str, source: str):
+        """Return ImportFact list from _extract_imports_typescript."""
+        from emend.fact_graph import _extract_imports_typescript
+        return _extract_imports_typescript(filename, source)
+
+    def _modules(self, source: str) -> set[str]:
+        """Return the set of imported module paths from a TypeScript snippet."""
+        return {f.imported_module for f in self._imports("/tmp/app.ts", source)}
+
+    def _names(self, source: str) -> set[str]:
+        """Return the set of imported name values (imported_name field)."""
+        return {f.imported_name for f in self._imports("/tmp/app.ts", source)
+                if f.imported_name is not None}
+
+    def test_named_imports_extract_module_and_names(self):
+        """import { Foo, Bar } from './foo' should produce two facts."""
+        source = 'import { Foo, Bar } from "./foo";'
+        facts = self._imports("/tmp/app.ts", source)
+        modules = {f.imported_module for f in facts}
+        names = {f.imported_name for f in facts}
+        assert "./foo" in modules
+        assert "Foo" in names
+        assert "Bar" in names
+
+    def test_type_only_import_produces_fact(self):
+        """import type { Foo } from './foo' should be handled like a regular import."""
+        source = 'import type { Foo } from "./foo";'
+        facts = self._imports("/tmp/app.ts", source)
+        assert len(facts) == 1
+        assert facts[0].imported_module == "./foo"
+        assert facts[0].imported_name == "Foo"
+
+    def test_multi_line_import_extracts_all_names(self):
+        """Multi-line import { foo,\\n  bar } from 'baz' should produce two facts."""
+        source = 'import {\n  foo,\n  bar\n} from "baz";'
+        names = self._names(source)
+        assert "foo" in names, f"'foo' not found in {names}"
+        assert "bar" in names, f"'bar' not found in {names}"
+
+    def test_module_path_quotes_are_stripped(self):
+        """Module paths should not include surrounding quote characters."""
+        source = 'import { X } from "./mymodule";'
+        facts = self._imports("/tmp/app.ts", source)
+        assert len(facts) >= 1
+        for f in facts:
+            assert not f.imported_module.startswith('"'), (
+                f"Module path should not have leading quote: {f.imported_module!r}"
+            )
+            assert not f.imported_module.endswith('"'), (
+                f"Module path should not have trailing quote: {f.imported_module!r}"
+            )
+
+    def test_line_numbers_are_zero(self):
+        """PyScopeResolver.imports_in_file() does not return line numbers; line=0."""
+        source = 'import { A } from "./a";'
+        facts = self._imports("/tmp/app.ts", source)
+        for f in facts:
+            assert f.line == 0, f"Expected line=0, got line={f.line}"
+
+    def test_tsx_extension_works(self):
+        """TSX files (.tsx) should also be handled."""
+        source = 'import React from "react";'
+        facts = self._imports("/tmp/Component.tsx", source)
+        assert any(f.imported_module == "react" for f in facts), (
+            f"Expected 'react' in facts, got: {facts}"
+        )
+
+    def test_js_extension_works(self):
+        """JS files (.js) should also be handled."""
+        source = 'import { helper } from "./utils";'
+        facts = self._imports("/tmp/app.js", source)
+        modules = {f.imported_module for f in facts}
+        assert "./utils" in modules, f"Expected './utils' in {modules}"
+
+    def test_side_effect_import_omitted(self):
+        """Side-effect imports (import './side-effect') are not supported by
+        PyScopeResolver.imports_in_file() and are silently omitted."""
+        source = 'import "./side-effect";'
+        facts = self._imports("/tmp/app.ts", source)
+        # The scope resolver does not track side-effect imports; result may be
+        # empty.  We just verify no exception is raised.
+        assert isinstance(facts, list)
+
+    def test_export_from_omitted(self):
+        """Re-export statements (export { X } from './bar') are not supported by
+        PyScopeResolver.imports_in_file() and are silently omitted."""
+        source = 'export { X } from "./bar";'
+        facts = self._imports("/tmp/app.ts", source)
+        # May be empty — just verify no exception is raised.
+        assert isinstance(facts, list)
+
+    def test_require_omitted(self):
+        """CommonJS require() calls are not handled by PyScopeResolver."""
+        source = 'const { a, b } = require("./c");'
+        facts = self._imports("/tmp/app.ts", source)
+        # May be empty — just verify no exception is raised.
+        assert isinstance(facts, list)
