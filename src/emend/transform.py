@@ -674,11 +674,6 @@ def _extract_file_facts(
     """
     from emend.fact_graph import _normalize_qn
 
-    import_re = re.compile(
-        r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
-        re.MULTILINE,
-    )
-
     result: dict[str, list] = {
         "fact_sym": [], "fact_ref": [], "fact_imp": [], "fg_sym": [],
         "dec": [], "cfg_blocks": [], "cfg_edges": [], "fg_refs": [],
@@ -747,16 +742,6 @@ def _extract_file_facts(
             pass
 
     # -- Extract imports (all languages)
-    # Fast Python-regex import graph (fact_imp) is only used for Python.
-    if ext == "py":
-        try:
-            for m_match in import_re.finditer(content):
-                mod = m_match.group(1) or m_match.group(2)
-                if mod:
-                    result["fact_imp"].append([rel_path, mod])
-        except Exception:
-            pass
-
     # Detailed imports via _extract_imports (dispatches by language for TS/Rust).
     for imp in _extract_imports(rel_path, content):
         result["imports"].append([
@@ -764,6 +749,16 @@ def _extract_file_facts(
             imp.imported_name or "", imp.line,
             imp.alias or "",
         ])
+
+    # Populate fact_imp from structured imports (Python only).
+    # Uses the already-computed _extract_imports results to avoid a second regex pass.
+    if ext == "py":
+        seen_modules: set[str] = set()
+        for imp_row in result["imports"]:
+            mod = imp_row[1]  # imported_module
+            if mod and mod not in seen_modules:
+                seen_modules.add(mod)
+                result["fact_imp"].append([rel_path, mod])
 
     # -- source_loc (from symbol facts)
     for sf in sym_facts_for_file:
@@ -1464,18 +1459,11 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
             except Exception:
                 pass
 
-        if need_import:
+        if need_import and scope_indexed:
             try:
-                # Use a lightweight regex-based import extraction
-                # (avoids importing the Rust module in subprocesses)
-                import_re = re.compile(
-                    r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
-                    re.MULTILINE,
-                )
-                for m_match in import_re.finditer(content):
-                    mod = m_match.group(1) or m_match.group(2)
-                    if mod:
-                        import_rows.append((content_hash, py_file, mod))
+                for _local, _mod, _imp_name, _is_star in scope_resolver.imports_in_file(py_file):
+                    if _mod:
+                        import_rows.append((content_hash, py_file, _mod))
             except Exception:
                 pass
 

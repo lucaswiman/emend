@@ -1132,3 +1132,53 @@ class TestDeadCodeExcludePathsWithFp:
             "which is in the exclusion segment list. The buggy .replace('fp','ref_fp') "
             "corrupted 'fp_tests/' to 'ref_fp_tests/'."
         )
+
+
+class TestMultiLineImportExtraction:
+    """Verify that multi-line parenthesised imports are correctly extracted.
+
+    The old hand-rolled regex matched only single-line imports and missed
+    multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
+    statement. The tree-sitter based ``_extract_imports_python`` must handle
+    all such cases.
+    """
+
+    def _imports(self, source: str) -> list[str]:
+        """Return a sorted list of (module, imported_name) string pairs."""
+        from emend.fact_graph import _extract_imports_python
+        facts = _extract_imports_python("test_module.py", source)
+        return sorted(
+            f"{f.imported_module}:{f.imported_name or ''}"
+            for f in facts
+        )
+
+    def test_single_line_from_import(self):
+        src = "from foo import bar\n"
+        pairs = self._imports(src)
+        assert "foo:bar" in pairs
+
+    def test_multi_line_parenthesised_import(self):
+        src = "from foo import (\n    bar,\n    baz\n)\n"
+        pairs = self._imports(src)
+        assert "foo:bar" in pairs, f"Expected foo:bar in {pairs}"
+        assert "foo:baz" in pairs, f"Expected foo:baz in {pairs}"
+
+    def test_plain_import(self):
+        src = "import os\n"
+        pairs = self._imports(src)
+        assert "os:" in pairs
+
+    def test_mixed_imports(self):
+        src = (
+            "import sys\n"
+            "from foo import (\n"
+            "    bar,\n"
+            "    baz,\n"
+            ")\n"
+            "from qux import quux\n"
+        )
+        pairs = self._imports(src)
+        assert "sys:" in pairs
+        assert "foo:bar" in pairs
+        assert "foo:baz" in pairs
+        assert "qux:quux" in pairs
