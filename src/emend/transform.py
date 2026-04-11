@@ -589,7 +589,7 @@ def _build_fact_sym_rows(
     from emend.language_registry import detect_language
     lang = detect_language(abs_path) or "python"
     if lang == "python":
-        exported_names = _extract_all_exports_text(content)
+        exported_names = _extract_all_exports_text(content, abs_path)
     else:
         from emend.language_registry import detect_exported_names
         exported_names = detect_exported_names(content, lang)
@@ -1245,19 +1245,30 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     return None
 
 
-_ALL_RE = re.compile(
-    r'^__all__\s*=\s*[\[\(](.*?)[\]\)]',
-    re.MULTILINE | re.DOTALL,
-)
-_ALL_NAME_RE = re.compile(r"""['"](\w+)['"]""")
+def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> set[str]:
+    """Extract names from ``__all__`` using tree-sitter pattern matching.
 
-
-def _extract_all_exports_text(source: str) -> set[str]:
-    """Extract names from ``__all__`` using regex (no AST dependency)."""
-    m = _ALL_RE.search(source)
-    if m is None:
-        return set()
-    return set(_ALL_NAME_RE.findall(m.group(1)))
+    Uses ``find_pattern`` so that the match is tree-sitter-based and respects
+    syntactic boundaries (won't match ``__all__`` inside string literals or
+    comments).  The small inner regex that pulls quoted names out of the
+    already-parsed ``$NAMES`` captured text is acceptable because it operates
+    on a structurally extracted sub-tree, not raw source.
+    """
+    names: set[str] = set()
+    try:
+        matches = find_pattern(
+            "__all__ = $NAMES",
+            file_path,
+            source_override=source,
+            language="python",
+        )
+    except Exception:
+        return names
+    for m in matches:
+        raw = m.captures.get("NAMES", "")
+        for n in re.findall(r"""['"](\w+)['"]""", raw):
+            names.add(n)
+    return names
 
 
 _NOQA_RE = re.compile(r'(?:#|//)\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
@@ -1422,7 +1433,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 )
 
                 # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports_text(content)
+                exported_names = _extract_all_exports_text(content, py_file)
                 noqa_lines = _extract_noqa_lines(content)
 
                 for sym in syms_for_file:
