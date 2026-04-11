@@ -6,7 +6,6 @@ was previously inlined in ``transform.py`` and ``lint.py``.
 """
 from __future__ import annotations
 
-import ast
 import io
 import re
 import tokenize
@@ -22,49 +21,105 @@ from emend.language_plugins import (
 _NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
 
 
+def _get_structured_imports(source: str) -> list[dict]:
+    """Return structured import dicts using tree-sitter scope resolver.
+
+    Each dict has keys: module, level, names, start_byte, end_byte,
+    start_line, end_line, is_plain.
+
+    The Rust scope resolver deliberately omits ``from __future__ import ...``
+    statements (they are not runtime dependencies).  This helper re-inserts
+    them by scanning for lines that begin with ``from __future__`` so that
+    import position detection remains correct for files that use
+    ``from __future__ import annotations`` or similar.
+
+    Returns an empty list on failure or if there are no imports.
+    """
+    try:
+        from emend import emend_core
+        resolver = emend_core.PyScopeResolver(".", "py")
+        structured = resolver.collect_structured_imports_from_source(source, "py") or []
+    except Exception:
+        return []
+
+    # Re-add __future__ imports that the Rust resolver omits.
+    lines = source.splitlines(keepends=True)
+    future_entries: list[dict] = []
+    for lineno_0idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("from __future__"):
+            # Compute byte offsets for this line
+            start_byte = len("".join(lines[:lineno_0idx]).encode("utf-8"))
+            line_text = line.rstrip("\n")
+            end_byte = start_byte + len(line_text.encode("utf-8"))
+            future_entries.append({
+                "module": "__future__",
+                "level": 0,
+                "names": [],
+                "start_byte": start_byte,
+                "end_byte": end_byte,
+                "start_line": lineno_0idx + 1,  # 1-indexed
+                "end_line": lineno_0idx + 1,     # 1-indexed
+                "is_plain": False,
+            })
+
+    if not future_entries:
+        return structured
+
+    # Merge __future__ entries (they come first) with the resolver results,
+    # sorted by start_line to preserve document order.
+    merged = future_entries + structured
+    merged.sort(key=lambda d: d["start_line"])
+    return merged
+
+
 class PythonImportHandler(ImportHandler):
     """Import handler for Python source files."""
 
     def extract_imports(self, source: str) -> str:
         """Return all top-level import statements as a single string."""
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
+        imports = _get_structured_imports(source)
+        if not imports:
             return ""
-        lines = source.splitlines(keepends=True)
-        imports = []
-        for stmt in tree.body:
-            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                start = stmt.lineno - 1
-                end = stmt.end_lineno
-                imports.append("".join(lines[start:end]))
-        return "".join(imports)
+        encoded = source.encode("utf-8")
+        parts: list[str] = []
+        for imp in imports:
+            start_b = imp["start_byte"]
+            end_b = imp["end_byte"]
+            # Include the trailing newline if present
+            if end_b < len(encoded) and encoded[end_b : end_b + 1] == b"\n":
+                end_b += 1
+            parts.append(encoded[start_b:end_b].decode("utf-8"))
+        return "".join(parts)
 
     def add_import_text(
         self, import_str: str, position: int, source_code: str
     ) -> str:
         """Return *source_code* with *import_str* inserted.
 
-        Raises ``ValueError`` if *source_code* cannot be parsed.
+        Uses tree-sitter structured imports for position detection.
         """
-        tree = ast.parse(source_code)  # raises ValueError-wrapped SyntaxError in caller
+        imports = _get_structured_imports(source_code)
 
         lines = source_code.splitlines(keepends=True)
-        import_line = import_str.rstrip('\n') + '\n'
+        import_line = import_str.rstrip("\n") + "\n"
 
-        first_import_line = None
-        last_import_line = None
-        last_future_line = None
-        for stmt in tree.body:
-            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                if first_import_line is None:
-                    first_import_line = stmt.lineno
-                last_import_line = stmt.end_lineno
-                if isinstance(stmt, ast.ImportFrom) and stmt.module == '__future__':
-                    last_future_line = stmt.end_lineno
+        first_import_line = None  # 1-indexed
+        last_import_line = None  # 1-indexed
+        last_future_line = None  # 1-indexed
+
+        for imp in imports:
+            sl = imp["start_line"]  # 1-indexed
+            el = imp["end_line"]  # 1-indexed
+            if first_import_line is None:
+                first_import_line = sl
+            last_import_line = el
+            # Detect __future__ imports: is_plain=False and module='__future__'
+            if not imp["is_plain"] and imp.get("module") == "__future__":
+                last_future_line = el
 
         if position == 0:
-            insert_at = (last_future_line or 0)
+            insert_at = last_future_line or 0
             lines.insert(insert_at, import_line)
         else:
             if last_import_line is not None:
@@ -78,6 +133,61 @@ class PythonImportHandler(ImportHandler):
         raise NotImplementedError("remove_import is not yet implemented for Python")
 
 
+def _find_docstring_ranges(source: str) -> list[tuple[int, int]]:
+    """Return ``(start_line_0idx, end_line_0idx)`` (0-indexed, inclusive) for each docstring.
+
+    Uses tree-sitter scope resolver to identify function/class/module bodies,
+    then ``find_pattern`` to locate string literals at the first statement
+    position of each body.
+    """
+    try:
+        from emend import emend_core
+
+        resolver = emend_core.PyScopeResolver(".", "py")
+        resolver.index_file("__temp__.py", source)
+        scopes = resolver.scopes_in_file("__temp__.py")
+    except Exception:
+        return []
+
+    try:
+        from emend.transform import find_pattern
+
+        str_matches = find_pattern("$X:str", "__temp__.py", source_override=source)
+    except Exception:
+        return []
+
+    # Build a dict from (1-indexed line) -> list of PatternMatch for strings
+    str_by_line: dict[int, list] = {}
+    for m in str_matches:
+        if m.line is not None:
+            str_by_line.setdefault(m.line, []).append(m)
+
+    results: list[tuple[int, int]] = []
+    seen: set[int] = set()
+
+    for scope_kind, scope_start, scope_end, _bindings in scopes:
+        # scope_start and scope_end are 0-indexed
+        if scope_kind == "Module":
+            # Module docstring is at line 0 (0-indexed) = line 1 (1-indexed)
+            first_body_line_1idx = 1
+        else:
+            # Function/Class: body starts one line after the def/class line
+            # scope_start is 0-indexed; convert to 1-indexed and add 1 for body
+            first_body_line_1idx = scope_start + 2
+
+        matches_on_first = str_by_line.get(first_body_line_1idx, [])
+        for m in matches_on_first:
+            if m.line in seen:
+                continue
+            seen.add(m.line)
+            # Convert to 0-indexed
+            start_0idx = m.line - 1
+            end_0idx = (m.end_line or m.line) - 1
+            results.append((start_0idx, end_0idx))
+
+    return results
+
+
 class PythonCommentHandler(CommentHandler):
     """Comment and docstring handler for Python source files."""
 
@@ -89,34 +199,21 @@ class PythonCommentHandler(CommentHandler):
         self, source: str, symbol_byte_range: tuple[int, int]
     ) -> list[tuple[int, int, str]]:
         """Return ``(start_byte, end_byte, text)`` for each docstring."""
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
+        ranges = _find_docstring_ranges(source)
+        if not ranges:
             return []
 
-        encoded = source.encode()
         lines = source.splitlines(keepends=True)
         results: list[tuple[int, int, str]] = []
 
-        def _collect(node: ast.AST) -> None:
-            body = getattr(node, 'body', None)
-            if not isinstance(body, list) or not body:
-                return
-            first = body[0]
-            if (isinstance(first, ast.Expr)
-                    and isinstance(first.value, ast.Constant)
-                    and isinstance(first.value.value, str)):
-                start_line = first.lineno - 1
-                end_line = first.end_lineno
-                text = "".join(lines[start_line:end_line])
-                start_byte = len("".join(lines[:start_line]).encode())
-                end_byte = start_byte + len(text.encode())
-                results.append((start_byte, end_byte, text))
-            for child in body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    _collect(child)
+        for start_0idx, end_0idx in ranges:
+            if start_0idx < 0 or start_0idx >= len(lines):
+                continue
+            text = "".join(lines[start_0idx : end_0idx + 1])
+            start_byte = len("".join(lines[:start_0idx]).encode("utf-8"))
+            end_byte = start_byte + len(text.encode("utf-8"))
+            results.append((start_byte, end_byte, text))
 
-        _collect(tree)
         return results
 
     def find_noqa_comments(self, source: str) -> dict[int, set[str] | None]:
@@ -134,7 +231,7 @@ class PythonCommentHandler(CommentHandler):
                             for r in rules_str.split(","):
                                 r = r.strip()
                                 if r.startswith("emend:"):
-                                    rules.add(r[len("emend:"):])
+                                    rules.add(r[len("emend:") :])
                             if rules:
                                 result[srow] = rules
                             # e.g. "# noqa: E501" with no emend: prefix → no effect
@@ -151,35 +248,15 @@ class PythonCommentHandler(CommentHandler):
 
         Returns new content if changes were made, ``None`` otherwise.
         """
-        try:
-            tree = ast.parse(content)
-        except SyntaxError:
+        ranges = _find_docstring_ranges(content)
+        if not ranges:
             return None
 
         lines = content.splitlines(keepends=True)
-        docstring_ranges: list[tuple[int, int]] = []
-
-        def _collect_docstrings(node: ast.AST) -> None:
-            body = getattr(node, 'body', None)
-            if not isinstance(body, list) or not body:
-                return
-            first = body[0]
-            if (isinstance(first, ast.Expr)
-                    and isinstance(first.value, ast.Constant)
-                    and isinstance(first.value.value, str)):
-                docstring_ranges.append((first.lineno - 1, first.end_lineno))
-            for child in body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    _collect_docstrings(child)
-
-        _collect_docstrings(tree)
-
-        if not docstring_ranges:
-            return None
 
         changed = False
-        for start_line, end_line in docstring_ranges:
-            for i in range(start_line, end_line):
+        for start_0idx, end_0idx in ranges:
+            for i in range(start_0idx, end_0idx + 1):
                 if i < len(lines) and old_name in lines[i]:
                     lines[i] = lines[i].replace(old_name, new_name)
                     changed = True
@@ -194,6 +271,7 @@ class PythonPatternCompiler(PatternCompiler):
 
     def compile(self, pattern_str: str) -> dict | None:
         from emend.pattern import _compile_python_pattern_to_rust_ir
+
         return _compile_python_pattern_to_rust_ir(pattern_str)
 
 

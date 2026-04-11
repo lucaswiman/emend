@@ -95,6 +95,15 @@ def test_python_import_handler_add_import_no_existing_imports():
     assert result.startswith("import os\n")
 
 
+def test_python_import_handler_add_import_syntax_error_graceful():
+    """add_import_text should not crash on syntactically invalid source."""
+    handler = PythonImportHandler()
+    # With invalid Python, tree-sitter should still not crash; the import is
+    # inserted at position 0 since no existing imports can be detected.
+    result = handler.add_import_text("import os", -1, "def (\n")
+    assert "import os" in result
+
+
 def test_python_import_handler_add_import_future_only_prepend():
     handler = PythonImportHandler()
     result = handler.add_import_text("import os", 0, SOURCE_FUTURE_ONLY)
@@ -174,6 +183,45 @@ def test_python_comment_handler_rename_in_docstrings_syntax_error():
     handler = PythonCommentHandler()
     result = handler.rename_in_docstrings("def (", "old", "new")
     assert result is None
+
+
+def test_python_comment_handler_find_docstrings_syntax_error():
+    """find_docstrings should return an empty list on invalid source."""
+    handler = PythonCommentHandler()
+    result = handler.find_docstrings("def (", (0, 100))
+    assert result == []
+
+
+def test_python_comment_handler_find_docstrings_basic():
+    """find_docstrings should find function and class docstrings."""
+    handler = PythonCommentHandler()
+    source = (
+        'def foo():\n'
+        '    """Function docstring."""\n'
+        '    pass\n'
+        '\n'
+        'class Bar:\n'
+        '    """Class docstring."""\n'
+        '    pass\n'
+    )
+    results = handler.find_docstrings(source, (0, len(source.encode())))
+    texts = [text for _, _, text in results]
+    assert any("Function docstring" in t for t in texts)
+    assert any("Class docstring" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Verify no ast.parse usage (Phase 7 migration check)
+# ---------------------------------------------------------------------------
+
+def test_python_plugin_does_not_import_ast():
+    """Phase 7 requirement: python_plugin.py must not import Python's ast module."""
+    import inspect
+    import emend.python_plugin as mod
+    src = inspect.getsource(mod)
+    assert "import ast" not in src, (
+        "python_plugin.py must not use Python's ast module (Phase 7 migration)"
+    )
 
 
 # ---------------------------------------------------------------------------
