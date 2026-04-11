@@ -47,7 +47,7 @@ code.
 
 ### Lower Priority (Complex / Needs Rust Extension Work)
 
-- [ ] [Phase 9: DSL Region Detection](./phase-9-dsl-region-detection.md)
+- [x] [Phase 9: DSL Region Detection](./phase-9-dsl-region-detection.md)
 
 ## Design Principles
 

@@ -91,24 +91,19 @@ class DslLink:
 # Injection detection
 # ---------------------------------------------------------------------------
 
-# SQL keyword pattern used to identify SQL content in string literals
+# SQL keyword pattern used to identify SQL content in string literals.
+# Applied to already-extracted string content (not raw source), so regex is appropriate.
 _SQL_KEYWORD_RE = re.compile(
     r'\b(SELECT|INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|TRUNCATE\s+TABLE|WITH\s+\w+|REPLACE\s+INTO)\b',
     re.IGNORECASE,
 )
 
-# Magic comment pattern: # language=sql
+# Magic comment pattern — applied to comment text (not raw source structure).
+# Only used as a fallback when tree-sitter comment collection is unavailable.
 _MAGIC_COMMENT_RE = re.compile(r'#\s*language\s*=\s*(\w+)', re.IGNORECASE)
 
-# Triple-quoted string patterns
-_TRIPLE_DOUBLE_STRING_RE = re.compile(r'"""(.*?)"""', re.DOTALL)
-_TRIPLE_SINGLE_STRING_RE = re.compile(r"'''(.*?)'''", re.DOTALL)
-
-# Single-line string patterns (double or single quoted)
-_SINGLE_DOUBLE_STRING_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
-_SINGLE_SINGLE_STRING_RE = re.compile(r"'([^'\\]*(?:\\.[^'\\]*)*)'")
-
 # Jinja2 template patterns — detect {{ var }}, {% tag %}, {# comment #}
+# Applied to already-extracted string content (not raw source).
 _JINJA_EXPR_RE = re.compile(r'\{\{.*?\}\}', re.DOTALL)
 _JINJA_TAG_RE = re.compile(r'\{%.*?%\}', re.DOTALL)
 _JINJA_COMMENT_RE = re.compile(r'\{#.*?#\}', re.DOTALL)
@@ -156,28 +151,66 @@ _RESOLVER_DECORATOR_RE = re.compile(
 )
 
 
-def _count_newlines_before(text: str, pos: int) -> int:
-    """Count newlines in text[:pos], returning 0-based line offset."""
-    return text[:pos].count('\n')
+def _get_string_literals(
+    source: str, file_path: str
+) -> list[tuple[int, int, int, int, int, int, str]]:
+    """Extract all string literals from source using tree-sitter.
+
+    Returns a list of
+    ``(start_byte, end_byte, start_line, start_col, end_line, end_col, content)``
+    tuples where *content* is the unquoted inner text.
+
+    Falls back to an empty list if ``emend_core`` is unavailable.
+    """
+    try:
+        from emend import emend_core as _rust  # type: ignore[attr-defined]
+        ext = Path(file_path).suffix.lstrip(".") or "py"
+        return _rust.collect_string_literals(source, ext)
+    except Exception:
+        return []
 
 
-def _make_region(
+def _has_magic_comment(source: str, file_path: str, keyword: str) -> bool:
+    """Return True if source contains a ``# language=<keyword>`` comment.
+
+    Uses tree-sitter comment node traversal when possible, falling back to a
+    simple regex over the raw source only if the Rust extension is unavailable.
+    The regex fallback operates on comment text, not source structure.
+    """
+    try:
+        from emend import emend_core as _rust  # type: ignore[attr-defined]
+        ext = Path(file_path).suffix.lstrip(".") or "py"
+        comments = _rust.collect_comments(source, ext)
+        keyword_lower = keyword.lower()
+        for _line, _col, text in comments:
+            # text is e.g. "# language=sql" or "# language = sql"
+            m = _MAGIC_COMMENT_RE.search(text)
+            if m and m.group(1).lower() == keyword_lower:
+                return True
+        return False
+    except Exception:
+        # Fallback: regex on raw source (acceptable for comment text detection)
+        return bool(re.search(
+            r'#\s*language\s*=\s*' + re.escape(keyword),
+            source,
+            re.IGNORECASE,
+        ))
+
+
+def _make_region_from_ts(
     dsl: DslKind,
-    stripped: str,
+    content: str,
     file_path: str,
-    source: str,
-    match_start: int,
-    match_end: int,
+    start_line: int,
+    start_col: int,
+    end_line: int,
+    end_col: int,
     trigger: str,
 ) -> DslRegion:
-    """Build a DslRegion from a match span inside *source*."""
-    start_line = _count_newlines_before(source, match_start) + 1
-    start_col = match_start - source.rfind('\n', 0, match_start) - 1
-    end_line = _count_newlines_before(source, match_end) + 1
-    end_col = match_end - source.rfind('\n', 0, match_end) - 1
+    """Build a DslRegion from tree-sitter position data."""
     return DslRegion(
         dsl=dsl,
-        content=stripped,
+        content=content,
         host_file=file_path,
         host_start_line=start_line,
         host_start_col=max(0, start_col),
@@ -266,29 +299,26 @@ def _detect_sql_regions(file_path: str, source: str) -> list[DslRegion]:
     """Detect SQL regions in Python source code.
 
     Looks for:
-    1. Triple-quoted string literals containing SQL keywords
-    2. Single-quoted string literals containing SQL keywords
-    3. Magic comments: # language=sql
+    1. String literals containing SQL keywords (via tree-sitter string node traversal)
+    2. Magic comments: # language=sql (via tree-sitter comment node traversal)
     """
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
     # Check for magic comment presence to determine trigger type
-    magic_comment_active = bool(_MAGIC_COMMENT_RE.search(source))
-    trigger = "magic_comment" if magic_comment_active else "literal"
+    trigger = "magic_comment" if _has_magic_comment(source, file_path, "sql") else "literal"
 
-    for pattern in (
-        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
-        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
-    ):
-        for m in pattern.finditer(source):
-            stripped = m.group(1).strip()
-            if not stripped or stripped in seen_contents:
-                continue
-            if not _SQL_KEYWORD_RE.search(stripped):
-                continue
-            seen_contents.add(stripped)
-            regions.append(_make_region(DslKind.SQL, stripped, file_path, source, m.start(), m.end(), trigger))
+    for _sb, _eb, start_line, start_col, end_line, end_col, content in _get_string_literals(source, file_path):
+        stripped = content.strip()
+        if not stripped or stripped in seen_contents:
+            continue
+        if not _SQL_KEYWORD_RE.search(stripped):
+            continue
+        seen_contents.add(stripped)
+        regions.append(_make_region_from_ts(
+            DslKind.SQL, stripped, file_path,
+            start_line, start_col, end_line, end_col, trigger,
+        ))
 
     return regions
 
@@ -297,27 +327,29 @@ def _detect_jinja_regions(file_path: str, source: str) -> list[DslRegion]:
     """Detect Jinja2 template regions embedded in Python string literals.
 
     Looks for strings containing Jinja2 syntax: {{ expr }}, {% tag %}, {# comment #}.
-    Also detects render_template_string() and Template() calls.
+    Uses tree-sitter string node traversal for reliable extraction.
     """
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
     # Check for magic comment: # language=jinja or # language=jinja2
-    magic_jinja = bool(re.search(r'#\s*language\s*=\s*jinja2?\b', source, re.IGNORECASE))
+    magic_jinja = (
+        _has_magic_comment(source, file_path, "jinja")
+        or _has_magic_comment(source, file_path, "jinja2")
+    )
     trigger = "magic_comment" if magic_jinja else "literal"
 
-    for pattern in (
-        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
-        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
-    ):
-        for m in pattern.finditer(source):
-            stripped = m.group(1).strip()
-            if not stripped or stripped in seen_contents:
-                continue
-            if not (_JINJA_EXPR_RE.search(stripped) or _JINJA_TAG_RE.search(stripped)):
-                continue
-            seen_contents.add(stripped)
-            regions.append(_make_region(DslKind.JINJA, stripped, file_path, source, m.start(), m.end(), trigger))
+    for _sb, _eb, start_line, start_col, end_line, end_col, content in _get_string_literals(source, file_path):
+        stripped = content.strip()
+        if not stripped or stripped in seen_contents:
+            continue
+        if not (_JINJA_EXPR_RE.search(stripped) or _JINJA_TAG_RE.search(stripped)):
+            continue
+        seen_contents.add(stripped)
+        regions.append(_make_region_from_ts(
+            DslKind.JINJA, stripped, file_path,
+            start_line, start_col, end_line, end_col, trigger,
+        ))
 
     return regions
 
@@ -326,26 +358,25 @@ def _detect_graphql_regions(file_path: str, source: str) -> list[DslRegion]:
     """Detect GraphQL regions embedded in Python/TypeScript string literals.
 
     Looks for strings containing GraphQL keywords (type, query, mutation, etc.).
-    Also detects gql() tagged template calls.
+    Uses tree-sitter string node traversal for reliable extraction.
     """
     regions: list[DslRegion] = []
     seen_contents: set[str] = set()
 
-    magic_gql = bool(re.search(r'#\s*language\s*=\s*graphql\b', source, re.IGNORECASE))
+    magic_gql = _has_magic_comment(source, file_path, "graphql")
     trigger = "magic_comment" if magic_gql else "literal"
 
-    for pattern in (
-        _TRIPLE_DOUBLE_STRING_RE, _TRIPLE_SINGLE_STRING_RE,
-        _SINGLE_DOUBLE_STRING_RE, _SINGLE_SINGLE_STRING_RE,
-    ):
-        for m in pattern.finditer(source):
-            stripped = m.group(1).strip()
-            if not stripped or stripped in seen_contents:
-                continue
-            if not _GRAPHQL_KEYWORD_RE.search(stripped):
-                continue
-            seen_contents.add(stripped)
-            regions.append(_make_region(DslKind.GRAPHQL, stripped, file_path, source, m.start(), m.end(), trigger))
+    for _sb, _eb, start_line, start_col, end_line, end_col, content in _get_string_literals(source, file_path):
+        stripped = content.strip()
+        if not stripped or stripped in seen_contents:
+            continue
+        if not _GRAPHQL_KEYWORD_RE.search(stripped):
+            continue
+        seen_contents.add(stripped)
+        regions.append(_make_region_from_ts(
+            DslKind.GRAPHQL, stripped, file_path,
+            start_line, start_col, end_line, end_col, trigger,
+        ))
 
     return regions
 

@@ -199,6 +199,38 @@ class TestDetectDslRegions:
             "WITH with multi-char CTE name must be detected by the SQL keyword regex"
         )
 
+    def test_two_triple_quoted_strings_are_detected_separately(self, tmp_path):
+        """Two separate triple-quoted strings must each be detected individually.
+
+        The old regex approach with ``re.DOTALL`` could span string boundaries
+        in some edge cases.  Tree-sitter correctly identifies each string node
+        as a separate entity, so only the string that actually contains SQL
+        keywords should be returned as an SQL region.
+
+        The second string uses a marker phrase that must NOT appear in the SQL
+        region content — confirming the two strings were never merged.
+        """
+        f = tmp_path / "queries.py"
+        f.write_text(
+            'sql = """\n'
+            '    SELECT name FROM users\n'
+            '"""\n'
+            '\n'
+            'marker = """\n'
+            '    PLAIN_DOCSTRING_MARKER\n'
+            '"""\n'
+        )
+        regions = detect_dsl_regions(str(f))
+        # Only the first string contains SQL — the second must NOT be included
+        sql_contents = [r.content for r in regions if r.dsl == DslKind.SQL]
+        assert len(sql_contents) == 1, (
+            f"Expected exactly 1 SQL region but got {len(sql_contents)}: {sql_contents}"
+        )
+        assert "SELECT" in sql_contents[0]
+        # Confirm the plain docstring did NOT get merged or misidentified
+        for content in sql_contents:
+            assert "PLAIN_DOCSTRING_MARKER" not in content
+
 
 class TestExtractSqlSymbols:
     def test_extract_table_from_select(self):

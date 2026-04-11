@@ -551,3 +551,152 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
     collect(root, source_bytes, &mut results);
     results
 }
+
+
+/// Collect all string literal nodes from source code.
+///
+/// Returns a list of `(start_byte, end_byte, start_line, start_col, end_line, end_col, content)`
+/// tuples where `content` is the unquoted string content (inner text only, no surrounding
+/// quote characters).  Both single-quoted and triple-quoted strings are handled correctly.
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. `"py"`, `"ts"`, `"rs"`).
+pub fn collect_string_literals(source: &str, ext: &str) -> Vec<(u32, u32, u32, u32, u32, u32, String)> {
+    let tree = match parse_by_extension(source, ext) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut results: Vec<(u32, u32, u32, u32, u32, u32, String)> = Vec::new();
+
+    fn extract_string_content(node: Node, source: &[u8]) -> String {
+        // Try to find string_content children (Python grammar).
+        // For each child, collect the text of nodes that are NOT the quote nodes
+        // (i.e. not string_start / string_end).
+        let mut content_parts: Vec<&[u8]> = Vec::new();
+        let mut cursor = node.walk();
+        let mut has_content_children = false;
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                let kind = child.kind();
+                // Skip opening/closing quote tokens
+                if kind != "string_start" && kind != "string_end"
+                    && kind != "\"\"\"" && kind != "'''"
+                    && kind != "\"" && kind != "'"
+                {
+                    has_content_children = true;
+                    content_parts.push(&source[child.start_byte()..child.end_byte()]);
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+
+        if has_content_children {
+            String::from_utf8_lossy(&content_parts.concat()).into_owned()
+        } else {
+            // Fallback: strip quotes from the full node text
+            let full = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
+            strip_string_quotes(full).to_string()
+        }
+    }
+
+    fn collect_strings(node: Node, source: &[u8], results: &mut Vec<(u32, u32, u32, u32, u32, u32, String)>) {
+        let kind = node.kind();
+        if kind == "string" || kind == "string_literal" || kind == "raw_string_literal"
+            || kind == "interpreted_string_literal"
+        {
+            let content = extract_string_content(node, source);
+            results.push((
+                node.start_byte() as u32,
+                node.end_byte() as u32,
+                node.start_position().row as u32 + 1,
+                node.start_position().column as u32,
+                node.end_position().row as u32 + 1,
+                node.end_position().column as u32,
+                content,
+            ));
+            // Don't recurse into string children — content already captured
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                collect_strings(cursor.node(), source, results);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    collect_strings(root, source_bytes, &mut results);
+    results
+}
+
+/// Strip surrounding quote characters from a string literal token.
+///
+/// Handles single-quoted (`'...'`, `"..."`), triple-quoted (`"""..."""`, `'''...'''`),
+/// and prefix-quoted (`r'...'`, `b"..."`, `f'''...'''`, etc.) strings.
+fn strip_string_quotes(s: &str) -> &str {
+    // Skip prefix characters (r, b, f, u, rb, br, etc.)
+    let after_prefix = s.trim_start_matches(|c: char| matches!(c, 'r' | 'R' | 'b' | 'B' | 'f' | 'F' | 'u' | 'U'));
+    // Detect triple-quoted
+    if after_prefix.starts_with("\"\"\"") && after_prefix.ends_with("\"\"\"") && after_prefix.len() >= 6 {
+        return &after_prefix[3..after_prefix.len()-3];
+    }
+    if after_prefix.starts_with("'''") && after_prefix.ends_with("'''") && after_prefix.len() >= 6 {
+        return &after_prefix[3..after_prefix.len()-3];
+    }
+    // Single-quoted
+    if after_prefix.starts_with('"') && after_prefix.ends_with('"') && after_prefix.len() >= 2 {
+        return &after_prefix[1..after_prefix.len()-1];
+    }
+    if after_prefix.starts_with('\'') && after_prefix.ends_with('\'') && after_prefix.len() >= 2 {
+        return &after_prefix[1..after_prefix.len()-1];
+    }
+    s
+}
+
+/// Collect all comment nodes from source code.
+///
+/// Returns a list of `(start_line, start_col, text)` tuples where `text` is the
+/// full comment text including the leading comment prefix (e.g. `# ...`).
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. `"py"`, `"ts"`, `"rs"`).
+pub fn collect_comments(source: &str, ext: &str) -> Vec<(u32, u32, String)> {
+    let tree = match parse_by_extension(source, ext) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let source_bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut results: Vec<(u32, u32, String)> = Vec::new();
+
+    fn collect_comment_nodes(node: Node, source: &[u8], results: &mut Vec<(u32, u32, String)>) {
+        let kind = node.kind();
+        if kind == "comment" || kind == "line_comment" || kind == "block_comment" {
+            let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
+            results.push((
+                node.start_position().row as u32 + 1,
+                node.start_position().column as u32,
+                text.to_string(),
+            ));
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                collect_comment_nodes(cursor.node(), source, results);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    collect_comment_nodes(root, source_bytes, &mut results);
+    results
+}

@@ -119,8 +119,8 @@ split into sub-phases:
 
 ## Acceptance Criteria
 
-- [ ] String literal extraction in `detect_dsl_regions()` uses tree-sitter, not regex.
-- [ ] Magic comment detection uses comment node traversal.
-- [ ] All existing DSL tests pass.
-- [ ] Multi-string false-merge bug fixed and tested.
-- [ ] SQL table/column extraction uses tree-sitter SQL grammar (Phase 9c).
+- [x] String literal extraction in `detect_dsl_regions()` uses tree-sitter, not regex.
+- [x] Magic comment detection uses comment node traversal.
+- [x] All existing DSL tests pass.
+- [x] Multi-string false-merge bug fixed and tested.
+- [ ] SQL table/column extraction uses tree-sitter SQL grammar (Phase 9c — deferred, content-regex on already-extracted SQL content is acceptable per roadmap notes).
