@@ -1414,15 +1414,35 @@ class InterproceduralResult:
     iterations: int  # how many fixed-point iterations
 
 
+_FUNC_SIG_RE = re.compile(
+    r"(?:(?:export|pub)\s+)?"
+    r"(?:async\s+)?"
+    r"(?:def|function|fn)\s+\w+\s*"
+    r"(?:<[^>]*>)?\s*"          # optional generics (TS/Rust)
+    r"\(([^)]*)\)"
+)
+
+_SELF_LIKE = frozenset({"self", "cls", "this"})
+
+# Matches assignment targets across Python, TypeScript, and Rust.
+# Handles: ``name = ...``, ``let name = ...``, ``let mut name = ...``,
+# ``const name = ...``, ``var name = ...``.
+_ASSIGN_TARGET_RE = re.compile(
+    r"^\s*(?:let\s+(?:mut\s+)?|const\s+|var\s+)?"
+    r"([A-Za-z_][A-Za-z_0-9]*)\s*=\s*"
+)
+
+
 def _collect_function_params(
     source: str,
     func_start: int,
     func_end: int,
 ) -> list[str]:
-    """Extract parameter names from a function definition using tree-sitter.
+    """Extract parameter names from a function definition.
 
-    Parses the def line at *func_start* and returns the list of parameter
-    names (excluding ``self`` and ``cls``).
+    Uses a generic regex that handles Python (``def``), TypeScript
+    (``function``), and Rust (``fn``) signatures.  Self-like parameters
+    (``self``, ``cls``, ``this``, ``&self``, ``&mut self``) are excluded.
 
     Args:
         source: Full file source text.
@@ -1432,19 +1452,13 @@ def _collect_function_params(
     Returns:
         List of parameter name strings.
     """
-    from emend import emend_core
-
     lines = source.split("\n")
     if func_start < 1 or func_start > len(lines):
         return []
 
-    # Use statement ranges on the def line to find parameters
-    # The def line is at func_start (1-based)
     def_line = lines[func_start - 1].strip()
 
-    # Quick regex parse of the def line for parameter names
-    # Handles: def foo(a, b, c=1, *args, **kwargs, d: int = 5)
-    m = re.match(r"(?:async\s+)?def\s+\w+\s*\(([^)]*)\)", def_line)
+    m = _FUNC_SIG_RE.search(def_line)
     if not m:
         # Multi-line signature: gather lines until we find the closing paren
         sig_lines = [lines[func_start - 1]]
@@ -1453,7 +1467,7 @@ def _collect_function_params(
             if ")" in lines[i]:
                 break
         combined = " ".join(l.strip() for l in sig_lines)
-        m = re.match(r"(?:async\s+)?def\s+\w+\s*\(([^)]*)\)", combined)
+        m = _FUNC_SIG_RE.search(combined)
         if not m:
             return []
 
@@ -1466,11 +1480,11 @@ def _collect_function_params(
         part = part.strip()
         if not part:
             continue
-        # Strip leading * or **
-        name = part.lstrip("*")
-        # Strip type annotation and default
+        # Strip leading &, &mut, *, ** (Rust borrows and Python splats)
+        name = re.sub(r"^[&*]+(?:mut\s+)?", "", part)
+        # Strip type annotation and default value
         name = name.split(":")[0].split("=")[0].strip()
-        if name and name not in ("self", "cls") and re.match(r"^[A-Za-z_]\w*$", name):
+        if name and name not in _SELF_LIKE and re.match(r"^[A-Za-z_]\w*$", name):
             params.append(name)
 
     return params
@@ -1958,7 +1972,7 @@ def _run_interprocedural_trace_datalog(
                     continue
                 tainted_vars: set[str] = set()
                 stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
-                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                assign_m = _ASSIGN_TARGET_RE.match(stmt_line)
                 if assign_m:
                     tainted_vars.add(assign_m.group(1))
                 for _cn, cv in (match.captures or {}).items():
@@ -1990,7 +2004,7 @@ def _run_interprocedural_trace_datalog(
                 if not (fs <= match_line <= fe):
                     continue
                 stmt_line = lines[match_line - 1] if match_line <= len(lines) else ""
-                assign_m = re.match(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*=\s*", stmt_line)
+                assign_m = _ASSIGN_TARGET_RE.match(stmt_line)
                 sanitized_vars: set[str] = set()
                 if assign_m:
                     sanitized_vars.add(assign_m.group(1))
