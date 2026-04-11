@@ -1,0 +1,233 @@
+"""Tests for impact analysis on Rust projects."""
+from pathlib import Path
+
+import pytest
+
+from emend.component_selector import ExtendedSelector
+
+
+class TestRustImpact:
+    """Tests for impact analysis on Rust projects."""
+
+    def test_rust_impact_direct_caller(self, tmp_path):
+        """Impact analysis finds direct callers in Rust (single file)."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "lib.rs"
+        lib.write_text(
+            "pub fn helper(x: i32) -> i32 {\n"
+            "    x + 1\n"
+            "}\n"
+            "\n"
+            "pub fn run() -> i32 {\n"
+            "    helper(42)\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["helper"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.changed_symbols) == 1
+        assert "helper" in result.changed_symbols[0]
+
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "run" in impacted_names
+
+    def test_rust_impact_transitive_closure(self, tmp_path):
+        """Impact analysis computes transitive closure for Rust (single file)."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        core = project / "core.rs"
+        core.write_text(
+            "pub fn validate(input: &str) -> bool {\n"
+            "    !input.is_empty()\n"
+            "}\n"
+            "\n"
+            "pub fn process(data: &str) -> String {\n"
+            "    if validate(data) {\n"
+            "        data.to_uppercase()\n"
+            "    } else {\n"
+            "        String::new()\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "pub fn handle(req: &str) -> String {\n"
+            "    process(req)\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(core),
+            symbol_path=["validate"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "process" in impacted_names
+        assert "handle" in impacted_names
+
+    def test_rust_impact_detects_tests_directory(self, tmp_path):
+        """Impact analysis identifies Rust tests/ directory files."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        # Put the callee and caller in the same file inside tests/
+        tests_dir = project / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "test_lib.rs"
+        test_file.write_text(
+            "pub fn compute(x: i32) -> i32 {\n"
+            "    x * 2\n"
+            "}\n"
+            "\n"
+            "fn test_compute() {\n"
+            "    assert_eq!(compute(3), 6);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(test_file),
+            symbol_path=["compute"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        # test_compute should be in impacted_tests (file is in tests/ directory)
+        assert len(result.impacted_tests) > 0
+
+    def test_rust_impact_test_prefix_detection(self, tmp_path):
+        """Impact analysis identifies Rust test_ prefixed functions."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "lib.rs"
+        lib.write_text(
+            "pub fn add(a: i32, b: i32) -> i32 {\n"
+            "    a + b\n"
+            "}\n"
+            "\n"
+            "fn test_add() {\n"
+            "    assert_eq!(add(1, 2), 3);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["add"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        # test_add should be in impacted_tests (name starts with test_)
+        assert len(result.impacted_tests) > 0
+        test_names = " ".join(result.impacted_tests)
+        assert "test_add" in test_names
+
+    def test_rust_impact_no_callers(self, tmp_path):
+        """Impact analysis returns empty impacted set for Rust function with no callers."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "isolated.rs"
+        lib.write_text(
+            "pub fn lonely_func() -> i32 {\n"
+            "    42\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["lonely_func"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.changed_symbols) == 1
+        assert len(result.impacted_symbols) == 0
+        assert len(result.impacted_tests) == 0
+
+    def test_rust_impact_witness_edges(self, tmp_path):
+        """Impact analysis returns witness edges for Rust (single file)."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "lib.rs"
+        lib.write_text(
+            "pub fn target() -> i32 {\n"
+            "    1\n"
+            "}\n"
+            "\n"
+            "pub fn use_target() -> i32 {\n"
+            "    target()\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["target"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.edges) > 0
+        edge_kinds = {e.kind for e in result.edges}
+        assert "calls" in edge_kinds
+
+    def test_rust_impact_changed_symbols_format(self, tmp_path):
+        """Impact analysis returns the selector string for the changed symbol."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "util.rs"
+        lib.write_text(
+            "pub fn util_fn() -> i32 {\n"
+            "    0\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["util_fn"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.changed_symbols) == 1
+        # The changed symbol selector should contain the file and function name
+        changed = result.changed_symbols[0]
+        assert "util_fn" in changed

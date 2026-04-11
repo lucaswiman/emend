@@ -5851,7 +5851,7 @@ def _is_test_file(file_path: str) -> bool:
     """Check if a file is a test file by path heuristics."""
     p = Path(file_path)
     name = p.name
-    if name.startswith('test_') or name.endswith('_test.py'):
+    if name.startswith('test_') or p.stem.endswith('_test'):
         return True
     stem = p.stem
     if stem.endswith('.test') or stem.endswith('.spec'):
@@ -5868,7 +5868,11 @@ def _is_test_symbol(selector: str) -> bool:
         sym_part = selector.split('::', 1)[1]
         # e.g. test_foo or TestFoo or TestFoo.test_method
         first_name = sym_part.split('.')[0]
-        return first_name.startswith('test_') or first_name.startswith('Test')
+        if first_name.startswith('test_') or first_name.startswith('Test'):
+            return True
+        # TypeScript/JavaScript test framework conventions
+        if first_name in ('describe', 'it', 'test'):
+            return True
     return False
 
 
@@ -6029,9 +6033,23 @@ def _find_impact_via_fact_graph(
     impacted_tests: list[str] = []
     all_impacted = changed_selectors + impacted
 
+    # Build set of decorator-based test symbols from fact graph (e.g. Rust #[test])
+    test_decorated_sels: set[str] = set()
+    try:
+        deco_result = fdb.run(
+            '?[sqn] := *decorator_on[sqn, dec], '
+            'dec in ["test", "tokio::test"]'
+        )
+        for row in deco_result["rows"]:
+            mqn = row[0]
+            if mqn in mqn_to_sel:
+                test_decorated_sels.add(mqn_to_sel[mqn])
+    except Exception:
+        pass
+
     for sel_str in all_impacted:
         file_part = sel_str.split('::', 1)[0] if '::' in sel_str else sel_str
-        if _is_test_file(file_part) or _is_test_symbol(sel_str):
+        if _is_test_file(file_part) or _is_test_symbol(sel_str) or sel_str in test_decorated_sels:
             if sel_str not in impacted_tests:
                 impacted_tests.append(sel_str)
                 for edge in all_edges:

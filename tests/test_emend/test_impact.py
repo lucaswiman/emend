@@ -499,3 +499,240 @@ class TestFindImpactFactGraph:
         impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
         assert "middle_func" in impacted_names
         assert "top_func" in impacted_names
+
+
+class TestTypeScriptImpact:
+    """Tests for impact analysis on TypeScript projects."""
+
+    def test_ts_impact_direct_caller(self, tmp_path):
+        """Impact analysis finds direct callers in TypeScript."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        utils = project / "utils.ts"
+        utils.write_text(
+            "export function formatName(name: string): string {\n"
+            "    return name.trim().toLowerCase();\n"
+            "}\n"
+        )
+
+        app = project / "app.ts"
+        app.write_text(
+            "import { formatName } from './utils';\n"
+            "\n"
+            "export function greetUser(name: string): string {\n"
+            "    return `Hello, ${formatName(name)}`;\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(utils),
+            symbol_path=["formatName"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.changed_symbols) == 1
+        assert "formatName" in result.changed_symbols[0]
+
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "greetUser" in impacted_names
+
+    def test_ts_impact_transitive_closure(self, tmp_path):
+        """Impact analysis computes transitive closure for TypeScript."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        core = project / "core.ts"
+        core.write_text(
+            "export function validate(input: string): boolean {\n"
+            "    return input.length > 0;\n"
+            "}\n"
+        )
+
+        service = project / "service.ts"
+        service.write_text(
+            "import { validate } from './core';\n"
+            "\n"
+            "export function processInput(data: string): string {\n"
+            "    if (validate(data)) {\n"
+            "        return data.toUpperCase();\n"
+            "    }\n"
+            "    return '';\n"
+            "}\n"
+        )
+
+        handler = project / "handler.ts"
+        handler.write_text(
+            "import { processInput } from './service';\n"
+            "\n"
+            "export function handleRequest(req: string): string {\n"
+            "    return processInput(req);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(core),
+            symbol_path=["validate"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "processInput" in impacted_names
+        assert "handleRequest" in impacted_names
+
+    def test_ts_impact_detects_test_dot_ts_files(self, tmp_path):
+        """Impact analysis identifies .test.ts files as test files."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "math.ts"
+        lib.write_text(
+            "export function add(a: number, b: number): number {\n"
+            "    return a + b;\n"
+            "}\n"
+        )
+
+        test_file = project / "math.test.ts"
+        test_file.write_text(
+            "import { add } from './math';\n"
+            "\n"
+            "function test_add(): void {\n"
+            "    console.assert(add(1, 2) === 3);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["add"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        # test_add should be in impacted_tests (file is .test.ts)
+        assert len(result.impacted_tests) > 0
+        test_names = " ".join(result.impacted_tests)
+        assert "test_add" in test_names or "math.test" in test_names
+
+    def test_ts_impact_detects_spec_ts_files(self, tmp_path):
+        """Impact analysis identifies .spec.ts files as test files."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "utils.ts"
+        lib.write_text(
+            "export function multiply(a: number, b: number): number {\n"
+            "    return a * b;\n"
+            "}\n"
+        )
+
+        spec_file = project / "utils.spec.ts"
+        spec_file.write_text(
+            "import { multiply } from './utils';\n"
+            "\n"
+            "function describe(): void {\n"
+            "    console.assert(multiply(2, 3) === 6);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["multiply"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.impacted_tests) > 0
+        test_names = " ".join(result.impacted_tests)
+        assert "describe" in test_names or "utils.spec" in test_names
+
+    def test_ts_impact_detects_tests_directory(self, tmp_path):
+        """Impact analysis identifies __tests__/ directory files as test files."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "lib.ts"
+        lib.write_text(
+            "export function compute(x: number): number {\n"
+            "    return x * 2;\n"
+            "}\n"
+        )
+
+        tests_dir = project / "__tests__"
+        tests_dir.mkdir()
+        test_file = tests_dir / "lib.ts"
+        test_file.write_text(
+            "import { compute } from '../lib';\n"
+            "\n"
+            "function test_compute(): void {\n"
+            "    console.assert(compute(3) === 6);\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["compute"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        assert len(result.impacted_tests) > 0
+
+    def test_ts_impact_test_symbol_detection(self, tmp_path):
+        """Impact analysis identifies TypeScript test function names (describe/it/test)."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        lib = project / "string_utils.ts"
+        lib.write_text(
+            "export function capitalize(s: string): string {\n"
+            "    return s.charAt(0).toUpperCase() + s.slice(1);\n"
+            "}\n"
+        )
+
+        # Test file with 'describe' block calling capitalize
+        test_file = project / "string_utils.test.ts"
+        test_file.write_text(
+            "import { capitalize } from './string_utils';\n"
+            "\n"
+            "function describe(): void {\n"
+            "    console.assert(capitalize('hello') === 'Hello');\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(lib),
+            symbol_path=["capitalize"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        # 'describe' should be in impacted_tests due to _is_test_symbol recognizing it
+        assert len(result.impacted_tests) > 0
+        test_names = " ".join(result.impacted_tests)
+        assert "describe" in test_names
