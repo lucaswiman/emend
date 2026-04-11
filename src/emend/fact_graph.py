@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 import re
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -892,6 +893,99 @@ class FactGraph:
             ":put exported_symbol {qualified_name}",
             {"rows": rows},
         )
+
+    # -- Post-processing ---------------------------------------------------
+
+    def _resolve_builtin_refs(self) -> None:
+        """Resolve ``builtins.*`` references using import facts.
+
+        When a scope resolver can't resolve a cross-file import (typical
+        for TypeScript/Rust), it reports the callee as ``builtins.X``.
+        This method finds such references, matches them against import
+        facts, and adds corrected reference/call facts with the real
+        qualified name.
+        """
+        try:
+            builtin_calls = self._client.run(
+                "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] := "
+                "*call[caller_qn, callee_qn, file_path, line, col, func_qn, block_id], "
+                "starts_with(callee_qn, 'builtins.')"
+            )["rows"]
+        except Exception:
+            return
+
+        if not builtin_calls:
+            return
+
+        try:
+            imports = self._client.run(
+                "?[importing_file, imported_name, imported_module] := "
+                "*import[importing_file, imported_module, imported_name, _, _], "
+                "imported_name != ''"
+            )["rows"]
+        except Exception:
+            return
+
+        import_map: dict[tuple[str, str], str] = {}
+        for imp_file, imp_name, imp_module in imports:
+            import_map[(imp_file, imp_name)] = imp_module
+
+        new_calls: list[CallFact] = []
+        new_refs: list[ReferenceFact] = []
+
+        for caller_qn, callee_qn, file_path, line, col, func_qn, block_id in builtin_calls:
+            bare_name = callee_qn.split(".", 1)[-1] if "." in callee_qn else callee_qn
+            imp_module = import_map.get((file_path, bare_name))
+            if not imp_module:
+                continue
+
+            # Resolve import module path to a file module QN.
+            # Handle relative imports (./target, ../utils) by normalizing
+            # against the importing file's directory.
+            resolved_qn = self._resolve_import_to_qn(
+                imp_module, file_path, bare_name,
+            )
+            if not resolved_qn:
+                continue
+
+            new_calls.append(CallFact(
+                caller_qn=caller_qn, callee_qn=resolved_qn,
+                file_path=file_path, line=line, col=col,
+                func_qn=func_qn, block_id=block_id,
+            ))
+            new_refs.append(ReferenceFact(
+                symbol_qn=resolved_qn, file_path=file_path,
+                line=line, col=col, ref_kind="call",
+                func_qn=func_qn, block_id=block_id,
+            ))
+
+        if new_calls:
+            self.add_calls_batch(new_calls)
+        if new_refs:
+            self.add_references_batch(new_refs)
+
+    def _resolve_import_to_qn(
+        self,
+        import_source: str,
+        importing_file: str,
+        symbol_name: str,
+    ) -> str | None:
+        """Resolve an import source path to a symbol QN.
+
+        For relative imports like ``./target`` or ``../utils/helper``,
+        resolves relative to the importing file's directory.
+        """
+        # Strip leading ./ and resolve relative paths
+        source = import_source
+        if source.startswith("./") or source.startswith("../"):
+            # Resolve relative to the importing file's directory
+            imp_dir = posixpath.dirname(importing_file)
+            source = posixpath.normpath(posixpath.join(imp_dir, source))
+
+        # Normalize separators to dots
+        normalized = _normalize_qn(source)
+
+        return f"{normalized}.{symbol_name}"
 
     # -- Queries ----------------------------------------------------------
 
@@ -3189,6 +3283,12 @@ class FactGraph:
             import_facts = _extract_imports(rel_path, content)
             graph.add_imports_batch(import_facts)
 
+        # -- Resolve builtins.* references using import facts -----------
+        # When a scope resolver can't resolve a cross-file import (common
+        # for TypeScript/Rust), references end up as "builtins.X".  We
+        # resolve these using the import facts to find the real callee QN.
+        graph._resolve_builtin_refs()
+
         # -- Type binding facts (via type oracle) ----------------------
         # Populate after all files are processed so the type oracle can
         # see the full project.  Gracefully skips when no type checker is
@@ -3239,6 +3339,9 @@ def _walk_symbols(
     parent_qn: str | None,
 ) -> None:
     """Recursively walk Rust symbol dicts and collect SymbolFact entries."""
+    # Normalize the module name to use dots so that symbol QNs are
+    # consistent with reference QNs (which go through _normalize_qn()).
+    normalized_module = _normalize_qn(module_name)
     for d in raw_symbols:
         kind = d.get("kind", "")
         if kind in ("variable", "reference"):
@@ -3247,9 +3350,9 @@ def _walk_symbols(
         name = d["name"]
         path_parts = list(d.get("path", []))
         if path_parts:
-            qn = f"{module_name}.{'.'.join(path_parts)}"
+            qn = f"{normalized_module}.{'.'.join(path_parts)}"
         else:
-            qn = f"{module_name}.{name}"
+            qn = f"{normalized_module}.{name}"
 
         out.append(SymbolFact(
             file_path=file_path,
@@ -3324,8 +3427,16 @@ def _normalize_qn(qn: str) -> str:
 
     The Rust scope resolver uses ``::`` (Rust) and ``/`` (TypeScript) as
     separators, but ``_walk_symbols`` always uses ``.``.
+
+    Also strips quotes and normalizes relative import paths (e.g.
+    ``'./target'.process`` → ``target.process``).
     """
-    return qn.replace("::", ".").replace("/", ".")
+    qn = qn.replace("'", "").replace('"', "")
+    qn = qn.replace("::", ".").replace("/", ".")
+    # Collapse runs of dots (from relative paths like ../utils) into single dots
+    qn = re.sub(r"\.{2,}", ".", qn)
+    qn = qn.lstrip(".")
+    return qn
 
 
 def _find_containing_block(

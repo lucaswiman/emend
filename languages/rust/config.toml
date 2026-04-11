@@ -162,6 +162,7 @@ class_def = "struct_item"
 call = "call_expression"
 attribute = "field_expression"
 identifier = "identifier"
+extra_identifiers = ["type_identifier"]
 assignment = "assignment_expression"
 augmented_assignment = "compound_assignment_expr"
 annotated_assignment = "let_declaration"

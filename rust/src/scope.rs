@@ -328,6 +328,10 @@ pub struct PatternMatchingSection {
     pub attribute: String,
     #[serde(default)]
     pub identifier: String,
+    /// Additional node types that should be treated as identifiers for
+    /// reference collection (e.g. `type_identifier` in TypeScript).
+    #[serde(default)]
+    pub extra_identifiers: Vec<String>,
     #[serde(default)]
     pub assignment: String,
     #[serde(default)]
@@ -1536,6 +1540,7 @@ impl ScopeResolver {
             };
 
             // For the imported names, we still want to process them
+            let mut found_names = false;
             for_each_child(&node, |child| {
                 if mod_node_id == Some(child.id()) {
                     return;
@@ -1545,6 +1550,7 @@ impl ScopeResolver {
                     || cfg_imports.dotted_name.as_deref() == Some(ck)
                     || cfg_imports.aliased_import.as_deref() == Some(ck);
                 if is_name_node {
+                    found_names = true;
                     // These resolve to symbols in the module
                     self.walk_references(
                         &mut child.walk(), file_path, source, module_path,
@@ -1554,12 +1560,20 @@ impl ScopeResolver {
                     );
                 }
             });
-            return;
+            // Only return early if we found top-level names (Python-style).
+            // For TS-style imports where names are nested inside import_clause >
+            // named_imports > import_specifier, fall through to the normal
+            // child recursion which will handle them with child_in_import=true.
+            if found_names {
+                return;
+            }
         }
 
         // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
-        if node_kind == self.config.pattern_matching.identifier {
+        let is_identifier_node = node_kind == self.config.pattern_matching.identifier
+            || self.config.pattern_matching.extra_identifiers.iter().any(|ei| ei == node_kind);
+        if is_identifier_node {
             // Skip if it's the 'attribute' field of an 'attribute' node
             let attr_kind = &self.config.pattern_matching.attribute;
             let attr_field = &self.config.pattern_matching.attr_field;
@@ -1631,11 +1645,16 @@ impl ScopeResolver {
                     let name_field = self.config.symbols.name_field();
                     if node.child_by_field_name(name_field) == Some(child) {
                         current_scope
-                    } else if child.kind() == "identifier" && node_kind != "module" && node_kind != "program" {
+                    } else if (child.kind() == "identifier"
+                        || self.config.pattern_matching.extra_identifiers.iter().any(|ei| ei.as_str() == child.kind()))
+                        && node_kind != "module" && node_kind != "program" {
                         // Heuristic: if it's an identifier but not the 'name' field, it might be the name.
                         // Let's check if it IS the name.
                         let mut name_cursor = node.walk();
-                        let first_id = node.children(&mut name_cursor).find(|c| c.kind() == "identifier");
+                        let first_id = node.children(&mut name_cursor).find(|c|
+                            c.kind() == "identifier"
+                            || self.config.pattern_matching.extra_identifiers.iter().any(|ei| ei.as_str() == c.kind())
+                        );
                         if first_id == Some(child) {
                             current_scope
                         } else {
@@ -1673,34 +1692,61 @@ impl ScopeResolver {
     }
 
     /// Classify a reference's kind based on its parent context.
+    ///
+    /// Uses config-driven node types so that call and definition detection
+    /// works across Python, TypeScript, and Rust (rather than hardcoding
+    /// Python-specific tree-sitter node names).
     fn classify_reference(&self, node: &tree_sitter::Node, in_import: bool) -> ReferenceKind {
         if in_import {
             return ReferenceKind::Import;
         }
+
+        let call_node = self.config.pattern_matching.call.as_str();
+        let attr_node = self.config.pattern_matching.attribute.as_str();
+
         if let Some(parent) = node.parent() {
             let pk = parent.kind();
-            // Call target: direct function call
-            if pk == "call" {
+
+            // ── Call target: direct function call ─────────────────────
+            if pk == call_node || pk == "call" || pk == "call_expression" {
                 if let Some(func) = parent.child_by_field_name("function") {
                     if func.id() == node.id() {
                         return ReferenceKind::Call;
                     }
+                } else {
+                    // Grammars without a "function" field: the first named
+                    // child that isn't the args list is the callee.
+                    if let Some(first) = parent.named_child(0) {
+                        if first.id() == node.id() {
+                            return ReferenceKind::Call;
+                        }
+                    }
                 }
             }
-            // Attribute is the call target (e.g., obj.method())
-            if pk == "attribute" {
+
+            // ── Attribute / member is the call target ─────────────────
+            if pk == attr_node || pk == "attribute" || pk == "member_expression" || pk == "field_expression" {
                 if let Some(grandparent) = parent.parent() {
-                    if grandparent.kind() == "call" {
+                    let gpk = grandparent.kind();
+                    if gpk == call_node || gpk == "call" || gpk == "call_expression" {
                         if let Some(func) = grandparent.child_by_field_name("function") {
                             if func.id() == parent.id() {
                                 return ReferenceKind::Call;
+                            }
+                        } else {
+                            if let Some(first) = grandparent.named_child(0) {
+                                if first.id() == parent.id() {
+                                    return ReferenceKind::Call;
+                                }
                             }
                         }
                     }
                 }
             }
-            // Function/class definitions (the name itself is a definition)
-            if pk == "function_definition" || pk == "class_definition" {
+
+            // ── Definition nodes (config-driven via cfg.definition_nodes) ──
+            let def_nodes = &self.config.cfg.definition_nodes;
+            if def_nodes.iter().any(|dn| dn == pk) {
                 if let Some(name) = parent.child_by_field_name("name") {
                     if name.id() == node.id() {
                         return ReferenceKind::Definition;
@@ -2453,6 +2499,7 @@ impl ScopeResolver {
                 .map(|n| ctx.text(n).to_string())
                 .unwrap_or_default();
 
+            let mut found_any = false;
             for_each_child(node, |child| {
                 let ck = child.kind();
                 let is_star = !imports.star_import.is_empty() && ck == imports.star_import;
@@ -2461,6 +2508,7 @@ impl ScopeResolver {
                     || imports.identifier.as_deref() == Some(ck);
 
                 if is_star {
+                    found_any = true;
                     ctx.add_import(ImportBinding {
                         local_name: "*".to_string(),
                         module_path: module_path.clone(),
@@ -2468,6 +2516,7 @@ impl ScopeResolver {
                         is_star: true,
                     });
                 } else if is_plain_name {
+                    found_any = true;
                     let name = ctx.text(child).to_string();
                     ctx.add_import(ImportBinding {
                         local_name: name.clone(),
@@ -2477,6 +2526,7 @@ impl ScopeResolver {
                     });
                 } else if is_aliased {
                     if let Some(name_node) = child.child_by_field_name("name") {
+                        found_any = true;
                         let imported = ctx.text(name_node).to_string();
                         let local = if !imports.alias_field.is_empty() {
                             child
@@ -2495,6 +2545,53 @@ impl ScopeResolver {
                     }
                 }
             });
+
+            // Fallback: if no imports were found at the top level (e.g.
+            // TypeScript where specifiers are nested inside import_clause >
+            // named_imports > import_specifier), recursively search for
+            // identifier nodes inside the import tree.
+            if !found_any && !module_path.is_empty() {
+                let ident_kind = imports.identifier.as_deref().unwrap_or("identifier");
+                Self::collect_nested_import_names(node, ident_kind, &module_path, ctx);
+            }
+        }
+    }
+
+    /// Recursively search an import node tree for identifier children and
+    /// register them as import bindings.  Used for languages like TypeScript
+    /// where import specifiers are deeply nested:
+    ///   `import_statement > import_clause > named_imports > import_specifier > identifier`
+    fn collect_nested_import_names(
+        node: &tree_sitter::Node,
+        ident_kind: &str,
+        module_path: &str,
+        ctx: &mut BuildContext,
+    ) {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == ident_kind {
+                // Skip the source string literal
+                let name = ctx.text(child).to_string();
+                // Don't register if name looks like a module path string
+                if !name.contains('/') && !name.contains('.') {
+                    ctx.add_import(ImportBinding {
+                        local_name: name.clone(),
+                        module_path: module_path.to_string(),
+                        imported_name: Some(name),
+                        is_star: false,
+                    });
+                }
+            } else {
+                // Recurse into child
+                Self::collect_nested_import_names(&child, ident_kind, module_path, ctx);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
 
@@ -3099,6 +3196,7 @@ impl LanguageConfig {
                 call: "call".to_string(),
                 attribute: "attribute".to_string(),
                 identifier: "identifier".to_string(),
+                extra_identifiers: vec![],
                 assignment: "assignment".to_string(),
                 augmented_assignment: "augmented_assignment".to_string(),
                 annotated_assignment: "annotated_assignment".to_string(),

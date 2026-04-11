@@ -584,6 +584,8 @@ def _build_fact_sym_rows(
     Includes all symbol kinds (function, class, variable, etc.) with full
     metadata, matching what the old parse.db symbol_index contained.
     """
+    # Normalize to dots so QNs are consistent across all tables.
+    module_name = _normalize_module_qn(module_name)
     from emend.language_registry import detect_language
     lang = detect_language(abs_path) or "python"
     if lang == "python":
@@ -1104,64 +1106,64 @@ def _build_facts_db(
 
         if dec_rows_list:
             fdb.run(
-                "?[qn, dec] <- $rows "
-                ":replace decorator_on {qn, dec}",
+                "?[symbol_qn, decorator] <- $rows "
+                ":replace decorator_on {symbol_qn, decorator}",
                 {"rows": dec_rows_list},
             )
 
         fdb.run(
-            "?[sq, fp, line, col, kind, fq, bid] <- $rows "
-            ":replace reference {sq, fp, line, col => kind, fq, bid}",
+            "?[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id] <- $rows "
+            ":replace reference {symbol_qn, file_path, line, col => ref_kind, func_qn, block_id}",
             {"rows": all_fg_refs},
         )
 
         fdb.run(
-            "?[caller_qn, callee_qn, fp, line, col, fq, bid] <- $rows "
-            ":replace call {caller_qn, callee_qn, fp, line, col => fq, bid}",
+            "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] <- $rows "
+            ":replace call {caller_qn, callee_qn, file_path, line, col => func_qn, block_id}",
             {"rows": all_calls},
         )
 
         fdb.run(
-            "?[callee_qn, caller_qn, fp, line, col, fq, bid] <- $rows "
-            ":replace call_by_callee {callee_qn, caller_qn, fp, line, col => fq, bid}",
+            "?[callee_qn, caller_qn, file_path, line, col, func_qn, block_id] <- $rows "
+            ":replace call_by_callee {callee_qn, caller_qn, file_path, line, col => func_qn, block_id}",
             {"rows": all_calls_by_callee},
         )
 
         fdb.run(
-            "?[fp, caller_qn, callee_qn, line, col, fq, bid] <- $rows "
-            ":replace call_by_file {fp, caller_qn, callee_qn, line, col => fq, bid}",
+            "?[file_path, caller_qn, callee_qn, line, col, func_qn, block_id] <- $rows "
+            ":replace call_by_file {file_path, caller_qn, callee_qn, line, col => func_qn, block_id}",
             {"rows": all_calls_by_file},
         )
 
         fdb.run(
-            "?[fp, fq, bid, is_entry, is_exit] <- $rows "
-            ":replace cfg_block {fp, fq, bid => is_entry, is_exit}",
+            "?[file_path, func_qn, block_id, is_entry, is_exit] <- $rows "
+            ":replace cfg_block {file_path, func_qn, block_id => is_entry, is_exit}",
             {"rows": all_cfg_blocks},
         )
 
         fdb.run(
-            "?[fp, fq, from_block, to_block, edge_kind, from_line, to_line] <- $rows "
-            ":replace cfg_edge {fp, fq, from_block, to_block, edge_kind, from_line, to_line}",
+            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] <- $rows "
+            ":replace cfg_edge {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
             {"rows": all_cfg_edges},
         )
 
         fdb.run(
-            "?[fp, fq, var_name, kind, def_block, use_block, "
+            "?[file_path, func_qn, var_name, kind, def_block, use_block, "
             "def_line, def_col, use_line, use_col] <- $rows "
-            ":replace def_use {fp, fq, var_name, kind, def_block, use_block "
+            ":replace def_use {file_path, func_qn, var_name, kind, def_block, use_block "
             "=> def_line, def_col, use_line, use_col}",
             {"rows": all_def_uses},
         )
 
         fdb.run(
-            "?[fp, fq, receiver, method, bid, line] <- $rows "
-            ":replace method_call {fp, fq, receiver, method, bid, line}",
+            "?[file_path, func_qn, receiver, method, block_id, line] <- $rows "
+            ":replace method_call {file_path, func_qn, receiver, method, block_id, line}",
             {"rows": all_method_calls},
         )
 
         fdb.run(
-            "?[fp, loc_kind, loc_id, line, col, end_line, rel_line] <- $rows "
-            ":replace source_loc {fp, loc_kind, loc_id => line, col, end_line, rel_line}",
+            "?[file_path, loc_kind, loc_id, line, col, end_line, rel_line] <- $rows "
+            ":replace source_loc {file_path, loc_kind, loc_id => line, col, end_line, rel_line}",
             {"rows": all_source_locs},
         )
 
@@ -1172,20 +1174,20 @@ def _build_facts_db(
         )
 
         fdb.run(
-            "?[fp, fq, bid, sq] <- $rows "
-            ":replace ref_by_block {fp, fq, bid, sq}",
+            "?[file_path, func_qn, block_id, symbol_qn] <- $rows "
+            ":replace ref_by_block {file_path, func_qn, block_id, symbol_qn}",
             {"rows": all_ref_by_block},
         )
 
         fdb.run(
-            "?[fp, fq, bid] <- $rows "
-            ":replace reachable_block {fp, fq, bid}",
+            "?[file_path, func_qn, block_id] <- $rows "
+            ":replace reachable_block {file_path, func_qn, block_id}",
             {"rows": all_reachable},
         )
 
         fdb.run(
-            "?[sq, fp, line] <- $rows "
-            ":replace module_level_ref {sq, fp, line}",
+            "?[symbol_qn, file_path, line] <- $rows "
+            ":replace module_level_ref {symbol_qn, file_path, line}",
             {"rows": all_module_level_refs},
         )
 
@@ -3132,12 +3134,25 @@ def _read_and_filter_py(
 # Helper functions for cross-project operations
 
 def _find_project_root(start_path: str) -> str:
-    """Find project root by looking for markers."""
+    """Find project root by looking for markers.
+
+    Checks for language-agnostic markers (.git, .emend) first, then
+    language-specific project files for Python, TypeScript/JS, and Rust.
+    """
     path = Path(start_path).resolve()
     if path.is_file():
         path = path.parent
 
-    markers = ['.git', 'pyproject.toml', 'setup.py', 'setup.cfg']
+    markers = [
+        '.git',
+        '.emend',
+        # Python
+        'pyproject.toml', 'setup.py', 'setup.cfg',
+        # TypeScript / JavaScript
+        'package.json', 'tsconfig.json',
+        # Rust
+        'Cargo.toml',
+    ]
 
     current = path
     while current != current.parent:
@@ -3297,6 +3312,17 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
             return str(src_dir)
 
     return str(root)
+
+
+def _normalize_module_qn(module: str) -> str:
+    """Normalize a module name to use dots for fact-graph QN construction.
+
+    Delegates to ``_normalize_qn`` from ``fact_graph`` which handles
+    language-specific separators (``::`` for Rust, ``/`` for TypeScript),
+    quotes, and relative path segments.
+    """
+    from emend.fact_graph import _normalize_qn
+    return _normalize_qn(module)
 
 
 def _file_to_module(file_path: str, project_path: str | None) -> str:
@@ -5202,12 +5228,17 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
             "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
         )["rows"][0][0]
         if count > 0:
+            try:
+                graph._resolve_builtin_refs()
+            except Exception:
+                logger.debug("Failed to resolve builtin refs", exc_info=True)
             _fact_graph_cache[project_root] = graph
             return graph
     except Exception:
         logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Fallback: build in-memory (mainly for tests where warm_caches is mocked)
+    # Fallback: build in-memory (mainly for tests where warm_caches is mocked).
+    # build_from_project already calls _resolve_builtin_refs internally.
     graph = FactGraph.build_from_project(project_path)
     _fact_graph_cache[project_root] = graph
     return graph
@@ -5234,7 +5265,7 @@ def find_references(
 
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
-    target_module = _file_to_module(selector.file_path, module_root)
+    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_qn = f"{target_module}.{symbol_name}"
 
     from .fact_graph import FactGraph
@@ -5303,7 +5334,7 @@ def find_callers(
 
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
-    target_module = _file_to_module(selector.file_path, module_root)
+    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_qn = f"{target_module}.{symbol_name}"
 
     graph = _get_or_build_fact_graph(scan_root)
@@ -5348,7 +5379,7 @@ def find_callees(
 
     scan_root = project_path if project_path else _find_project_root(file_path)
     module_root = _find_project_root(file_path)
-    target_module = _file_to_module(file_path, module_root)
+    target_module = _normalize_module_qn(_file_to_module(file_path, module_root))
     target_qn = f"{target_module}.{symbol_name}"
 
     graph = _get_or_build_fact_graph(scan_root)
@@ -6933,7 +6964,7 @@ def safe_delete(
         )
 
     module_root = _find_project_root(selector.file_path)
-    target_module = _file_to_module(selector.file_path, module_root)
+    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_name = selector.symbol_path[-1]
     target_qn = f"{target_module}.{target_name}" if target_module else target_name
     selector_str = f"{selector.file_path}::{'::'.join(selector.symbol_path)}"
@@ -7109,7 +7140,7 @@ def rename_symbol(
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _file_to_module(selector.file_path, module_root)
+    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
 
     # Use fully qualified name for matching
     target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name

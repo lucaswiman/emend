@@ -47,7 +47,7 @@ TypeScript and Rust are **missing**:
 
 ### Project-Level Features
 
-- [ ] [Phase 7: Cross-Language References, Callers, Callees, Graph](./phase-7-cross-language-refs-callers-graph.md)
+- [x] [Phase 7: Cross-Language References, Callers, Callees, Graph](./phase-7-cross-language-refs-callers-graph.md)
 - [ ] [Phase 8: Cross-Language Impact Analysis](./phase-8-cross-language-impact.md)
 
 ### Advanced Analysis

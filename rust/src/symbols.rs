@@ -733,6 +733,13 @@ fn collect_from_body(
             let (decorators, decorator_line_start) = extract_decorators(child, source, cfg);
             emit_class(child, child, source, depth, max_depth, path, selector_path,
                 defined_names_stack, decorators, decorator_line_start, cfg, &mut symbols);
+        } else if kind == "export_statement" {
+            // TypeScript: `export function foo()`, `export class Bar`, etc.
+            // The export_statement wraps the actual definition; recurse into it
+            // so that the inner function/class is discovered.
+            let mut inner = collect_from_body(child, source, depth, max_depth, path,
+                selector_path, defined_names_stack, in_class, cfg);
+            symbols.append(&mut inner);
         } else if !expr_stmt_kind.is_empty() && kind == expr_stmt_kind {
             // Variable assignments inside classes/modules.
             let mut inner_cursor = child.walk();
@@ -1166,7 +1173,7 @@ def top_func(a, b=1):
         assert_eq!(cfg.symbols.function_node(), "function_declaration");
         assert_eq!(cfg.symbols.class_node(), "class_declaration");
         assert_eq!(cfg.symbols.parameters_field(), "formal_parameters");
-        assert_eq!(cfg.symbols.body_field(), "statement_block");
+        assert_eq!(cfg.symbols.body_field(), "body");
         assert!(cfg.symbols.method_node().is_some());
         assert_eq!(cfg.symbols.method_node().unwrap(), "method_definition");
     }

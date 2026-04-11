@@ -153,6 +153,8 @@
 - To detect references to a symbol, use `PyScopeResolver.references_in_file()`, not a regex over source lines.
 - To get statement boundaries, use `get_statement_ranges()` or tree-sitter node spans, not Python's `ast.parse()`.
 
+**Language-specific regexes are a code smell.** If you find yourself writing `if language == "python": re.match(...)` or similar per-language regex logic, stop and reconsider. Language differences should be encoded as **data** in `config.toml` files and consumed by language-agnostic code. When a Python-only implementation exists and needs to be extended to TypeScript/Rust, the right approach is to **refactor the Python implementation to be language-agnostic** (driven by config data), not to write a parallel implementation for each language. The Datalog/FactGraph layer is intentionally language-independent — only fact *population* changes per language, never the queries or analysis logic.
+
 If the Rust extension lacks a needed capability, extend it rather than working around the gap with Python-specific code.
 
 ### Tree-sitter + Rust Backend
