@@ -45,7 +45,9 @@ def lint_cmd(
         rules, macros, deadcode_config = load_rules(str(config_path))
 
         _lang = _state["language"]
-        resolved, _ = resolve_files(path, language=_lang)
+        # Lint scans all source languages by default so that
+        # multi-language projects are covered in a single invocation.
+        resolved, _ = resolve_files(path, language=None)
         files = [str(f) for f in resolved]
 
         violations = run_lint(

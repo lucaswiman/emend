@@ -36,18 +36,34 @@ def _reject_file_glob(selector_str: str, command_name: str) -> None:
         )
 
 
-def resolve_files(path: str, language: str = "python") -> tuple[list[Path], bool]:
-    """Resolve a path argument to a list of source files."""
-    from emend.language_registry import get_extensions, matches_language
+def resolve_files(path: str, language: str | None = "python") -> tuple[list[Path], bool]:
+    """Resolve a path argument to a list of source files.
+
+    When *language* is ``None``, files of **all** registered languages are
+    collected (useful for lint which should scan everything).
+    """
+    from emend.language_registry import get_extensions, matches_language, get_all_languages, is_source_file
 
     path_obj = Path(path)
     if path_obj.is_dir():
         from emend import emend_core
 
         abs_path = str(path_obj.resolve())
-        exts = get_extensions(language)
+        if language is None:
+            all_exts: list[str] = []
+            for lang in get_all_languages():
+                all_exts.extend(get_extensions(lang))
+            exts = list(dict.fromkeys(all_exts))  # deduplicate, preserve order
+        else:
+            exts = get_extensions(language)
         return [Path(f) for f in emend_core.collect_files(abs_path, exts)], True
     if "*" in path or "?" in path:
+        if language is None:
+            return [
+                Path(f)
+                for f in glob_mod.glob(path, recursive=True)
+                if is_source_file(f)
+            ], True
         return [
             Path(f)
             for f in glob_mod.glob(path, recursive=True)
