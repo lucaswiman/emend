@@ -17,106 +17,101 @@ detected by raw-text regex scanning in three places:
    ```
 
 3. **`language_plugins.py:305-342`** — `RegexCommentHandler` with
-   per-language-prefix patterns, used for TypeScript and Rust:
+   per-language-prefix patterns used for TypeScript and Rust, where the
+   comment prefix (`#`, `//`) is hardcoded in Python:
    ```python
    self._noqa_tagged_pat = re.compile(escaped + r"\s*noqa:\s*(\S+)")
    self._noqa_bare_pat   = re.compile(escaped + r"\s*noqa\s*$")
    ```
 
-All three scan raw source text line-by-line.  They will mis-fire on noqa-like
-strings inside string literals (e.g. a test asserting `"# noqa"` is in source).
+The core regex logic (`noqa:\s*(\S+)`) is fine and intentional — the noqa
+format is a stable convention, not source code structure.  The real issues are:
+
+- **The comment prefix is hardcoded in Python** (`#`, `//`) rather than read
+  from `config.toml`.  Adding a new language requires changing Python code.
+- **The same `_NOQA_RE` is duplicated** in `transform.py` and `python_plugin.py`.
+- **`RegexCommentHandler.__init__`** takes a `prefix` argument wired up
+  in the plugin registry — the prefix should come from `config.toml` instead.
+
+The false-positive risk (matching `"# noqa"` inside a string literal) is low
+priority — in practice no one writes noqa strings as string content in test
+files, and tree-sitter comment node extraction would only help if `emend_core`
+exposes comment text positions, which it may not.
 
 ## Goal
 
-Replace regex-based noqa scanning with tree-sitter comment node traversal.
-Tree-sitter parses comments as first-class nodes; walking them avoids matching
-inside strings.
+1. Move the comment prefix (and optionally the full noqa pattern) into each
+   language's `config.toml` so no Python code needs to know about it.
+2. Consolidate the two copies of `_NOQA_RE` into a single location.
+3. Keep the regex logic itself — it is appropriate for matching within already-
+   identified comment text.
 
 ## Affected Files
 
-- `src/emend/transform.py` — `_NOQA_RE`, `_extract_noqa_lines()`
-- `src/emend/python_plugin.py` — `_NOQA_RE`
-- `src/emend/language_plugins.py` — `RegexCommentHandler`
+- `src/emend/transform.py` — `_NOQA_RE` (consolidate, don't delete)
+- `src/emend/python_plugin.py` — `_NOQA_RE` (remove duplicate, import from
+  one canonical location)
+- `src/emend/language_plugins.py` — `RegexCommentHandler` (read prefix from
+  config rather than constructor arg)
+- `languages/python/config.toml` — add `[comments]` section
+- `languages/typescript/config.toml` — add `[comments]` section
+- `languages/rust/config.toml` — add `[comments]` section
 
 ## Implementation Notes
 
-### New API in `emend_core`
+### `config.toml` changes
 
-Add a Rust-side function (or extend `PyScopeResolver`) to extract noqa
-comments from a source string by language:
+Add to each language config:
 
-```rust
-// emend_core: new function
-pub fn collect_noqa_lines(source: &str, ext: &str) -> Vec<(u32, Option<String>)>;
-// Returns: list of (line_number, Option<comma-separated tags>)
-// None = bare noqa (suppress all)
-// Some("deadcode,unused") = tagged noqa
+```toml
+# languages/python/config.toml
+[comments]
+line_prefix = "#"
+
+# languages/typescript/config.toml and languages/rust/config.toml
+[comments]
+line_prefix = "//"
 ```
 
-This walks tree-sitter's comment nodes (node type `"comment"` in Python,
-`"line_comment"` in Rust, `"comment"` in TypeScript) and checks the comment
-text for the noqa pattern.  The key point is that it only checks actual
-comment nodes, never string literals or other tokens.
+The `noqa` pattern itself (`noqa\b(?:\s*:\s*(.*))?`) is language-agnostic and
+stays in Python.  Only the comment delimiter is language-specific data.
 
-### Python side
+### `RegexCommentHandler` change
 
-Replace `_extract_noqa_lines()` with:
+Remove the `prefix` constructor parameter.  Instead, read it from the language
+config:
 
 ```python
-def _extract_noqa_lines(source: str, ext: str = "py") -> set[int]:
-    from emend import emend_core
-    result: set[int] = set()
-    for line_no, tags in emend_core.collect_noqa_lines(source, ext):
-        if tags is None or "deadcode" in tags.split(","):
-            result.add(line_no)
-    return result
+class RegexCommentHandler(CommentHandler):
+    def __init__(self, language: str) -> None:
+        config = load_config(language)
+        prefix = config.get("comments", {}).get("line_prefix", "#")
+        escaped = re.escape(prefix)
+        self._noqa_tagged_pat = re.compile(escaped + r"\s*noqa:\s*(\S+)")
+        self._noqa_bare_pat   = re.compile(escaped + r"\s*noqa\s*$")
 ```
 
-The `CommentHandler.find_noqa_comments()` interface in `language_plugins.py`
-should also delegate to `emend_core.collect_noqa_lines()`:
+### Canonical `_NOQA_RE`
 
-```python
-class TreeSitterCommentHandler(CommentHandler):
-    def __init__(self, ext: str) -> None:
-        self._ext = ext
+Keep one copy in `transform.py` (or move to a shared `_noqa.py` helper).
+Delete the copy in `python_plugin.py` and import from the canonical location.
 
-    def find_noqa_comments(self, source: str) -> dict[int, set[str] | None]:
-        from emend import emend_core
-        result: dict[int, set[str] | None] = {}
-        for line_no, tags in emend_core.collect_noqa_lines(source, self._ext):
-            if tags is None:
-                result[line_no] = None
-            else:
-                result[line_no] = {t.strip() for t in tags.split(",") if t.strip()}
-        return result
-```
+### Optional: tree-sitter comment nodes
 
-### Fallback
-
-If `emend_core.collect_noqa_lines()` cannot be added immediately, the
-existing regex approach can be made safer by checking that the regex match
-position is within a comment token.  However, extending `emend_core` is
-strongly preferred.
-
-### `RegexCommentHandler` retirement
-
-Once `TreeSitterCommentHandler` covers all languages, `RegexCommentHandler`
-can be removed.  `DocCommentHandler` (which extends it) should also be
-migrated.
+If `emend_core` exposes comment node text and positions (node type `comment`
+in Python, `line_comment` in Rust), the scan can be restricted to actual
+comment nodes, eliminating any false-positive risk.  This is a nice-to-have
+improvement and can be added incrementally without changing the regex logic.
 
 ## Tests
 
-- Add a test with a source file containing `"# noqa: deadcode"` inside a
-  string literal — verify it does NOT suppress the warning.
-- Existing dead-code noqa tests in `test_dead_code.py` must continue to pass.
-- Add tests for TypeScript and Rust noqa comments.
+- All existing noqa / dead-code tests in `test_dead_code.py` must pass.
+- Confirm that a new language added with only `config.toml` (no Python code
+  change) correctly picks up its comment prefix for noqa detection.
 
 ## Acceptance Criteria
 
-- [ ] `_NOQA_RE` removed from `transform.py`.
-- [ ] `_NOQA_RE` removed from `python_plugin.py`.
-- [ ] `RegexCommentHandler` replaced by `TreeSitterCommentHandler` (or
-      delegating to `emend_core`).
-- [ ] noqa comments inside string literals do not suppress warnings.
+- [ ] `_NOQA_RE` has a single canonical definition (not duplicated).
+- [ ] Comment prefix (`#`, `//`) read from `config.toml` in each language.
+- [ ] `RegexCommentHandler` no longer takes a hardcoded prefix argument.
 - [ ] All existing noqa/dead-code tests pass.
-- [ ] New string-literal false-positive test added and passing.

@@ -24,7 +24,7 @@ code.
 | 3 | `fact_graph.py:3660-3692` | TypeScript import parsing (5 patterns) |
 | 4 | `fact_graph.py:3858-3974` | Rust `mod` / `use` parsing |
 | 5 | `language_registry.py:302-332` | Config-driven export detection (TS/Rust) |
-| 6 | `transform.py:1268`, `language_plugins.py:305-342`, `python_plugin.py:22` | noqa suppression comment parsing |
+| 6 | `transform.py:1268`, `language_plugins.py:305-342`, `python_plugin.py:22` | noqa comment prefix hardcoded in Python (regex itself is fine; prefix belongs in `config.toml`) |
 | 7 | `python_plugin.py:9-41` | Python AST (`ast.parse`) for import extraction |
 | 8 | `language_plugins.py:153-169, 285-302` | Import line detection / removal |
 | 9 | `dsl.py:95-155, 306-365` | DSL region detection (SQL/Jinja2/GraphQL keywords) |
