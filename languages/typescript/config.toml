@@ -254,6 +254,7 @@ if_nodes = ["if_statement"]
 if_style = "alternative"
 alternative_field = "alternative"
 else_clause = "else_clause"
+else_wrapper = "else_clause"
 
 for_nodes = ["for_in_statement"]
 for_variable_field = "left"

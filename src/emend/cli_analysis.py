@@ -124,7 +124,7 @@ def trace_cmd(
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
-    preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules (django, flask, sqlalchemy, fastapi, all)")] = None,
+    preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules. Python: django, flask, sqlalchemy, fastapi. TypeScript/Node.js: express, react, nextjs, node-sql. Rust: actix-web, axum, sqlx, diesel. Special: all")] = None,
     exclude_path: Annotated[Optional[list[str]], typer.Option("--exclude-path", help="Glob patterns for paths to exclude from analysis (repeatable)")] = None,
 ):
     """Run trace analysis to detect unsafe data flows.
@@ -694,23 +694,29 @@ def types_cmd(
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import, diagnostic")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
-    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: pyrefly, pyright, ty, auto")] = "pyrefly",
+    engine: Annotated[str, typer.Option("--engine", help="Type inference engine: pyrefly, pyright, ty, typescript, rust-analyzer, auto")] = "auto",
     definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
 ):
     """Show inferred types for symbols in a file.
 
-    Uses a type inference engine (Pyrefly, Pyright, or ty) to analyze
-    source files and display inferred types for all symbols and expressions.
+    Uses a type inference engine to analyze source files and display
+    inferred types for all symbols and expressions.
 
-    Defaults to Pyrefly.  Use --engine to override (pyright, ty, or auto
-    to detect from project configuration).
+    Defaults to auto-detection based on file extension and project
+    configuration.  Use --engine to override.
+
+    Supported engines:
+      Python:     pyrefly (default), pyright, ty
+      TypeScript: typescript (uses TypeScript Compiler API via Node.js)
+      Rust:       rust-analyzer (LSP-based)
 
     Examples:
         emend types src/models/user.py
+        emend types src/app.ts
+        emend types src/lib.rs
         emend types src/models/user.py --name User
         emend types src/models/ --definitions-only --json
         emend types app.py --engine pyright
-        emend types app.py --engine ty
     """
     from emend.type_oracle import create_type_oracle
 
@@ -727,7 +733,10 @@ def types_cmd(
             project_root = target.parent
         else:
             project_root = target
-        oracle = create_type_oracle(engine=engine, project_root=project_root)
+        file_hint = target if target.is_file() else None
+        oracle = create_type_oracle(
+            engine=engine, project_root=project_root, file_path=file_hint,
+        )
 
         resolved_engine = engine
         if engine == "auto":

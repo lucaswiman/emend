@@ -3249,6 +3249,22 @@ class FactGraph:
                 graph.add_references_batch(ref_facts)
                 graph.add_calls_batch(call_facts)
 
+                # Exclude definition-site "references" (e.g. class/fn name
+                # at its own definition line) to avoid inflating live_ref.
+                sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts}
+                ref_by_block_rows = [
+                    [f.file_path, f.func_qn, f.block_id, f.symbol_qn]
+                    for f in ref_facts
+                    if f.func_qn and f.block_id >= 0
+                    and (f.symbol_qn, f.line) not in sym_def_lines
+                ]
+                if ref_by_block_rows:
+                    graph._client.run(
+                        "?[file_path, func_qn, block_id, symbol_qn] <- $rows "
+                        ":put ref_by_block {file_path, func_qn, block_id, symbol_qn}",
+                        {"rows": ref_by_block_rows},
+                    )
+
             # -- Def-use facts with block IDs ----------------------------
             def_use_facts: list[DefUseFact] = _build_def_use_facts(
                 cfgs, sym_facts, rel_path, module_name
@@ -3282,6 +3298,47 @@ class FactGraph:
             # -- Import facts (via stdlib ast) ----------------------------
             import_facts = _extract_imports(rel_path, content)
             graph.add_imports_batch(import_facts)
+
+        # -- Compute reachable blocks via BFS from entry blocks ----------
+        try:
+            block_result = graph._client.run(
+                "?[fp, fq, bid, ie] := *cfg_block[fp, fq, bid, ie, _]"
+            )
+            edge_result = graph._client.run(
+                "?[fp, fq, fb, tb] := *cfg_edge[fp, fq, fb, tb, _, _, _]"
+            )
+
+            entries_by_func: dict[tuple[str, str], set[int]] = {}
+            for fp, fq, bid, is_entry in block_result["rows"]:
+                if is_entry:
+                    entries_by_func.setdefault((fp, fq), set()).add(bid)
+
+            adj: dict[tuple[str, str, int], list[int]] = {}
+            for fp, fq, fb, tb in edge_result["rows"]:
+                adj.setdefault((fp, fq, fb), []).append(tb)
+
+            reachable_rows: list[list] = []
+            for (fp, fq), entry_set in entries_by_func.items():
+                visited: set[int] = set()
+                stack = list(entry_set)
+                while stack:
+                    bid = stack.pop()
+                    if bid in visited:
+                        continue
+                    visited.add(bid)
+                    reachable_rows.append([fp, fq, bid])
+                    for nb in adj.get((fp, fq, bid), []):
+                        if nb not in visited:
+                            stack.append(nb)
+
+            if reachable_rows:
+                graph._client.run(
+                    "?[file_path, func_qn, block_id] <- $rows "
+                    ":put reachable_block {file_path, func_qn, block_id}",
+                    {"rows": reachable_rows},
+                )
+        except Exception:
+            logger.debug("Could not compute reachable blocks", exc_info=True)
 
         # -- Resolve builtins.* references using import facts -----------
         # When a scope resolver can't resolve a cross-file import (common
@@ -4029,10 +4086,21 @@ def _build_cfg_facts(
     for cfg in cfgs:
         func_name = cfg.func_name
         func_qn = ""
+        # Match by name AND line range to disambiguate methods with the
+        # same name in different classes (e.g. two classes both having
+        # "method").  CFG lines are 0-indexed, symbol lines are 1-indexed.
+        cfg_start = cfg.func_start_line + 1
         for sf in sym_facts:
             if sf.name == func_name and sf.file_path == rel_path:
-                func_qn = sf.qualified_name
-                break
+                if sf.line <= cfg_start <= (sf.end_line or sf.line):
+                    func_qn = sf.qualified_name
+                    break
+        # Fallback: match by name only if line-range match failed
+        if not func_qn:
+            for sf in sym_facts:
+                if sf.name == func_name and sf.file_path == rel_path:
+                    func_qn = sf.qualified_name
+                    break
         if not func_qn:
             func_qn = f"{module_name}.{func_name}"
 
@@ -4094,10 +4162,17 @@ def _build_def_use_facts(
     for cfg in cfgs:
         func_name = cfg.func_name
         func_qn = ""
+        cfg_start = cfg.func_start_line + 1
         for sf in sym_facts:
             if sf.name == func_name and sf.file_path == rel_path:
-                func_qn = sf.qualified_name
-                break
+                if sf.line <= cfg_start <= (sf.end_line or sf.line):
+                    func_qn = sf.qualified_name
+                    break
+        if not func_qn:
+            for sf in sym_facts:
+                if sf.name == func_name and sf.file_path == rel_path:
+                    func_qn = sf.qualified_name
+                    break
         if not func_qn:
             func_qn = f"{module_name}.{func_name}"
 

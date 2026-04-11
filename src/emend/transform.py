@@ -782,10 +782,19 @@ def _extract_file_facts(
     for cfg in cfgs:
         func_name = cfg.func_name
         func_qn = ""
+        # Match by name AND line range to disambiguate methods with the
+        # same name in different classes (CFG lines 0-indexed, sym 1-indexed).
+        cfg_start = cfg.func_start_line + 1
         for sf in sym_facts_for_file:
             if sf.name == func_name and sf.file_path == rel_path:
-                func_qn = sf.qualified_name
-                break
+                if sf.line <= cfg_start <= (sf.end_line or sf.line):
+                    func_qn = sf.qualified_name
+                    break
+        if not func_qn:
+            for sf in sym_facts_for_file:
+                if sf.name == func_name and sf.file_path == rel_path:
+                    func_qn = sf.qualified_name
+                    break
         if not func_qn:
             func_qn = f"{module_name}.{func_name}"
 
@@ -828,11 +837,15 @@ def _extract_file_facts(
     content_block_ranges = [br for br in block_ranges if br[4]]
     symbol_ranges = _build_symbol_line_index(sym_facts_for_file, rel_path)
 
+    # Pre-compute definition-site locations to exclude class/fn name
+    # references at their own definition line from ref_by_block.
+    _sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts_for_file}
     for tqn, line, col, kind in file_refs:
         fq, bid = _find_containing_block(content_block_ranges, line)
         result["fg_refs"].append([tqn, rel_path, line, col, kind, fq, bid])
-        # ref_by_block: only for refs with real block data
-        if fq and bid >= 0:
+        # ref_by_block: only for refs with real block data, excluding
+        # definition-site "references" to avoid inflating live_ref.
+        if fq and bid >= 0 and (tqn, line) not in _sym_def_lines:
             result["ref_by_block"].append([rel_path, fq, bid, tqn])
         else:
             result["module_level_refs"].append([tqn, rel_path, line])

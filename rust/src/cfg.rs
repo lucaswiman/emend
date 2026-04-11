@@ -557,6 +557,18 @@ impl<'a> CfgBuilder<'a> {
     /// Walk statements in a body node. Returns the current block after
     /// processing (may differ from `current` if a terminator was hit).
     fn walk_body(&mut self, body: tree_sitter::Node, mut current: BlockId) -> Option<BlockId> {
+        // If the body node itself is a control-flow terminator (e.g. a
+        // return_expression used as a Rust match-arm value), handle it as a
+        // single statement instead of iterating its children.
+        let bk = body.kind();
+        if self.cfg_sec.return_nodes.iter().any(|n| n == bk)
+            || self.cfg_sec.throw_nodes.iter().any(|n| n == bk)
+            || self.cfg_sec.break_nodes.iter().any(|n| n == bk)
+            || self.cfg_sec.continue_nodes.iter().any(|n| n == bk)
+        {
+            return self.walk_statement(body, current);
+        }
+
         // Collect children upfront: tree-sitter cursors can't be shared with
         // recursive walks, and the builder mutates self during iteration.
         let mut cursor = body.walk();
@@ -1499,11 +1511,7 @@ impl<'a> CfgBuilder<'a> {
             }
         }
 
-        if all_terminated {
-            self.add_edge(current, join, EdgeKind::Fallthrough);
-        }
-
-        Some(join)
+        if all_terminated { None } else { Some(join) }
     }
 }
 

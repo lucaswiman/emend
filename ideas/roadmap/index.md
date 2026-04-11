@@ -53,8 +53,8 @@ TypeScript and Rust are **missing**:
 ### Advanced Analysis
 
 - [x] [Phase 9: Interprocedural Trace for TS & Rust](./phase-9-interprocedural-trace.md)
-- [ ] [Phase 10: Language-Specific Trace Presets](./phase-10-language-trace-presets.md)
-- [ ] [Phase 11: Cross-Language Type Oracle](./phase-11-cross-language-type-oracle.md)
+- [x] [Phase 10: Language-Specific Trace Presets](./phase-10-language-trace-presets.md)
+- [x] [Phase 11: Cross-Language Type Oracle](./phase-11-cross-language-type-oracle.md)
 
 ## Dependency Graph
 
