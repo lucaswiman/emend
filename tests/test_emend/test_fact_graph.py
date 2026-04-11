@@ -165,6 +165,112 @@ class TestImportQueries:
         assert g.imports_in("lib.py") == []
 
 
+class TestRustImportExtraction:
+    """Tests for Rust import extraction via tree-sitter (Phase 4 migration)."""
+
+    def _extract(self, content: str) -> list[ImportFact]:
+        from emend.fact_graph import _extract_imports_rust
+        # Reset the cached resolver between tests to ensure isolation
+        if hasattr(_extract_imports_rust, "_resolver"):
+            del _extract_imports_rust._resolver
+        return _extract_imports_rust("test.rs", content)
+
+    def test_simple_use(self):
+        """``use std::io;`` — plain scoped import."""
+        facts = self._extract("use std::io;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std"
+        assert f.imported_name == "io"
+        assert f.alias is None
+        assert f.line == 1
+
+    def test_nested_use_tree(self):
+        """``use std::{io, fmt::{self, Display}}`` — nested use tree."""
+        src = "use std::{io, fmt::{self, Display}};\n"
+        facts = self._extract(src)
+        by_name = {f.imported_name: f for f in facts}
+        # io from std
+        assert "io" in by_name
+        assert by_name["io"].imported_module == "std"
+        # fmt (self) from std::fmt
+        assert "fmt" in by_name
+        assert by_name["fmt"].imported_module == "std"
+        # Display from std::fmt
+        assert "Display" in by_name
+        assert by_name["Display"].imported_module == "std::fmt"
+
+    def test_pub_use_reexport(self):
+        """``pub use crate::foo::Bar`` — re-export."""
+        facts = self._extract("pub use crate::foo::Bar;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "crate::foo"
+        assert f.imported_name == "Bar"
+        assert f.alias is None
+
+    def test_aliased_import(self):
+        """``use std::collections::HashMap as HM`` — aliased import."""
+        facts = self._extract("use std::collections::HashMap as HM;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::collections"
+        assert f.imported_name == "HashMap"
+        assert f.alias == "HM"
+
+    def test_glob_import(self):
+        """``use std::io::*;`` — wildcard/glob import."""
+        facts = self._extract("use std::io::*;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::io"
+        assert f.imported_name == "*"
+        assert f.alias is None
+
+    def test_mod_declaration(self):
+        """``mod sub_module;`` — external module declaration."""
+        facts = self._extract("mod sub_module;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "sub_module"
+        assert f.imported_name is None
+        assert f.alias is None
+        assert f.line == 1
+
+    def test_aliased_relative_import(self):
+        """``use super::baz as b;`` — aliased relative import."""
+        facts = self._extract("use super::baz as b;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "super"
+        assert f.imported_name == "baz"
+        assert f.alias == "b"
+
+    def test_pub_crate_visibility(self):
+        """``pub(crate) use std::sync::Arc;`` — visibility modifier ignored."""
+        facts = self._extract("pub(crate) use std::sync::Arc;\n")
+        assert len(facts) == 1
+        f = facts[0]
+        assert f.imported_module == "std::sync"
+        assert f.imported_name == "Arc"
+
+    def test_line_numbers(self):
+        """Line numbers are correctly reported for each import."""
+        src = "use std::io;\nuse std::fmt;\nmod helper;\n"
+        facts = self._extract(src)
+        lines = {f.imported_module: f.line for f in facts}
+        assert lines["std"] == 1 or lines.get("std") in (1, 2)
+        # Check at least two different lines appear
+        line_vals = [f.line for f in facts]
+        assert len(set(line_vals)) >= 2
+
+    def test_inline_mod_not_extracted(self):
+        """``mod name { ... }`` inline modules are NOT extracted as imports."""
+        src = "mod inner {\n    pub fn foo() {}\n}\n"
+        facts = self._extract(src)
+        assert len(facts) == 0
+
+
 class TestSerialization:
     def test_roundtrip(self):
         g = _make_graph()

@@ -247,6 +247,33 @@ impl PyScopeResolver {
         structured.iter().map(|si| structured_import_to_pydict(py, si)).collect()
     }
 
+    /// Collect Rust `use` and `mod` declarations from a source string.
+    ///
+    /// This is a language-specific parser for Rust that handles the recursive
+    /// use-tree grammar (``scoped_use_list``, ``use_wildcard``, ``use_as_clause``…).
+    /// Returns a list of ``(local_name, module_path, imported_name, is_star, line)``
+    /// tuples, where ``line`` is 1-based.
+    ///
+    /// Use this instead of ``imports_in_file`` or
+    /// ``collect_structured_imports_from_source`` for Rust source files.
+    #[pyo3(signature = (source, ext=None))]
+    fn collect_rust_imports_from_source(
+        &self,
+        source: &str,
+        ext: Option<&str>,
+    ) -> Vec<(String, String, Option<String>, bool, usize)> {
+        let ext = ext.unwrap_or("rs");
+        let tree = match crate::pattern::parse_by_extension(source, ext) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        self.inner
+            .collect_rust_imports(&tree, source)
+            .into_iter()
+            .map(|(b, line)| (b.local_name, b.module_path, b.imported_name, b.is_star, line))
+            .collect()
+    }
+
     /// Returns all qualified name strings mentioned in a file (for pre-filter index).
     fn all_qnames_in_file(&self, path: &str) -> Vec<String> {
         let path = PathBuf::from(path);
