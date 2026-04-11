@@ -1,81 +1,66 @@
-# TypeScript & Rust Parity Roadmap
+# Regex Migration Roadmap
 
-Bring TypeScript and Rust analysis to feature parity with Python across
-control flow, taint/trace, dead code, lint, references, impact, and
-interprocedural analysis.
+Eliminate source-code-parsing regexes from the Python codebase and replace them
+with tree-sitter-based analysis, in accordance with the design philosophy in
+CLAUDE.md: *"Regexes in analysis code are a big code smell"*.
 
-## Current State
+## Motivation
 
-Python has full analysis support: CFG construction, intraprocedural and
-interprocedural trace/taint analysis, dead code detection, lint rules with
-flow checks, impact analysis, references/callers/callees/graph, DSL
-integration, and type oracle integration.
+The codebase contains several clusters of `re.compile` / `re.finditer` calls
+that parse source code structure (imports, exports, `__all__`, comments, noqa
+suppressions).  These are fragile — they break on multi-line statements, string
+literals, comments, and other edge cases that a real parser handles
+transparently.  The Rust `emend_core` extension already exposes the right
+primitives (`PyScopeResolver`, `find_pattern`, `collect_symbols_from_str`) and
+language differences should be expressed as `config.toml` data, not Python
+code.
 
-TypeScript and Rust have:
-- Tree-sitter parsing and pattern matching (working)
-- Scope resolution and qualified names (working)
-- CFG construction with def-use facts (working, tested)
-- Language config files with scoping/binding/CFG rules (working)
-- Source root detection (`_find_source_root`) (working)
+## Inventory of Violations
 
-TypeScript and Rust are **missing**:
-- Trace/taint analysis (hardcoded Python assumptions block it)
-- Import fact extraction (uses `stdlib ast.parse`, Python only)
-- Dead code detection (Python-specific entry point heuristics, `__init__.py`)
-- Lint flow rules (trace engine is Python-only)
-- Project-level references/callers/callees/graph (hardcoded `language="python"`)
-- Impact analysis (depends on callers, which is Python-only)
-- Container mutation tracking (hardcoded `.append()`, `.extend()`, `.update()`)
-- Keyword filtering (hardcoded `_PYTHON_KEYWORDS` frozenset)
-- Module naming (`_file_to_module` assumes Python dotted paths)
-- Type oracle (Python-only adapters: pyrefly, pyright, ty)
-- Interprocedural trace (depends on all of the above)
+| Phase | Location | What the regex does |
+|-------|----------|---------------------|
+| 1 | `transform.py:677-680, 1471-1480` | Python import extraction (`fact_imp`) |
+| 2 | `transform.py:1253-1265` | Python `__all__` list extraction |
+| 3 | `fact_graph.py:3660-3692` | TypeScript import parsing (5 patterns) |
+| 4 | `fact_graph.py:3858-3974` | Rust `mod` / `use` parsing |
+| 5 | `language_registry.py:302-332` | Config-driven export detection (TS/Rust) |
+| 6 | `transform.py:1268`, `language_plugins.py:305-342`, `python_plugin.py:22` | noqa suppression comment parsing |
+| 7 | `python_plugin.py:9-41` | Python AST (`ast.parse`) for import extraction |
+| 8 | `language_plugins.py:153-169, 285-302` | Import line detection / removal |
+| 9 | `dsl.py:95-155, 306-365` | DSL region detection (SQL/Jinja2/GraphQL keywords) |
 
 ## Phases
 
-### Foundation: Language-Agnostic Fact Population
+### High Priority (Source Code Parsing Regressions Most Likely)
 
-- [x] [Phase 1: Tree-Sitter Import Extraction](./phase-1-treesitter-import-extraction.md)
-- [x] [Phase 2: Language-Aware Fact Graph Building](./phase-2-language-aware-fact-graph.md)
-- [x] [Phase 3: Language-Parameterised Helpers](./phase-3-language-parameterised-helpers.md)
+- [ ] [Phase 1: Python `fact_imp` Import Regex](./phase-1-python-fact-imp-import-regex.md)
+- [ ] [Phase 2: Python `__all__` Export Detection](./phase-2-python-all-export-detection.md)
+- [ ] [Phase 3: TypeScript Import Parsing](./phase-3-typescript-import-parsing.md)
+- [ ] [Phase 4: Rust Module/Import Parsing](./phase-4-rust-import-parsing.md)
 
-### Core Analysis
+### Medium Priority (Structural Improvements)
 
-- [x] [Phase 4: Intraprocedural Trace for TS & Rust](./phase-4-intraprocedural-trace.md)
-- [x] [Phase 5: Cross-Language Dead Code Detection](./phase-5-cross-language-dead-code.md)
-- [x] [Phase 6: Cross-Language Lint & Flow Rules](./phase-6-cross-language-lint-flow.md)
+- [ ] [Phase 5: Config-Driven Export Detection](./phase-5-config-driven-export-detection.md)
+- [ ] [Phase 6: noqa Comment Detection](./phase-6-noqa-comment-detection.md)
+- [ ] [Phase 7: Python Plugin `ast.parse` Migration](./phase-7-python-plugin-ast-migration.md)
+- [ ] [Phase 8: `language_plugins.py` Import Handling](./phase-8-language-plugins-import-handling.md)
 
-### Project-Level Features
+### Lower Priority (Complex / Needs Rust Extension Work)
 
-- [x] [Phase 7: Cross-Language References, Callers, Callees, Graph](./phase-7-cross-language-refs-callers-graph.md)
-- [x] [Phase 8: Cross-Language Impact Analysis](./phase-8-cross-language-impact.md)
-
-### Advanced Analysis
-
-- [x] [Phase 9: Interprocedural Trace for TS & Rust](./phase-9-interprocedural-trace.md)
-- [x] [Phase 10: Language-Specific Trace Presets](./phase-10-language-trace-presets.md)
-- [x] [Phase 11: Cross-Language Type Oracle](./phase-11-cross-language-type-oracle.md)
-
-## Dependency Graph
-
-```
-Phase 1 ──┐
-           ├── Phase 2 ──┬── Phase 4 ──┬── Phase 6
-Phase 3 ──┘              │             │
-                          ├── Phase 5   ├── Phase 9 ── Phase 10
-                          │             │
-                          └── Phase 7 ── Phase 8
-                                                  Phase 11 (independent)
-```
+- [ ] [Phase 9: DSL Region Detection](./phase-9-dsl-region-detection.md)
 
 ## Design Principles
 
-1. **Config-driven, not hardcoded.** Language-specific behaviour belongs in
-   `languages/<lang>/config.toml`, not in Python `if` chains or frozensets.
-2. **Same Datalog rules, different facts.** The Datalog trace/flow/dead-code
-   rules are language-agnostic; only fact population changes per language.
-3. **Incremental testing.** Each phase adds tests for TS and Rust that mirror
-   existing Python test coverage for the same feature.
-4. **No cross-language analysis yet.** Tracing taint from a Python caller into
-   a TypeScript callee (or vice versa) is out of scope. Each language is
-   analysed independently using the same engine.
+1. **Use `PyScopeResolver` for import/export extraction.** It already works for
+   Python, TypeScript, and Rust.  Functions `imports_in_file()` and
+   `structured_imports_in_file()` return structured data; no regex needed.
+2. **Use `find_pattern` with `$METAVAR` captures for structural matching.**
+   Patterns like `__all__ = [$NAMES]` or `export { $NAMES }` are parsed by
+   tree-sitter, not regex.
+3. **Encode language differences in `config.toml`, not Python `if` chains.**
+   Export visibility rules, import keywords, comment prefixes all belong in
+   `languages/<lang>/config.toml`.
+4. **Tree-sitter comment nodes for noqa detection.**  Comment nodes are first-
+   class tree-sitter nodes — traverse them rather than scanning raw text.
+5. **Never add a new regex for source code structure.**  If the Rust extension
+   lacks a needed capability, extend it.
