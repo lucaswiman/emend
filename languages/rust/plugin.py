@@ -14,6 +14,6 @@ def create_plugin() -> LanguagePlugin:
             extensions=["rs"],
             import_keywords=("use",),
         ),
-        comment_handler=DocCommentHandler("//", doc_style="line"),
+        comment_handler=DocCommentHandler(doc_style="line", language="rust"),
         pattern_compiler=TreeSitterPatternCompiler("rust"),
     )

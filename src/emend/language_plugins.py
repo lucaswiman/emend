@@ -13,12 +13,26 @@ Phase 2c extracts Python-specific code into ``PythonImportHandler``,
 ``PythonCommentHandler``, and ``PythonPatternCompiler`` in ``python_plugin.py``.
 Phase 2d rewires the original call sites in ``transform.py`` and ``lint.py``
 to delegate through the plugin system.
+
+Phase 6 (noqa consolidation): ``NOQA_PATTERN`` is the canonical core regex for
+noqa suppression comments.  Importers should build their own ``re.compile``
+using this string rather than duplicating the pattern.
 """
 from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Canonical noqa pattern core (Phase 6)
+# ---------------------------------------------------------------------------
+
+#: Core regex fragment that matches ``noqa`` followed by an optional tag list.
+#: Does **not** include the comment-prefix (``#``, ``//``) — callers add that.
+#:
+#: Group 1 (optional): the tag string after the colon, e.g. ``"emend:deadcode"``.
+NOQA_PATTERN: str = r'noqa\b(?:\s*:\s*(.*))?'
 
 
 # ---------------------------------------------------------------------------
@@ -307,9 +321,20 @@ class RegexCommentHandler(CommentHandler):
 
     Recognises ``<prefix> noqa: tag1,tag2`` comments.  Does not handle
     block-style docstrings (returns empty list for ``find_docstrings``).
+
+    The comment prefix can be supplied directly via *prefix*, or derived from
+    a language name via *language* (reads ``config.toml``).  When neither is
+    given, the prefix defaults to ``"#"``.
     """
 
-    def __init__(self, prefix: str) -> None:
+    def __init__(
+        self,
+        prefix: str | None = None,
+        *,
+        language: str | None = None,
+    ) -> None:
+        if prefix is None:
+            prefix = _get_comment_prefix(language or "")
         self._prefix = prefix
         escaped = re.escape(prefix)
         # Match "noqa: tag1,tag2" with tags
@@ -360,14 +385,23 @@ class DocCommentHandler(RegexCommentHandler):
     # Rust doc comments: consecutive lines starting with /// or //!
     _RUST_DOC_LINE_RE = re.compile(r'^[ \t]*(?:///|//!)', re.MULTILINE)
 
-    def __init__(self, prefix: str, doc_style: str = "block") -> None:
+    def __init__(
+        self,
+        prefix: str | None = None,
+        doc_style: str = "block",
+        *,
+        language: str | None = None,
+    ) -> None:
         """
         Args:
-            prefix: line comment prefix (e.g. ``//``)
+            prefix: line comment prefix (e.g. ``//``); if omitted, *language*
+                is used to read the prefix from ``config.toml``.
             doc_style: ``"block"`` for ``/** */`` style (JS/TS),
                 ``"line"`` for ``///`` style (Rust)
+            language: language name to look up prefix from config (used when
+                *prefix* is not supplied).
         """
-        super().__init__(prefix)
+        super().__init__(prefix, language=language)
         self._doc_style = doc_style
 
     def _find_doc_comment_ranges(
@@ -652,9 +686,8 @@ def load_plugin(language: str) -> "LanguagePlugin":
         if plugin is not None:
             return plugin
 
-    prefix = _get_comment_prefix(language)
     return LanguagePlugin(
         import_handler=NoOpImportHandler(),
-        comment_handler=RegexCommentHandler(prefix),
+        comment_handler=RegexCommentHandler(language=language),
         pattern_compiler=TreeSitterPatternCompiler(language),
     )

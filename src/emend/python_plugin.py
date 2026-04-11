@@ -11,14 +11,18 @@ import re
 import tokenize
 
 from emend.language_plugins import (
+    NOQA_PATTERN,
     CommentHandler,
     ImportHandler,
     LanguagePlugin,
     PatternCompiler,
 )
 
-# Copied from transform.py (_NOQA_RE) to avoid a circular import.
-_NOQA_RE = re.compile(r'#\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+# Build the Python-specific noqa regex from the canonical NOQA_PATTERN.
+# Python's tokenize.COMMENT tokens include the leading '#', so we must
+# match it here.  (No circular import: language_plugins does not import
+# from python_plugin.)
+_NOQA_RE = re.compile(r'#\s*' + NOQA_PATTERN, re.IGNORECASE)
 
 
 def _get_structured_imports(source: str) -> list[dict]:

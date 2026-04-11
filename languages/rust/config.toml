@@ -7,6 +7,9 @@ file_extensions = ["rs"]
 comment_prefix = "//"
 keywords = ["let", "fn", "struct", "enum", "trait", "impl", "mod", "use", "pub", "crate", "self", "Self", "where", "type", "async", "await", "mut", "ref", "static", "const", "extern", "unsafe", "move"]
 
+[comments]
+line_prefix = "//"
+
 [scoping]
 [[scoping.scope_creators]]
 node = "source_file"

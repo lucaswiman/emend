@@ -230,6 +230,11 @@ def get_module_separator(language: str) -> str:
 def get_comment_prefix(language: str) -> str:
     """Return the line-comment prefix for *language* (e.g. ``"#"`` or ``"//"``)."""
     config = load_config(language)
+    # Prefer the dedicated [comments] section (Phase 6); fall back to the
+    # legacy [language].comment_prefix key for backward compatibility.
+    comments_section = config.get("comments", {})
+    if "line_prefix" in comments_section:
+        return comments_section["line_prefix"]
     return config.get("language", {}).get("comment_prefix", "#")
 
 

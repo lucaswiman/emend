@@ -7,6 +7,9 @@ file_extensions = ["ts", "tsx", "js", "jsx"]
 comment_prefix = "//"
 keywords = ["undefined", "null", "true", "false"]
 
+[comments]
+line_prefix = "//"
+
 [scoping]
 [[scoping.scope_creators]]
 node = "program"

@@ -16,6 +16,7 @@ import io
 import json
 import time
 from .component_selector import ExtendedSelector, parse_extended_selector
+from .language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from .pattern import (
     parse_pattern,
     compile_pattern_to_rust_ir,
@@ -1271,7 +1272,9 @@ def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> se
     return names
 
 
-_NOQA_RE = re.compile(r'(?:#|//)\s*noqa\b(?:\s*:\s*(.*))?', re.IGNORECASE)
+# Build from the canonical pattern so the noqa fragment is not duplicated.
+# Matches both Python (#) and C-style (//) comment prefixes.
+_NOQA_RE = re.compile(r'(?:#|//)\s*' + _NOQA_PATTERN, re.IGNORECASE)
 
 
 def _extract_noqa_lines(source: str) -> set[int]:
