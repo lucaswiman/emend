@@ -3317,12 +3317,12 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
 def _normalize_module_qn(module: str) -> str:
     """Normalize a module name to use dots for fact-graph QN construction.
 
-    The fact graph uses ``.`` as a universal separator for qualified names.
-    Language-specific separators (``::`` for Rust, ``/`` for TypeScript)
-    are converted to dots so that symbol QNs, reference QNs, and query QNs
-    all use the same representation.
+    Delegates to ``_normalize_qn`` from ``fact_graph`` which handles
+    language-specific separators (``::`` for Rust, ``/`` for TypeScript),
+    quotes, and relative path segments.
     """
-    return module.replace("::", ".").replace("/", ".")
+    from emend.fact_graph import _normalize_qn
+    return _normalize_qn(module)
 
 
 def _file_to_module(file_path: str, project_path: str | None) -> str:
@@ -5170,24 +5170,6 @@ def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: 
 _fact_graph_cache: dict[str, "FactGraph"] = {}
 
 
-def _resolve_graph_builtins(graph: "FactGraph", project_root: str) -> None:
-    """Resolve ``builtins.*`` references in a loaded FactGraph.
-
-    Rewrites unresolved cross-file call references (which appear as
-    ``builtins.X``) using import facts so that callers/callees queries
-    return correct results for TypeScript and Rust projects.
-    """
-    try:
-        graph._resolve_builtin_refs(
-            lambda fp: _file_to_module(
-                str((Path(project_root).resolve() / fp)),
-                project_root,
-            ),
-        )
-    except Exception:
-        logger.debug("Failed to resolve builtin refs", exc_info=True)
-
-
 def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     """Get or build a FactGraph for the project.
 
@@ -5246,15 +5228,18 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
             "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
         )["rows"][0][0]
         if count > 0:
-            _resolve_graph_builtins(graph, project_root)
+            try:
+                graph._resolve_builtin_refs()
+            except Exception:
+                logger.debug("Failed to resolve builtin refs", exc_info=True)
             _fact_graph_cache[project_root] = graph
             return graph
     except Exception:
         logger.debug("Failed to load facts.db after indexing", exc_info=True)
 
-    # Fallback: build in-memory (mainly for tests where warm_caches is mocked)
+    # Fallback: build in-memory (mainly for tests where warm_caches is mocked).
+    # build_from_project already calls _resolve_builtin_refs internally.
     graph = FactGraph.build_from_project(project_path)
-    _resolve_graph_builtins(graph, project_root)
     _fact_graph_cache[project_root] = graph
     return graph
 

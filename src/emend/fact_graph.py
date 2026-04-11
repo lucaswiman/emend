@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 import re
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -895,10 +896,7 @@ class FactGraph:
 
     # -- Post-processing ---------------------------------------------------
 
-    def _resolve_builtin_refs(
-        self,
-        file_to_module_fn: Callable[[str], str],
-    ) -> None:
+    def _resolve_builtin_refs(self) -> None:
         """Resolve ``builtins.*`` references using import facts.
 
         When a scope resolver can't resolve a cross-file import (typical
@@ -906,11 +904,7 @@ class FactGraph:
         This method finds such references, matches them against import
         facts, and adds corrected reference/call facts with the real
         qualified name.
-
-        ``file_to_module_fn`` maps a relative file path to its module
-        name (language-specific, e.g. ``target`` or ``utils.helper``).
         """
-        # 1. Find all call facts with builtins.* callee
         try:
             builtin_calls = self._client.run(
                 "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] := "
@@ -923,7 +917,6 @@ class FactGraph:
         if not builtin_calls:
             return
 
-        # 2. Build import map: (file_path, name) -> imported_module
         try:
             imports = self._client.run(
                 "?[importing_file, imported_name, imported_module] := "
@@ -937,23 +930,6 @@ class FactGraph:
         for imp_file, imp_name, imp_module in imports:
             import_map[(imp_file, imp_name)] = imp_module
 
-        # 3. Build file→module QN map for all known files
-        try:
-            file_modules = self._client.run(
-                "?[fp] := *symbol[_, fp, _, _, _, _, _]"
-            )["rows"]
-        except Exception:
-            file_modules = []
-
-        module_qn_cache: dict[str, str] = {}
-        for (fp,) in file_modules:
-            if fp not in module_qn_cache:
-                try:
-                    module_qn_cache[fp] = _normalize_qn(file_to_module_fn(fp))
-                except Exception:
-                    pass
-
-        # 4. Resolve and add corrected facts
         new_calls: list[CallFact] = []
         new_refs: list[ReferenceFact] = []
 
@@ -967,7 +943,7 @@ class FactGraph:
             # Handle relative imports (./target, ../utils) by normalizing
             # against the importing file's directory.
             resolved_qn = self._resolve_import_to_qn(
-                imp_module, file_path, bare_name, module_qn_cache,
+                imp_module, file_path, bare_name,
             )
             if not resolved_qn:
                 continue
@@ -993,15 +969,12 @@ class FactGraph:
         import_source: str,
         importing_file: str,
         symbol_name: str,
-        module_qn_cache: dict[str, str],
     ) -> str | None:
         """Resolve an import source path to a symbol QN.
 
         For relative imports like ``./target`` or ``../utils/helper``,
         resolves relative to the importing file's directory.
         """
-        import posixpath
-
         # Strip leading ./ and resolve relative paths
         source = import_source
         if source.startswith("./") or source.startswith("../"):
@@ -1012,12 +985,6 @@ class FactGraph:
         # Normalize separators to dots
         normalized = _normalize_qn(source)
 
-        # Try to match against known module QNs
-        for _fp, mod_qn in module_qn_cache.items():
-            if mod_qn == normalized:
-                return f"{mod_qn}.{symbol_name}"
-
-        # Fallback: construct the QN directly
         return f"{normalized}.{symbol_name}"
 
     # -- Queries ----------------------------------------------------------
@@ -3320,12 +3287,7 @@ class FactGraph:
         # When a scope resolver can't resolve a cross-file import (common
         # for TypeScript/Rust), references end up as "builtins.X".  We
         # resolve these using the import facts to find the real callee QN.
-        graph._resolve_builtin_refs(
-            lambda fp: _file_to_module(
-                str((Path(project_root).resolve() / fp)),
-                project_root,
-            ),
-        )
+        graph._resolve_builtin_refs()
 
         # -- Type binding facts (via type oracle) ----------------------
         # Populate after all files are processed so the type oracle can
@@ -3469,13 +3431,10 @@ def _normalize_qn(qn: str) -> str:
     Also strips quotes and normalizes relative import paths (e.g.
     ``'./target'.process`` → ``target.process``).
     """
-    # Strip quotes from TS import source paths
     qn = qn.replace("'", "").replace('"', "")
     qn = qn.replace("::", ".").replace("/", ".")
-    # Normalize relative path segments: ./target -> target, ../utils -> utils
-    while ".." in qn:
-        qn = qn.replace("..", ".")
-    # Strip leading dots
+    # Collapse runs of dots (from relative paths like ../utils) into single dots
+    qn = re.sub(r"\.{2,}", ".", qn)
     qn = qn.lstrip(".")
     return qn
 

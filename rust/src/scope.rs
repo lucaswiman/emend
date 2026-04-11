@@ -1701,35 +1701,21 @@ impl ScopeResolver {
             return ReferenceKind::Import;
         }
 
-        // Gather the config-driven node type names we need to recognise.
         let call_node = self.config.pattern_matching.call.as_str();
         let attr_node = self.config.pattern_matching.attribute.as_str();
-        let func_node = self.config.symbols.function_node();
-        let class_node = self.config.symbols.class_node();
-        // Method nodes (TypeScript: "method_definition") should also be
-        // recognised as definition sites.
-        let method_node = self.config.symbols.method_node.as_deref().unwrap_or("");
-
-        // Also recognise the Python-era node names that the tree-sitter
-        // grammars actually emit (e.g. Python's call node is "call", not
-        // "call_expression", but the config may say "call_expression").
-        // We check both the config value and the well-known grammar names.
 
         if let Some(parent) = node.parent() {
             let pk = parent.kind();
 
             // ── Call target: direct function call ─────────────────────
-            // Python: "call", TS/Rust: "call_expression"
             if pk == call_node || pk == "call" || pk == "call_expression" {
                 if let Some(func) = parent.child_by_field_name("function") {
                     if func.id() == node.id() {
                         return ReferenceKind::Call;
                     }
-                }
-                // Some grammars use "arguments" as a sibling — the first
-                // non-arguments child is the callee.
-                if parent.child_by_field_name("function").is_none() {
-                    // Callee is the first named child that isn't the args.
+                } else {
+                    // Grammars without a "function" field: the first named
+                    // child that isn't the args list is the callee.
                     if let Some(first) = parent.named_child(0) {
                         if first.id() == node.id() {
                             return ReferenceKind::Call;
@@ -1739,7 +1725,6 @@ impl ScopeResolver {
             }
 
             // ── Attribute / member is the call target ─────────────────
-            // Python: "attribute", TS: "member_expression", Rust: "field_expression"
             if pk == attr_node || pk == "attribute" || pk == "member_expression" || pk == "field_expression" {
                 if let Some(grandparent) = parent.parent() {
                     let gpk = grandparent.kind();
@@ -1748,9 +1733,7 @@ impl ScopeResolver {
                             if func.id() == parent.id() {
                                 return ReferenceKind::Call;
                             }
-                        }
-                        // Same fallback for grammars without "function" field.
-                        if grandparent.child_by_field_name("function").is_none() {
+                        } else {
                             if let Some(first) = grandparent.named_child(0) {
                                 if first.id() == parent.id() {
                                     return ReferenceKind::Call;
@@ -1761,29 +1744,14 @@ impl ScopeResolver {
                 }
             }
 
-            // ── Function / class definitions ──────────────────────────
-            // Python: "function_definition" / "class_definition"
-            // TS: "function_declaration" / "class_declaration" / "method_definition"
-            // Rust: "function_item" / "struct_item"
-            if pk == func_node || pk == class_node
-                || pk == "function_definition" || pk == "class_definition"
-                || pk == "function_declaration" || pk == "class_declaration"
-                || pk == "function_item" || pk == "struct_item"
-                || pk == "enum_item" || pk == "trait_item"
-                || (!method_node.is_empty() && pk == method_node)
-            {
+            // ── Definition nodes (config-driven via cfg.definition_nodes) ──
+            let def_nodes = &self.config.cfg.definition_nodes;
+            if def_nodes.iter().any(|dn| dn == pk) {
                 if let Some(name) = parent.child_by_field_name("name") {
                     if name.id() == node.id() {
                         return ReferenceKind::Definition;
                     }
                 }
-            }
-
-            // ── Decorated definition wrapper ──────────────────────────
-            // Python wraps decorated defs in a "decorated_definition" node.
-            let dec_node = self.config.symbols.decorated_node();
-            if !dec_node.is_empty() && pk == dec_node {
-                // The real definition is inside; don't reclassify here.
             }
         }
         if self.is_write_context(node) {
