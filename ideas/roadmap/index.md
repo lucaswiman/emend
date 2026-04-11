@@ -33,8 +33,8 @@ code.
 
 ### High Priority (Source Code Parsing Regressions Most Likely)
 
-- [ ] [Phase 1: Python `fact_imp` Import Regex](./phase-1-python-fact-imp-import-regex.md)
-- [ ] [Phase 2: Python `__all__` Export Detection](./phase-2-python-all-export-detection.md)
+- [x] [Phase 1: Python `fact_imp` Import Regex](./phase-1-python-fact-imp-import-regex.md)
+- [x] [Phase 2: Python `__all__` Export Detection](./phase-2-python-all-export-detection.md)
 - [x] [Phase 3: TypeScript Import Parsing](./phase-3-typescript-import-parsing.md)
 - [x] [Phase 4: Rust Module/Import Parsing](./phase-4-rust-import-parsing.md)
 
