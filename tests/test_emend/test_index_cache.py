@@ -582,3 +582,44 @@ class TestIndexStatus:
 
         info = get_index_status(str(tmp_path))
         assert info is None
+
+    def test_status_exposes_git_head_and_indexed_at(self, tmp_path):
+        """``info['git_head']`` and ``info['indexed_at']`` are populated
+        after indexing — they must not remain under their worktree-scoped
+        keys, otherwise ``emend index --status`` prints "unknown"."""
+        import subprocess
+        from emend.transform import warm_caches, get_index_status
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "a.py").write_text(SOURCE)
+
+        # Initialise a git repo so that indexing records a real HEAD sha.
+        git_env = [
+            "-c", "user.email=t@t", "-c", "user.name=t",
+            "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+        ]
+        subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+        subprocess.run(
+            ["git", *git_env, "add", "a.py"], cwd=proj, check=True,
+        )
+        subprocess.run(
+            ["git", *git_env, "commit", "-q", "-m", "init"],
+            cwd=proj, check=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=proj,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        warm_caches(str(proj), type_engine=None)
+
+        info = get_index_status(str(proj))
+        assert info is not None
+        # Each worktree stores its metadata under "<key>:<worktree_id>",
+        # but the returned dict should also expose the current worktree's
+        # values under the plain key names — the CLI status formatter
+        # in ``cli_tooling.py`` calls ``info.get('git_head')`` / ``get('indexed_at')``
+        # and silently prints "unknown" otherwise.
+        assert info.get("git_head") == head
+        assert info.get("indexed_at")  # non-empty timestamp string
