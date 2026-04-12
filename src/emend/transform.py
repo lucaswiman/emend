@@ -2551,10 +2551,19 @@ def get_index_status(project_path: str) -> dict | None:
 
     try:
         info: dict = {}
+        worktree_id = _get_worktree_id(project_root)
 
-        # Index metadata
+        # Index metadata.  Some keys (``git_head``, ``indexed_at``) are
+        # scoped per-worktree and stored as ``"<key>:<worktree_id>"``.
+        # Surface the current worktree's value under the plain key name
+        # so consumers (including ``emend index --status``) can look it
+        # up without knowing the worktree id.
         for row in conn.execute("SELECT key, value FROM index_meta").fetchall():
             info[row[0]] = row[1]
+        for scoped in ("git_head", "indexed_at"):
+            scoped_key = f"{scoped}:{worktree_id}"
+            if scoped_key in info:
+                info[scoped] = info[scoped_key]
 
         # Counts
         for table in ("file_manifest", "symbol_index", "import_graph", "reference_index"):
