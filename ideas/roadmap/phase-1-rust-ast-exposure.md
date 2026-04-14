@@ -177,11 +177,11 @@ uses. Worth a code review from someone else before landing.
 
 ## Checklist
 
-- [ ] `rust/src/tree_py.rs` created with `PyTree`, `PyNode`, `parse_source`,
+- [x] `rust/src/tree_py.rs` created with `PyTree`, `PyNode`, `parse_source`,
       `parse_file`
-- [ ] Registered in `rust/src/lib.rs` module init
-- [ ] `tests/test_emend/test_ast_nodes.py` covers tests 1-8 above
-- [ ] `make test` green
+- [x] Registered in `rust/src/lib.rs` module init
+- [x] `tests/test_emend/test_ast_nodes.py` covers tests 1-8 above
+- [x] `make test` green (3027 passed, 3 skipped, 1 xfailed)
 - [ ] `make clean test` green (confirms the Rust rebuild picks up the new
       symbols in a fresh .venv)
 - [ ] Soundness review of the `transmute` by a second reader
