@@ -1,30 +1,13 @@
-"""Phase 2 — AST canonicalizer for near-duplicate detection experiment.
+"""AST canonicalizer for the near-duplicate detection experiment.
 
-Given a ``PyTree`` (from Phase 1) and a ``PyScopeResolver`` (existing), this
-module produces a canonical form of each candidate subtree where variables
-are alpha-renamed to ``bound_{i}`` / ``free_{i}`` and literals are replaced
-with placeholders. The canonical form is what downstream phases hash for
-near-duplicate detection.
+Given a ``PyTree`` and a ``PyScopeResolver``, produces a canonical form of
+each candidate subtree where variables are alpha-renamed to ``bound_{i}`` /
+``free_{i}`` and literals are replaced with placeholders. The canonical form
+is what downstream phases hash.
 
-Public API:
-    - ``CanonicalSubtree`` — frozen dataclass of one canonicalized subtree
-    - ``CanonicalizerConfig`` — ablation knobs
-    - ``canonicalize(root, qn_at, def_loc, file_path, raw_hashes, config)``
-    - ``iter_candidates(tree)`` — yields candidate root ``PyNode``s
-    - ``compute_raw_hashes(root)`` — Pass A raw Merkle hashes
-    - ``canonicalize_file(path, scope_resolver, config)`` — tie it together
-
-Findings on the open question (qn stability for comprehensions / walrus):
-    ``PyScopeResolver.references_in_file`` reports 1-indexed line numbers,
-    while ``PyScopeResolver.scopes_in_file`` uses 0-indexed line numbers.
-    This module normalizes both to 0-indexed so they match tree-sitter's
-    ``PyNode.start_point`` coordinates.
-
-    Empirically (see `test_canonicalize.py::test_comprehension_bindings`),
-    comprehension variables get their own qualified name nested under the
-    enclosing function (e.g. ``module.f.<listcomp>.i``). Walrus bindings
-    bind in an enclosing scope, so their qn is rooted at the enclosing
-    function, which is the correct behaviour for alpha-renaming.
+``PyScopeResolver.references_in_file`` reports 1-indexed line numbers while
+``PyScopeResolver.scopes_in_file`` and ``PyNode.start_point`` are 0-indexed.
+This module normalizes everything to 0-indexed.
 """
 
 from __future__ import annotations
@@ -70,12 +53,7 @@ class CanonicalizerConfig:
 
 @dataclass(frozen=True)
 class CanonicalSubtree:
-    """A canonicalized subtree: structural shape + alpha-renamed hash.
-
-    Phase 3 consumes ``canonical_hash`` (for exact dedup), ``kind_seq`` /
-    ``token_seq`` (for shingled / simhash strategies), and
-    ``child_merkle_bag`` (for bag-of-subtrees MinHash).
-    """
+    """A canonicalized subtree: structural shape + alpha-renamed hash."""
 
     file: str
     start_byte: int
@@ -95,8 +73,8 @@ class CanonicalSubtree:
     unique_non_keyword_tokens: int
     kind_histogram: tuple[tuple[str, int], ...]
 
-    # Multiset of child Merkle hashes collected during the canonicalization
-    # walk (depth <= 2). Phase 3's ``BagOfSubtreesMinHash`` consumes this.
+    # Multiset of child Merkle hashes at depth <= 2; consumed by
+    # ``BagOfSubtreesMinHash``.
     child_merkle_bag: tuple[bytes, ...]
 
 
@@ -152,7 +130,7 @@ def _count_named_statements(block) -> int:
 
 
 def iter_candidates(tree) -> Iterator:
-    """Yield candidate roots per the Phase 2 spec.
+    """Yield candidate roots for canonicalization.
 
     Candidates are:
       1. every ``function_definition`` / ``class_definition`` /
@@ -161,9 +139,6 @@ def iter_candidates(tree) -> Iterator:
          statements;
       3. every ``if_statement`` / ``for_statement`` / ``while_statement`` /
          ``try_statement`` whose body has >= 2 statements.
-
-    TODO(Phase 5): also yield maximal runs of >= 3 sibling statements inside
-    a ``block`` for sibling-sequence clone detection.
     """
     root = tree.root
 
@@ -189,26 +164,6 @@ def iter_candidates(tree) -> Iterator:
 # ---------------------------------------------------------------------------
 # Pass B: alpha-renamed canonicalization
 # ---------------------------------------------------------------------------
-
-
-def _compute_depth(n) -> int:
-    """Max depth of the subtree rooted at ``n``, counting named children."""
-    if n.named_child_count == 0:
-        return 1
-    best = 0
-    for c in n.named_children():
-        d = _compute_depth(c)
-        if d > best:
-            best = d
-    return 1 + best
-
-
-def _count_named_nodes(n) -> int:
-    """Count all named descendants including ``n`` itself."""
-    total = 1
-    for c in n.named_children():
-        total += _count_named_nodes(c)
-    return total
 
 
 def _is_bound_inside(
@@ -255,6 +210,10 @@ def canonicalize(
     kind_seq: list[str] = []
     token_seq: list[str] = []
     child_merkle_bag: list[bytes] = []
+    # Max depth of named descent; 1-indexed to match the old _compute_depth
+    # semantics (a leaf-only subtree has depth=1). Mutated via a one-element
+    # list so the nested walk() can update it without a nonlocal statement.
+    max_depth = [1]
 
     r_start_line = R.start_point[0]
     r_end_line = R.end_point[0]
@@ -306,6 +265,9 @@ def canonicalize(
     def walk(n, depth: int = 0) -> bytes:
         if n.is_named:
             kind_seq.append(n.kind)
+            named_depth = depth + 1
+            if named_depth > max_depth[0]:
+                max_depth[0] = named_depth
 
         # String literals: tree-sitter parses a string as ``string`` with
         # child nodes (``string_start``, ``string_content``, ``string_end``).
@@ -347,6 +309,11 @@ def canonicalize(
                 else:
                     tok = attr.text()
                 kind_seq.append(attr.kind)
+                # attr is a named child not walked via walk(), so bump
+                # max_depth manually.
+                attr_named_depth = depth + 2
+                if attr_named_depth > max_depth[0]:
+                    max_depth[0] = attr_named_depth
                 token_seq.append(tok)
                 leaf_h = blake2b(
                     attr.kind.encode() + tok.encode(), digest_size=16
@@ -391,11 +358,12 @@ def canonicalize(
 
     canonical = walk(R)
     raw = raw_hashes.get((R.start_byte, R.end_byte), b"")
-    node_count = _count_named_nodes(R)
-    depth = _compute_depth(R)
+    node_count = len(kind_seq)
+    depth = max_depth[0]
     kind_hist = tuple(sorted(Counter(kind_seq).items()))
-    unique = len(set(token_seq))
-    unique_non_kw = len(set(token_seq) - PYTHON_KEYWORDS)
+    unique_token_set = set(token_seq)
+    unique = len(unique_token_set)
+    unique_non_kw = len(unique_token_set - PYTHON_KEYWORDS)
 
     return CanonicalSubtree(
         file=file_path,

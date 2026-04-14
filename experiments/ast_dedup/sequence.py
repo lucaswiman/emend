@@ -1,34 +1,26 @@
-"""Phase 5 — Sibling-sequence duplicate detection.
+"""Sibling-sequence duplicate detection.
 
-Treats each function/method body as a **sequence of canonical statement
-hashes** and finds duplicated runs across all such sequences using two
-complementary methods:
-
-  - Method A: Winnowing (Schleimer-Wilkerson-Aiken, SIGMOD 2003)
-  - Method B: Generalized suffix array + LCP
-
-Public API:
-    - ``StatementSeq``  — frozen dataclass of per-statement hashes for one function
-    - ``SequenceClone`` — frozen dataclass representing a matched run
-    - ``build_statement_seqs(path, scope_resolver)`` — parse a file and build seqs
-    - ``winnowing(seq, w)`` — Method A fingerprinting primitive
-    - ``find_clones_winnowing(seqs, w, min_run)`` — Method A clone finder
-    - ``find_clones_suffix_array(seqs, min_run)`` — Method B clone finder
-    - ``filter_sequence_clones(clones, min_run)`` — triviality filter
+Treats each function body as a sequence of canonical statement hashes and
+finds duplicated runs across all such sequences using two complementary
+methods: winnowing (Schleimer-Wilkerson-Aiken, SIGMOD 2003) and generalized
+suffix array + LCP.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from dataclasses import dataclass
 from hashlib import blake2b
-from typing import Optional
+from itertools import count
+from typing import Literal, Optional
 
 from emend import emend_core
 
 from experiments.ast_dedup.canonicalize import (
+    PYTHON_KEYWORDS,
     _build_qn_at_and_def_loc,
-    compute_raw_hashes,
+    _is_bound_inside,
 )
 
 # ---------------------------------------------------------------------------
@@ -65,6 +57,9 @@ class StatementSeq:
     kinds: tuple[str, ...]                      # per-statement node kinds
 
 
+CloneMethod = Literal["winnowing", "suffix_array"]
+
+
 @dataclass(frozen=True)
 class SequenceClone:
     """A run of matching statements found across two ``StatementSeq`` objects."""
@@ -74,45 +69,18 @@ class SequenceClone:
     right: StatementSeq
     right_range: tuple[int, int]    # statement indices [start, end)
     length: int                     # number of statements in the run
-    method: str                     # "winnowing" or "suffix_array"
+    method: CloneMethod
 
 
 # ---------------------------------------------------------------------------
 # Per-statement canonicalization (function-scoped alpha-renaming)
 # ---------------------------------------------------------------------------
-
-# We need per-statement canonical hashes where the alpha-renaming scope is the
-# *enclosing function* (so sibling statements share a consistent renaming
-# context).  The public canonicalize() in canonicalize.py uses the node passed
-# as `R` to determine the bound/free classification: a variable is "bound" if
-# its definition falls within R's start/end lines.  If we pass a single
-# statement as R, the bound check fails for variables defined elsewhere in the
-# function.
 #
-# PRAGMATIC FIX: We implement _canonicalize_statement() here, which is a
-# self-contained walker that accepts an explicit (func_start_line,
-# func_end_line) range for the bound/free classification, but walks only the
-# statement subtree for the actual hash.  We borrow the helpers and logic
-# directly from canonicalize.py rather than calling it.
-
-from itertools import count as _count
-from collections import Counter as _Counter
-from keyword import kwlist as _kwlist
-
-
-_PYTHON_KEYWORDS: frozenset[str] = frozenset(_kwlist) | {"self", "cls"}
-
-
-def _is_bound_inside_range(
-    qn: str,
-    def_loc: dict[str, tuple[int, int]],
-    start_line: int,
-    end_line: int,
-) -> bool:
-    loc = def_loc.get(qn)
-    if loc is None:
-        return False
-    return start_line <= loc[0] <= end_line
+# Unlike ``canonicalize.canonicalize()`` — which derives the bound/free scope
+# from the subtree root — here the scope is the *enclosing function* so that
+# sibling statements share a consistent renaming context. We therefore need a
+# walker that accepts an explicit ``(func_start_line, func_end_line)`` range
+# for the bound check but walks only a single statement subtree for the hash.
 
 
 def _canonicalize_statement(
@@ -121,30 +89,23 @@ def _canonicalize_statement(
     func_end_line: int,
     qn_at: dict[tuple[int, int], str],
     def_loc: dict[str, tuple[int, int]],
-    raw_hashes: dict[tuple[int, int], bytes],
 ) -> bytes:
-    """Hash a single statement node using the *enclosing function*'s line range
-    for the bound/free classification of identifiers.
-
-    This mirrors the walk() logic in canonicalize.canonicalize() but accepts
-    an explicit (func_start_line, func_end_line) for the bound check instead of
-    deriving it from the root node R's start/end.
-
-    Returns a 16-byte canonical hash for the statement.
+    """Return a 16-byte canonical hash for ``stmt`` with bound/free
+    classification taken from the enclosing function's line range.
     """
     rename: dict[str, str] = {}
-    bound_counter = _count()
-    free_counter = _count()
+    bound_counter = count()
+    free_counter = count()
     str_map: dict[str, str] = {}
     num_map: dict[str, str] = {}
-    str_counter = _count()
-    num_counter = _count()
+    str_counter = count()
+    num_counter = count()
 
     def assign(qn: str) -> str:
         tok = rename.get(qn)
         if tok is not None:
             return tok
-        if _is_bound_inside_range(qn, def_loc, func_start_line, func_end_line):
+        if _is_bound_inside(qn, def_loc, func_start_line, func_end_line):
             tok = f"bound_{next(bound_counter)}"
         else:
             tok = f"free_{next(free_counter)}"
@@ -258,7 +219,6 @@ def build_statement_seqs(path: str, scope_resolver) -> list[StatementSeq]:
 
     refs = scope_resolver.references_in_file(path)
     qn_at, def_loc = _build_qn_at_and_def_loc(refs)
-    raw_hashes = compute_raw_hashes(tree.root)
 
     # Build a map from (start_line, end_line) to qualified name using the
     # scope resolver's definitions_in_file.  Definitions are 1-indexed.
@@ -300,7 +260,6 @@ def build_statement_seqs(path: str, scope_resolver) -> list[StatementSeq]:
                         func_end,
                         qn_at,
                         def_loc,
-                        raw_hashes,
                     )
                     hashes_list.append(h)
                     line_ranges_list.append((stmt.start_point[0], stmt.end_point[0]))
@@ -489,37 +448,34 @@ def _build_int_sequence(seqs: list[StatementSeq]) -> tuple[list[int], list[tuple
         - ``sep_positions``: positions of separator values in int_seq
     """
     hash_to_int: dict[bytes, int] = {}
-    counter = [1]
+    next_hash_int = count(1)
 
     def get_int(h: bytes) -> int:
         v = hash_to_int.get(h)
         if v is None:
-            v = counter[0]
+            v = next(next_hash_int)
             hash_to_int[h] = v
-            counter[0] += 1
         return v
 
-    # First pass: build the integer sequence for real hashes.
+    # First pass: build the integer sequence for real hashes, with -1
+    # placeholders for separators.
     int_seq: list[int] = []
     offsets: list[tuple[int, int]] = []
     sep_positions: list[int] = []
-    # Placeholder for separator positions; we will fill them after pass 1.
-    sep_placeholder_indices: list[int] = []
 
     for si, seq in enumerate(seqs):
         for stmt_i, h in enumerate(seq.hashes):
             int_seq.append(get_int(h))
             offsets.append((si, stmt_i))
-        # Reserve a slot for the unique separator; fill value later.
         sep_positions.append(len(int_seq))
-        sep_placeholder_indices.append(len(int_seq))
-        int_seq.append(-1)  # temporary placeholder
+        int_seq.append(-1)  # placeholder; filled in below
         offsets.append((-1, -1))
 
-    # Second pass: assign unique separator values > all real hash integers.
-    # ``counter[0]`` is now one past the last hash integer.
-    for idx, sep_idx in enumerate(sep_placeholder_indices):
-        int_seq[sep_idx] = counter[0] + idx  # unique per sequence
+    # Second pass: assign unique separator values strictly greater than any
+    # real hash integer. ``next(next_hash_int)`` gives the next unused value.
+    first_sep_value = next(next_hash_int)
+    for i, pos in enumerate(sep_positions):
+        int_seq[pos] = first_sep_value + i
 
     return int_seq, offsets, sep_positions
 
@@ -547,13 +503,18 @@ def _compute_lcp_naive(seq: list[int], sa: list[int]) -> list[int]:
 def _crosses_separator(
     pos: int,
     length: int,
-    sep_positions: set[int],
+    sorted_sep_positions: list[int],
 ) -> bool:
-    """Return True if the range [pos, pos+length) contains any separator."""
-    for p in range(pos, pos + length):
-        if p in sep_positions:
-            return True
-    return False
+    """Return True if [pos, pos+length) contains any separator.
+
+    ``sorted_sep_positions`` must be sorted ascending; this uses binary
+    search so the check is O(log n) instead of O(length).
+    """
+    idx = bisect_left(sorted_sep_positions, pos)
+    return (
+        idx < len(sorted_sep_positions)
+        and sorted_sep_positions[idx] < pos + length
+    )
 
 
 def find_clones_suffix_array(
@@ -569,7 +530,6 @@ def find_clones_suffix_array(
         return []
 
     int_seq, offsets, sep_positions_list = _build_int_sequence(seqs)
-    sep_set: set[int] = set(sep_positions_list)
 
     n = len(int_seq)
 
@@ -605,9 +565,9 @@ def find_clones_suffix_array(
             continue
 
         # Filter out runs that straddle a separator.
-        if _crosses_separator(pos_a, run_len, sep_set):
+        if _crosses_separator(pos_a, run_len, sep_positions_list):
             continue
-        if _crosses_separator(pos_b, run_len, sep_set):
+        if _crosses_separator(pos_b, run_len, sep_positions_list):
             continue
 
         # Clamp run_len to available statements.

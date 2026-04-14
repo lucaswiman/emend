@@ -1,24 +1,9 @@
-"""Phase 4 — Triviality filters for AST duplicate detection.
+"""Triviality filters for AST duplicate detection.
 
 Each filter is a ``Callable[[CanonicalSubtree, FilterConfig], FilterVerdict]``
-that decides whether a canonicalized subtree is worth keeping in the
-deduplication pipeline. Filters short-circuit: the first REJECT verdict wins,
-but all rejection counts are tracked independently so the pipeline stats can be
-audited.
-
-Public API:
-    - ``FilterVerdict``   — frozen dataclass: ``accept: bool``, ``reason: str | None``
-    - ``FilterConfig``    — configurable thresholds
-    - ``Filter``          — type alias for a filter callable
-    - ``size_floor``      — reject if node_count < min_node_count
-    - ``depth_floor``     — reject if depth < min_depth
-    - ``token_diversity`` — reject if unique non-keyword tokens < threshold
-    - ``root_kind_blocklist`` — reject if root kind is in the blocklist
-    - ``halstead_lite``   — reject if Halstead-proxy volume is below threshold
-    - ``stereotyped_dunder`` — reject trivial __init__/__repr__/__eq__/etc.
-    - ``identity_pattern``   — reject simple identity-like patterns
-    - ``FilterPipeline``  — ordered filter runner with stats
-    - ``default_pipeline``   — factory returning the recommended pipeline
+that decides whether a canonicalized subtree is worth keeping. Filters
+short-circuit: the first REJECT verdict wins, but rejection counts are
+tracked independently so pipeline stats can be audited.
 """
 
 from __future__ import annotations
@@ -28,7 +13,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
-from experiments.ast_dedup.canonicalize import CanonicalSubtree, PYTHON_KEYWORDS
+from experiments.ast_dedup.canonicalize import CanonicalSubtree
+
+# Control-flow statement kinds that disqualify a subtree from being a
+# "stereotyped dunder" pattern (pure straight-line assignments/returns).
+_CONTROL_FLOW_KINDS: frozenset[str] = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "try_statement",
+        "with_statement",
+        "match_statement",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Core data model
@@ -107,7 +105,7 @@ def token_diversity(sub: CanonicalSubtree, cfg: FilterConfig) -> FilterVerdict:
     Rules out ``return None``, ``self.x = x``, ``a = b``, etc. — the direct
     answer to ``$bound1=$free1`` matches dominating the report.
     """
-    unique_non_kw = len(set(sub.token_seq) - PYTHON_KEYWORDS)
+    unique_non_kw = sub.unique_non_keyword_tokens
     if unique_non_kw >= cfg.min_unique_non_keyword:
         return _ACCEPT
     return FilterVerdict(
@@ -159,35 +157,18 @@ def halstead_lite(sub: CanonicalSubtree, cfg: FilterConfig) -> FilterVerdict:
 # ---------------------------------------------------------------------------
 
 
-def _is_trivial_init(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> bool:
-    """Return True if the subtree looks like a trivial __init__ that only
-    assigns constructor arguments to instance attributes:
-        self.x = x
-        self.y = y
-        ...
+def _is_trivial_init(kind_seq: tuple[str, ...]) -> bool:
+    """Return True if the subtree is a function whose body is entirely
+    ``self.<name> = <param>``-shaped assignments (no control flow, no return).
 
-    Detection strategy: purely structural via kind_seq shape (the function
-    name ``__init__`` is alpha-renamed away by the canonicalizer, so we
-    cannot rely on it appearing in token_seq). We check that:
-
-      1. The root kind is ``function_definition``.
-      2. The kind_seq contains ``assignment`` nodes (>= 2 for it to be
-         worth deduplicate-filtering).
-      3. At least as many ``attribute`` nodes as ``assignment`` nodes
-         (indicating ``self.<name> = ...`` LHS patterns).
-      4. The body contains NO control-flow kinds (if/for/while/try/with).
-      5. No ``return_statement`` in the body (pure assignment body).
-
-    Note: this also fires on non-``__init__`` methods that are pure
-    ``self.x = y`` assignment bodies, which is intentional — such
-    methods are equally uninteresting as duplicate candidates.
+    Detection is purely structural via ``kind_seq`` shape because ``__init__``
+    is alpha-renamed away by the canonicalizer. Also fires on non-``__init__``
+    methods that are pure assignment bodies, which is intentional.
     """
     if not kind_seq or kind_seq[0] != "function_definition":
         return False
     kind_set = set(kind_seq)
-    control_flow = {"if_statement", "for_statement", "while_statement",
-                    "try_statement", "with_statement", "match_statement"}
-    if kind_set & control_flow:
+    if kind_set & _CONTROL_FLOW_KINDS:
         return False
     if "return_statement" in kind_set:
         return False
@@ -195,8 +176,6 @@ def _is_trivial_init(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> b
     if assignment_count < 2:
         return False
     attribute_count = kind_seq.count("attribute")
-    # Heuristic: every assignment uses self.<name> = param, so attribute
-    # nodes should be at least as frequent as assignment nodes.
     return attribute_count >= assignment_count
 
 
@@ -204,22 +183,17 @@ def _is_trivial_repr(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> b
     """Return True for a __repr__ that returns a single f-string or format."""
     if "__repr__" not in token_seq:
         return False
-    kind_set = set(kind_seq)
-    control_flow = {"if_statement", "for_statement", "while_statement",
-                    "try_statement"}
-    if kind_set & control_flow:
+    if set(kind_seq) & _CONTROL_FLOW_KINDS:
         return False
-    return_count = kind_seq.count("return_statement")
-    return return_count == 1
+    return kind_seq.count("return_statement") == 1
 
 
 def _is_trivial_eq_or_lt(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> bool:
     """Return True for a __eq__/__lt__ with a single isinstance + comparison."""
     if "__eq__" not in token_seq and "__lt__" not in token_seq:
         return False
-    kind_set = set(kind_seq)
-    control_flow = {"for_statement", "while_statement", "try_statement"}
-    if kind_set & control_flow:
+    # if_statement is allowed here (isinstance() guard).
+    if set(kind_seq) & (_CONTROL_FLOW_KINDS - {"if_statement"}):
         return False
     return kind_seq.count("return_statement") == 1
 
@@ -228,49 +202,32 @@ def _is_trivial_hash(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> b
     """Return True for __hash__ = return hash((self.a, self.b, ...))."""
     if "__hash__" not in token_seq:
         return False
-    kind_set = set(kind_seq)
-    control_flow = {"if_statement", "for_statement", "while_statement",
-                    "try_statement"}
-    if kind_set & control_flow:
+    if set(kind_seq) & _CONTROL_FLOW_KINDS:
         return False
     return kind_seq.count("return_statement") == 1
 
 
 def _is_trivial_property_getter(
-    kind_seq: tuple[str, ...], token_seq: tuple[str, ...]
+    kind_seq: tuple[str, ...], token_count: int
 ) -> bool:
-    """Return True for @property getter: return self._name.
+    """Return True for @property getter: ``return self._name``.
 
-    Detection strategy: purely structural via kind_seq shape (``self`` is
-    canonicalized to a ``bound_`` token, so we cannot check for the literal
-    'self'). We check:
-
-      1. The root kind is ``function_definition`` or ``decorated_definition``.
-      2. Exactly one ``return_statement`` in the body.
-      3. No assignments (getters don't assign).
-      4. No control flow.
-      5. Very short token_seq (property getter bodies are minimal: the
-         canonical form has just a few tokens — function name, self param,
-         the attribute, and an attribute name literal).
+    ``self`` is canonicalized to a ``bound_`` token so detection is purely
+    structural: function/decorated root, exactly one return, no assignments,
+    no control flow, and a tiny canonical token count.
     """
     if not kind_seq:
         return False
     if kind_seq[0] not in ("function_definition", "decorated_definition"):
         return False
     kind_set = set(kind_seq)
-    control_flow = {"if_statement", "for_statement", "while_statement",
-                    "try_statement"}
-    if kind_set & control_flow:
+    if kind_set & _CONTROL_FLOW_KINDS:
         return False
     if kind_seq.count("return_statement") != 1:
         return False
-    # No assignments in the body (getters don't assign).
     if "assignment" in kind_set:
         return False
-    # Must be very short — a property getter has only a handful of tokens:
-    # function_name (bound_0), self-param (bound_1), the attribute access
-    # tokens (bound_1, attr_name), so <= 5 tokens total.
-    return len(token_seq) <= 5
+    return token_count <= 5
 
 
 def stereotyped_dunder(sub: CanonicalSubtree, cfg: FilterConfig) -> FilterVerdict:
@@ -289,7 +246,7 @@ def stereotyped_dunder(sub: CanonicalSubtree, cfg: FilterConfig) -> FilterVerdic
     ks = sub.kind_seq
     ts = sub.token_seq
 
-    if _is_trivial_init(ks, ts):
+    if _is_trivial_init(ks):
         return FilterVerdict(accept=False, reason="stereotyped_dunder:__init__")
     if _is_trivial_repr(ks, ts):
         return FilterVerdict(accept=False, reason="stereotyped_dunder:__repr__")
@@ -297,7 +254,7 @@ def stereotyped_dunder(sub: CanonicalSubtree, cfg: FilterConfig) -> FilterVerdic
         return FilterVerdict(accept=False, reason="stereotyped_dunder:__eq__/__lt__")
     if _is_trivial_hash(ks, ts):
         return FilterVerdict(accept=False, reason="stereotyped_dunder:__hash__")
-    if _is_trivial_property_getter(ks, ts):
+    if _is_trivial_property_getter(ks, len(ts)):
         return FilterVerdict(accept=False, reason="stereotyped_dunder:property_getter")
     return _ACCEPT
 
@@ -327,23 +284,15 @@ def _token_shape(token_seq: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
-# Identity-like token shapes to reject.
-# Note: ``return <ident>`` → ("return", "<id>"), but ``return`` is an anonymous
-# keyword that appears in token_seq as the literal text "return".
+# Identity-like token shapes to reject. The ``<ident>(<ident>)`` call-shape
+# collapses to ``("<id>", "<id>")`` once the anonymous parentheses are
+# dropped, so it's already covered by the two-token shape.
 _IDENTITY_SHAPES: frozenset[tuple[str, ...]] = frozenset(
     [
-        # <ident> = <ident>
-        ("<id>", "=", "<id>"),
-        # <ident>.<name> (two tokens: identifier and attribute literal)
-        ("<id>", "<id>"),
-        # return <ident>
-        ("return", "<id>"),
-        # return <ident>.<name>  — the attribute access produces two tokens
-        ("return", "<id>", "<id>"),
-        # <ident>(<ident>) — call with single arg; shows as id + id in token_seq
-        # (the call parentheses are anonymous nodes, not in token_seq)
-        # represented as just two consecutive <id>s (same as attribute), so
-        # already covered by ("<id>", "<id>") above.
+        ("<id>", "=", "<id>"),            # <ident> = <ident>
+        ("<id>", "<id>"),                 # <ident>.<name>
+        ("return", "<id>"),               # return <ident>
+        ("return", "<id>", "<id>"),       # return <ident>.<name>
     ]
 )
 
@@ -458,7 +407,7 @@ class FilterPipeline:
 
 
 def default_pipeline(cfg: FilterConfig | None = None) -> FilterPipeline:
-    """Return a ``FilterPipeline`` with all six standard filters in recommended order.
+    """Return a ``FilterPipeline`` with the standard filters in recommended order.
 
     Order rationale:
     1. ``size_floor`` — fastest structural check, cuts the most.

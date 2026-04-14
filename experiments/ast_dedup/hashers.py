@@ -1,23 +1,19 @@
-"""Phase 3 — Pluggable hashing / fingerprinting strategies.
+"""Pluggable hashing / fingerprinting strategies.
 
-Each strategy implements a ``Hasher`` that produces a ``Fingerprint`` from a
+Each strategy implements a ``Hasher`` that produces a fingerprint from a
 ``CanonicalSubtree`` and a paired ``Index`` for near-neighbour lookup.
 
-External deps (optional):
-    - ``datasketch`` — MinHash and MinHashLSH; gracefully falls back to
-      a hand-rolled MinHash when unavailable.
-    - ``xxhash`` — fast hashing; falls back to ``hashlib.blake2b``.
-
-All five strategies work without any external dependencies.
+Optional deps: ``datasketch`` (MinHash + MinHashLSH; falls back to a
+hand-rolled MinHash) and ``xxhash`` (fast hash; falls back to blake2b).
 """
 
 from __future__ import annotations
 
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import blake2b
-from typing import ClassVar, Iterable, Iterator
+from typing import ClassVar, Iterable, Iterator, Protocol, runtime_checkable
 
 from experiments.ast_dedup.canonicalize import CanonicalSubtree
 
@@ -108,16 +104,12 @@ def _make_minhash(num_perm: int = 128):
 
 def _minhash_jaccard(a, b) -> float:
     """Compute Jaccard estimate between two MinHash objects."""
-    if _DATASKETCH_AVAILABLE:
-        return a.jaccard(b)
-    return a.jaccard(b)  # same API for fallback
+    return a.jaccard(b)
 
 
 # ---------------------------------------------------------------------------
 # Protocols (runtime_checkable so tests can use hasattr / isinstance)
 # ---------------------------------------------------------------------------
-
-from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -288,8 +280,6 @@ class KindTokenShingleMinHash:
         return mh
 
 
-# KindTokenShingleMinHash reuses MinHashIndex — instantiated per use.
-
 # ---------------------------------------------------------------------------
 # 4. SimHash (Charikar)
 # ---------------------------------------------------------------------------
@@ -324,7 +314,7 @@ class SimHasher:
 
 def _hamming(a: int, b: int) -> int:
     """Count differing bits between two integers."""
-    return bin(a ^ b).count("1")
+    return (a ^ b).bit_count()
 
 
 class SimHashIndex:
@@ -404,15 +394,12 @@ class BagOfSubtreesMinHash:
         return mh
 
 
-# BagOfSubtreesMinHash also reuses MinHashIndex.
-
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-# Registry maps strategy name → (Hasher instance, Index factory fn, default threshold).
-# Stored as (hasher_class, index_class, default_threshold) per spec; instances
-# are created on demand in compare_strategies.
+# Maps strategy name → (hasher_class, index_class, default_threshold).
+# Instances are created on demand in compare_strategies.
 
 REGISTRY: dict[str, tuple[type, type, float]] = {
     "merkle_exact": (MerkleHasher, MerkleIndex, 1.0),
@@ -437,27 +424,22 @@ class StrategyResult:
     query_secs: float
     duplicate_clusters: list[list[SubtreeKey]]
     near_duplicate_pairs: list[tuple[SubtreeKey, SubtreeKey, float]]
-    peak_rss_mb: float  # TODO: measure via resource.getrusage(RUSAGE_SELF)
 
 
 def _make_index(index_cls: type, strategy_name: str, threshold: float, num_perm: int = 128) -> object:
     """Instantiate an index with the right kwargs for each strategy type."""
     if strategy_name == "merkle_exact":
         return index_cls()
-    elif strategy_name == "simhash":
+    if strategy_name == "simhash":
         return index_cls(threshold=threshold)
-    else:
-        return index_cls(threshold=threshold, num_perm=num_perm)
+    return index_cls(threshold=threshold, num_perm=num_perm)
 
 
 def _make_hasher(hasher_cls: type, strategy_name: str, num_perm: int = 128) -> object:
     """Instantiate a hasher with the right kwargs."""
-    if strategy_name == "merkle_exact":
+    if strategy_name in ("merkle_exact", "simhash"):
         return hasher_cls()
-    elif strategy_name == "simhash":
-        return hasher_cls()
-    else:
-        return hasher_cls(num_perm=num_perm)
+    return hasher_cls(num_perm=num_perm)
 
 
 def _extract_clusters_and_pairs(
@@ -564,7 +546,6 @@ def compare_strategies(
                 query_secs=query_secs,
                 duplicate_clusters=clusters,
                 near_duplicate_pairs=pairs,
-                peak_rss_mb=0.0,  # TODO: measure via resource.getrusage(RUSAGE_SELF)
             )
         )
 
