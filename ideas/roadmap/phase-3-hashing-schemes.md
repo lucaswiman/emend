@@ -188,7 +188,7 @@ if deps are missing.
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/hashers.py` with the protocol + 5 strategies
-- [ ] Registry dict with default thresholds
-- [ ] `tests/test_hashers.py` with cases 1-5
-- [ ] Graceful degradation when `datasketch`/`xxhash` missing
+- [x] `experiments/ast_dedup/hashers.py` with the protocol + 5 strategies
+- [x] Registry dict with default thresholds
+- [x] `tests/test_hashers.py` with cases 1-5
+- [x] Graceful degradation when `datasketch`/`xxhash` missing

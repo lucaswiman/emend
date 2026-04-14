@@ -476,19 +476,16 @@ def find_clones_winnowing(
 def _build_int_sequence(seqs: list[StatementSeq]) -> tuple[list[int], list[tuple[int, int]], list[int]]:
     """Concatenate all statement hashes into an integer sequence.
 
-    Separators are inserted between sequences.  Each hash is mapped to a
-    positive integer; separators use distinct negative-mapped integers
-    (encoded as large positive integers above the hash domain by flipping
-    the sign in the final integer array — actually just use values > any
-    hash value by using the index directly via a reserved range).
-
-    We map each unique 16-byte hash to a positive integer starting from 1.
-    Separators are encoded as unique values starting from a count > all
-    hash integers, so they can never match any hash.
+    Each unique 16-byte hash maps to a positive integer starting from 1.
+    Separators between sequences use *distinct* values so the suffix array
+    never spuriously matches across them.  Separator values are allocated
+    after all real hashes have been collected, ensuring they exceed the
+    maximum hash integer and are unique per sequence.
 
     Returns:
-        - ``int_seq``:  the concatenated integer sequence (no trailing sep)
-        - ``offsets``:  list of (seq_index, stmt_index) for each position in int_seq
+        - ``int_seq``:  the concatenated integer sequence
+        - ``offsets``:  list of (seq_index, stmt_index) for each position;
+          separator positions use the sentinel ``(-1, -1)``
         - ``sep_positions``: positions of separator values in int_seq
     """
     hash_to_int: dict[bytes, int] = {}
@@ -502,23 +499,27 @@ def _build_int_sequence(seqs: list[StatementSeq]) -> tuple[list[int], list[tuple
             counter[0] += 1
         return v
 
+    # First pass: build the integer sequence for real hashes.
     int_seq: list[int] = []
     offsets: list[tuple[int, int]] = []
     sep_positions: list[int] = []
+    # Placeholder for separator positions; we will fill them after pass 1.
+    sep_placeholder_indices: list[int] = []
 
     for si, seq in enumerate(seqs):
         for stmt_i, h in enumerate(seq.hashes):
             int_seq.append(get_int(h))
             offsets.append((si, stmt_i))
-        # Add a unique separator after each sequence (except possibly the last).
-        sep_val = -(si + 1)  # We'll remap these later.
+        # Reserve a slot for the unique separator; fill value later.
         sep_positions.append(len(int_seq))
-        int_seq.append(0)  # 0 is reserved as separator (no hash maps to 0).
-        offsets.append((-1, -1))  # sentinel offset for separator
+        sep_placeholder_indices.append(len(int_seq))
+        int_seq.append(-1)  # temporary placeholder
+        offsets.append((-1, -1))
 
-    # Actually we use 0 for ALL separators, which is fine since we filter
-    # out any run that straddles a separator position.  Uniqueness of
-    # separator identity comes from sep_positions, not the value.
+    # Second pass: assign unique separator values > all real hash integers.
+    # ``counter[0]`` is now one past the last hash integer.
+    for idx, sep_idx in enumerate(sep_placeholder_indices):
+        int_seq[sep_idx] = counter[0] + idx  # unique per sequence
 
     return int_seq, offsets, sep_positions
 
