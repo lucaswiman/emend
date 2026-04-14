@@ -21,7 +21,7 @@ SimHash, shingled-MinHash, and winnowing schemes on the same corpus.
 
 ## Phases
 
-- [ ] Phase 1: Minimal Rust AST exposure (`PyTree` / `PyNode`) in `emend_core`
+- [x] Phase 1: Minimal Rust AST exposure (`PyTree` / `PyNode`) in `emend_core`
 - [ ] Phase 2: Python canonicalizer using `PyNode` + `PyScopeResolver`
 - [ ] Phase 3: Pluggable hashing / fingerprinting layer
 - [ ] Phase 4: Triviality filters
