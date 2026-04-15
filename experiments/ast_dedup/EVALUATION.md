@@ -218,22 +218,33 @@ selection to users.
       --all` once the machine has outbound git access. The runner handles
       caching via `corpora.ensure()`; the first run for each corpus will
       pay a clone cost.
-- [ ] **Peak-RSS measurement is per-process, not per-strategy.** All five
+- [x] **Peak-RSS measurement is per-process, not per-strategy.** ~~All five
       strategies currently report the same `peak_rss_mb` because
       `resource.getrusage` returns a monotonic process-wide high-water mark.
-      Fix by sampling RSS inside `compare_strategies` per strategy.
-- [ ] **Recalibrate or drop `simhash`.** At `threshold=0.9` it produces one
-      mega-cluster and 3.1 M LSH-only pairs. Either bump the threshold to ≥
-      0.97, band-split more aggressively, or remove from `REGISTRY`.
+      Fix by sampling RSS inside `compare_strategies` per strategy.~~ Fixed:
+      `run.py` now samples `/proc/self/status` VmRSS per strategy and reports
+      `rss_delta_mb` on `StrategyStats` (renamed from `peak_rss_mb`).
+- [x] **Recalibrate or drop `simhash`.** ~~At `threshold=0.9` it produces one
+      mega-cluster and 3.1 M LSH-only pairs.~~ Dropped from default `REGISTRY`
+      in `hashers.py` — 8-bit bands collide at corpus scale regardless of
+      threshold. `SimHasher`/`SimHashIndex` remain importable for explicit
+      opt-in experimentation; a detailed root-cause comment sits above the
+      registry.
 - [ ] **Port top refactors.** Open issues / PRs for the three concrete
       targets in `transform.py` and `fact_graph.py` called out above. Good
       validation that the tool finds actionable signal.
-- [ ] **Dedicated scope-edge-case micro-corpus.** A tiny `tests/`-adjacent
+- [x] **Dedicated scope-edge-case micro-corpus.** ~~A tiny `tests/`-adjacent
       corpus with comprehension variables, walrus, and nested functions in
       known alpha-equivalent pairs would directly answer Phase 2's open
-      question about `PyScopeResolver` qualified-name stability.
-- [ ] **Expose `PyNode` in `ast_utils.py`** (Phase 1 kept it in `emend_core`
-      only). Low priority but mentioned in the design doc.
+      question about `PyScopeResolver` qualified-name stability.~~ Added
+      `experiments/ast_dedup/tests/test_scope_edge_cases.py` (9 tests). All
+      pass: `PyScopeResolver` produces stable qns for comprehension vars,
+      walrus bindings, and nested-function locals; the Phase 2 open question
+      is answered affirmatively.
+- [x] **Expose `PyNode` in `ast_utils.py`** ~~(Phase 1 kept it in `emend_core`
+      only). Low priority but mentioned in the design doc.~~ `PyNode`,
+      `PyTree`, `parse_source`, and `parse_file` are now re-exported from
+      `emend.ast_utils`.
 - [ ] **Port `collect_identifier_positions` / `get_statement_ranges`** to use
       `PyNode` once that exposure lands.
 - [ ] **Consider a finer-grained candidate source.** Currently
