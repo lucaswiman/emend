@@ -176,12 +176,12 @@ Files: 187 · LOC: 51,234 · candidates: 8,721 · after filters: 2,934
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/corpora.py` with `CORPORA` registry + `ensure()`
-- [ ] `experiments/ast_dedup/stats.py` with `CorpusReport` dataclass +
+- [x] `experiments/ast_dedup/corpora.py` with `CORPORA` registry + `ensure()`
+- [x] `experiments/ast_dedup/stats.py` with `CorpusReport` dataclass +
       JSON/markdown emitters
-- [ ] `experiments/ast_dedup/run.py` CLI with flags above
-- [ ] `tests/test_runner.py` with cases 1-5
-- [ ] Runs successfully on `emend` corpus end-to-end
-- [ ] Runs successfully on `django` corpus end-to-end (may be slow)
-- [ ] Reports pinned in `experiments/ast_dedup/reports/` for future
+- [x] `experiments/ast_dedup/run.py` CLI with flags above
+- [x] `tests/test_runner.py` with cases 1-5
+- [x] Runs successfully on `emend` corpus end-to-end
+- [ ] Runs successfully on `django` corpus end-to-end (may be slow) — deferred; requires network clone, tracked as a follow-up in `EVALUATION.md`
+- [x] Reports pinned in `experiments/ast_dedup/reports/` for future
       regression comparison

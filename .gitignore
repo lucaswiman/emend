@@ -7,6 +7,7 @@ dist/
 LibCST
 benchmarks/.django-checkout/
 benchmarks/.django-scaled/
+experiments/ast_dedup/.corpora/
 .emend/cache/
 .emend/knowledge.db
 .emend/knowledge.db-wal
