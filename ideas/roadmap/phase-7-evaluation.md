@@ -86,8 +86,10 @@ issues:
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/EVALUATION.md` covering Q1-Q7
-- [ ] Raw per-corpus reports referenced from the evaluation
-- [ ] Follow-up tickets listed at the bottom
-- [ ] Hand-labeled sample CSV attached in `experiments/ast_dedup/labels/`
+- [x] `experiments/ast_dedup/EVALUATION.md` covering Q1-Q7 (Q7 is partially
+      answered; only the `emend` corpus has been run end-to-end and a
+      full-corpus sweep is listed as a follow-up)
+- [x] Raw per-corpus reports referenced from the evaluation
+- [x] Follow-up tickets listed at the bottom
+- [x] Hand-labeled sample CSV attached in `experiments/ast_dedup/labels/`
       for reproducibility of the precision numbers
