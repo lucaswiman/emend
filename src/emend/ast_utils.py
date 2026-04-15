@@ -5,7 +5,15 @@ import fnmatch
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from emend import emend_core
 from emend.component_selector import NestedSymbol
+
+# Re-export tree-sitter node types from emend_core so callers can do:
+#   from emend.ast_utils import PyNode, PyTree, parse_source, parse_file
+PyNode = emend_core.PyNode
+PyTree = emend_core.PyTree
+parse_source = emend_core.parse_source
+parse_file = emend_core.parse_file
 
 
 def get_imports(filepath: str) -> list[dict]:
@@ -164,8 +172,6 @@ def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list
 
     Uses tree-sitter via the Rust extension for parsing.
     """
-    from emend import emend_core
-
     with open(filepath) as f:
         source = f.read()
 

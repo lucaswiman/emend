@@ -162,3 +162,24 @@ def test_parse_file_missing_file_raises(tmp_path):
     missing = tmp_path / "nope.py"
     with pytest.raises(OSError):
         emend_core.parse_file(str(missing))
+
+
+# ---------------------------------------------------------------------------
+# Re-export test (Phase 1 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_pynode_reexported_from_ast_utils():
+    """PyNode, PyTree, parse_source, parse_file must be re-exported from ast_utils."""
+    from emend import ast_utils
+
+    # Identity checks — the re-exported names must be the exact same objects.
+    assert ast_utils.PyNode is emend_core.PyNode
+    assert ast_utils.PyTree is emend_core.PyTree
+    assert ast_utils.parse_source is emend_core.parse_source
+    assert ast_utils.parse_file is emend_core.parse_file
+
+    # Smoke-test: parse a tiny snippet through the re-exported parse_source.
+    tree = ast_utils.parse_source("x = 1\n", "py")
+    assert tree is not None
+    assert tree.root.kind == "module"

@@ -195,3 +195,76 @@ def test_markdown_size_limit(tmp_path: Path) -> None:
 
     md_bytes = len(report.to_markdown().encode())
     assert md_bytes <= 4096, f"markdown too large: {md_bytes} bytes"
+
+
+# ---------------------------------------------------------------------------
+# Case 6: per-strategy RSS delta (not a shared process-wide high-water mark)
+# ---------------------------------------------------------------------------
+
+
+def test_rss_delta_is_per_strategy_not_shared_hwm(tmp_path: Path) -> None:
+    """Each strategy must report ``rss_delta_mb`` independently.
+
+    Previously ``peak_rss_mb`` was derived from ``resource.getrusage`` which
+    returns a monotonically increasing process-wide high-water mark.  Every
+    strategy therefore reported the same number (the maximum ever seen during
+    the process lifetime).
+
+    With the new VmRSS-delta approach the measurement is taken before and after
+    each strategy in isolation, so:
+
+    1. The field is called ``rss_delta_mb`` (rename confirms the semantics
+       changed).
+    2. Each value must be >= 0 (a delta, never negative).
+    3. When two strategies are run, the values are independently measured and
+       therefore *not forced to be equal* — they may coincidentally be equal
+       but there is no structural reason they must be.  We confirm the field
+       exists and is non-negative, and additionally verify via patching that
+       the measurement function is called *once per strategy* (not once for
+       the whole batch).
+    """
+    from unittest.mock import patch, call as mock_call
+
+    root = _write_synthetic_corpus(tmp_path, n_files=3)
+    # Run with exactly two strategies so we can assert call count.
+    args = _make_args(strategies="merkle_exact,bag_of_subtrees")
+    rss_sequence = [10.0, 12.0, 12.0, 15.0]  # before/after for each strategy
+    rss_iter = iter(rss_sequence)
+
+    with patch.object(
+        runner_module, "_current_rss_mb", side_effect=lambda: next(rss_iter)
+    ):
+        report = runner_module.run_one("_synth", args, corpus_root=root)
+
+    assert len(report.strategy_stats) == 2, (
+        f"expected 2 strategy_stats, got {len(report.strategy_stats)}"
+    )
+
+    # Field must be renamed to rss_delta_mb.
+    for strat in report.strategy_stats:
+        assert hasattr(strat, "rss_delta_mb"), (
+            f"StrategyStats.rss_delta_mb missing on {strat.name}; "
+            "field was not renamed from peak_rss_mb"
+        )
+        assert not hasattr(strat, "peak_rss_mb"), (
+            f"old field peak_rss_mb still present on {strat.name}"
+        )
+        assert strat.rss_delta_mb >= 0.0, (
+            f"rss_delta_mb must be >= 0, got {strat.rss_delta_mb} for {strat.name}"
+        )
+
+    # With our mocked sequence: strategy 0 delta = 12-10 = 2, strategy 1 = 15-12 = 3.
+    deltas = [s.rss_delta_mb for s in report.strategy_stats]
+    assert deltas[0] == pytest.approx(2.0), f"unexpected delta[0]={deltas[0]}"
+    assert deltas[1] == pytest.approx(3.0), f"unexpected delta[1]={deltas[1]}"
+
+    # JSON round-trip should use the new field name.
+    payload = json.loads(report.to_json())
+    for s in payload["strategy_stats"]:
+        assert "rss_delta_mb" in s, f"rss_delta_mb missing from JSON for {s['name']}"
+        assert "peak_rss_mb" not in s, f"old peak_rss_mb still in JSON for {s['name']}"
+
+    # Markdown should reference new column header.
+    md = report.to_markdown()
+    assert "RSS delta" in md, "markdown column header not updated to 'RSS delta'"
+    assert "peak RSS" not in md, "old 'peak RSS' column header still in markdown"

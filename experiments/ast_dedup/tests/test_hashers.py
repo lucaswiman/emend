@@ -523,15 +523,116 @@ def test_agreement_metric():
 
 
 def test_registry_has_all_expected_strategies():
-    """REGISTRY has all 5 expected strategy names."""
+    """REGISTRY has the 4 default strategies; simhash is excluded by design."""
     expected = {
         "merkle_exact",
         "kind_shingles_minhash",
         "kind_token_shingles_minhash",
-        "simhash",
         "bag_of_subtrees",
     }
     assert set(REGISTRY.keys()) == expected
+
+
+def test_simhash_not_in_default_registry():
+    """simhash must NOT be in the default REGISTRY.
+
+    SimHash produces mega-clusters on short AST token/kind sequences because
+    the 8-bit band-split (256 bucket values) causes near-universal candidate
+    generation at corpus scale, drowning all real signal.  It remains available
+    for explicit opt-in via SimHasher / SimHashIndex but is excluded from the
+    default pipeline.
+    """
+    assert "simhash" not in REGISTRY, (
+        "simhash should not be in the default REGISTRY — it produces a single "
+        "mega-cluster on short AST sequences; see module docstring for details."
+    )
+
+
+def test_simhash_still_importable():
+    """SimHasher and SimHashIndex are still importable for explicit opt-in use."""
+    # Both classes are importable (already imported at the top of this module).
+    assert SimHasher is not None
+    assert SimHashIndex is not None
+
+    # They can be instantiated and used independently.
+    hasher = SimHasher(f=64)
+    index = SimHashIndex(f=64, b=4, threshold=0.97)
+
+    tseq = ("x", "y", "z") * 10
+    kseq = ("identifier", "binary_op") * 10
+    sub = _make_sub(file="a.py", token_seq=tseq, kind_seq=kseq)
+    fp = hasher.of(sub)
+    index.insert(("a.py", 0, 100), fp)
+    results = list(index.query(fp, threshold=0.97))
+    assert len(results) == 1
+    assert results[0][0] == ("a.py", 0, 100)
+
+
+def test_simhash_does_not_collapse_unrelated_subtrees():
+    """With 2 near-dup subtrees and 5 unrelated ones, simhash must not form one mega-cluster.
+
+    This is the regression guard for the issue described in EVALUATION.md:
+    at threshold=0.9 with b=8 bands of 8 bits, unrelated subtrees collide in
+    band buckets and collapse into a single cluster.
+
+    We use threshold=0.97 and b=4 bands of 16 bits (tighter selection) and
+    verify that the 5 unrelated subtrees are NOT grouped with the near-dup pair.
+    """
+    hasher = SimHasher(f=64)
+    # b=4 bands of 16 bits → 1/65536 chance of random band collision.
+    index = SimHashIndex(f=64, b=4, threshold=0.97)
+
+    # Build 2 near-duplicate subtrees (one token substituted out of 200).
+    long_tseq = _make_long_token_seq(200)
+    long_kseq = ("identifier",) * 200
+    near_tseq = list(long_tseq)
+    near_tseq[100] = "SUBSTITUTED_TOKEN_UNIQUE"
+    near_tseq_t = tuple(near_tseq)
+
+    sub_near_a = _make_sub(file="near_a.py", token_seq=long_tseq, kind_seq=long_kseq)
+    sub_near_b = _make_sub(file="near_b.py", token_seq=near_tseq_t, kind_seq=long_kseq)
+
+    # 5 unrelated subtrees with completely different, non-overlapping token bags.
+    unrelated_subs = []
+    for i in range(5):
+        tseq = tuple(f"unique_tok_{i}_{j}" for j in range(50))
+        kseq = (f"node_kind_{i}",) * 50
+        unrelated_subs.append(
+            _make_sub(
+                file=f"unrelated_{i}.py",
+                start_byte=i * 1000,
+                end_byte=i * 1000 + 200,
+                token_seq=tseq,
+                kind_seq=kseq,
+            )
+        )
+
+    all_subs = [sub_near_a, sub_near_b] + unrelated_subs
+    keys = [(s.file, s.start_byte, s.end_byte) for s in all_subs]
+
+    for sub, key in zip(all_subs, keys):
+        index.insert(key, hasher.of(sub))
+
+    # Collect all pairs that appear together via SimHash at this threshold.
+    near_key_a = keys[0]
+    near_key_b = keys[1]
+    unrelated_keys = set(keys[2:])
+
+    all_found_pairs: set[frozenset] = set()
+    for sub, key in zip(all_subs, keys):
+        fp = hasher.of(sub)
+        for other_key, _ in index.query(fp, threshold=0.97):
+            if other_key != key:
+                all_found_pairs.add(frozenset([key, other_key]))
+
+    # The 5 unrelated subtrees must not be paired with the near-dup subtrees.
+    for uk in unrelated_keys:
+        assert frozenset([near_key_a, uk]) not in all_found_pairs, (
+            f"Unrelated subtree {uk} was wrongly paired with near_a by simhash"
+        )
+        assert frozenset([near_key_b, uk]) not in all_found_pairs, (
+            f"Unrelated subtree {uk} was wrongly paired with near_b by simhash"
+        )
 
 
 def test_registry_strategies_implement_hasher_protocol():

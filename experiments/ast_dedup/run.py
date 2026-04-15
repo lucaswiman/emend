@@ -17,8 +17,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import resource
-import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -97,18 +95,28 @@ def _build_canonicalizer_config(ablate: Optional[str]) -> CanonicalizerConfig:
 # ---------------------------------------------------------------------------
 
 
-def _peak_rss_mb() -> float:
-    """Return the peak RSS of the current process in megabytes.
+def _current_rss_mb() -> float:
+    """Return the *current* RSS of this process in megabytes.
 
-    ``ru_maxrss`` is kilobytes on Linux and bytes on macOS. We convert to
-    MB using platform detection.
+    We read VmRSS from ``/proc/self/status`` rather than using
+    ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` because ``ru_maxrss`` is a
+    monotonically increasing process-wide high-water mark: once any strategy
+    has touched a lot of memory the figure never decreases, so all subsequent
+    strategies report the same inflated number.  VmRSS reflects the actual
+    resident set at the moment of the call, so taking (after - before) for
+    each strategy yields a meaningful per-strategy delta.
+
+    Falls back to 0.0 on platforms without ``/proc/self/status`` (e.g. macOS).
     """
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        # macOS reports bytes
-        return raw / (1024 * 1024)
-    # Linux and most others report kilobytes
-    return raw / 1024
+    try:
+        with open("/proc/self/status", "r") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    # Value is in kB on all Linux kernels.
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -206,16 +214,21 @@ def run_one(
         (s.file, s.start_byte, s.end_byte): s for s in accepted
     }
 
-    # Peak RSS before strategy work
-    rss_before = _peak_rss_mb()
-
-    # Run strategies
-    strategy_results: list[StrategyResult] = compare_strategies(
-        accepted, registry=selected_registry
-    )
-
-    rss_after = _peak_rss_mb()
-    peak_rss = max(rss_before, rss_after)
+    # Run strategies one at a time so we can capture a per-strategy RSS delta.
+    # We use current VmRSS (from /proc/self/status) rather than the process
+    # high-water mark (ru_maxrss) because the high-water mark is monotonically
+    # increasing and therefore identical for all strategies after the first
+    # memory-heavy one completes.
+    strategy_results: list[StrategyResult] = []
+    strategy_rss_deltas: list[float] = []
+    for strategy_name, strategy_spec in selected_registry.items():
+        single_registry = {strategy_name: strategy_spec}
+        rss_before_strategy = _current_rss_mb()
+        results_for_one = compare_strategies(accepted, registry=single_registry)
+        rss_after_strategy = _current_rss_mb()
+        strategy_results.extend(results_for_one)
+        delta = max(0.0, rss_after_strategy - rss_before_strategy)
+        strategy_rss_deltas.append(delta)
 
     # Sibling-sequence clones (winnowing + optional suffix-array)
     w = getattr(args, "winnowing_w", 4)
@@ -237,8 +250,8 @@ def run_one(
     # Build stats
     filter_stats = build_filter_stats(pipeline)
     strategy_stats = [
-        build_strategy_stats(result, peak_rss, subtree_lookup)
-        for result in strategy_results
+        build_strategy_stats(result, rss_delta, subtree_lookup)
+        for result, rss_delta in zip(strategy_results, strategy_rss_deltas)
     ]
     sequence_stats = build_sequence_stats(filtered_clones)
 

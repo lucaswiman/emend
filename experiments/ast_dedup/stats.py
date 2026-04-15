@@ -96,7 +96,7 @@ class FilterStats:
 class StrategyStats:
     name: str
     wall_time_sec: float
-    peak_rss_mb: float
+    rss_delta_mb: float
     cluster_count: int
     largest_cluster_size: int
     cluster_size_histogram: dict[str, int]
@@ -106,7 +106,7 @@ class StrategyStats:
         return {
             "name": self.name,
             "wall_time_sec": self.wall_time_sec,
-            "peak_rss_mb": self.peak_rss_mb,
+            "rss_delta_mb": self.rss_delta_mb,
             "cluster_count": self.cluster_count,
             "largest_cluster_size": self.largest_cluster_size,
             "cluster_size_histogram": dict(self.cluster_size_histogram),
@@ -250,10 +250,10 @@ class CorpusReport:
         lines.append("## Strategies")
         lines.append("")
         lines.append(
-            "| strategy | clusters | wall | peak RSS | LSH-only pairs |"
+            "| strategy | clusters | wall | RSS delta | LSH-only pairs |"
         )
         lines.append(
-            "|----------|---------:|-----:|---------:|---------------:|"
+            "|----------|---------:|-----:|----------:|---------------:|"
         )
 
         # LSH-only pairs come from the agreement section, keyed on
@@ -274,7 +274,7 @@ class CorpusReport:
             lines.append(
                 f"| {strat.name} | {strat.cluster_count} "
                 f"| {strat.wall_time_sec:.1f}s "
-                f"| {strat.peak_rss_mb:.0f} MB | {lsh_cell} |"
+                f"| {strat.rss_delta_mb:.0f} MB | {lsh_cell} |"
             )
         lines.append("")
 
@@ -392,7 +392,7 @@ def _cluster_sort_key(
 
 def build_strategy_stats(
     result: Any,
-    peak_rss_mb: float,
+    rss_delta_mb: float,
     subtree_lookup: dict[tuple[str, int, int], Any],
 ) -> StrategyStats:
     """Build a :class:`StrategyStats` from a ``hashers.StrategyResult``."""
@@ -449,7 +449,7 @@ def build_strategy_stats(
     return StrategyStats(
         name=result.name,
         wall_time_sec=wall,
-        peak_rss_mb=peak_rss_mb,
+        rss_delta_mb=rss_delta_mb,
         cluster_count=len(clusters),
         largest_cluster_size=largest,
         cluster_size_histogram=hist,

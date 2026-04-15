@@ -400,12 +400,34 @@ class BagOfSubtreesMinHash:
 
 # Maps strategy name → (hasher_class, index_class, default_threshold).
 # Instances are created on demand in compare_strategies.
+#
+# NOTE: ``simhash`` is intentionally excluded from the default REGISTRY.
+#
+# Root-cause analysis (emend corpus, 2026-04-15):
+#   At threshold=0.9, max_hamming = int(64 * 0.1) = 6 bits.  The band-split
+#   uses b=8 bands of 8 bits each → only 256 possible band values per band.
+#   At corpus scale (≥ 3 000 subtrees) every band bucket fills rapidly, so
+#   *every* pair becomes a candidate, producing a single mega-cluster and 3.1 M
+#   LSH-only pairs — drowning all real signal.
+#
+#   Raising the threshold to 0.97 tightens max_hamming to 1 bit but does not
+#   fix the candidate-explosion: the coarse 8-bit bands still generate O(n²)
+#   candidates for any corpus larger than a few hundred subtrees.  Narrowing
+#   the bands (e.g. b=4, band_width=16) would reduce false candidates but then
+#   misses genuine near-duplicates that differ in >1 band.
+#
+#   SimHash is designed for very long documents (thousands of tokens) where
+#   per-bit vote counts are statistically stable.  AST token/kind sequences
+#   are short (tens to low hundreds of tokens), making the frequency-based
+#   voting noisy and the band-split untunable for this workload.
+#
+#   SimHasher and SimHashIndex remain fully importable for explicit opt-in
+#   experimentation; they are simply not included in the default pipeline.
 
 REGISTRY: dict[str, tuple[type, type, float]] = {
     "merkle_exact": (MerkleHasher, MerkleIndex, 1.0),
     "kind_shingles_minhash": (KindShingleMinHash, MinHashIndex, 0.8),
     "kind_token_shingles_minhash": (KindTokenShingleMinHash, MinHashIndex, 0.8),
-    "simhash": (SimHasher, SimHashIndex, 0.9),
     "bag_of_subtrees": (BagOfSubtreesMinHash, MinHashIndex, 0.8),
 }
 
