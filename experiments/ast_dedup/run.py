@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -30,7 +31,9 @@ from experiments.ast_dedup.canonicalize import (
     CanonicalizerConfig,
     canonicalize_file,
 )
-from experiments.ast_dedup.filter import FilterConfig, default_pipeline
+from experiments.ast_dedup.corpus_db import connect as connect_corpus_db
+from experiments.ast_dedup.corpus_db import delete_repo_rows, insert_subtrees
+from experiments.ast_dedup.filter import FilterConfig, FilterVerdict, default_pipeline
 from experiments.ast_dedup.hashers import (
     REGISTRY,
     StrategyResult,
@@ -171,16 +174,21 @@ def run_one(
     resolver = emend_core.PyScopeResolver(str(corpus_root), "py")
 
     all_subtrees: list[CanonicalSubtree] = []
+    subtree_verdicts: list[tuple[CanonicalSubtree, FilterVerdict]] = []
     seqs = []
     n_files = 0
     total_loc = 0
+    source_by_file: dict[str, str] = {}
 
     max_files = getattr(args, "max_files", None)
     for path in corpora.iter_py_files(corpus_root, max_files):
         n_files += 1
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                total_loc += len(fh.read().splitlines())
+                source = fh.read()
+                total_loc += len(source.splitlines())
+                if getattr(args, "write_db", None):
+                    source_by_file[str(path.resolve())] = source
         except OSError:
             pass
 
@@ -203,16 +211,36 @@ def run_one(
     accepted: list[CanonicalSubtree] = []
     if no_filter:
         accepted = list(all_subtrees)
+        subtree_verdicts = [
+            (sub, FilterVerdict(accept=True))
+            for sub in all_subtrees
+        ]
     else:
         for sub in all_subtrees:
             verdict = pipeline.run(sub)
+            subtree_verdicts.append((sub, verdict))
             if verdict.accept:
                 accepted.append(sub)
+
+    db_path = getattr(args, "write_db", None)
+    if db_path:
+        conn = connect_corpus_db(db_path)
+        delete_repo_rows(conn, corpus_name)
+        insert_subtrees(
+            conn,
+            spec=corpora.CORPORA[corpus_name],
+            corpus_root=corpus_root,
+            subtrees_with_verdicts=subtree_verdicts,
+            source_by_file=source_by_file,
+        )
+        conn.close()
 
     # Keys → subtrees lookup for stats helpers
     subtree_lookup: dict[tuple[str, int, int], CanonicalSubtree] = {
         (s.file, s.start_byte, s.end_byte): s for s in accepted
     }
+
+    populate_only = getattr(args, "populate_only", False)
 
     # Run strategies one at a time so we can capture a per-strategy RSS delta.
     # We use current VmRSS (from /proc/self/status) rather than the process
@@ -221,31 +249,34 @@ def run_one(
     # memory-heavy one completes.
     strategy_results: list[StrategyResult] = []
     strategy_rss_deltas: list[float] = []
-    for strategy_name, strategy_spec in selected_registry.items():
-        single_registry = {strategy_name: strategy_spec}
-        rss_before_strategy = _current_rss_mb()
-        results_for_one = compare_strategies(accepted, registry=single_registry)
-        rss_after_strategy = _current_rss_mb()
-        strategy_results.extend(results_for_one)
-        delta = max(0.0, rss_after_strategy - rss_before_strategy)
-        strategy_rss_deltas.append(delta)
+    if not populate_only:
+        for strategy_name, strategy_spec in selected_registry.items():
+            single_registry = {strategy_name: strategy_spec}
+            rss_before_strategy = _current_rss_mb()
+            results_for_one = compare_strategies(accepted, registry=single_registry)
+            rss_after_strategy = _current_rss_mb()
+            strategy_results.extend(results_for_one)
+            delta = max(0.0, rss_after_strategy - rss_before_strategy)
+            strategy_rss_deltas.append(delta)
 
     # Sibling-sequence clones (winnowing + optional suffix-array)
     w = getattr(args, "winnowing_w", 4)
     t = getattr(args, "winnowing_t", 4)
     use_sa = getattr(args, "suffix_array", False)
-    try:
-        winnowing_clones = find_clones_winnowing(seqs, w=w, min_run=t)
-    except Exception:
-        winnowing_clones = []
-    sa_clones = []
-    if use_sa:
+    filtered_clones = []
+    if not populate_only:
         try:
-            sa_clones = find_clones_suffix_array(seqs, min_run=t)
+            winnowing_clones = find_clones_winnowing(seqs, w=w, min_run=t)
         except Exception:
-            sa_clones = []
-    all_clones = list(winnowing_clones) + list(sa_clones)
-    filtered_clones = filter_sequence_clones(all_clones, min_run=t)
+            winnowing_clones = []
+        sa_clones = []
+        if use_sa:
+            try:
+                sa_clones = find_clones_suffix_array(seqs, min_run=t)
+            except Exception:
+                sa_clones = []
+        all_clones = list(winnowing_clones) + list(sa_clones)
+        filtered_clones = filter_sequence_clones(all_clones, min_run=t)
 
     # Build stats
     filter_stats = build_filter_stats(pipeline)
@@ -369,6 +400,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--suffix-array",
         action="store_true",
         help="Also run suffix-array based sibling-sequence detection.",
+    )
+    parser.add_argument(
+        "--write-db",
+        type=str,
+        default=None,
+        help="Optional SQLite DB path to persist subtree hashes and metadata.",
+    )
+    parser.add_argument(
+        "--populate-only",
+        action="store_true",
+        help="Populate the subtree DB and skip expensive strategy/sequence analysis.",
     )
     return parser
 

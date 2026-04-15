@@ -182,6 +182,6 @@ Files: 187 · LOC: 51,234 · candidates: 8,721 · after filters: 2,934
 - [x] `experiments/ast_dedup/run.py` CLI with flags above
 - [x] `tests/test_runner.py` with cases 1-5
 - [x] Runs successfully on `emend` corpus end-to-end
-- [ ] Runs successfully on `django` corpus end-to-end (may be slow) — deferred; requires network clone, tracked as a follow-up in `EVALUATION.md`
+- [x] Runs successfully on `django` corpus end-to-end (network clone succeeded on 2026-04-15; follow-on sweep also populated `fastapi`, `flask`, `lark`, `sqlalchemy`, and `sympy` into the cross-repo SQLite corpus)
 - [x] Reports pinned in `experiments/ast_dedup/reports/` for future
       regression comparison

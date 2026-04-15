@@ -3,10 +3,12 @@
 **Scope of this writeup.** Phases 1–6 of `ideas/roadmap/` are implemented. The
 Phase 6 runner was executed against the `emend` corpus with all five hashing
 strategies enabled; the raw report is pinned at
-`experiments/ast_dedup/reports/emend-20260415T053153Z.{json,md}`. The other
-corpora (`django`, `cpython`, `flask`, `pandas`) are wired up in `corpora.py`
-but were not run for this first pass — see "Follow-ups" below. All numbers
-and code references here come from the pinned report unless stated otherwise.
+`experiments/ast_dedup/reports/emend-20260415T053153Z.{json,md}`. A later
+cross-repo sweep populated exact canonical hashes for `django`, `fastapi`,
+`flask`, `lark`, `sqlalchemy`, and `sympy` into a persistent SQLite corpus and
+is summarized in `experiments/ast_dedup/CROSS_REPO_REPORT.md`. `cpython` and
+`pandas` remain unrun. All numbers and code references here come from the
+pinned reports unless stated otherwise.
 
 ## TL;DR
 
@@ -30,6 +32,11 @@ and code references here come from the pinned report unless stated otherwise.
 - **`simhash(0.9)` is unusable at this threshold.** It produced a single
   cluster of 3,510 members (≈ half the accepted corpus) and 3.1 M
   "LSH-only" pairs. Raise the threshold or drop the strategy.
+- **Exact cross-repo duplicates across mature libraries are mostly
+  boilerplate.** Across `emend`, `django`, `fastapi`, `flask`, `lark`,
+  `sqlalchemy`, and `sympy`, the 116 exact shared canonical hashes collapsed
+  to zero interesting findings after filtering constant tables, tiny guards,
+  and abstract stubs.
 
 ## Corpus summary
 
@@ -40,9 +47,22 @@ and code references here come from the pinned report unless stated otherwise.
 ¹ *dup ratio* = fraction of accepted subtrees that belong to some Merkle
 cluster of size ≥ 2. For `emend` that's about 173 / 3,631 ≈ 4.8 %.
 
-The other corpora in `CORPORA` were left for a follow-up run; the runner
-tolerates them via `--all` or `--corpus django`, but they require a network
-clone on first use.
+Cross-repo exact-match sweep status:
+
+| corpus     | rows written | note |
+|------------|-------------:|------|
+| emend      |        3,697 | local corpus |
+| django     |       23,871 | populated |
+| fastapi    |          755 | populated |
+| flask      |          948 | populated |
+| lark       |        1,654 | populated |
+| sqlalchemy |       26,299 | populated |
+| sympy      |       82,870 | populated |
+
+Merged accepted subtrees in `cross-repo-all.sqlite`: `128,210`. Exact
+cross-repo canonical hashes shared by at least two repos: `116`.
+
+The remaining unrun corpora in `CORPORA` are `cpython` and `pandas`.
 
 ## Strategy comparison
 
@@ -83,6 +103,31 @@ productizing.
 Do not default-enable `simhash` without first recalibrating its threshold
 and/or adding banded gating. It is currently worse than useless on this
 corpus — it would hide the real clusters inside its mega-cluster of 3,510.
+
+## Cross-repo exact-match sweep
+
+The persistent subtree-corpus pass added a second question: if we ignore
+near-duplicates and only look at **exact** alpha-canonicalized Merkle hashes,
+do large mature Python libraries actually share substantial chunks of code?
+
+Short answer: **not really**.
+
+The merged exact-match corpus across `emend`, `django`, `fastapi`, `flask`,
+`lark`, `sqlalchemy`, and `sympy` produced 116 canonical hashes that appeared
+in at least two repos. After reviewing the top matches and tightening two
+post-filters (`constant_class_body` and `constant_assignment_block`), the
+interesting exact cross-repo findings fell to zero.
+
+Representative raw exact matches:
+
+- Enum-like classes whose bodies are only constant assignments
+- Constant tables (`FOO = "..."`) with the same number of entries
+- Tiny `if not isinstance(x, T): raise ...; return x` validators
+- 4-line loop fragments like `if node in todo: stack.append(node); ...`
+- Abstract stubs of the form `def f(*args, **kwargs): raise NotImplementedError`
+
+These are real matches, but they are not compelling duplicated logic. The
+curated walkthrough is in `experiments/ast_dedup/CROSS_REPO_REPORT.md`.
 
 ## Filter audit
 
@@ -206,18 +251,21 @@ useful but noisy (`kind_token_shingles_minhash`), or broken at the default
 threshold (`simhash`).
 
 We should *not* productize this as an `emend` command yet. The current
-results are motivating but single-corpus. Before building a user-facing
-`emend grep --dupes` (or similar), run the `--all` corpus sweep, confirm
-`kind_token_shingles_minhash` carries its weight on at least one of `cpython`
-/ `pandas`, and tighten / remove `simhash` before exposing strategy
-selection to users.
+results are motivating for **intra-repo** refactoring but the cross-repo
+exact-match sweep shows that exact canonical hashes are too strict to surface
+substantial shared logic across distinct projects. Before building a
+user-facing `emend grep --dupes` (or similar), run the remaining corpora
+(`cpython`, `pandas`) and evaluate cross-repo **near-duplicate** matching
+(`kind_token_shingles_minhash` / sibling-sequence) rather than exact hashes
+alone.
 
 ## Follow-up tickets
 
-- [ ] **Run the full corpus sweep.** `python -m experiments.ast_dedup.run
-      --all` once the machine has outbound git access. The runner handles
-      caching via `corpora.ensure()`; the first run for each corpus will
-      pay a clone cost.
+- [ ] **Run the remaining corpus sweep.** `python -m experiments.ast_dedup.run
+      --corpus cpython --write-db ...` and `--corpus pandas --write-db ...`.
+      `django`, `fastapi`, `flask`, `lark`, `sqlalchemy`, and `sympy` are now
+      populated; `cpython` and `pandas` are the remaining corpora from the
+      original registry.
 - [x] **Peak-RSS measurement is per-process, not per-strategy.** ~~All five
       strategies currently report the same `peak_rss_mb` because
       `resource.getrusage` returns a monotonic process-wide high-water mark.
@@ -233,6 +281,10 @@ selection to users.
 - [ ] **Port top refactors.** Open issues / PRs for the three concrete
       targets in `transform.py` and `fact_graph.py` called out above. Good
       validation that the tool finds actionable signal.
+- [ ] **Add cross-repo near-duplicate analysis.** Exact canonical hashes across
+      mature repos mostly surfaced boilerplate. The next experiment should run
+      `kind_token_shingles_minhash` or sibling-sequence matching across repos
+      and apply the same report/audit workflow now used for exact matches.
 - [x] **Dedicated scope-edge-case micro-corpus.** ~~A tiny `tests/`-adjacent
       corpus with comprehension variables, walrus, and nested functions in
       known alpha-equivalent pairs would directly answer Phase 2's open

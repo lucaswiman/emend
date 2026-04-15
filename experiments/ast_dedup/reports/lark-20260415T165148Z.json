@@ -1,0 +1,174 @@
+{
+  "agreement": {},
+  "config": {
+    "canonicalizer": {
+      "keep_literal_equality": false,
+      "min_candidate_depth": 3,
+      "min_candidate_nodes": 8,
+      "rename_attrs": false,
+      "rename_numeric_literals": true,
+      "rename_string_literals": true
+    },
+    "filter": {
+      "block_root_kinds": [
+        "pass_statement",
+        "return_statement",
+        "raise_statement"
+      ],
+      "block_trivial_patterns": true,
+      "halstead_volume_min": 30.0,
+      "min_depth": 3,
+      "min_node_count": 8,
+      "min_unique_non_keyword": 4
+    },
+    "sequence": {
+      "suffix_array": false,
+      "winnowing_t": 4,
+      "winnowing_w": 4
+    },
+    "strategies": []
+  },
+  "corpus": "lark",
+  "corpus_stats": {
+    "after_filters": 1500,
+    "candidate_subtrees": 1654,
+    "files": 35,
+    "total_loc": 8953
+  },
+  "cross_corpus_overlaps": {
+    "entries": [],
+    "note": ""
+  },
+  "filter_stats": {
+    "accepted": 1500,
+    "rejected_samples": {
+      "size_floor": [
+        {
+          "end_line": 15,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/ast_utils.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 10
+        },
+        {
+          "end_line": 15,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/ast_utils.py",
+          "node_count": 4,
+          "reason": "size_floor",
+          "start_line": 11
+        },
+        {
+          "end_line": 21,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/ast_utils.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 17
+        },
+        {
+          "end_line": 28,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/ast_utils.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 23
+        },
+        {
+          "end_line": 28,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/ast_utils.py",
+          "node_count": 4,
+          "reason": "size_floor",
+          "start_line": 24
+        }
+      ],
+      "stereotyped_dunder": [
+        {
+          "end_line": 5,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/__pyinstaller/__init__.py",
+          "node_count": 14,
+          "reason": "stereotyped_dunder",
+          "start_line": 4
+        },
+        {
+          "end_line": 54,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/common.py",
+          "node_count": 158,
+          "reason": "stereotyped_dunder",
+          "start_line": 41
+        },
+        {
+          "end_line": 83,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/common.py",
+          "node_count": 49,
+          "reason": "stereotyped_dunder",
+          "start_line": 79
+        },
+        {
+          "end_line": 161,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/exceptions.py",
+          "node_count": 79,
+          "reason": "stereotyped_dunder",
+          "start_line": 151
+        },
+        {
+          "end_line": 244,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/exceptions.py",
+          "node_count": 115,
+          "reason": "stereotyped_dunder",
+          "start_line": 229
+        }
+      ],
+      "token_diversity": [
+        {
+          "end_line": 22,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/grammar.py",
+          "node_count": 12,
+          "reason": "token_diversity",
+          "start_line": 21
+        },
+        {
+          "end_line": 121,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/grammar.py",
+          "node_count": 9,
+          "reason": "token_diversity",
+          "start_line": 120
+        },
+        {
+          "end_line": 83,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/indenter.py",
+          "node_count": 10,
+          "reason": "token_diversity",
+          "start_line": 82
+        },
+        {
+          "end_line": 401,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/lexer.py",
+          "node_count": 28,
+          "reason": "token_diversity",
+          "start_line": 394
+        },
+        {
+          "end_line": 465,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/lark/lark/lexer.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 464
+        }
+      ]
+    },
+    "removal_counts": {
+      "depth_floor": 0,
+      "halstead_lite": 0,
+      "identity_pattern": 0,
+      "root_kind_blocklist": 0,
+      "size_floor": 39,
+      "stereotyped_dunder": 87,
+      "token_diversity": 28
+    }
+  },
+  "sibling_sequence_clones": {
+    "count": 0,
+    "length_histogram": {},
+    "top_runs": []
+  },
+  "strategy_stats": [],
+  "timestamp": "2026-04-15T16:51:48Z"
+}

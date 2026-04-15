@@ -28,6 +28,10 @@ SimHash, shingled-MinHash, and winnowing schemes on the same corpus.
 - [x] Phase 5: Sibling-sequence clone detection (winnowing / k-shingles)
 - [x] Phase 6: Corpus fetcher + runner + statistics report
 - [x] Phase 7: Evaluation writeup for the agent
+- [ ] Phase 8: Production cache + facts integration
+- [ ] Phase 9: CLI + lint surface
+- [ ] Phase 10: MCP duplicate-analysis surface
+- [ ] Phase 11: Production heuristics and false-positive control
 
 Details for each phase are in the sibling files in this directory.
 
@@ -270,6 +274,48 @@ corpora and hashing strategies, and calls out:
   value on top
 - What the triviality filters are hiding (error count from the sample review)
 - Candidate real-world refactor targets found in emend itself
+
+### Phase 8 — Production cache + facts integration
+
+Graduate the successful parts of the experiment into the real index path:
+
+- `parse.db` stores per-file duplicate-analysis payloads keyed by content hash
+- `facts.db` stores queryable duplicate facts (`dup_subtree`, `dup_run`, or
+  equivalent)
+- `emend index` incrementally refreshes duplicate facts on file changes
+
+No new standalone DB is introduced.
+
+### Phase 9 — CLI + lint surface
+
+Expose duplicate analysis as a small read-only production feature:
+
+- one CLI command under analysis (`analyze dupes` / equivalent)
+- JSON + text output
+- conservative lint integration for only non-trivial duplicates
+
+No auto-fix and no full experimental strategy matrix.
+
+### Phase 10 — MCP duplicate-analysis surface
+
+Expose one bounded duplicate-analysis tool through MCP:
+
+- same backend as the CLI
+- ranked findings with line ranges, score, and representative snippets
+- no MCP-only storage or algorithm path
+
+### Phase 11 — Production heuristics and false-positive control
+
+Harden the ranking and suppression model against the false positives seen in
+the experiment:
+
+- constant tables / constant class bodies
+- abstract stubs
+- trivial validators and property wrappers
+- tiny same-file fragments
+
+Keep only the strategies proven useful in production v1: exact canonical
+Merkle hashes and sibling-sequence duplicates.
 
 ## Open questions
 

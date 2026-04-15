@@ -1,0 +1,153 @@
+{
+  "agreement": {},
+  "config": {
+    "canonicalizer": {
+      "keep_literal_equality": false,
+      "min_candidate_depth": 3,
+      "min_candidate_nodes": 8,
+      "rename_attrs": false,
+      "rename_numeric_literals": true,
+      "rename_string_literals": true
+    },
+    "filter": {
+      "block_root_kinds": [
+        "pass_statement",
+        "return_statement",
+        "raise_statement"
+      ],
+      "block_trivial_patterns": true,
+      "halstead_volume_min": 30.0,
+      "min_depth": 3,
+      "min_node_count": 8,
+      "min_unique_non_keyword": 4
+    },
+    "sequence": {
+      "suffix_array": false,
+      "winnowing_t": 4,
+      "winnowing_w": 4
+    },
+    "strategies": []
+  },
+  "corpus": "fastapi",
+  "corpus_stats": {
+    "after_filters": 725,
+    "candidate_subtrees": 755,
+    "files": 44,
+    "total_loc": 17829
+  },
+  "cross_corpus_overlaps": {
+    "entries": [],
+    "note": ""
+  },
+  "filter_stats": {
+    "accepted": 725,
+    "rejected_samples": {
+      "size_floor": [
+        {
+          "end_line": 80,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 4,
+          "reason": "size_floor",
+          "start_line": 79
+        },
+        {
+          "end_line": 83,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 82
+        },
+        {
+          "end_line": 171,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 4,
+          "reason": "size_floor",
+          "start_line": 171
+        },
+        {
+          "end_line": 365,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 364
+        },
+        {
+          "end_line": 450,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 450
+        }
+      ],
+      "stereotyped_dunder": [
+        {
+          "end_line": 102,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 13,
+          "reason": "stereotyped_dunder",
+          "start_line": 101
+        },
+        {
+          "end_line": 208,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/_compat.py",
+          "node_count": 16,
+          "reason": "stereotyped_dunder",
+          "start_line": 207
+        },
+        {
+          "end_line": 1032,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/applications.py",
+          "node_count": 14,
+          "reason": "stereotyped_dunder",
+          "start_line": 1031
+        },
+        {
+          "end_line": 131,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/params.py",
+          "node_count": 9,
+          "reason": "stereotyped_dunder",
+          "start_line": 130
+        },
+        {
+          "end_line": 588,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/params.py",
+          "node_count": 9,
+          "reason": "stereotyped_dunder",
+          "start_line": 587
+        }
+      ],
+      "token_diversity": [
+        {
+          "end_line": 138,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/datastructures.py",
+          "node_count": 12,
+          "reason": "token_diversity",
+          "start_line": 133
+        },
+        {
+          "end_line": 383,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/fastapi/fastapi/openapi/models.py",
+          "node_count": 11,
+          "reason": "token_diversity",
+          "start_line": 382
+        }
+      ]
+    },
+    "removal_counts": {
+      "depth_floor": 0,
+      "halstead_lite": 0,
+      "identity_pattern": 0,
+      "root_kind_blocklist": 0,
+      "size_floor": 11,
+      "stereotyped_dunder": 17,
+      "token_diversity": 2
+    }
+  },
+  "sibling_sequence_clones": {
+    "count": 0,
+    "length_histogram": {},
+    "top_runs": []
+  },
+  "strategy_stats": [],
+  "timestamp": "2026-04-15T16:50:48Z"
+}

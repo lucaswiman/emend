@@ -1,0 +1,190 @@
+{
+  "agreement": {},
+  "config": {
+    "canonicalizer": {
+      "keep_literal_equality": false,
+      "min_candidate_depth": 3,
+      "min_candidate_nodes": 8,
+      "rename_attrs": false,
+      "rename_numeric_literals": true,
+      "rename_string_literals": true
+    },
+    "filter": {
+      "block_root_kinds": [
+        "raise_statement",
+        "pass_statement",
+        "return_statement"
+      ],
+      "block_trivial_patterns": true,
+      "halstead_volume_min": 30.0,
+      "min_depth": 3,
+      "min_node_count": 8,
+      "min_unique_non_keyword": 4
+    },
+    "sequence": {
+      "suffix_array": false,
+      "winnowing_t": 4,
+      "winnowing_w": 4
+    },
+    "strategies": []
+  },
+  "corpus": "flask",
+  "corpus_stats": {
+    "after_filters": 914,
+    "candidate_subtrees": 948,
+    "files": 24,
+    "total_loc": 9024
+  },
+  "cross_corpus_overlaps": {
+    "entries": [],
+    "note": ""
+  },
+  "filter_stats": {
+    "accepted": 914,
+    "rejected_samples": {
+      "halstead_lite": [
+        {
+          "end_line": 19,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/debughelpers.py",
+          "node_count": 8,
+          "reason": "halstead_lite",
+          "start_line": 16
+        },
+        {
+          "end_line": 70,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/tag.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 69
+        }
+      ],
+      "size_floor": [
+        {
+          "end_line": 46,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/provider.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 41
+        },
+        {
+          "end_line": 64,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/provider.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 59
+        },
+        {
+          "end_line": 74,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/tag.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 73
+        },
+        {
+          "end_line": 79,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/tag.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 77
+        },
+        {
+          "end_line": 84,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/json/tag.py",
+          "node_count": 5,
+          "reason": "size_floor",
+          "start_line": 82
+        }
+      ],
+      "stereotyped_dunder": [
+        {
+          "end_line": 52,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/blueprints.py",
+          "node_count": 136,
+          "reason": "stereotyped_dunder",
+          "start_line": 18
+        },
+        {
+          "end_line": 316,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/cli.py",
+          "node_count": 82,
+          "reason": "stereotyped_dunder",
+          "start_line": 301
+        },
+        {
+          "end_line": 26,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/config.py",
+          "node_count": 38,
+          "reason": "stereotyped_dunder",
+          "start_line": 22
+        },
+        {
+          "end_line": 369,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/config.py",
+          "node_count": 9,
+          "reason": "stereotyped_dunder",
+          "start_line": 368
+        },
+        {
+          "end_line": 248,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/ctx.py",
+          "node_count": 56,
+          "reason": "stereotyped_dunder",
+          "start_line": 244
+        }
+      ],
+      "token_diversity": [
+        {
+          "end_line": 1255,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/app.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 1254
+        },
+        {
+          "end_line": 1366,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/app.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 1348
+        },
+        {
+          "end_line": 275,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/ctx.py",
+          "node_count": 9,
+          "reason": "token_diversity",
+          "start_line": 274
+        },
+        {
+          "end_line": 434,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/ctx.py",
+          "node_count": 9,
+          "reason": "token_diversity",
+          "start_line": 433
+        },
+        {
+          "end_line": 466,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/flask/src/flask/sansio/app.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 443
+        }
+      ]
+    },
+    "removal_counts": {
+      "depth_floor": 0,
+      "halstead_lite": 2,
+      "identity_pattern": 0,
+      "root_kind_blocklist": 0,
+      "size_floor": 10,
+      "stereotyped_dunder": 13,
+      "token_diversity": 9
+    }
+  },
+  "sibling_sequence_clones": {
+    "count": 0,
+    "length_histogram": {},
+    "top_runs": []
+  },
+  "strategy_stats": [],
+  "timestamp": "2026-04-15T16:50:52Z"
+}

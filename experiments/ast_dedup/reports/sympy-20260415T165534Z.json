@@ -1,0 +1,220 @@
+{
+  "agreement": {},
+  "config": {
+    "canonicalizer": {
+      "keep_literal_equality": false,
+      "min_candidate_depth": 3,
+      "min_candidate_nodes": 8,
+      "rename_attrs": false,
+      "rename_numeric_literals": true,
+      "rename_string_literals": true
+    },
+    "filter": {
+      "block_root_kinds": [
+        "raise_statement",
+        "pass_statement",
+        "return_statement"
+      ],
+      "block_trivial_patterns": true,
+      "halstead_volume_min": 30.0,
+      "min_depth": 3,
+      "min_node_count": 8,
+      "min_unique_non_keyword": 4
+    },
+    "sequence": {
+      "suffix_array": false,
+      "winnowing_t": 4,
+      "winnowing_w": 4
+    },
+    "strategies": []
+  },
+  "corpus": "sympy",
+  "corpus_stats": {
+    "after_filters": 75577,
+    "candidate_subtrees": 82870,
+    "files": 1517,
+    "total_loc": 739471
+  },
+  "cross_corpus_overlaps": {
+    "entries": [],
+    "note": ""
+  },
+  "filter_stats": {
+    "accepted": 75577,
+    "rejected_samples": {
+      "depth_floor": [
+        {
+          "end_line": 419,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/utilities/tests/test_pickling.py",
+          "node_count": 12,
+          "reason": "depth_floor",
+          "start_line": 405
+        }
+      ],
+      "halstead_lite": [
+        {
+          "end_line": 1361,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 1337
+        },
+        {
+          "end_line": 354,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/assume.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 352
+        },
+        {
+          "end_line": 215,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/handlers/calculus.py",
+          "node_count": 8,
+          "reason": "halstead_lite",
+          "start_line": 214
+        },
+        {
+          "end_line": 219,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/handlers/calculus.py",
+          "node_count": 8,
+          "reason": "halstead_lite",
+          "start_line": 218
+        },
+        {
+          "end_line": 223,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/handlers/calculus.py",
+          "node_count": 8,
+          "reason": "halstead_lite",
+          "start_line": 222
+        }
+      ],
+      "size_floor": [
+        {
+          "end_line": 1280,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 1263
+        },
+        {
+          "end_line": 92,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/relation/binrel.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 91
+        },
+        {
+          "end_line": 2108,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/tests/test_query.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 2107
+        },
+        {
+          "end_line": 2127,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/tests/test_query.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 2126
+        },
+        {
+          "end_line": 2349,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/tests/test_query.py",
+          "node_count": 6,
+          "reason": "size_floor",
+          "start_line": 2348
+        }
+      ],
+      "stereotyped_dunder": [
+        {
+          "end_line": 154,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 29,
+          "reason": "stereotyped_dunder",
+          "start_line": 120
+        },
+        {
+          "end_line": 158,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 157
+        },
+        {
+          "end_line": 162,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 161
+        },
+        {
+          "end_line": 166,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 165
+        },
+        {
+          "end_line": 170,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 169
+        }
+      ],
+      "token_diversity": [
+        {
+          "end_line": 174,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/algebras/quaternion.py",
+          "node_count": 9,
+          "reason": "token_diversity",
+          "start_line": 173
+        },
+        {
+          "end_line": 34,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/ask.py",
+          "node_count": 13,
+          "reason": "token_diversity",
+          "start_line": 33
+        },
+        {
+          "end_line": 39,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/ask.py",
+          "node_count": 13,
+          "reason": "token_diversity",
+          "start_line": 38
+        },
+        {
+          "end_line": 44,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/ask.py",
+          "node_count": 13,
+          "reason": "token_diversity",
+          "start_line": 43
+        },
+        {
+          "end_line": 49,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sympy/sympy/assumptions/ask.py",
+          "node_count": 13,
+          "reason": "token_diversity",
+          "start_line": 48
+        }
+      ]
+    },
+    "removal_counts": {
+      "depth_floor": 1,
+      "halstead_lite": 535,
+      "identity_pattern": 0,
+      "root_kind_blocklist": 0,
+      "size_floor": 1241,
+      "stereotyped_dunder": 3810,
+      "token_diversity": 1706
+    }
+  },
+  "sibling_sequence_clones": {
+    "count": 0,
+    "length_histogram": {},
+    "top_runs": []
+  },
+  "strategy_stats": [],
+  "timestamp": "2026-04-15T16:55:34Z"
+}

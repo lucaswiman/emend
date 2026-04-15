@@ -1,0 +1,4018 @@
+{
+  "agreement": {},
+  "config": {
+    "canonicalizer": {
+      "keep_literal_equality": false,
+      "min_candidate_depth": 3,
+      "min_candidate_nodes": 8,
+      "rename_attrs": false,
+      "rename_numeric_literals": true,
+      "rename_string_literals": true
+    },
+    "filter": {
+      "block_root_kinds": [
+        "raise_statement",
+        "pass_statement",
+        "return_statement"
+      ],
+      "block_trivial_patterns": true,
+      "halstead_volume_min": 30.0,
+      "min_depth": 3,
+      "min_node_count": 8,
+      "min_unique_non_keyword": 4
+    },
+    "sequence": {
+      "suffix_array": false,
+      "winnowing_t": 4,
+      "winnowing_w": 4
+    },
+    "strategies": [
+      "merkle_exact"
+    ]
+  },
+  "corpus": "sqlalchemy",
+  "corpus_stats": {
+    "after_filters": 23989,
+    "candidate_subtrees": 26299,
+    "files": 255,
+    "total_loc": 231761
+  },
+  "cross_corpus_overlaps": {
+    "entries": [],
+    "note": ""
+  },
+  "filter_stats": {
+    "accepted": 23989,
+    "rejected_samples": {
+      "halstead_lite": [
+        {
+          "end_line": 1310,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 1309
+        },
+        {
+          "end_line": 1347,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 1346
+        },
+        {
+          "end_line": 1351,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 1350
+        },
+        {
+          "end_line": 1383,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 1375
+        },
+        {
+          "end_line": 2066,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "halstead_lite",
+          "start_line": 2065
+        }
+      ],
+      "size_floor": [
+        {
+          "end_line": 17,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/__init__.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 11
+        },
+        {
+          "end_line": 1423,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 1403
+        },
+        {
+          "end_line": 1430,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 1427
+        },
+        {
+          "end_line": 1487,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 1478
+        },
+        {
+          "end_line": 1498,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 7,
+          "reason": "size_floor",
+          "start_line": 1491
+        }
+      ],
+      "stereotyped_dunder": [
+        {
+          "end_line": 51,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/aioodbc.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 50
+        },
+        {
+          "end_line": 102,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/aioodbc.py",
+          "node_count": 47,
+          "reason": "stereotyped_dunder",
+          "start_line": 96
+        },
+        {
+          "end_line": 173,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/aioodbc.py",
+          "node_count": 10,
+          "reason": "stereotyped_dunder",
+          "start_line": 172
+        },
+        {
+          "end_line": 46,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/asyncio.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 45
+        },
+        {
+          "end_line": 50,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/connectors/asyncio.py",
+          "node_count": 11,
+          "reason": "stereotyped_dunder",
+          "start_line": 49
+        }
+      ],
+      "token_diversity": [
+        {
+          "end_line": 1521,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 14,
+          "reason": "token_diversity",
+          "start_line": 1519
+        },
+        {
+          "end_line": 1936,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 9,
+          "reason": "token_diversity",
+          "start_line": 1935
+        },
+        {
+          "end_line": 3955,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+          "node_count": 24,
+          "reason": "token_diversity",
+          "start_line": 3947
+        },
+        {
+          "end_line": 126,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/provision.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 125
+        },
+        {
+          "end_line": 118,
+          "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mysql/aiomysql.py",
+          "node_count": 8,
+          "reason": "token_diversity",
+          "start_line": 117
+        }
+      ]
+    },
+    "removal_counts": {
+      "depth_floor": 0,
+      "halstead_lite": 123,
+      "identity_pattern": 0,
+      "root_kind_blocklist": 0,
+      "size_floor": 537,
+      "stereotyped_dunder": 1145,
+      "token_diversity": 505
+    }
+  },
+  "sibling_sequence_clones": {
+    "count": 44,
+    "length_histogram": {
+      "11+": 1,
+      "4": 27,
+      "5": 13,
+      "6-10": 3
+    },
+    "top_runs": [
+      {
+        "length": 13,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/base.py",
+            "function": "dialects.postgresql.base.PGCompiler.visit_on_conflict_do_update.clause",
+            "lines": "L2041-2105"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/sqlite/base.py",
+            "function": "dialects.sqlite.base.SQLiteCompiler.visit_on_conflict_do_update.clause",
+            "lines": "L1463-1527"
+          }
+        ]
+      },
+      {
+        "length": 7,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/array.py",
+            "function": "__init__",
+            "lines": "L234-276"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+            "function": "__init__",
+            "lines": "L2877-2918"
+          }
+        ]
+      },
+      {
+        "length": 6,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/asyncio/session.py",
+            "function": "__init__",
+            "lines": "L1709-1723"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/session.py",
+            "function": "__init__",
+            "lines": "L5060-5096"
+          }
+        ]
+      },
+      {
+        "length": 6,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/util.py",
+            "function": "orm.util.AliasedClass.__getattr__.key",
+            "lines": "L804-813"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/util.py",
+            "function": "_get_from_serialized",
+            "lines": "L826-835"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSDDLCompiler.visit_create_index.index",
+            "lines": "L2595-2600"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/oracle/base.py",
+            "function": "dialects.oracle.base.OracleDDLCompiler.visit_create_index.index",
+            "lines": "L1295-1300"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSDDLCompiler.visit_create_index.index",
+            "lines": "L2595-2600"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/sqlite/base.py",
+            "function": "visit_create_index",
+            "lines": "L1676-1681"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSDDLCompiler.visit_create_index.index",
+            "lines": "L2595-2600"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "visit_create_index",
+            "lines": "L6741-6746"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/oracle/base.py",
+            "function": "dialects.oracle.base.OracleDDLCompiler.visit_create_index.index",
+            "lines": "L1295-1300"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/sqlite/base.py",
+            "function": "visit_create_index",
+            "lines": "L1676-1681"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/oracle/base.py",
+            "function": "dialects.oracle.base.OracleDDLCompiler.visit_create_index.index",
+            "lines": "L1295-1300"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "visit_create_index",
+            "lines": "L6741-6746"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/sqlite/base.py",
+            "function": "visit_create_index",
+            "lines": "L1676-1681"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "visit_create_index",
+            "lines": "L6741-6746"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSDDLCompiler.visit_primary_key_constraint.kw",
+            "lines": "L2670-2681"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSDDLCompiler.visit_unique_constraint.kw",
+            "lines": "L2694-2705"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/array.py",
+            "function": "dialects.postgresql.array.ARRAY.literal_processor.item_proc",
+            "lines": "L332-347"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+            "function": "sql.sqltypes.ARRAY.literal_processor.item_proc",
+            "lines": "L3100-3115"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "sql.compiler.SQLCompiler.visit_update.compile_state",
+            "lines": "L6259-6278"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "sql.compiler.SQLCompiler.visit_delete.compile_state",
+            "lines": "L6407-6426"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "sql.compiler.DDLCompiler.visit_check_constraint.text",
+            "lines": "L6951-6960"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "sql.compiler.DDLCompiler.visit_column_check_constraint.text",
+            "lines": "L6963-6972"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+            "function": "__init__",
+            "lines": "L831-835"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+            "function": "__init__",
+            "lines": "L1319-1323"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+            "function": "_make_proxy",
+            "lines": "L4625-4635"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+            "function": "_make_proxy",
+            "lines": "L5064-5074"
+          }
+        ]
+      },
+      {
+        "length": 5,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/selectable.py",
+            "function": "sql.selectable.FromClause._init_collections.self",
+            "lines": "L962-964"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/selectable.py",
+            "function": "sql.selectable.TableClause.__init__.**kw",
+            "lines": "L3009-3011"
+          }
+        ]
+      },
+      {
+        "length": 4,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/base.py",
+            "function": "dialects.postgresql.base.PGCompiler.limit_clause.text",
+            "lines": "L1928-1935"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+            "function": "sql.compiler.SQLCompiler.limit_clause.text",
+            "lines": "L5160-5167"
+          }
+        ]
+      },
+      {
+        "length": 4,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/visitors.py",
+            "function": "cloned_traverse",
+            "lines": "L1064-1069"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/visitors.py",
+            "function": "replacement_traverse",
+            "lines": "L1159-1164"
+          }
+        ]
+      },
+      {
+        "length": 4,
+        "locations": [
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+            "function": "dialects.mssql.base.MSSQLCompiler.delete_table_clause.kw",
+            "lines": "L2384-2390"
+          },
+          {
+            "file": "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mysql/base.py",
+            "function": "dialects.mysql.base.MySQLCompiler.delete_table_clause.kw",
+            "lines": "L1697-1703"
+          }
+        ]
+      }
+    ]
+  },
+  "strategy_stats": [
+    {
+      "cluster_count": 1270,
+      "cluster_size_histogram": {
+        "17+": 15,
+        "2": 808,
+        "3": 247,
+        "4": 94,
+        "5-8": 87,
+        "9-16": 19
+      },
+      "largest_cluster_size": 88,
+      "name": "merkle_exact",
+      "rss_delta_mb": 0.00390625,
+      "top_clusters": [
+        {
+          "line_ranges": [
+            [
+              49,
+              53
+            ],
+            [
+              55,
+              59
+            ],
+            [
+              61,
+              65
+            ],
+            [
+              73,
+              78
+            ],
+            [
+              80,
+              84
+            ],
+            [
+              86,
+              90
+            ],
+            [
+              92,
+              102
+            ],
+            [
+              131,
+              135
+            ],
+            [
+              252,
+              256
+            ],
+            [
+              264,
+              268
+            ],
+            [
+              285,
+              288
+            ],
+            [
+              290,
+              293
+            ],
+            [
+              295,
+              298
+            ],
+            [
+              300,
+              304
+            ],
+            [
+              306,
+              313
+            ],
+            [
+              315,
+              320
+            ],
+            [
+              452,
+              458
+            ],
+            [
+              507,
+              517
+            ],
+            [
+              519,
+              526
+            ],
+            [
+              528,
+              534
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1096,
+              1253
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1259,
+              1417
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1423,
+              1561
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1701,
+              1881
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1887,
+              2066
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              2072,
+              2238
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              2244,
+              2569
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              3619,
+              3801
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7051,
+              7209
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7365,
+              7498
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7983,
+              8120
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              8126,
+              8271
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              8277,
+              8414
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              8420,
+              8529
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              8535,
+              8787
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              8793,
+              9005
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              13140,
+              13314
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              14736,
+              15145
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              15151,
+              15426
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              15432,
+              15615
+            ]
+          ],
+          "node_count": 16,
+          "size": 88,
+          "truncated_members": 68
+        },
+        {
+          "line_ranges": [
+            [
+              37,
+              41
+            ],
+            [
+              43,
+              47
+            ],
+            [
+              67,
+              71
+            ],
+            [
+              104,
+              122
+            ],
+            [
+              124,
+              129
+            ],
+            [
+              160,
+              164
+            ],
+            [
+              166,
+              170
+            ],
+            [
+              172,
+              176
+            ],
+            [
+              178,
+              182
+            ],
+            [
+              184,
+              193
+            ],
+            [
+              195,
+              199
+            ],
+            [
+              201,
+              207
+            ],
+            [
+              209,
+              215
+            ],
+            [
+              217,
+              224
+            ],
+            [
+              226,
+              236
+            ],
+            [
+              238,
+              250
+            ],
+            [
+              258,
+              262
+            ],
+            [
+              270,
+              275
+            ],
+            [
+              277,
+              283
+            ],
+            [
+              322,
+              327
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              822,
+              955
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              961,
+              1090
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              1567,
+              1695
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              2575,
+              3435
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              3441,
+              3613
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              4448,
+              4610
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              4616,
+              4766
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              4772,
+              4914
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              4920,
+              5078
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              5084,
+              5474
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              5480,
+              5604
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              5610,
+              5772
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              5778,
+              5957
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              5963,
+              6222
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              6228,
+              6554
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              6560,
+              7045
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7215,
+              7359
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7504,
+              7728
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              7734,
+              7977
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/requirements.py",
+              9011,
+              9231
+            ]
+          ],
+          "node_count": 16,
+          "size": 72,
+          "truncated_members": 52
+        },
+        {
+          "line_ranges": [
+            [
+              1403,
+              1424
+            ],
+            [
+              54,
+              69
+            ],
+            [
+              360,
+              366
+            ],
+            [
+              369,
+              375
+            ],
+            [
+              720,
+              723
+            ],
+            [
+              726,
+              729
+            ],
+            [
+              732,
+              735
+            ],
+            [
+              738,
+              741
+            ],
+            [
+              744,
+              747
+            ],
+            [
+              750,
+              753
+            ],
+            [
+              756,
+              759
+            ],
+            [
+              762,
+              765
+            ],
+            [
+              538,
+              546
+            ],
+            [
+              764,
+              767
+            ],
+            [
+              770,
+              777
+            ],
+            [
+              780,
+              783
+            ],
+            [
+              786,
+              789
+            ],
+            [
+              792,
+              795
+            ],
+            [
+              798,
+              801
+            ],
+            [
+              5084,
+              5093
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/mssql/base.py",
+              44217,
+              44843
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              1736,
+              2165
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              10297,
+              10474
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              10477,
+              10658
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21490,
+              21583
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21586,
+              21677
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21680,
+              21766
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21769,
+              21869
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21872,
+              21968
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              21971,
+              22065
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              22068,
+              22168
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/exc.py",
+              22171,
+              22273
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              16562,
+              16803
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              23668,
+              23802
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              23805,
+              24001
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              24004,
+              24141
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              24144,
+              24288
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              24291,
+              24440
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/ddl.py",
+              24443,
+              24599
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/schema.py",
+              190540,
+              190923
+            ]
+          ],
+          "node_count": 11,
+          "size": 42,
+          "truncated_members": 22
+        },
+        {
+          "line_ranges": [
+            [
+              193,
+              193
+            ],
+            [
+              197,
+              197
+            ],
+            [
+              207,
+              207
+            ],
+            [
+              1875,
+              1875
+            ],
+            [
+              957,
+              957
+            ],
+            [
+              746,
+              746
+            ],
+            [
+              748,
+              748
+            ],
+            [
+              914,
+              914
+            ],
+            [
+              916,
+              916
+            ],
+            [
+              177,
+              177
+            ],
+            [
+              433,
+              433
+            ],
+            [
+              81,
+              81
+            ],
+            [
+              867,
+              867
+            ],
+            [
+              893,
+              893
+            ],
+            [
+              937,
+              937
+            ],
+            [
+              1028,
+              1028
+            ],
+            [
+              1030,
+              1030
+            ],
+            [
+              1032,
+              1032
+            ],
+            [
+              1034,
+              1034
+            ],
+            [
+              1036,
+              1036
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              4854,
+              4894
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              4964,
+              5004
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              5238,
+              5278
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/result.py",
+              62315,
+              62354
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/hybrid.py",
+              33763,
+              33810
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/decl_api.py",
+              25947,
+              25994
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/decl_api.py",
+              26004,
+              26062
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/decl_api.py",
+              30880,
+              30927
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/decl_api.py",
+              30937,
+              30995
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/dynamic.py",
+              5519,
+              5558
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/properties.py",
+              13745,
+              13798
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/state.py",
+              2271,
+              2319
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              27938,
+              27987
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28977,
+              29025
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              30384,
+              30436
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33112,
+              33157
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33167,
+              33211
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33221,
+              33273
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33283,
+              33334
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33344,
+              33395
+            ]
+          ],
+          "node_count": 13,
+          "size": 30,
+          "truncated_members": 10
+        },
+        {
+          "line_ranges": [
+            [
+              140,
+              161
+            ],
+            [
+              164,
+              185
+            ],
+            [
+              550,
+              555
+            ],
+            [
+              558,
+              563
+            ],
+            [
+              576,
+              582
+            ],
+            [
+              585,
+              591
+            ],
+            [
+              594,
+              600
+            ],
+            [
+              603,
+              613
+            ],
+            [
+              624,
+              629
+            ],
+            [
+              632,
+              637
+            ],
+            [
+              651,
+              657
+            ],
+            [
+              660,
+              666
+            ],
+            [
+              669,
+              675
+            ],
+            [
+              678,
+              684
+            ],
+            [
+              755,
+              766
+            ],
+            [
+              769,
+              780
+            ],
+            [
+              783,
+              794
+            ],
+            [
+              811,
+              822
+            ],
+            [
+              825,
+              836
+            ],
+            [
+              839,
+              925
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              4069,
+              4673
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              4730,
+              5329
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              16649,
+              16794
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              16857,
+              17004
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              17398,
+              17603
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              17692,
+              17902
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              17975,
+              18203
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              18280,
+              18740
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              18995,
+              19140
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19203,
+              19350
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19711,
+              19900
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19967,
+              20194
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              20261,
+              20488
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              20551,
+              20759
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              22579,
+              22839
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              22906,
+              23139
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              23207,
+              23442
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              23797,
+              24039
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              24110,
+              24352
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              24412,
+              27558
+            ]
+          ],
+          "node_count": 11,
+          "size": 30,
+          "truncated_members": 10
+        },
+        {
+          "line_ranges": [
+            [
+              125,
+              125
+            ],
+            [
+              173,
+              173
+            ],
+            [
+              1877,
+              1877
+            ],
+            [
+              394,
+              394
+            ],
+            [
+              339,
+              339
+            ],
+            [
+              77,
+              77
+            ],
+            [
+              86,
+              86
+            ],
+            [
+              150,
+              150
+            ],
+            [
+              1077,
+              1077
+            ],
+            [
+              102,
+              102
+            ],
+            [
+              122,
+              122
+            ],
+            [
+              162,
+              162
+            ],
+            [
+              261,
+              261
+            ],
+            [
+              816,
+              816
+            ],
+            [
+              877,
+              877
+            ],
+            [
+              4354,
+              4354
+            ],
+            [
+              490,
+              490
+            ],
+            [
+              570,
+              570
+            ],
+            [
+              1718,
+              1718
+            ],
+            [
+              1736,
+              1736
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              3522,
+              3558
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              4482,
+              4512
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/result.py",
+              62364,
+              62393
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/event/attr.py",
+              12344,
+              12376
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              11903,
+              11935
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/inspection.py",
+              2464,
+              2504
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/inspection.py",
+              2659,
+              2703
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              4282,
+              4324
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              37230,
+              37266
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/_typing.py",
+              2931,
+              2964
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/annotation.py",
+              3182,
+              3233
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/base.py",
+              4597,
+              4648
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/base.py",
+              7667,
+              7699
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              26271,
+              26325
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28413,
+              28443
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              140294,
+              140323
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              16321,
+              16350
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              17230,
+              17260
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              57037,
+              57081
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              57589,
+              57632
+            ]
+          ],
+          "node_count": 9,
+          "size": 26,
+          "truncated_members": 6
+        },
+        {
+          "line_ranges": [
+            [
+              139,
+              161
+            ],
+            [
+              163,
+              185
+            ],
+            [
+              549,
+              555
+            ],
+            [
+              557,
+              563
+            ],
+            [
+              623,
+              629
+            ],
+            [
+              631,
+              637
+            ],
+            [
+              650,
+              657
+            ],
+            [
+              659,
+              666
+            ],
+            [
+              668,
+              675
+            ],
+            [
+              677,
+              684
+            ],
+            [
+              754,
+              766
+            ],
+            [
+              768,
+              780
+            ],
+            [
+              782,
+              794
+            ],
+            [
+              810,
+              822
+            ],
+            [
+              824,
+              836
+            ],
+            [
+              838,
+              925
+            ],
+            [
+              927,
+              953
+            ],
+            [
+              1830,
+              1840
+            ],
+            [
+              1842,
+              1848
+            ],
+            [
+              1850,
+              1856
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              4017,
+              4673
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              4679,
+              5329
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              16592,
+              16794
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              16800,
+              17004
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              18938,
+              19140
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19146,
+              19350
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19649,
+              19900
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              19906,
+              20194
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              20200,
+              20488
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              20494,
+              20759
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              22517,
+              22839
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              22845,
+              23139
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              23145,
+              23442
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              23732,
+              24039
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              24045,
+              24352
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              24358,
+              27558
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              27564,
+              28608
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              60470,
+              60882
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              60888,
+              61092
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              61098,
+              61302
+            ]
+          ],
+          "node_count": 21,
+          "size": 23,
+          "truncated_members": 3
+        },
+        {
+          "line_ranges": [
+            [
+              540,
+              546
+            ],
+            [
+              572,
+              578
+            ],
+            [
+              580,
+              585
+            ],
+            [
+              432,
+              505
+            ],
+            [
+              621,
+              633
+            ],
+            [
+              1801,
+              1840
+            ],
+            [
+              1924,
+              1950
+            ],
+            [
+              1977,
+              2008
+            ],
+            [
+              2010,
+              2034
+            ],
+            [
+              2069,
+              2081
+            ],
+            [
+              2084,
+              2106
+            ],
+            [
+              2199,
+              2216
+            ],
+            [
+              2219,
+              2236
+            ],
+            [
+              2239,
+              2255
+            ],
+            [
+              2258,
+              2276
+            ],
+            [
+              2279,
+              2311
+            ],
+            [
+              2314,
+              2345
+            ],
+            [
+              2348,
+              2376
+            ],
+            [
+              2379,
+              2392
+            ],
+            [
+              2395,
+              2414
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/events.py",
+              20859,
+              21087
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/events.py",
+              21791,
+              22013
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/events.py",
+              22019,
+              22244
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              14795,
+              18237
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              22973,
+              23524
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              71667,
+              73290
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              76202,
+              77481
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              78250,
+              79583
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              79589,
+              80414
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              81487,
+              81853
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              81881,
+              82644
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              85994,
+              86584
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              86612,
+              87258
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              87286,
+              87877
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              87905,
+              88582
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              88610,
+              90036
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              90064,
+              91581
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              91609,
+              92893
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              92921,
+              93397
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/events.py",
+              93425,
+              94250
+            ]
+          ],
+          "node_count": 17,
+          "size": 23,
+          "truncated_members": 3
+        },
+        {
+          "line_ranges": [
+            [
+              2556,
+              2561
+            ],
+            [
+              685,
+              692
+            ],
+            [
+              1239,
+              1254
+            ],
+            [
+              2045,
+              2053
+            ],
+            [
+              3064,
+              3073
+            ],
+            [
+              3137,
+              3142
+            ],
+            [
+              976,
+              982
+            ],
+            [
+              77,
+              92
+            ],
+            [
+              1540,
+              1543
+            ],
+            [
+              1545,
+              1548
+            ],
+            [
+              414,
+              424
+            ],
+            [
+              460,
+              463
+            ],
+            [
+              530,
+              553
+            ],
+            [
+              622,
+              625
+            ],
+            [
+              1082,
+              1086
+            ],
+            [
+              1089,
+              1093
+            ],
+            [
+              1677,
+              1680
+            ],
+            [
+              222,
+              231
+            ],
+            [
+              3442,
+              3454
+            ],
+            [
+              3506,
+              3513
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/base.py",
+              94090,
+              94319
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              19833,
+              20048
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              37582,
+              38347
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              65297,
+              65566
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              101610,
+              101946
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              104805,
+              105002
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/result.py",
+              31713,
+              31896
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/util.py",
+              2200,
+              2807
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              51781,
+              51898
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              51904,
+              52016
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              14331,
+              14700
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              15655,
+              15803
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              17826,
+              18825
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              21334,
+              21462
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              37327,
+              37509
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              37529,
+              37697
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/base.py",
+              55877,
+              56037
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/selectable.py",
+              6681,
+              7108
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/selectable.py",
+              115102,
+              115471
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/selectable.py",
+              117167,
+              117352
+            ]
+          ],
+          "node_count": 13,
+          "size": 21,
+          "truncated_members": 1
+        },
+        {
+          "line_ranges": [
+            [
+              980,
+              981
+            ],
+            [
+              992,
+              993
+            ],
+            [
+              1031,
+              1032
+            ],
+            [
+              1034,
+              1035
+            ],
+            [
+              1040,
+              1041
+            ],
+            [
+              1043,
+              1044
+            ],
+            [
+              1046,
+              1047
+            ],
+            [
+              1049,
+              1050
+            ],
+            [
+              1052,
+              1053
+            ],
+            [
+              1055,
+              1056
+            ],
+            [
+              1064,
+              1065
+            ],
+            [
+              1067,
+              1068
+            ],
+            [
+              1145,
+              1146
+            ],
+            [
+              1148,
+              1149
+            ],
+            [
+              1154,
+              1155
+            ],
+            [
+              1163,
+              1164
+            ],
+            [
+              1166,
+              1167
+            ],
+            [
+              1172,
+              1173
+            ],
+            [
+              1211,
+              1212
+            ],
+            [
+              1214,
+              1215
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              32877,
+              32954
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              33188,
+              33253
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34435,
+              34490
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34500,
+              34553
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34629,
+              34690
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34700,
+              34767
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34777,
+              34844
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34854,
+              34931
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34941,
+              35008
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35018,
+              35081
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35242,
+              35303
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35313,
+              35384
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              37836,
+              37899
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              37909,
+              37958
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38052,
+              38119
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38305,
+              38360
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38370,
+              38421
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38501,
+              38568
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              39766,
+              39823
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              39833,
+              39884
+            ]
+          ],
+          "node_count": 16,
+          "size": 20
+        },
+        {
+          "line_ranges": [
+            [
+              981,
+              981
+            ],
+            [
+              993,
+              993
+            ],
+            [
+              1032,
+              1032
+            ],
+            [
+              1035,
+              1035
+            ],
+            [
+              1041,
+              1041
+            ],
+            [
+              1044,
+              1044
+            ],
+            [
+              1047,
+              1047
+            ],
+            [
+              1050,
+              1050
+            ],
+            [
+              1053,
+              1053
+            ],
+            [
+              1056,
+              1056
+            ],
+            [
+              1065,
+              1065
+            ],
+            [
+              1068,
+              1068
+            ],
+            [
+              1146,
+              1146
+            ],
+            [
+              1149,
+              1149
+            ],
+            [
+              1155,
+              1155
+            ],
+            [
+              1164,
+              1164
+            ],
+            [
+              1167,
+              1167
+            ],
+            [
+              1173,
+              1173
+            ],
+            [
+              1212,
+              1212
+            ],
+            [
+              1215,
+              1215
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              32895,
+              32954
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              33206,
+              33253
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34453,
+              34490
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34518,
+              34553
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34647,
+              34690
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34718,
+              34767
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34795,
+              34844
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34872,
+              34931
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              34959,
+              35008
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35036,
+              35081
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35260,
+              35303
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              35331,
+              35384
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              37854,
+              37899
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              37927,
+              37958
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38070,
+              38119
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38323,
+              38360
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38388,
+              38421
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              38519,
+              38568
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              39784,
+              39823
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/functions.py",
+              39851,
+              39884
+            ]
+          ],
+          "node_count": 13,
+          "size": 20
+        },
+        {
+          "line_ranges": [
+            [
+              238,
+              238
+            ],
+            [
+              1692,
+              1692
+            ],
+            [
+              933,
+              933
+            ],
+            [
+              823,
+              823
+            ],
+            [
+              869,
+              869
+            ],
+            [
+              871,
+              871
+            ],
+            [
+              885,
+              885
+            ],
+            [
+              887,
+              887
+            ],
+            [
+              889,
+              889
+            ],
+            [
+              891,
+              891
+            ],
+            [
+              895,
+              895
+            ],
+            [
+              980,
+              980
+            ],
+            [
+              982,
+              982
+            ],
+            [
+              984,
+              984
+            ],
+            [
+              94,
+              94
+            ],
+            [
+              98,
+              98
+            ],
+            [
+              1112,
+              1112
+            ],
+            [
+              231,
+              231
+            ],
+            [
+              521,
+              521
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/event/base.py",
+              7582,
+              7650
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              56230,
+              56277
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/hybrid.py",
+              33172,
+              33223
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/base.py",
+              23011,
+              23071
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              27997,
+              28053
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28063,
+              28119
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28689,
+              28755
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28765,
+              28835
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28845,
+              28901
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              28911,
+              28967
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29035,
+              29097
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              31663,
+              31719
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              31729,
+              31788
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              31798,
+              31856
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/type_api.py",
+              2853,
+              2907
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/type_api.py",
+              2961,
+              3015
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/type_api.py",
+              38927,
+              38991
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/_collections.py",
+              6696,
+              6740
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/_collections.py",
+              14249,
+              14294
+            ]
+          ],
+          "node_count": 17,
+          "size": 19
+        },
+        {
+          "line_ranges": [
+            [
+              950,
+              953
+            ],
+            [
+              956,
+              959
+            ],
+            [
+              962,
+              965
+            ],
+            [
+              968,
+              971
+            ],
+            [
+              974,
+              977
+            ],
+            [
+              980,
+              983
+            ],
+            [
+              986,
+              989
+            ],
+            [
+              992,
+              995
+            ],
+            [
+              998,
+              1001
+            ],
+            [
+              1004,
+              1007
+            ],
+            [
+              1010,
+              1013
+            ],
+            [
+              1016,
+              1019
+            ],
+            [
+              687,
+              698
+            ],
+            [
+              3208,
+              3217
+            ],
+            [
+              3220,
+              3229
+            ],
+            [
+              3232,
+              3243
+            ],
+            [
+              3246,
+              3257
+            ],
+            [
+              3260,
+              3269
+            ],
+            [
+              3272,
+              3281
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31069,
+              31196
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31199,
+              31326
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31329,
+              31457
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31460,
+              31588
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31591,
+              31717
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31720,
+              31852
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31855,
+              31996
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              31999,
+              32140
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              32143,
+              32285
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              32288,
+              32430
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              32433,
+              32568
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/ranges.py",
+              32571,
+              32712
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              23273,
+              23568
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              111892,
+              112062
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              112065,
+              112238
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              112241,
+              112446
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              112449,
+              112684
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              112687,
+              112870
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/sqltypes.py",
+              112873,
+              113056
+            ]
+          ],
+          "node_count": 13,
+          "size": 19
+        },
+        {
+          "line_ranges": [
+            [
+              3053,
+              3054
+            ],
+            [
+              113,
+              114
+            ],
+            [
+              972,
+              973
+            ],
+            [
+              71,
+              72
+            ],
+            [
+              74,
+              75
+            ],
+            [
+              94,
+              95
+            ],
+            [
+              265,
+              266
+            ],
+            [
+              271,
+              272
+            ],
+            [
+              817,
+              818
+            ],
+            [
+              263,
+              264
+            ],
+            [
+              470,
+              471
+            ],
+            [
+              500,
+              501
+            ],
+            [
+              110,
+              111
+            ],
+            [
+              3348,
+              3349
+            ],
+            [
+              766,
+              767
+            ],
+            [
+              62,
+              63
+            ],
+            [
+              65,
+              66
+            ],
+            [
+              68,
+              69
+            ],
+            [
+              79,
+              80
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              101236,
+              101306
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/result.py",
+              3196,
+              3272
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/result.py",
+              31626,
+              31693
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/util.py",
+              2034,
+              2111
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/util.py",
+              2117,
+              2194
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/util.py",
+              2813,
+              2889
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/event/attr.py",
+              8311,
+              8372
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/event/attr.py",
+              8468,
+              8531
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              28055,
+              28127
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/asyncio/base.py",
+              8455,
+              8517
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/base.py",
+              15993,
+              16053
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/pool/impl.py",
+              16337,
+              16425
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              2501,
+              2583
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/schema.py",
+              129688,
+              129760
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/plugin/plugin_base.py",
+              21267,
+              21341
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/queue.py",
+              1612,
+              1672
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/queue.py",
+              1678,
+              1737
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/queue.py",
+              1743,
+              1802
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/queue.py",
+              2030,
+              2093
+            ]
+          ],
+          "node_count": 11,
+          "size": 19
+        },
+        {
+          "line_ranges": [
+            [
+              209,
+              209
+            ],
+            [
+              1292,
+              1292
+            ],
+            [
+              265,
+              265
+            ],
+            [
+              285,
+              285
+            ],
+            [
+              186,
+              186
+            ],
+            [
+              802,
+              802
+            ],
+            [
+              800,
+              800
+            ],
+            [
+              962,
+              962
+            ],
+            [
+              7300,
+              7300
+            ],
+            [
+              863,
+              863
+            ],
+            [
+              865,
+              865
+            ],
+            [
+              1040,
+              1040
+            ],
+            [
+              618,
+              618
+            ],
+            [
+              958,
+              958
+            ],
+            [
+              1054,
+              1054
+            ],
+            [
+              180,
+              180
+            ],
+            [
+              124,
+              124
+            ],
+            [
+              605,
+              605
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              5284,
+              5327
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/engine/interfaces.py",
+              39429,
+              39488
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              9766,
+              9813
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/ext/associationproxy.py",
+              10371,
+              10416
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/path_registry.py",
+              5738,
+              5804
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/orm/strategy_options.py",
+              27828,
+              27897
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/base.py",
+              25124,
+              25167
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/base.py",
+              29999,
+              30042
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/compiler.py",
+              256938,
+              256980
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              27809,
+              27864
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              27874,
+              27928
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              33465,
+              33522
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              18805,
+              18870
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              28673,
+              28725
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/operators.py",
+              31564,
+              31615
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/testing/config.py",
+              5405,
+              5449
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/typing.py",
+              3787,
+              3833
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/util/typing.py",
+              17609,
+              17661
+            ]
+          ],
+          "node_count": 13,
+          "size": 18
+        },
+        {
+          "line_ranges": [
+            [
+              905,
+              905
+            ],
+            [
+              913,
+              913
+            ],
+            [
+              921,
+              921
+            ],
+            [
+              1072,
+              1072
+            ],
+            [
+              1080,
+              1080
+            ],
+            [
+              1091,
+              1091
+            ],
+            [
+              1102,
+              1102
+            ],
+            [
+              1113,
+              1113
+            ],
+            [
+              1124,
+              1124
+            ],
+            [
+              1132,
+              1132
+            ],
+            [
+              1140,
+              1140
+            ],
+            [
+              1153,
+              1153
+            ],
+            [
+              1163,
+              1163
+            ],
+            [
+              1173,
+              1173
+            ],
+            [
+              1183,
+              1183
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29362,
+              29421
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29616,
+              29675
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29862,
+              29917
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34414,
+              34470
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34674,
+              34731
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34957,
+              35013
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35241,
+              35298
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35524,
+              35580
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35808,
+              35865
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36056,
+              36112
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36305,
+              36362
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36685,
+              36745
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36972,
+              37033
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37256,
+              37317
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37542,
+              37604
+            ]
+          ],
+          "node_count": 17,
+          "size": 15
+        },
+        {
+          "line_ranges": [
+            [
+              290,
+              296
+            ],
+            [
+              299,
+              304
+            ],
+            [
+              307,
+              310
+            ],
+            [
+              121,
+              124
+            ],
+            [
+              127,
+              128
+            ],
+            [
+              131,
+              132
+            ],
+            [
+              135,
+              141
+            ],
+            [
+              144,
+              149
+            ],
+            [
+              260,
+              263
+            ],
+            [
+              266,
+              269
+            ],
+            [
+              272,
+              275
+            ],
+            [
+              278,
+              285
+            ],
+            [
+              288,
+              294
+            ],
+            [
+              311,
+              318
+            ],
+            [
+              321,
+              331
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/array.py",
+              9483,
+              9797
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/array.py",
+              9850,
+              10101
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/array.py",
+              10149,
+              10350
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/hstore.py",
+              3630,
+              3832
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/hstore.py",
+              3880,
+              4023
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/hstore.py",
+              4071,
+              4213
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/hstore.py",
+              4272,
+              4599
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/hstore.py",
+              4652,
+              4895
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              8665,
+              8902
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              8950,
+              9154
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              9202,
+              9405
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              9464,
+              9839
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              9892,
+              10183
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              10835,
+              11137
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/dialects/postgresql/json.py",
+              11188,
+              11580
+            ]
+          ],
+          "node_count": 16,
+          "size": 15
+        },
+        {
+          "line_ranges": [
+            [
+              56,
+              58
+            ],
+            [
+              61,
+              63
+            ],
+            [
+              66,
+              68
+            ],
+            [
+              71,
+              73
+            ],
+            [
+              76,
+              78
+            ],
+            [
+              81,
+              83
+            ],
+            [
+              120,
+              122
+            ],
+            [
+              125,
+              127
+            ],
+            [
+              148,
+              150
+            ],
+            [
+              161,
+              163
+            ],
+            [
+              269,
+              271
+            ],
+            [
+              288,
+              290
+            ],
+            [
+              293,
+              295
+            ],
+            [
+              309,
+              311
+            ],
+            [
+              314,
+              316
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1299,
+              1397
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1400,
+              1509
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1512,
+              1603
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1606,
+              1696
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1699,
+              1819
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              1822,
+              1939
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              2713,
+              2808
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              2811,
+              2912
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              3363,
+              3476
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              3668,
+              3779
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              6337,
+              6411
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              6747,
+              6866
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              6869,
+              6979
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              7225,
+              7345
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/roles.py",
+              7348,
+              7484
+            ]
+          ],
+          "node_count": 13,
+          "size": 15
+        },
+        {
+          "line_ranges": [
+            [
+              902,
+              903
+            ],
+            [
+              910,
+              911
+            ],
+            [
+              918,
+              919
+            ],
+            [
+              1069,
+              1070
+            ],
+            [
+              1088,
+              1089
+            ],
+            [
+              1099,
+              1100
+            ],
+            [
+              1110,
+              1111
+            ],
+            [
+              1121,
+              1122
+            ],
+            [
+              1129,
+              1130
+            ],
+            [
+              1137,
+              1138
+            ],
+            [
+              1150,
+              1151
+            ],
+            [
+              1160,
+              1161
+            ],
+            [
+              1170,
+              1171
+            ],
+            [
+              1180,
+              1181
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29275,
+              29352
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29529,
+              29606
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29779,
+              29852
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34330,
+              34404
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34873,
+              34947
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35156,
+              35231
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35440,
+              35514
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35723,
+              35798
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35972,
+              36046
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36220,
+              36295
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36597,
+              36675
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36883,
+              36962
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37167,
+              37246
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37452,
+              37532
+            ]
+          ],
+          "node_count": 20,
+          "size": 14
+        },
+        {
+          "line_ranges": [
+            [
+              903,
+              903
+            ],
+            [
+              911,
+              911
+            ],
+            [
+              919,
+              919
+            ],
+            [
+              1070,
+              1070
+            ],
+            [
+              1089,
+              1089
+            ],
+            [
+              1100,
+              1100
+            ],
+            [
+              1111,
+              1111
+            ],
+            [
+              1122,
+              1122
+            ],
+            [
+              1130,
+              1130
+            ],
+            [
+              1138,
+              1138
+            ],
+            [
+              1151,
+              1151
+            ],
+            [
+              1161,
+              1161
+            ],
+            [
+              1171,
+              1171
+            ],
+            [
+              1181,
+              1181
+            ]
+          ],
+          "locations": [
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29293,
+              29352
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29547,
+              29606
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              29797,
+              29852
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34348,
+              34404
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              34891,
+              34947
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35174,
+              35231
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35458,
+              35514
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35741,
+              35798
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              35990,
+              36046
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36238,
+              36295
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36615,
+              36675
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              36901,
+              36962
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37185,
+              37246
+            ],
+            [
+              "/Users/lucaswiman/personal/emend/experiments/ast_dedup/.corpora/sqlalchemy/lib/sqlalchemy/sql/elements.py",
+              37470,
+              37532
+            ]
+          ],
+          "node_count": 17,
+          "size": 14
+        }
+      ],
+      "wall_time_sec": 0.0053804650087840855
+    }
+  ],
+  "timestamp": "2026-04-15T18:08:29Z"
+}

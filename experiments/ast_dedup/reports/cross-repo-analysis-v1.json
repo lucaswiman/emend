@@ -1,0 +1,1070 @@
+{
+  "candidate_cluster_count": 116,
+  "config": {
+    "max_results": 25,
+    "min_node_count": 18,
+    "min_non_placeholder_tokens": 4,
+    "min_repo_count": 2,
+    "min_token_count": 10,
+    "min_total_lines": 5,
+    "min_unique_non_keyword_tokens": 5
+  },
+  "db_path": "experiments/ast_dedup/cross-repo-all.sqlite",
+  "generated_at": "2026-04-15T17:01:51Z",
+  "interesting_clusters": [
+    {
+      "canonical_hash": "bf365458c6381fdaa57d4f50294eee18",
+      "node_count": 25,
+      "occurrence_count": 2,
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 31,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num bound_2 num bound_3 num bound_4 num bound_5 num",
+          "rel_file": "db/migrations/autodetector.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class Type(Enum):\n        CREATE = 0\n        REMOVE = 1\n        ALTER = 2\n        REMOVE_ORDER_WRT = 3\n        ALTER_FOO_TOGETHER = 4",
+          "start_line": 26
+        },
+        {
+          "end_line": 84,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num bound_2 num bound_3 num bound_4 num bound_5 num",
+          "rel_file": "engine/interfaces.py",
+          "repo": "sqlalchemy",
+          "root_kind": "class_definition",
+          "source_text": "class CacheStats(Enum):\n    CACHE_HIT = 0\n    CACHE_MISS = 1\n    CACHING_DISABLED = 2\n    NO_CACHE_KEY = 3\n    NO_DIALECT_SUPPORT = 4",
+          "start_line": 79
+        }
+      ],
+      "total_lines": 6,
+      "unique_non_keyword_tokens": 8
+    },
+    {
+      "canonical_hash": "bfb4e80fecdda5e0832d434ef12dbf35",
+      "node_count": 25,
+      "occurrence_count": 2,
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 12,
+          "normalized_text": "root=block\nkinds: block expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string\ntokens: bound_0 str bound_1 str bound_2 str bound_3 str bound_4 str bound_5 str",
+          "rel_file": "db/migrations/operations/base.py",
+          "repo": "django",
+          "root_kind": "block",
+          "source_text": "ADDITION = \"+\"\n    REMOVAL = \"-\"\n    ALTERATION = \"~\"\n    PYTHON = \"p\"\n    SQL = \"s\"\n    MIXED = \"?\"",
+          "start_line": 7
+        },
+        {
+          "end_line": 4313,
+          "normalized_text": "root=block\nkinds: block expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string\ntokens: bound_0 str bound_1 str bound_2 str bound_3 str bound_4 str bound_5 str",
+          "rel_file": "sql/selectable.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "UNION = \"UNION\"\n    UNION_ALL = \"UNION ALL\"\n    EXCEPT = \"EXCEPT\"\n    EXCEPT_ALL = \"EXCEPT ALL\"\n    INTERSECT = \"INTERSECT\"\n    INTERSECT_ALL = \"INTERSECT ALL\"",
+          "start_line": 4308
+        }
+      ],
+      "total_lines": 6,
+      "unique_non_keyword_tokens": 7
+    },
+    {
+      "canonical_hash": "29e119bbf4998444fcc604d323e2dfd4",
+      "node_count": 21,
+      "occurrence_count": 3,
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 31,
+          "normalized_text": "root=block\nkinds: block expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer\ntokens: bound_0 num bound_1 num bound_2 num bound_3 num bound_4 num",
+          "rel_file": "db/migrations/autodetector.py",
+          "repo": "django",
+          "root_kind": "block",
+          "source_text": "CREATE = 0\n        REMOVE = 1\n        ALTER = 2\n        REMOVE_ORDER_WRT = 3\n        ALTER_FOO_TOGETHER = 4",
+          "start_line": 27
+        },
+        {
+          "end_line": 84,
+          "normalized_text": "root=block\nkinds: block expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer expression_statement assignment identifier integer\ntokens: bound_0 num bound_1 num bound_2 num bound_3 num bound_4 num",
+          "rel_file": "engine/interfaces.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "CACHE_HIT = 0\n    CACHE_MISS = 1\n    CACHING_DISABLED = 2\n    NO_CACHE_KEY = 3\n    NO_DIALECT_SUPPORT = 4",
+          "start_line": 80
+        }
+      ],
+      "total_lines": 5,
+      "unique_non_keyword_tokens": 6
+    }
+  ],
+  "rejected_clusters": [
+    {
+      "canonical_hash": "de8fa3ea1a299cfcb764bf203647f336",
+      "node_count": 18,
+      "occurrence_count": 2,
+      "rejection": "too_few_tokens",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 90,
+          "normalized_text": "root=block\nkinds: block expression_statement string expression_statement assignment identifier call identifier argument_list expression_statement call attribute identifier identifier argument_list identifier return_statement identifier\ntokens: str bound_0 free_0 bound_0 update free_1 bound_0",
+          "rel_file": "template/backends/django.py",
+          "repo": "django",
+          "root_kind": "block",
+          "source_text": "\"\"\"\n        Return a collation of template tag libraries from installed\n        applications and the supplied custom_libraries argument.\n        \"\"\"\n        libraries = get_installed_libraries()\n        libraries.update(custom_libraries)\n        return libraries",
+          "start_line": 84
+        },
+        {
+          "end_line": 209,
+          "normalized_text": "root=block\nkinds: block expression_statement string expression_statement assignment identifier call identifier argument_list expression_statement call attribute identifier identifier argument_list identifier return_statement identifier\ntokens: str bound_0 free_0 bound_0 update free_1 bound_0",
+          "rel_file": "utilities/_compilation/util.py",
+          "repo": "sympy",
+          "root_kind": "block",
+          "source_text": "\"\"\" Computes the SHA256 hash of a string. \"\"\"\n    sh = sha256()\n    sh.update(string)\n    return sh",
+          "start_line": 206
+        }
+      ],
+      "total_lines": 7,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "02e8cb68dfb70ab94e18bd5a544b4497",
+      "node_count": 10,
+      "occurrence_count": 27,
+      "rejection": "too_short_lines",
+      "repo_count": 4,
+      "samples": [
+        {
+          "end_line": 1273,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier identifier identifier\ntokens: str free_0 free_1 free_2 free_3",
+          "rel_file": "contrib/admin/options.py",
+          "repo": "django",
+          "root_kind": "block",
+          "source_text": "\"\"\"\n        Construct a JSON structure describing changes from a changed object.\n        \"\"\"\n        return construct_change_message(form, formsets, add)",
+          "start_line": 1270
+        },
+        {
+          "end_line": 180,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier identifier identifier\ntokens: str free_0 free_1 free_2 free_3",
+          "rel_file": "visitors.py",
+          "repo": "lark",
+          "root_kind": "block",
+          "source_text": "\"\"\"Default function that is called if there is no attribute matching ``data``\n\n        Can be overridden. Defaults to creating a new copy of the tree node (i.e. ``return Tree(data, children, meta)``)\n        \"\"\"\n        return Tree(data, children, meta)",
+          "start_line": 176
+        },
+        {
+          "end_line": 605,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier identifier identifier\ntokens: str free_0 free_1 free_2 free_3",
+          "rel_file": "sql/functions.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "\"\"\"Interpret this expression as a boolean comparison between two\n        values.\n\n        This method is used for an ORM use case described at\n        :ref:`relationship_custom_operator_sql_function`.\n\n        A hypothetical SQL function \"is_equal()\" which compares to values\n        for equality would be written in the Core expression language as::\n\n            expr = func.is_equal(\"a\", \"b\")\n\n        If \"is_equal()\" above is comparing \"a\" and \"b\" for equality, the\n        :meth:`.FunctionElement.as_comparison` method would be invoked as::\n\n            expr = func.is_equal(\"a\", \"b\").as_comparison(1, 2)\n\n        Where above, the integer value \"1\" refers to the first argument of the\n        \"is_equal()\" function and the integer value \"2\" refers to the second.\n\n        This would create a :class:`.BinaryExpression` that is equivalent to::\n\n            BinaryExpression(\"a\", \"b\", operator=op.eq)\n\n        However, at the SQL level it would still render as\n        \"is_equal('a', 'b')\".\n\n        The ORM, when it loads a related object or collection, needs to be able\n        to manipulate the \"left\" and \"right\" sides of the ON clause of a JOIN\n        expression. The purpose of this method is to provide a SQL function\n        construct that can also supply this information to the ORM, when used\n        with the :paramref:`_orm.relationship.primaryjoin` parameter. The\n        return value is a containment object called :class:`.FunctionAsBinary`.\n\n        An ORM example is as follows::\n\n            class Venue(Base):\n                __tablename__ = 'venue'\n                id = Column(Integer, primary_key=True)\n                name = Column(String)\n\n                descendants = relationship(\n                    \"Venue\",\n                    primaryjoin=func.instr(\n                        remote(foreign(name)), name + \"/\"\n                    ).as_comparison(1, 2) == 1,\n                    viewonly=True,\n                    order_by=name\n                )\n\n        Above, the \"Venue\" class can load descendant \"Venue\" objects by\n        determining if the name of the parent Venue is contained within the\n        start of the hypothetical descendant value's name, e.g. \"parent1\" would\n        match up to \"parent1/child1\", but not to \"parent2/child1\".\n\n        Possible use cases include the \"materialized path\" example given above,\n        as well as making use of special SQL functions such as geometric\n        functions to create join conditions.\n\n        :param left_index: the integer 1-based index of the function argument\n         that serves as the \"left\" side of the expression.\n        :param right_index: the integer 1-based index of the function argument\n         that serves as the \"right\" side of the expression.\n\n        .. versionadded:: 1.3\n\n        .. seealso::\n\n            :ref:`relationship_custom_operator_sql_function` -\n            example use within the ORM\n\n        \"\"\"\n        return FunctionAsBinary(self, left_index, right_index)",
+          "start_line": 534
+        },
+        {
+          "end_line": 594,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier identifier identifier\ntokens: str free_0 free_1 free_2 free_3",
+          "rel_file": "crypto/crypto.py",
+          "repo": "sympy",
+          "root_kind": "block",
+          "source_text": "r\"\"\"\n    Returns the ciphertext obtained by replacing each character that\n    appears in ``old`` with the corresponding character in ``new``.\n    If ``old`` is a mapping, then new is ignored and the replacements\n    defined by ``old`` are used.\n\n    Explanation\n    ===========\n\n    This is a more general than the affine cipher in that the key can\n    only be recovered by determining the mapping for each symbol.\n    Though in practice, once a few symbols are recognized the mappings\n    for other characters can be quickly guessed.\n\n    Examples\n    ========\n\n    >>> from sympy.crypto.crypto import encipher_substitution, AZ\n    >>> old = 'OEYAG'\n    >>> new = '034^6'\n    >>> msg = AZ(\"go navy! beat army!\")\n    >>> ct = encipher_substitution(msg, old, new); ct\n    '60N^V4B3^T^RM4'\n\n    To decrypt a substitution, reverse the last two arguments:\n\n    >>> encipher_substitution(ct, new, old)\n    'GONAVYBEATARMY'\n\n    In the special case where ``old`` and ``new`` are a permutation of\n    order 2 (representing a transposition of characters) their order\n    is immaterial:\n\n    >>> old = 'NAVY'\n    >>> new = 'ANYV'\n    >>> encipher = lambda x: encipher_substitution(x, old, new)\n    >>> encipher('NAVY')\n    'ANYV'\n    >>> encipher(_)\n    'NAVY'\n\n    The substitution cipher, in general, is a method\n    whereby \"units\" (not necessarily single characters) of plaintext\n    are replaced with ciphertext according to a regular system.\n\n    >>> ords = dict(zip('abc', ['\\\\%i' % ord(i) for i in 'abc']))\n    >>> print(encipher_substitution('abc', ords))\n    \\97\\98\\99\n\n    References\n    ==========\n\n    .. [1] https://en.wikipedia.org/wiki/Substitution_cipher\n\n    \"\"\"\n    return translate(msg, old, new)",
+          "start_line": 539
+        }
+      ],
+      "total_lines": 72,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "a0d97e8e9827e6c21727831ca50122b2",
+      "node_count": 11,
+      "occurrence_count": 28,
+      "rejection": "too_short_lines",
+      "repo_count": 4,
+      "samples": [
+        {
+          "end_line": 567,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 free_0 str",
+          "rel_file": "contrib/auth/models.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def set_password(self, raw_password):\n        raise NotImplementedError(\n            \"Django doesn't provide a DB representation for AnonymousUser.\"\n        )",
+          "start_line": 564
+        },
+        {
+          "end_line": 572,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 free_0 str",
+          "rel_file": "contrib/auth/models.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def check_password(self, raw_password):\n        raise NotImplementedError(\n            \"Django doesn't provide a DB representation for AnonymousUser.\"\n        )",
+          "start_line": 569
+        },
+        {
+          "end_line": 661,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 free_0 str",
+          "rel_file": "load_grammar.py",
+          "repo": "lark",
+          "root_kind": "function_definition",
+          "source_text": "def alias(self, t):\n        raise GrammarError(\"Aliasing not allowed in terminals (You used -> in the wrong place)\")",
+          "start_line": 660
+        },
+        {
+          "end_line": 1480,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 free_0 str",
+          "rel_file": "dialects/oracle/cx_oracle.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def do_recover_twophase(self, connection):\n        raise NotImplementedError(\n            \"recover two phase query for cx_Oracle not implemented\"\n        )",
+          "start_line": 1477
+        },
+        {
+          "end_line": 617,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 free_0 str",
+          "rel_file": "stats/drv_types.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def _cdf(self, x):\n        raise NotImplementedError(\n            \"Skellam doesn't have closed form for the CDF.\")",
+          "start_line": 615
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "33223e615ad4218096460efe1f1cb34b",
+      "node_count": 16,
+      "occurrence_count": 6,
+      "rejection": "too_short_lines",
+      "repo_count": 4,
+      "samples": [
+        {
+          "end_line": 22,
+          "normalized_text": "root=block\nkinds: block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: free_0 free_1 free_2 free_3 str free_1",
+          "rel_file": "contrib/gis/db/models/sql/conversion.py",
+          "repo": "django",
+          "root_kind": "block",
+          "source_text": "if not isinstance(value, Area):\n            raise ValueError(\"AreaField only accepts Area measurement objects.\")\n        return value",
+          "start_line": 20
+        },
+        {
+          "end_line": 149,
+          "normalized_text": "root=block\nkinds: block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: free_0 free_1 free_2 free_3 str free_1",
+          "rel_file": "datastructures.py",
+          "repo": "fastapi",
+          "root_kind": "block",
+          "source_text": "if not isinstance(v, StarletteUploadFile):\n            raise ValueError(f\"Expected UploadFile, received: {type(v)}\")\n        return v",
+          "start_line": 147
+        },
+        {
+          "end_line": 279,
+          "normalized_text": "root=block\nkinds: block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: free_0 free_1 free_2 free_3 str free_1",
+          "rel_file": "engine/url.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "if not isinstance(v, str):\n                raise TypeError(\"Query dictionary keys must be strings\")\n            return v",
+          "start_line": 277
+        },
+        {
+          "end_line": 905,
+          "normalized_text": "root=block\nkinds: block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: free_0 free_1 free_2 free_3 str free_1",
+          "rel_file": "codegen/ast.py",
+          "repo": "sympy",
+          "root_kind": "block",
+          "source_text": "if not isinstance(text, str):\n            raise TypeError(\"Argument text is not a string type.\")\n        return text",
+          "start_line": 903
+        }
+      ],
+      "total_lines": 3,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "6f38ef6c890e61b2362c24aba380944e",
+      "node_count": 11,
+      "occurrence_count": 9,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 106,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier keyword_argument identifier identifier\ntokens: str free_0 free_1 free_2 free_2",
+          "rel_file": "cli_base.py",
+          "repo": "emend",
+          "root_kind": "block",
+          "source_text": "\"\"\"Backward-compatible alias for multiple file scope resolution.\"\"\"\n    return resolve_many_files(paths, language=language)",
+          "start_line": 105
+        },
+        {
+          "end_line": 322,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier keyword_argument identifier identifier\ntokens: str free_0 free_1 free_2 free_2",
+          "rel_file": "orm/mapped_collection.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "\"\"\"A dictionary-based collection type with arbitrary keying.\n\n    .. versionchanged:: 2.0 Renamed :data:`.mapped_collection` to\n       :func:`.keyfunc_mapping`.\n\n    Returns a :class:`.KeyFuncDict` factory with a keying function\n    generated from keyfunc, a callable that takes an entity and returns a\n    key value.\n\n    .. note:: the given keyfunc is called only once at the time that the\n       target object is being added to the collection.   Changes to the\n       effective value returned by the function are not tracked.\n\n\n    .. seealso::\n\n        :ref:`orm_dictionary_collection` - background on use\n\n    :param keyfunc: a callable that will be passed the ORM-mapped instance\n     which should then generate a new key to use in the dictionary.\n     If the value returned is :attr:`.LoaderCallableStatus.NO_VALUE`, an error\n     is raised.\n    :param ignore_unpopulated_attribute:  if True, and the callable returns\n     :attr:`.LoaderCallableStatus.NO_VALUE` for a particular instance, the\n     operation will be silently skipped.  By default, an error is raised.\n\n     .. versionadded:: 2.0 an error is raised by default if the callable\n        being used for the dictionary key returns\n        :attr:`.LoaderCallableStatus.NO_VALUE`, which in an ORM attribute\n        context indicates an attribute that was never populated with any value.\n        The :paramref:`_orm.mapped_collection.ignore_unpopulated_attribute`\n        parameter may be set which will instead indicate that this condition\n        should be ignored, and the append operation silently skipped. This is\n        in contrast to the behavior of the 1.x series which would erroneously\n        populate the value in the dictionary with an arbitrary key value of\n        ``None``.\n\n\n    \"\"\"\n    return _mapped_collection_cls(\n        keyfunc, ignore_unpopulated_attribute=ignore_unpopulated_attribute\n    )",
+          "start_line": 281
+        },
+        {
+          "end_line": 2228,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list identifier keyword_argument identifier identifier\ntokens: str free_0 free_1 free_2 free_2",
+          "rel_file": "polys/matrices/domainmatrix.py",
+          "repo": "sympy",
+          "root_kind": "block",
+          "source_text": "r\"\"\"\n        Returns reduced-row echelon form (RREF) and list of pivots.\n\n        If the domain is not a field then it will be converted to a field. See\n        :meth:`rref_den` for the fraction-free version of this routine that\n        returns RREF with denominator instead.\n\n        The domain must either be a field or have an associated fraction field\n        (see :meth:`to_field`).\n\n        Examples\n        ========\n\n        >>> from sympy import QQ\n        >>> from sympy.polys.matrices import DomainMatrix\n        >>> A = DomainMatrix([\n        ...     [QQ(2), QQ(-1), QQ(0)],\n        ...     [QQ(-1), QQ(2), QQ(-1)],\n        ...     [QQ(0), QQ(0), QQ(2)]], (3, 3), QQ)\n\n        >>> rref_matrix, rref_pivots = A.rref()\n        >>> rref_matrix\n        DomainMatrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]], (3, 3), QQ)\n        >>> rref_pivots\n        (0, 1, 2)\n\n        Parameters\n        ==========\n\n        method : str, optional (default: 'auto')\n            The method to use to compute the RREF. The default is ``'auto'``,\n            which will attempt to choose the fastest method. The other options\n            are:\n\n            - ``A.rref(method='GJ')`` uses Gauss-Jordan elimination with\n              division. If the domain is not a field then it will be converted\n              to a field with :meth:`to_field` first and RREF will be computed\n              by inverting the pivot elements in each row. This is most\n              efficient for very sparse matrices or for matrices whose elements\n              have complex denominators.\n\n            - ``A.rref(method='FF')`` uses fraction-free Gauss-Jordan\n              elimination. Elimination is performed using exact division\n              (``exquo``) to control the growth of the coefficients. In this\n              case the current domain is always used for elimination but if\n              the domain is not a field then it will be converted to a field\n              at the end and divided by the denominator. This is most efficient\n              for dense matrices or for matrices with simple denominators.\n\n            - ``A.rref(method='CD')`` clears the denominators before using\n              fraction-free Gauss-Jordan elimination in the assoicated ring.\n              This is most efficient for dense matrices with very simple\n              denominators.\n\n            - ``A.rref(method='GJ_dense')``, ``A.rref(method='FF_dense')``, and\n              ``A.rref(method='CD_dense')`` are the same as the above methods\n              except that the dense implementations of the algorithms are used.\n              By default ``A.rref(method='auto')`` will usually choose the\n              sparse implementations for RREF.\n\n            Regardless of which algorithm is used the returned matrix will\n            always have the same format (sparse or dense) as the input and its\n            domain will always be the field of fractions of the input domain.\n\n        Returns\n        =======\n\n        (DomainMatrix, list)\n            reduced-row echelon form and list of pivots for the DomainMatrix\n\n        See Also\n        ========\n\n        rref_den\n            RREF with denominator\n        sympy.polys.matrices.sdm.sdm_irref\n            Sparse implementation of ``method='GJ'``.\n        sympy.polys.matrices.sdm.sdm_rref_den\n            Sparse implementation of ``method='FF'`` and ``method='CD'``.\n        sympy.polys.matrices.dense.ddm_irref\n            Dense implementation of ``method='GJ'``.\n        sympy.polys.matrices.dense.ddm_irref_den\n            Dense implementation of ``method='FF'`` and ``method='CD'``.\n        clear_denoms\n            Clear denominators from a matrix, used by ``method='CD'`` and\n            by ``method='GJ'`` when the original domain is not a field.\n\n        \"\"\"\n        return _dm_rref(self, method=method)",
+          "start_line": 2140
+        }
+      ],
+      "total_lines": 89,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "0643023c75dcdcf1de28a7761025459d",
+      "node_count": 14,
+      "occurrence_count": 7,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 77,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier list_splat_pattern identifier dictionary_splat_pattern identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "contrib/gis/serializers/geojson.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, *args, **kwargs):\n        raise SerializerDoesNotExist(\"geojson is a serialization-only serializer\")",
+          "start_line": 76
+        },
+        {
+          "end_line": 2041,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier list_splat_pattern identifier dictionary_splat_pattern identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "db/models/query.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, *args, **kwargs):\n        raise TypeError(\"EmptyQuerySet can't be instantiated\")",
+          "start_line": 2040
+        },
+        {
+          "end_line": 2985,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier list_splat_pattern identifier dictionary_splat_pattern identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "sql/elements.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, *arg, **kw):\n        raise NotImplementedError(\n            \"BooleanClauseList has a private constructor\"\n        )",
+          "start_line": 2982
+        },
+        {
+          "end_line": 1037,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier list_splat_pattern identifier dictionary_splat_pattern identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "parsing/c/c_parser.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, *args, **kwargs):\n            raise ImportError(\"Module not Installed\")",
+          "start_line": 1036
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 6
+    },
+    {
+      "canonical_hash": "be70a7e78eef140a4fee6b79b54921df",
+      "node_count": 10,
+      "occurrence_count": 34,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 557,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 free_0 str",
+          "rel_file": "contrib/auth/models.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def save(self):\n        raise NotImplementedError(\n            \"Django doesn't provide a DB representation for AnonymousUser.\"\n        )",
+          "start_line": 554
+        },
+        {
+          "end_line": 562,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 free_0 str",
+          "rel_file": "contrib/auth/models.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def delete(self):\n        raise NotImplementedError(\n            \"Django doesn't provide a DB representation for AnonymousUser.\"\n        )",
+          "start_line": 559
+        },
+        {
+          "end_line": 748,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 free_0 str",
+          "rel_file": "sql/elements.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def __bool__(self):\n        raise TypeError(\"Boolean value of this clause is not defined\")",
+          "start_line": 747
+        },
+        {
+          "end_line": 560,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 free_0 str",
+          "rel_file": "categories/baseclasses.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def all_morphisms(self):\n        raise NotImplementedError(\n            \"Obtaining the class of morphisms is not implemented in Category.\")",
+          "start_line": 558
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "cd8eaf00083f74b1cd69bc7d76c52e32",
+      "node_count": 12,
+      "occurrence_count": 15,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 81,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "contrib/admin/filters.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def get_facet_counts(self, pk_attname, filtered_qs):\n        raise NotImplementedError(\n            \"subclasses of FacetsMixin must provide a get_facet_counts() method.\"\n        )",
+          "start_line": 78
+        },
+        {
+          "end_line": 81,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "contrib/gis/db/backends/base/operations.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def convert_extent(self, box, srid):\n        raise NotImplementedError(\n            \"Aggregate extent not implemented for this spatial backend.\"\n        )",
+          "start_line": 78
+        },
+        {
+          "end_line": 679,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "dialects/postgresql/asyncpg.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def executemany(self, operation, seq_of_parameters):\n        raise NotImplementedError(\n            \"server side cursor doesn't support executemany yet\"\n        )",
+          "start_line": 676
+        },
+        {
+          "end_line": 556,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier identifier block raise_statement call identifier argument_list string\ntokens: bound_0 bound_1 bound_2 bound_3 free_0 str",
+          "rel_file": "categories/baseclasses.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def hom(self, A, B):\n        raise NotImplementedError(\n            \"hom-sets are not implemented in Category.\")",
+          "start_line": 554
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 6
+    },
+    {
+      "canonical_hash": "01c8756a35601f914946f5da44dcfdb2",
+      "node_count": 9,
+      "occurrence_count": 20,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 212,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier true\ntokens: bound_0 free_0 bound_1 true",
+          "rel_file": "contrib/gis/gdal/field.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class OFTInteger64(OFTInteger):\n    _bit64 = True",
+          "start_line": 211
+        },
+        {
+          "end_line": 5,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier true\ntokens: bound_0 free_0 bound_1 true",
+          "rel_file": "contrib/sessions/models.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class SessionManager(BaseSessionManager):\n    use_in_migrations = True",
+          "start_line": 4
+        },
+        {
+          "end_line": 569,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier true\ntokens: bound_0 free_0 bound_1 true",
+          "rel_file": "dialects/oracle/cx_oracle.py",
+          "repo": "sqlalchemy",
+          "root_kind": "class_definition",
+          "source_text": "class _OracleNUMBER(_OracleNumeric):\n    is_number = True",
+          "start_line": 568
+        },
+        {
+          "end_line": 162,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier true\ntokens: bound_0 free_0 bound_1 true",
+          "rel_file": "physics/secondquant.py",
+          "repo": "sympy",
+          "root_kind": "class_definition",
+          "source_text": "class TensorSymbol(Expr):\n\n    is_commutative = True",
+          "start_line": 160
+        }
+      ],
+      "total_lines": 3,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "f30a825b5bbdb3353c496b2fe5f7201e",
+      "node_count": 19,
+      "occurrence_count": 6,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 776,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier identifier block expression_statement call attribute identifier identifier argument_list identifier expression_statement call attribute identifier identifier argument_list identifier\ntokens: free_0 free_1 free_1 add free_0 free_2 append free_0",
+          "rel_file": "trace_presets.py",
+          "repo": "emend",
+          "root_kind": "if_statement",
+          "source_text": "if lbl not in seen_labels:\n                seen_labels.add(lbl)\n                labels.append(lbl)",
+          "start_line": 774
+        },
+        {
+          "end_line": 3492,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier identifier block expression_statement call attribute identifier identifier argument_list identifier expression_statement call attribute identifier identifier argument_list identifier\ntokens: free_0 free_1 free_1 add free_0 free_2 append free_0",
+          "rel_file": "transform.py",
+          "repo": "emend",
+          "root_kind": "if_statement",
+          "source_text": "if f not in seen:\n                seen.add(f)\n                all_files.append(f)",
+          "start_line": 3490
+        },
+        {
+          "end_line": 269,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier identifier block expression_statement call attribute identifier identifier argument_list identifier expression_statement call attribute identifier identifier argument_list identifier\ntokens: free_0 free_1 free_1 add free_0 free_2 append free_0",
+          "rel_file": "utils.py",
+          "repo": "lark",
+          "root_kind": "if_statement",
+          "source_text": "if next_node not in visited:\n                visited.add(next_node)\n                open_q.append(next_node)",
+          "start_line": 267
+        },
+        {
+          "end_line": 453,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier identifier block expression_statement call attribute identifier identifier argument_list identifier expression_statement call attribute identifier identifier argument_list identifier\ntokens: free_0 free_1 free_1 add free_0 free_2 append free_0",
+          "rel_file": "orm/context.py",
+          "repo": "sqlalchemy",
+          "root_kind": "if_statement",
+          "source_text": "if obj not in dedupe:\n            dedupe.add(obj)\n            col_collection.append(obj)",
+          "start_line": 451
+        }
+      ],
+      "total_lines": 3,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "16a9150ead902f508c7c57eb555c3aa9",
+      "node_count": 11,
+      "occurrence_count": 23,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 480,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type identifier block raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1",
+          "rel_file": "sansio/app.py",
+          "repo": "flask",
+          "root_kind": "function_definition",
+          "source_text": "def create_jinja_environment(self) -> Environment:\n        raise NotImplementedError()",
+          "start_line": 479
+        },
+        {
+          "end_line": 58,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type identifier block raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1",
+          "rel_file": "lexer.py",
+          "repo": "lark",
+          "root_kind": "function_definition",
+          "source_text": "def to_regexp(self) -> str:\n        raise NotImplementedError()",
+          "start_line": 57
+        },
+        {
+          "end_line": 3054,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type identifier block raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1",
+          "rel_file": "engine/interfaces.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def _get_cache_stats(self) -> str:\n        raise NotImplementedError()",
+          "start_line": 3053
+        }
+      ],
+      "total_lines": 2,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "83caaa64445af07a0a2435042184931d",
+      "node_count": 9,
+      "occurrence_count": 14,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 362,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num",
+          "rel_file": "contrib/gis/db/models/functions.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class Envelope(GeomOutputGeoFunc):\n    arity = 1",
+          "start_line": 361
+        },
+        {
+          "end_line": 366,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num",
+          "rel_file": "contrib/gis/db/models/functions.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class ForcePolygonCW(GeomOutputGeoFunc):\n    arity = 1",
+          "start_line": 365
+        },
+        {
+          "end_line": 402,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num",
+          "rel_file": "engine/result.py",
+          "repo": "sqlalchemy",
+          "root_kind": "class_definition",
+          "source_text": "class _NoRow(Enum):\n    _NO_ROW = 0",
+          "start_line": 401
+        },
+        {
+          "end_line": 536,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier integer\ntokens: bound_0 free_0 bound_1 num",
+          "rel_file": "codegen/cfunctions.py",
+          "repo": "sympy",
+          "root_kind": "class_definition",
+          "source_text": "class isnan(Function):\n    nargs = 1",
+          "start_line": 535
+        }
+      ],
+      "total_lines": 2,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "b60f15916a63470fef29fba74a1557c7",
+      "node_count": 12,
+      "occurrence_count": 5,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 17,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block expression_statement assignment attribute identifier identifier identifier\ntokens: bound_0 bound_1 bound_2 bound_1 name bound_2",
+          "rel_file": "contrib/postgres/operations.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, name):\n        self.name = name",
+          "start_line": 16
+        },
+        {
+          "end_line": 23,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block expression_statement assignment attribute identifier identifier identifier\ntokens: bound_0 bound_1 bound_2 bound_1 name bound_2",
+          "rel_file": "db/migrations/operations/models.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, name):\n        self.name = name",
+          "start_line": 22
+        },
+        {
+          "end_line": 23,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block expression_statement assignment attribute identifier identifier identifier\ntokens: bound_0 bound_1 bound_2 bound_1 name bound_2",
+          "rel_file": "parsers/lalr_analysis.py",
+          "repo": "lark",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, name):\n        self.name = name",
+          "start_line": 22
+        },
+        {
+          "end_line": 16,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block expression_statement assignment attribute identifier identifier identifier\ntokens: bound_0 bound_1 bound_2 bound_1 name bound_2",
+          "rel_file": "physics/biomechanics/tests/test_mixin.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def __init__(self, name):\n                self.name = name",
+          "start_line": 15
+        }
+      ],
+      "total_lines": 2,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "f10c3955b567496e123501d1d020de67",
+      "node_count": 9,
+      "occurrence_count": 88,
+      "rejection": "too_short_lines",
+      "repo_count": 3,
+      "samples": [
+        {
+          "end_line": 31,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str",
+          "rel_file": "contrib/admin/forms.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class AdminPasswordChangeForm(PasswordChangeForm):\n    required_css_class = \"required\"",
+          "start_line": 30
+        },
+        {
+          "end_line": 2596,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str",
+          "rel_file": "contrib/admin/options.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class StackedInline(InlineModelAdmin):\n    template = \"admin/edit_inline/stacked.html\"",
+          "start_line": 2595
+        },
+        {
+          "end_line": 1296,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str",
+          "rel_file": "dialects/mssql/base.py",
+          "repo": "sqlalchemy",
+          "root_kind": "class_definition",
+          "source_text": "class _BASETIMEIMPL(TIME):\n    __visit_name__ = \"_BASETIMEIMPL\"",
+          "start_line": 1295
+        },
+        {
+          "end_line": 522,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str",
+          "rel_file": "codegen/ast.py",
+          "repo": "sympy",
+          "root_kind": "class_definition",
+          "source_text": "class AddAugmentedAssignment(AugmentedAssignment):\n    binop = '+'",
+          "start_line": 521
+        }
+      ],
+      "total_lines": 2,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "cff851295f6487ccf1195816cd342fb7",
+      "node_count": 9,
+      "occurrence_count": 6,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 430,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type none block expression_statement string\ntokens: bound_0 bound_1 none str",
+          "rel_file": "type_oracle.py",
+          "repo": "emend",
+          "root_kind": "function_definition",
+          "source_text": "def clear_cache(self) -> None:\n        \"\"\"Clear any cached type information.\"\"\"",
+          "start_line": 429
+        },
+        {
+          "end_line": 1183,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type none block expression_statement string\ntokens: bound_0 bound_1 none str",
+          "rel_file": "orm/events.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def after_configured(self) -> None:\n        \"\"\"Called after a series of mappers have been configured.\n\n        The :meth:`.MapperEvents.after_configured` event is invoked\n        each time the :func:`_orm.configure_mappers` function is\n        invoked, after the function has completed its work.\n        :func:`_orm.configure_mappers` is typically invoked\n        automatically as mappings are first used, as well as each time\n        new mappers have been made available and new mapper use is\n        detected.\n\n        Contrast this event to the :meth:`.MapperEvents.mapper_configured`\n        event, which is called on a per-mapper basis while the configuration\n        operation proceeds; unlike that event, when this event is invoked,\n        all cross-configurations (e.g. backrefs) will also have been made\n        available for any mappers that were pending.\n        Also contrast to :meth:`.MapperEvents.before_configured`,\n        which is invoked before the series of mappers has been configured.\n\n        This event can **only** be applied to the :class:`_orm.Mapper` class,\n        and not to individual mappings or\n        mapped classes.  It is only invoked for all mappings as a whole::\n\n            from sqlalchemy.orm import Mapper\n\n            @event.listens_for(Mapper, \"after_configured\")\n            def go():\n                # ...\n\n        Theoretically this event is called once per\n        application, but is actually called any time new mappers\n        have been affected by a :func:`_orm.configure_mappers`\n        call.   If new mappings are constructed after existing ones have\n        already been used, this event will likely be called again.  To ensure\n        that a particular event is only called once and no further, the\n        ``once=True`` argument (new in 0.9.4) can be applied::\n\n            from sqlalchemy.orm import mapper\n\n            @event.listens_for(mapper, \"after_configured\", once=True)\n            def go():\n                # ...\n\n        .. seealso::\n\n            :meth:`.MapperEvents.before_mapper_configured`\n\n            :meth:`.MapperEvents.mapper_configured`\n\n            :meth:`.MapperEvents.before_configured`\n\n        \"\"\"",
+          "start_line": 1132
+        }
+      ],
+      "total_lines": 52,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "4473337f1fd3ae4a070241af6b2a342f",
+      "node_count": 12,
+      "occurrence_count": 2,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 430,
+          "normalized_text": "root=decorated_definition\nkinds: decorated_definition decorator identifier function_definition identifier parameters identifier type none block expression_statement string\ntokens: free_0 bound_0 bound_1 none str",
+          "rel_file": "type_oracle.py",
+          "repo": "emend",
+          "root_kind": "decorated_definition",
+          "source_text": "@abstractmethod\n    def clear_cache(self) -> None:\n        \"\"\"Clear any cached type information.\"\"\"",
+          "start_line": 428
+        },
+        {
+          "end_line": 2595,
+          "normalized_text": "root=decorated_definition\nkinds: decorated_definition decorator identifier function_definition identifier parameters identifier type none block expression_statement string\ntokens: free_0 bound_0 bound_1 none str",
+          "rel_file": "engine/interfaces.py",
+          "repo": "sqlalchemy",
+          "root_kind": "decorated_definition",
+          "source_text": "@classmethod\n    def load_provisioning(cls) -> None:\n        \"\"\"set up the provision.py module for this dialect.\n\n        For dialects that include a provision.py module that sets up\n        provisioning followers, this method should initiate that process.\n\n        A typical implementation would be::\n\n            @classmethod\n            def load_provisioning(cls):\n                __import__(\"mydialect.provision\")\n\n        The default method assumes a module named ``provision.py`` inside\n        the owning package of the current dialect, based on the ``__module__``\n        attribute::\n\n            @classmethod\n            def load_provisioning(cls):\n                package = \".\".join(cls.__module__.split(\".\")[0:-1])\n                try:\n                    __import__(package + \".provision\")\n                except ImportError:\n                    pass\n\n        .. versionadded:: 1.3.14\n\n        \"\"\"",
+          "start_line": 2568
+        }
+      ],
+      "total_lines": 28,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "7d7bd36447a7be31a9256cb58b68a965",
+      "node_count": 11,
+      "occurrence_count": 7,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 355,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list call identifier argument_list identifier\ntokens: str free_0 free_1 free_2",
+          "rel_file": "orm/base.py",
+          "repo": "sqlalchemy",
+          "root_kind": "block",
+          "source_text": "\"\"\"Return a string describing an instance.\"\"\"\n\n    return state_str(instance_state(instance))",
+          "start_line": 353
+        },
+        {
+          "end_line": 53,
+          "normalized_text": "root=block\nkinds: block expression_statement string return_statement call identifier argument_list call identifier argument_list identifier\ntokens: str free_0 free_1 free_2",
+          "rel_file": "physics/quantum/qexpr.py",
+          "repo": "sympy",
+          "root_kind": "block",
+          "source_text": "\"\"\"Convert elements of a sequence to standard form.\n\n    This is like sympify, but it performs special logic for arguments passed\n    to QExpr. The following conversions are done:\n\n    * (list, tuple, Tuple) => _qsympify_sequence each element and convert\n      sequence to a Tuple.\n    * basestring => Symbol\n    * Matrix => Matrix\n    * other => sympify\n\n    Strings are passed to Symbol, not sympify to make sure that variables like\n    'pi' are kept as Symbols, not the SymPy built-in number subclasses.\n\n    Examples\n    ========\n\n    >>> from sympy.physics.quantum.qexpr import _qsympify_sequence\n    >>> _qsympify_sequence((1,2,[3,4,[1,]]))\n    (1, 2, (3, 4, (1,)))\n\n    \"\"\"\n\n    return tuple(__qsympify_sequence_helper(seq))",
+          "start_line": 30
+        }
+      ],
+      "total_lines": 24,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "2c30478de02103d27fad644b7980c70c",
+      "node_count": 17,
+      "occurrence_count": 6,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 103,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type generic_type identifier type_parameter type identifier block expression_statement string raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1 str free_2",
+          "rel_file": "indenter.py",
+          "repo": "lark",
+          "root_kind": "function_definition",
+          "source_text": "def CLOSE_PAREN_types(self) -> List[str]:\n        \"\"\"The names of the tokens that close a parenthesis\n        \"\"\"\n        raise NotImplementedError()",
+          "start_line": 100
+        },
+        {
+          "end_line": 96,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type generic_type identifier type_parameter type identifier block expression_statement string raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1 str free_2",
+          "rel_file": "indenter.py",
+          "repo": "lark",
+          "root_kind": "function_definition",
+          "source_text": "def OPEN_PAREN_types(self) -> List[str]:\n        \"The names of the tokens that open a parenthesis\"\n        raise NotImplementedError()",
+          "start_line": 94
+        },
+        {
+          "end_line": 577,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type generic_type identifier type_parameter type identifier block expression_statement string raise_statement call identifier argument_list\ntokens: bound_0 bound_1 free_0 free_1 str free_2",
+          "rel_file": "pool/base.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def record_info(self) -> Optional[_InfoType]:\n        \"\"\"Persistent info dictionary associated with this\n        :class:`.ManagesConnection`.\n\n        Unlike the :attr:`.ManagesConnection.info` dictionary, the lifespan\n        of this dictionary is that of the :class:`.ConnectionPoolEntry`\n        which owns it; therefore this dictionary will persist across\n        reconnects and connection invalidation for a particular entry\n        in the connection pool.\n\n        For a :class:`.PoolProxiedConnection` instance that's not associated\n        with a :class:`.ConnectionPoolEntry`, such as if it were detached, the\n        attribute returns None. Contrast to the :attr:`.ManagesConnection.info`\n        dictionary which is never None.\n\n\n        .. seealso::\n\n            :attr:`.ManagesConnection.info`\n\n        \"\"\"\n        raise NotImplementedError()",
+          "start_line": 556
+        }
+      ],
+      "total_lines": 22,
+      "unique_non_keyword_tokens": 6
+    },
+    {
+      "canonical_hash": "dd8944b18b6640a5ad7432451bd5b0c0",
+      "node_count": 11,
+      "occurrence_count": 7,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 1448,
+          "normalized_text": "root=decorated_definition\nkinds: decorated_definition decorator identifier function_definition identifier parameters identifier block expression_statement string pass_statement\ntokens: free_0 bound_0 bound_1 str",
+          "rel_file": "test/testcases.py",
+          "repo": "django",
+          "root_kind": "decorated_definition",
+          "source_text": "@classmethod\n    def setUpTestData(cls):\n        \"\"\"Load initial data for the TestCase.\"\"\"\n        pass",
+          "start_line": 1445
+        },
+        {
+          "end_line": 55,
+          "normalized_text": "root=decorated_definition\nkinds: decorated_definition decorator identifier function_definition identifier parameters identifier block expression_statement string pass_statement\ntokens: free_0 bound_0 bound_1 str",
+          "rel_file": "physics/mechanics/actuator.py",
+          "repo": "sympy",
+          "root_kind": "decorated_definition",
+          "source_text": "@abstractmethod\n    def to_loads(self):\n        \"\"\"Loads required by the equations of motion method classes.\n\n        Explanation\n        ===========\n\n        ``KanesMethod`` requires a list of ``Point``-``Vector`` tuples to be\n        passed to the ``loads`` parameters of its ``kanes_equations`` method\n        when constructing the equations of motion. This method acts as a\n        utility to produce the correctly-structred pairs of points and vectors\n        required so that these can be easily concatenated with other items in\n        the list of loads and passed to ``KanesMethod.kanes_equations``. These\n        loads are also in the correct form to also be passed to the other\n        equations of motion method classes, e.g. ``LagrangesMethod``.\n\n        \"\"\"\n        pass",
+          "start_line": 38
+        }
+      ],
+      "total_lines": 18,
+      "unique_non_keyword_tokens": 4
+    },
+    {
+      "canonical_hash": "5bee650b6cbea0052e91e29fffd2f0fb",
+      "node_count": 11,
+      "occurrence_count": 6,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 25,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement string expression_statement assignment identifier true\ntokens: bound_0 free_0 str bound_1 true",
+          "rel_file": "core/exceptions.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class ObjectDoesNotExist(Exception):\n    \"\"\"The requested object does not exist\"\"\"\n\n    silent_variable_failure = True",
+          "start_line": 22
+        },
+        {
+          "end_line": 116,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement string expression_statement assignment identifier true\ntokens: bound_0 free_0 str bound_1 true",
+          "rel_file": "functions/elementary/hyperbolic.py",
+          "repo": "sympy",
+          "root_kind": "class_definition",
+          "source_text": "class HyperbolicFunction(Function):\n    \"\"\"\n    Base class for hyperbolic functions.\n\n    See Also\n    ========\n\n    sinh, cosh, tanh, coth\n    \"\"\"\n\n    unbranched = True",
+          "start_line": 106
+        }
+      ],
+      "total_lines": 11,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "ccedf7c655ce29012b4481039ab445ee",
+      "node_count": 11,
+      "occurrence_count": 3,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 74,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type identifier block expression_statement string expression_statement ellipsis\ntokens: bound_0 bound_1 free_0 str ...",
+          "rel_file": "language_plugins.py",
+          "repo": "emend",
+          "root_kind": "function_definition",
+          "source_text": "def line_comment_prefix(self) -> str:\n        \"\"\"The single-line comment prefix (e.g. ``#`` for Python, ``//`` for TS).\"\"\"\n        ...",
+          "start_line": 72
+        },
+        {
+          "end_line": 1908,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier type identifier block expression_statement string expression_statement ellipsis\ntokens: bound_0 bound_1 free_0 str ...",
+          "rel_file": "engine/result.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def one(self) -> _R:\n            \"\"\"Return exactly one object or raise an exception.\n\n            Equivalent to :meth:`_engine.Result.one` except that\n            tuple values, rather than :class:`_engine.Row` objects,\n            are returned.\n\n            \"\"\"\n            ...",
+          "start_line": 1900
+        }
+      ],
+      "total_lines": 9,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "63e8ded69d35d26aeeeed6b866631c7f",
+      "node_count": 21,
+      "occurrence_count": 2,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 22,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: bound_0 bound_1 bound_2 free_0 bound_2 free_1 free_2 str bound_2",
+          "rel_file": "contrib/gis/db/models/sql/conversion.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def get_prep_value(self, value):\n        if not isinstance(value, Area):\n            raise ValueError(\"AreaField only accepts Area measurement objects.\")\n        return value",
+          "start_line": 19
+        },
+        {
+          "end_line": 905,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier identifier block if_statement not_operator call identifier argument_list identifier identifier block raise_statement call identifier argument_list string return_statement identifier\ntokens: bound_0 bound_1 bound_2 free_0 bound_2 free_1 free_2 str bound_2",
+          "rel_file": "codegen/ast.py",
+          "repo": "sympy",
+          "root_kind": "function_definition",
+          "source_text": "def _construct_text(cls, text):\n        if not isinstance(text, str):\n            raise TypeError(\"Argument text is not a string type.\")\n        return text",
+          "start_line": 902
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 7
+    },
+    {
+      "canonical_hash": "72d62a6dde4d1f9b3cd2de9a515080a8",
+      "node_count": 19,
+      "occurrence_count": 3,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 4437,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier none block if_statement comparison_operator identifier none block raise_statement call identifier argument_list string expression_statement assignment identifier identifier\ntokens: free_0 none free_1 none free_2 str free_1 free_0",
+          "rel_file": "transform.py",
+          "repo": "emend",
+          "root_kind": "if_statement",
+          "source_text": "if where is not None:\n        if inside is not None:\n            raise ValueError(\"Cannot specify both 'where' and 'inside' parameters\")\n        inside = where",
+          "start_line": 4434
+        },
+        {
+          "end_line": 5079,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier none block if_statement comparison_operator identifier none block raise_statement call identifier argument_list string expression_statement assignment identifier identifier\ntokens: free_0 none free_1 none free_2 str free_1 free_0",
+          "rel_file": "transform.py",
+          "repo": "emend",
+          "root_kind": "if_statement",
+          "source_text": "if where is not None:\n        if inside is not None:\n            raise ValueError(\"Cannot specify both 'where' and 'inside' parameters\")\n        inside = where",
+          "start_line": 5076
+        },
+        {
+          "end_line": 567,
+          "normalized_text": "root=if_statement\nkinds: if_statement comparison_operator identifier none block if_statement comparison_operator identifier none block raise_statement call identifier argument_list string expression_statement assignment identifier identifier\ntokens: free_0 none free_1 none free_2 str free_1 free_0",
+          "rel_file": "visitors.py",
+          "repo": "lark",
+          "root_kind": "if_statement",
+          "source_text": "if wrapper is not None:\n        if func is not None:\n            raise ValueError(\"Cannot use 'wrapper' along with 'tree', 'meta' or 'inline'.\")\n        func = wrapper",
+          "start_line": 564
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "99e70400aff5c3d2e0374cba0e46c161",
+      "node_count": 14,
+      "occurrence_count": 3,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 105,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block import_from_statement dotted_name identifier identifier identifier dotted_name identifier return_statement identifier\ntokens: bound_0 bound_1 free_0 free_unresolved free_unresolved free_1 free_1",
+          "rel_file": "utils/text.py",
+          "repo": "django",
+          "root_kind": "function_definition",
+          "source_text": "def void_elements(self):\n        from django.utils.html import VOID_ELEMENTS\n\n        return VOID_ELEMENTS",
+          "start_line": 102
+        },
+        {
+          "end_line": 446,
+          "normalized_text": "root=function_definition\nkinds: function_definition identifier parameters identifier block import_from_statement dotted_name identifier identifier identifier dotted_name identifier return_statement identifier\ntokens: bound_0 bound_1 free_0 free_unresolved free_unresolved free_1 free_1",
+          "rel_file": "dialects/postgresql/psycopg.py",
+          "repo": "sqlalchemy",
+          "root_kind": "function_definition",
+          "source_text": "def _psycopg_Range(self):\n        from psycopg.types.range import Range\n\n        return Range",
+          "start_line": 443
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 5
+    },
+    {
+      "canonical_hash": "e23568ff6b1d2a34c6b9cdd4bed43d02",
+      "node_count": 17,
+      "occurrence_count": 2,
+      "rejection": "too_short_lines",
+      "repo_count": 2,
+      "samples": [
+        {
+          "end_line": 295,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str bound_2 str bound_3 str",
+          "rel_file": "db/models/fields/json.py",
+          "repo": "django",
+          "root_kind": "class_definition",
+          "source_text": "class HasAnyKeys(HasKeys):\n    lookup_name = \"has_any_keys\"\n    postgres_operator = \"?|\"\n    logical_operator = \" OR \"",
+          "start_line": 292
+        },
+        {
+          "end_line": 346,
+          "normalized_text": "root=class_definition\nkinds: class_definition identifier argument_list identifier block expression_statement assignment identifier string expression_statement assignment identifier string expression_statement assignment identifier string\ntokens: bound_0 free_0 bound_1 str bound_2 str bound_3 str",
+          "rel_file": "openapi/models.py",
+          "repo": "fastapi",
+          "root_kind": "class_definition",
+          "source_text": "class APIKeyIn(Enum):\n    query = \"query\"\n    header = \"header\"\n    cookie = \"cookie\"",
+          "start_line": 343
+        }
+      ],
+      "total_lines": 4,
+      "unique_non_keyword_tokens": 6
+    }
+  ]
+}
