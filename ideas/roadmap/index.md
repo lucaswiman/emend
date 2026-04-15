@@ -22,10 +22,10 @@ SimHash, shingled-MinHash, and winnowing schemes on the same corpus.
 ## Phases
 
 - [x] Phase 1: Minimal Rust AST exposure (`PyTree` / `PyNode`) in `emend_core`
-- [ ] Phase 2: Python canonicalizer using `PyNode` + `PyScopeResolver`
-- [ ] Phase 3: Pluggable hashing / fingerprinting layer
-- [ ] Phase 4: Triviality filters
-- [ ] Phase 5: Sibling-sequence clone detection (winnowing / k-shingles)
+- [x] Phase 2: Python canonicalizer using `PyNode` + `PyScopeResolver`
+- [x] Phase 3: Pluggable hashing / fingerprinting layer
+- [x] Phase 4: Triviality filters
+- [x] Phase 5: Sibling-sequence clone detection (winnowing / k-shingles)
 - [ ] Phase 6: Corpus fetcher + runner + statistics report
 - [ ] Phase 7: Evaluation writeup for the agent
 

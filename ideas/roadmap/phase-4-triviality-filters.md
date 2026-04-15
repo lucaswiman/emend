@@ -137,7 +137,8 @@ loop for iterating on the filters themselves.
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/filter.py` with all filters + `FilterConfig`
-- [ ] Each filter has a removal-count counter and a sample buffer
-- [ ] `tests/test_filter.py` with cases 1-6
-- [ ] Hand-chosen non-trivial duplicate from emend's own source for test 6
+- [x] `experiments/ast_dedup/filter.py` with all filters + `FilterConfig`
+- [x] Each filter has a removal-count counter and a sample buffer
+- [x] `tests/test_filter.py` with cases 1-6
+- [x] Hand-chosen non-trivial duplicate from emend's own source for test 6
+      (`_resolve_cache_root` in `src/emend/transform.py`)

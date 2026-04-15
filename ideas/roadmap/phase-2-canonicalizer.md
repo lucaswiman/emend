@@ -220,9 +220,10 @@ class CanonicalizerConfig:
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/canonicalize.py` with `CanonicalSubtree`,
+- [x] `experiments/ast_dedup/canonicalize.py` with `CanonicalSubtree`,
       `canonicalize()`, `iter_candidates()`
-- [ ] `experiments/ast_dedup/tests/test_canonicalize.py` with cases 1-6
-- [ ] Spot-check `PyScopeResolver` qn stability on comprehensions and walrus
+- [x] `experiments/ast_dedup/tests/test_canonicalize.py` with cases 1-6
+- [x] Spot-check `PyScopeResolver` qn stability on comprehensions and walrus
       (open question from index.md) — record findings in the file
 - [ ] Works against `src/emend/transform.py` end-to-end (smoke test in runner)
+      — deferred to Phase 6 runner.

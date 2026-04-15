@@ -123,10 +123,10 @@ Phase 4's filters don't all transfer. We add:
 
 ## Checklist
 
-- [ ] `experiments/ast_dedup/sequence.py` with both methods + shared
+- [x] `experiments/ast_dedup/sequence.py` with both methods + shared
       `StatementSeq`/`SequenceClone` types
-- [ ] `tests/test_sequence.py` with cases 1-6
+- [x] `tests/test_sequence.py` with cases 1-6
 - [ ] Runner (Phase 6) feeds sibling-sequence results into the report
-      alongside whole-subtree results
-- [ ] Verified: uses `pydivsufsort` optionally; falls back to pure-Python
+      alongside whole-subtree results — deferred to Phase 6
+- [x] Verified: uses `pydivsufsort` optionally; falls back to pure-Python
       LCP if unavailable
