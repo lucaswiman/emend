@@ -407,6 +407,11 @@ def build_strategy_stats(
     )
 
     top_clusters: list[dict[str, Any]] = []
+    # Per-cluster cap on serialized members: a pathological strategy (e.g.
+    # simhash at a too-loose threshold) can emit a cluster covering half the
+    # corpus. We still record the true ``size`` / ``node_count`` but only
+    # serialize a few representative locations so the JSON stays compact.
+    MAX_LOCATIONS_PER_CLUSTER = 20
     for cluster in ranked[:20]:
         node_count = 0
         for key in cluster:
@@ -414,13 +419,14 @@ def build_strategy_stats(
             if sub is not None:
                 node_count = getattr(sub, "node_count", 0)
                 break
+        kept = list(cluster)[:MAX_LOCATIONS_PER_CLUSTER]
         # Byte-offset key used by the hasher (authoritative identity).
-        locations = [[k[0], int(k[1]), int(k[2])] for k in cluster]
+        locations = [[k[0], int(k[1]), int(k[2])] for k in kept]
         # Parallel list of human-readable 1-indexed line ranges, pulled
         # from the CanonicalSubtree when we can find it. Missing entries
         # fall back to ``None`` so programmatic consumers can tell.
         line_ranges: list[list[Any]] = []
-        for key in cluster:
+        for key in kept:
             sub = subtree_lookup.get(tuple(key))
             if sub is None:
                 line_ranges.append([None, None])
@@ -428,14 +434,15 @@ def build_strategy_stats(
                 line_ranges.append(
                     [int(sub.start_line) + 1, int(sub.end_line) + 1]
                 )
-        top_clusters.append(
-            {
-                "size": len(cluster),
-                "node_count": node_count,
-                "locations": locations,
-                "line_ranges": line_ranges,
-            }
-        )
+        entry: dict[str, Any] = {
+            "size": len(cluster),
+            "node_count": node_count,
+            "locations": locations,
+            "line_ranges": line_ranges,
+        }
+        if len(cluster) > MAX_LOCATIONS_PER_CLUSTER:
+            entry["truncated_members"] = len(cluster) - MAX_LOCATIONS_PER_CLUSTER
+        top_clusters.append(entry)
 
     wall = float(result.index_insert_secs) + float(result.query_secs)
 

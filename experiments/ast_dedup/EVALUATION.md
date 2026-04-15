@@ -3,7 +3,7 @@
 **Scope of this writeup.** Phases 1–6 of `ideas/roadmap/` are implemented. The
 Phase 6 runner was executed against the `emend` corpus with all five hashing
 strategies enabled; the raw report is pinned at
-`experiments/ast_dedup/reports/emend-20260415T021906Z.{json,md}`. The other
+`experiments/ast_dedup/reports/emend-20260415T053153Z.{json,md}`. The other
 corpora (`django`, `cpython`, `flask`, `pandas`) are wired up in `corpora.py`
 but were not run for this first pass — see "Follow-ups" below. All numbers
 and code references here come from the pinned report unless stated otherwise.
