@@ -204,12 +204,39 @@ class EntryPointNameFact:
     name: str
 
 
+@dataclass(frozen=True)
+class DupSubtreeFact:
+    """A canonical subtree candidate for duplicate detection."""
+    file_path: str
+    start_line: int
+    end_line: int
+    symbol: str = ""
+    root_kind: str = ""
+    node_count: int = 0
+    total_lines: int = 0
+    canonical_hash: str = ""
+    score: float = 0.0
+
+
+@dataclass(frozen=True)
+class DupRunFact:
+    """A sibling-sequence run candidate for duplicate detection."""
+    file_path: str
+    start_line: int
+    end_line: int
+    symbol: str = ""
+    run_hash: str = ""
+    stmt_count: int = 0
+    score: float = 0.0
+
+
 # Union of all fact types for generic queries.
 Fact = Union[
     SymbolFact, CallFact, ReferenceFact, TraceFlowFact, TypeFact,
     ImportFact, CfgEdgeFact, DefUseFact, MethodCallFact, CfgBlockFact,
     DecoratorOnFact, SourceLocFact, FuncSummaryFact,
     EntryPointDecoratorFact, EntryPointNameFact,
+    DupSubtreeFact, DupRunFact,
 ]
 
 
@@ -417,6 +444,30 @@ _SCHEMA_INIT = """\
     symbol_qn: String,
     file_path: String,
     line: Int
+}}
+
+{:create dup_subtree {
+    file_path: String,
+    start_line: Int,
+    end_line: Int
+    =>
+    symbol: String default "",
+    root_kind: String default "",
+    node_count: Int default 0,
+    total_lines: Int default 0,
+    canonical_hash: String default "",
+    score: Float default 0.0
+}}
+
+{:create dup_run {
+    file_path: String,
+    start_line: Int,
+    end_line: Int
+    =>
+    symbol: String default "",
+    run_hash: String default "",
+    stmt_count: Int default 0,
+    score: Float default 0.0
 }}
 """
 
@@ -893,6 +944,128 @@ class FactGraph:
             ":put exported_symbol {qualified_name}",
             {"rows": rows},
         )
+
+    def add_dup_subtree(self, fact: DupSubtreeFact) -> None:
+        """Add a duplicate subtree fact."""
+        self._client.run(
+            "?[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score] <- "
+            "[[$fp, $sl, $el, $sym, $rk, $nc, $tl, $ch, $sc]] "
+            ":put dup_subtree {file_path, start_line, end_line => symbol, root_kind, node_count, total_lines, canonical_hash, score}",
+            {
+                "fp": fact.file_path,
+                "sl": fact.start_line,
+                "el": fact.end_line,
+                "sym": fact.symbol,
+                "rk": fact.root_kind,
+                "nc": fact.node_count,
+                "tl": fact.total_lines,
+                "ch": fact.canonical_hash,
+                "sc": fact.score,
+            },
+        )
+
+    def add_dup_subtrees_batch(self, facts: list[DupSubtreeFact]) -> None:
+        """Bulk-insert duplicate subtree facts."""
+        if not facts:
+            return
+        rows = [
+            [f.file_path, f.start_line, f.end_line, f.symbol, f.root_kind,
+             f.node_count, f.total_lines, f.canonical_hash, f.score]
+            for f in facts
+        ]
+        self._client.run(
+            "?[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score] <- $rows "
+            ":put dup_subtree {file_path, start_line, end_line => symbol, root_kind, node_count, total_lines, canonical_hash, score}",
+            {"rows": rows},
+        )
+
+    def add_dup_run(self, fact: DupRunFact) -> None:
+        """Add a duplicate sibling-sequence run fact."""
+        self._client.run(
+            "?[file_path, start_line, end_line, symbol, run_hash, stmt_count, score] <- "
+            "[[$fp, $sl, $el, $sym, $rh, $sc_count, $sc]] "
+            ":put dup_run {file_path, start_line, end_line => symbol, run_hash, stmt_count, score}",
+            {
+                "fp": fact.file_path,
+                "sl": fact.start_line,
+                "el": fact.end_line,
+                "sym": fact.symbol,
+                "rh": fact.run_hash,
+                "sc_count": fact.stmt_count,
+                "sc": fact.score,
+            },
+        )
+
+    def add_dup_runs_batch(self, facts: list[DupRunFact]) -> None:
+        """Bulk-insert duplicate run facts."""
+        if not facts:
+            return
+        rows = [
+            [f.file_path, f.start_line, f.end_line, f.symbol, f.run_hash,
+             f.stmt_count, f.score]
+            for f in facts
+        ]
+        self._client.run(
+            "?[file_path, start_line, end_line, symbol, run_hash, stmt_count, score] <- $rows "
+            ":put dup_run {file_path, start_line, end_line => symbol, run_hash, stmt_count, score}",
+            {"rows": rows},
+        )
+
+    def dup_subtrees(self, file_path: str | None = None) -> list[DupSubtreeFact]:
+        """Query duplicate subtree facts, optionally filtered by file_path."""
+        if file_path is not None:
+            result = self._client.run(
+                "?[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score] := "
+                "*dup_subtree[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score], "
+                "file_path == $fp",
+                {"fp": file_path},
+            )
+        else:
+            result = self._client.run(
+                "?[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score] := "
+                "*dup_subtree[file_path, start_line, end_line, symbol, root_kind, node_count, total_lines, canonical_hash, score]"
+            )
+        return [
+            DupSubtreeFact(
+                file_path=row[0],
+                start_line=row[1],
+                end_line=row[2],
+                symbol=row[3],
+                root_kind=row[4],
+                node_count=row[5],
+                total_lines=row[6],
+                canonical_hash=row[7],
+                score=row[8],
+            )
+            for row in result.get("rows", [])
+        ]
+
+    def dup_runs(self, file_path: str | None = None) -> list[DupRunFact]:
+        """Query duplicate run facts, optionally filtered by file_path."""
+        if file_path is not None:
+            result = self._client.run(
+                "?[file_path, start_line, end_line, symbol, run_hash, stmt_count, score] := "
+                "*dup_run[file_path, start_line, end_line, symbol, run_hash, stmt_count, score], "
+                "file_path == $fp",
+                {"fp": file_path},
+            )
+        else:
+            result = self._client.run(
+                "?[file_path, start_line, end_line, symbol, run_hash, stmt_count, score] := "
+                "*dup_run[file_path, start_line, end_line, symbol, run_hash, stmt_count, score]"
+            )
+        return [
+            DupRunFact(
+                file_path=row[0],
+                start_line=row[1],
+                end_line=row[2],
+                symbol=row[3],
+                run_hash=row[4],
+                stmt_count=row[5],
+                score=row[6],
+            )
+            for row in result.get("rows", [])
+        ]
 
     # -- Post-processing ---------------------------------------------------
 

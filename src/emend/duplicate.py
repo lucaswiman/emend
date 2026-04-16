@@ -1,0 +1,1040 @@
+"""Production duplicate code detection via AST canonicalization.
+
+Graduates the experimental AST dedup work (experiments/ast_dedup/) into
+a narrow production surface:
+- Exact canonical Merkle hashes (variable-renamed, literal-preserving)
+- Sibling-sequence duplicate runs (winnowing)
+
+This module provides the shared backend for CLI, lint, and MCP.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import pickle
+import zlib
+from collections import defaultdict
+from dataclasses import dataclass, field
+from hashlib import blake2b
+from typing import Any, Iterator
+
+from emend import emend_core
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DUP_CACHE_VERSION = "1"
+
+# Canonicalizer: node kinds that are candidate roots
+_FUNCTION_KINDS: frozenset[str] = frozenset({
+    "function_definition", "class_definition", "decorated_definition",
+})
+_CONTROL_FLOW_KINDS: frozenset[str] = frozenset({
+    "if_statement", "for_statement", "while_statement", "try_statement",
+})
+
+# Python keywords and builtins kept as-is during canonicalization
+import keyword as _keyword_mod
+_PYTHON_KEYWORDS: frozenset[str] = frozenset(_keyword_mod.kwlist) | {"self", "cls"}
+
+# Winnowing parameters
+WINNOW_K = 5   # k-gram size
+WINNOW_W = 4   # window size
+
+# Minimum thresholds for candidates
+MIN_CANDIDATE_NODES = 8
+MIN_CANDIDATE_DEPTH = 3
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DupSubtreeFinding:
+    """A canonical subtree candidate for duplicate detection."""
+    file: str
+    symbol: str
+    root_kind: str
+    start_line: int
+    end_line: int
+    node_count: int
+    total_lines: int
+    canonical_hash: bytes
+    score: float
+    unique_tokens: int = 0
+    kind_seq: tuple[str, ...] = ()
+    token_seq: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DupRunFinding:
+    """A sibling-sequence run candidate for duplicate detection."""
+    file: str
+    symbol: str
+    start_line: int
+    end_line: int
+    run_hash: bytes
+    stmt_count: int
+    score: float
+    stmt_kinds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DuplicateMember:
+    """One member of a duplicate cluster."""
+    file: str
+    symbol: str
+    start_line: int
+    end_line: int
+    node_count: int = 0
+    stmt_count: int = 0
+
+
+@dataclass
+class DuplicateCluster:
+    """A group of code locations that are duplicates of each other."""
+    kind: str  # "exact" or "sequence"
+    score: float
+    members: list[DuplicateMember] = field(default_factory=list)
+    explanation: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Raw Merkle hashing (bottom-up, per-node)
+# ---------------------------------------------------------------------------
+
+
+def _compute_raw_hashes(root) -> dict[tuple[int, int], bytes]:
+    """Post-order walk producing raw Merkle hash for every node.
+
+    Hash = blake2b(kind || field_name || H(child_1) || ... || H(child_n)).
+    Leaves hash their source text so distinct identifiers/operators differ.
+    """
+    hashes: dict[tuple[int, int], bytes] = {}
+
+    def walk(n) -> bytes:
+        h = blake2b(digest_size=16)
+        h.update(n.kind.encode())
+        if n.named_child_count > 0:
+            for field_name, child in n.named_children_with_fields():
+                h.update((field_name or "").encode("utf-8", errors="ignore"))
+                h.update(walk(child))
+        else:
+            h.update(n.text().encode("utf-8", errors="ignore"))
+        digest = h.digest()
+        hashes[(n.start_byte, n.end_byte)] = digest
+        return digest
+
+    walk(root)
+    return hashes
+
+
+# ---------------------------------------------------------------------------
+# Candidate enumeration
+# ---------------------------------------------------------------------------
+
+
+def _count_named_statements(block) -> int:
+    """Return number of named children of a block node."""
+    if block is None:
+        return 0
+    return block.named_child_count
+
+
+def _iter_candidates(tree) -> Iterator:
+    """Yield candidate subtree roots for canonicalization."""
+    root = tree.root
+
+    def walk(n) -> Iterator:
+        k = n.kind
+        if k in _FUNCTION_KINDS:
+            yield n
+            body = n.child_by_field_name("body")
+            if body is not None and _count_named_statements(body) >= 2:
+                yield body
+        elif k in _CONTROL_FLOW_KINDS:
+            body = n.child_by_field_name("body") or n.child_by_field_name("consequence")
+            if body is not None and _count_named_statements(body) >= 2:
+                yield n
+        for child in n.named_children():
+            yield from walk(child)
+
+    yield from walk(root)
+
+
+# ---------------------------------------------------------------------------
+# Scope-aware canonicalization (production rules)
+# ---------------------------------------------------------------------------
+
+
+def _build_qn_at(file_path: str, scope_resolver) -> tuple[dict[tuple[int, int], str], dict[str, tuple[int, int]]]:
+    """Build position-to-QN and QN-to-def-position maps from scope resolver.
+
+    Returns (qn_at, def_loc) where:
+    - qn_at maps (row_0indexed, col) -> qualified_name
+    - def_loc maps qualified_name -> (start_line_0indexed, col) of definition
+
+    Both are derived from ``references_in_file`` which returns
+    ``(qn, line_1idx, col, sb, eb, kind, annotation)`` tuples.
+    """
+    qn_at: dict[tuple[int, int], str] = {}
+    def_loc: dict[str, tuple[int, int]] = {}
+
+    try:
+        refs = scope_resolver.references_in_file(file_path)
+    except Exception:
+        refs = []
+
+    for ref in refs:
+        qn = ref[0]
+        line_1 = ref[1]
+        col = ref[2]
+        kind = ref[5] if len(ref) > 5 else ""
+        key = (line_1 - 1, col)  # convert to 0-indexed line
+        qn_at[key] = qn
+        # Record the first definition/write/parameter site as the definition loc
+        if qn not in def_loc and kind in ("definition", "write", "parameter"):
+            def_loc[qn] = key
+
+    return qn_at, def_loc
+
+
+def _is_bound_inside(qn: str, def_loc: dict[str, tuple[int, int]], subtree_start: int, subtree_end: int) -> bool:
+    """Check if a qualified name's definition is inside the subtree's line range."""
+    loc = def_loc.get(qn)
+    if loc is None:
+        return False
+    return subtree_start <= loc[0] <= subtree_end
+
+
+def _node_depth(node) -> int:
+    """Compute the depth of an AST subtree."""
+    if node.named_child_count == 0:
+        return 1
+    return 1 + max(_node_depth(c) for c in node.named_children())
+
+
+def _node_count(node) -> int:
+    """Count named nodes in subtree."""
+    count = 1
+    for c in node.named_children():
+        count += _node_count(c)
+    return count
+
+
+def canonicalize_subtree(
+    node,
+    qn_at: dict[tuple[int, int], str],
+    def_loc: dict[str, tuple[int, int]],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Canonicalize a subtree with production rules.
+
+    Production canonicalization:
+    - Alpha-rename variable bindings/usages (bound_i / free_i)
+    - Keep attribute names and method names literal
+    - Keep literal constants (strings, numbers, booleans, None)
+    - Ignore comments/trivia (via is_named filter)
+
+    Returns (kind_seq, token_seq) as pre-order sequences.
+    """
+    subtree_start = node.start_point[0]
+    subtree_end = node.end_point[0]
+
+    bound_counter = iter(range(10000))
+    free_counter = iter(range(10000))
+    bound_map: dict[str, str] = {}
+    free_map: dict[str, str] = {}
+
+    kind_seq: list[str] = []
+    token_seq: list[str] = []
+
+    def walk(n, is_attribute: bool = False):
+        if not n.is_named:
+            return
+
+        kind_seq.append(n.kind)
+
+        # String nodes: treat the whole node as a leaf token "str"
+        if n.kind == "string":
+            token_seq.append("str")
+            return
+
+        if n.named_child_count == 0:
+            # Leaf node
+            text = n.text()
+            if n.kind == "identifier" and not is_attribute:
+                pos = (n.start_point[0], n.start_point[1])
+                qn = qn_at.get(pos)
+                if qn and text not in _PYTHON_KEYWORDS:
+                    if _is_bound_inside(qn, def_loc, subtree_start, subtree_end):
+                        if qn not in bound_map:
+                            bound_map[qn] = f"bound_{next(bound_counter)}"
+                        token_seq.append(bound_map[qn])
+                    else:
+                        if qn not in free_map:
+                            free_map[qn] = f"free_{next(free_counter)}"
+                        token_seq.append(free_map[qn])
+                else:
+                    token_seq.append(text)
+            elif n.kind in ("integer", "float"):
+                # Numeric literals → canonical token "num"
+                token_seq.append("num")
+            else:
+                # Keywords, attribute names, booleans, None, operators as-is
+                token_seq.append(text)
+        else:
+            for field_name, child in n.named_children_with_fields():
+                # Attribute names stay literal
+                is_attr = (n.kind == "attribute" and field_name == "attribute")
+                walk(child, is_attribute=is_attr or is_attribute)
+
+    walk(node)
+    return tuple(kind_seq), tuple(token_seq)
+
+
+def _canonical_hash(kind_seq: tuple[str, ...], token_seq: tuple[str, ...]) -> bytes:
+    """Compute blake2b hash of the canonical form."""
+    h = blake2b(digest_size=16)
+    for k in kind_seq:
+        h.update(k.encode())
+        h.update(b"|")
+    h.update(b"##")
+    for t in token_seq:
+        h.update(t.encode())
+        h.update(b"|")
+    return h.digest()
+
+
+def _find_containing_symbol(
+    line: int,
+    symbol_index: list[tuple[str, int, int]],
+) -> str:
+    """Find the innermost symbol containing a given line.
+
+    symbol_index is [(qn, start_line, end_line), ...] sorted by start_line.
+    """
+    best = ""
+    for qn, sl, el in symbol_index:
+        if sl <= line <= el:
+            if not best or (el - sl) < (_find_range(best, symbol_index)):
+                best = qn
+    return best
+
+
+def _find_range(qn: str, index: list[tuple[str, int, int]]) -> int:
+    for q, sl, el in index:
+        if q == qn:
+            return el - sl
+    return 999999
+
+
+# ---------------------------------------------------------------------------
+# Triviality filter (production thresholds)
+# ---------------------------------------------------------------------------
+
+_MIN_NODE_COUNT = 8
+_MIN_DEPTH = 3
+_MIN_UNIQUE_NON_KW = 4
+_HALSTEAD_VOLUME_MIN = 30.0
+
+_BLOCKED_ROOT_KINDS: frozenset[str] = frozenset(
+    {"return_statement", "pass_statement", "raise_statement"}
+)
+
+
+def _is_trivial(
+    kind_seq: tuple[str, ...],
+    token_seq: tuple[str, ...],
+    node_count: int,
+    depth: int,
+) -> bool:
+    """Return True if the subtree should be excluded from dup detection."""
+    if node_count < _MIN_NODE_COUNT:
+        return True
+    if depth < _MIN_DEPTH:
+        return True
+    unique_non_kw = len(set(token_seq) - _PYTHON_KEYWORDS)
+    if unique_non_kw < _MIN_UNIQUE_NON_KW:
+        return True
+    vocab = len(set(kind_seq)) + len(set(token_seq))
+    volume = node_count * math.log2(max(vocab, 2))
+    if volume < _HALSTEAD_VOLUME_MIN:
+        return True
+    if kind_seq and kind_seq[0] in _BLOCKED_ROOT_KINDS:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Statement canonicalization for sibling-sequence detection
+# ---------------------------------------------------------------------------
+
+
+def _stmt_canonical_hash(
+    stmt,
+    func_start: int,
+    func_end: int,
+    qn_at: dict[tuple[int, int], str],
+    def_loc: dict[str, tuple[int, int]],
+) -> bytes:
+    """Return a 16-byte canonical hash for a single statement.
+
+    The bound/free scope is taken from the enclosing function's line range
+    so sibling statements share consistent renaming context.
+    """
+    bound_map: dict[str, str] = {}
+    free_map: dict[str, str] = {}
+    bound_ctr = iter(range(10000))
+    free_ctr = iter(range(10000))
+
+    def assign(qn: str, text: str) -> str:
+        if text in _PYTHON_KEYWORDS:
+            return text
+        if _is_bound_inside(qn, def_loc, func_start, func_end):
+            if qn not in bound_map:
+                bound_map[qn] = f"bound_{next(bound_ctr)}"
+            return bound_map[qn]
+        else:
+            if qn not in free_map:
+                free_map[qn] = f"free_{next(free_ctr)}"
+            return free_map[qn]
+
+    def walk(n) -> bytes:
+        if n.kind == "string":
+            return blake2b(b"string|str", digest_size=16).digest()
+        if n.kind == "attribute":
+            obj = n.child_by_field_name("object")
+            attr = n.child_by_field_name("attribute")
+            h = blake2b(digest_size=16)
+            h.update(b"attribute")
+            if obj is not None:
+                h.update(walk(obj))
+            if attr is not None:
+                tok = attr.text()
+                leaf_h = blake2b(
+                    attr.kind.encode() + tok.encode(), digest_size=16
+                ).digest()
+                h.update(leaf_h)
+            return h.digest()
+        if n.child_count == 0:
+            if n.kind == "identifier":
+                pos = (n.start_point[0], n.start_point[1])
+                qn = qn_at.get(pos)
+                tok = assign(qn, n.text()) if qn else "free_unresolved"
+            elif n.kind in ("integer", "float"):
+                tok = "num"
+            elif n.kind in ("true", "false", "none", "True", "False", "None"):
+                tok = n.text()
+            else:
+                tok = n.text()
+            return blake2b(n.kind.encode() + tok.encode(), digest_size=16).digest()
+        h = blake2b(digest_size=16)
+        h.update(n.kind.encode())
+        for i in range(n.child_count):
+            c = n.child(i)
+            if c is None:
+                continue
+            if c.is_named:
+                h.update(walk(c))
+            else:
+                h.update(c.kind.encode())
+                h.update(c.text().encode())
+        return h.digest()
+
+    return walk(stmt)
+
+
+# ---------------------------------------------------------------------------
+# Public API: production cache helpers
+# ---------------------------------------------------------------------------
+
+
+def canonicalize_file_for_cache(
+    file_path: str,
+    content: str,
+    scope_resolver,
+) -> list[dict]:
+    """Compute production canonical subtree payloads for *file_path*.
+
+    *scope_resolver* must already have *file_path* indexed
+    (``scope_resolver.index_file(file_path, content)`` should have been called
+    before invoking this function).
+
+    Returns a list of dicts (one per non-trivial candidate subtree) with keys:
+      ``start_line``, ``end_line``, ``root_kind``, ``node_count``,
+      ``total_lines``, ``canonical_hash`` (hex str), ``score``,
+      ``kind_seq`` (list of str), ``token_seq`` (list of str).
+
+    Returns an empty list if the file cannot be parsed.
+    """
+    tree = emend_core.parse_source(content, "py")
+    if tree is None:
+        return []
+
+    qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+
+    out: list[dict] = []
+    for cand in _iter_candidates(tree):
+        try:
+            kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
+        except Exception:
+            continue
+
+        node_count = len(kind_seq)
+        depth = _node_depth(cand)
+
+        if _is_trivial(kind_seq, token_seq, node_count, depth):
+            continue
+
+        start_line = cand.start_point[0]
+        end_line = cand.end_point[0]
+        total_lines = end_line - start_line + 1
+
+        canon_hash = _canonical_hash(kind_seq, token_seq)
+        vocab = len(set(kind_seq)) + len(set(token_seq))
+        score = node_count * math.log2(max(vocab, 2))
+
+        out.append(
+            {
+                "start_line": start_line,
+                "end_line": end_line,
+                "root_kind": kind_seq[0] if kind_seq else "",
+                "node_count": node_count,
+                "total_lines": total_lines,
+                "canonical_hash": canon_hash.hex(),
+                "score": score,
+                "kind_seq": list(kind_seq),
+                "token_seq": list(token_seq),
+            }
+        )
+    return out
+
+
+def build_statement_seqs_for_cache(
+    file_path: str,
+    content: str,
+    scope_resolver,
+) -> list[dict]:
+    """Compute production sibling-sequence payloads for *file_path*.
+
+    *scope_resolver* must already have *file_path* indexed.
+
+    Returns a list of dicts (one per function with >= 2 statements) with keys:
+      ``function_qn``, ``start_line``, ``end_line``,
+      ``hashes`` (list of hex strings), ``line_ranges`` (list of [start, end]),
+      ``kinds`` (list of str).
+
+    Returns an empty list if the file cannot be parsed.
+    """
+    tree = emend_core.parse_source(content, "py")
+    if tree is None:
+        return []
+
+    qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+
+    # Build 0-indexed start_line → qn map from definitions_in_file.
+    def_line_to_qn: dict[int, str] = {}
+    try:
+        defs = scope_resolver.definitions_in_file(file_path)
+        for item in defs:
+            qn_d, line_d = item[0], item[1]
+            def_line_to_qn[line_d - 1] = qn_d  # 1-indexed → 0-indexed
+    except Exception:
+        pass
+
+    out: list[dict] = []
+
+    def visit(node) -> None:
+        if node.kind == "function_definition":
+            name_node = node.child_by_field_name("name")
+            func_start = node.start_point[0]
+            func_end = node.end_point[0]
+
+            func_qn = def_line_to_qn.get(func_start)
+            if func_qn is None and name_node is not None:
+                func_qn = name_node.text()
+            if func_qn is None:
+                func_qn = f"<unknown>@{func_start}"
+
+            body = node.child_by_field_name("body")
+            if body is not None:
+                hashes_list: list[str] = []
+                ranges_list: list[list[int]] = []
+                kinds_list: list[str] = []
+
+                for stmt in body.named_children():
+                    try:
+                        h = _stmt_canonical_hash(
+                            stmt, func_start, func_end, qn_at, def_loc
+                        )
+                    except Exception:
+                        continue
+                    hashes_list.append(h.hex())
+                    ranges_list.append([stmt.start_point[0], stmt.end_point[0]])
+                    kinds_list.append(stmt.kind)
+
+                if len(hashes_list) >= 2:
+                    out.append(
+                        {
+                            "function_qn": func_qn,
+                            "start_line": func_start,
+                            "end_line": func_end,
+                            "hashes": hashes_list,
+                            "line_ranges": ranges_list,
+                            "kinds": kinds_list,
+                        }
+                    )
+
+            # Recurse into body for nested functions.
+            if body is not None:
+                for child in body.named_children():
+                    visit(child)
+
+        elif node.kind in ("class_definition", "decorated_definition"):
+            body = node.child_by_field_name("body")
+            if body is not None:
+                for child in body.named_children():
+                    visit(child)
+        else:
+            for child in node.named_children():
+                visit(child)
+
+    for child in tree.root.named_children():
+        visit(child)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# File collection helper (production CLI / MCP)
+# ---------------------------------------------------------------------------
+
+
+def _iter_py_files_query(root_path, max_files=500):
+    """Yield Python source file paths under *root_path*, skipping hidden/cache dirs."""
+    from pathlib import Path as _Path
+    n = 0
+    for p in sorted(_Path(root_path).rglob("*.py")):
+        if any(part.startswith(".") or part == "__pycache__" for part in p.parts):
+            continue
+        yield str(p)
+        n += 1
+        if max_files is not None and n >= max_files:
+            return
+
+
+# ---------------------------------------------------------------------------
+# Exact-duplicate detection (query layer)
+# ---------------------------------------------------------------------------
+
+
+def _query_exact_clusters(
+    py_files: list[str],
+    min_lines: int,
+    cross_file,
+    symbol_scope,
+) -> list[DuplicateCluster]:
+    """Find exact structural duplicates by grouping on canonical hash."""
+    if not py_files:
+        return []
+    try:
+        from pathlib import Path as _Path
+        scope_resolver = emend_core.PyScopeResolver(
+            str(_Path(py_files[0]).parent), "py"
+        )
+    except Exception:
+        return []
+
+    # canonical_hash (bytes) -> list of candidate dicts
+    hash_to_cands: dict[bytes, list[dict]] = {}
+
+    for file_path in py_files:
+        if symbol_scope and symbol_scope not in file_path:
+            continue
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        try:
+            scope_resolver.index_file(file_path, content)
+        except Exception:
+            pass
+        try:
+            tree = emend_core.parse_source(content, "py")
+        except Exception:
+            continue
+        if tree is None:
+            continue
+
+        qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+
+        # Build symbol index for containing-symbol lookup
+        symbol_index: list[tuple[str, int, int]] = [
+            (qn, sl, el) for qn, (sl, el) in def_loc.items()
+        ]
+
+        for cand in _iter_candidates(tree):
+            start_0 = cand.start_point[0]
+            end_0 = cand.end_point[0]
+            total_lines = end_0 - start_0 + 1
+            if total_lines < min_lines:
+                continue
+
+            try:
+                kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
+            except Exception:
+                continue
+
+            nc = len(kind_seq)
+            depth = _node_depth(cand)
+            if _is_trivial(kind_seq, token_seq, nc, depth):
+                continue
+
+            ch = _canonical_hash(kind_seq, token_seq)
+            symbol = _find_containing_symbol(start_0, symbol_index)
+            unique_non_kw = len(set(token_seq) - _PYTHON_KEYWORDS)
+
+            vocab = len(set(kind_seq)) + len(set(token_seq))
+            score = nc * math.log2(max(vocab, 2))
+
+            hash_to_cands.setdefault(ch, []).append({
+                "file": file_path,
+                "symbol": symbol,
+                "start_line": start_0 + 1,   # 1-indexed
+                "end_line": end_0 + 1,
+                "node_count": nc,
+                "unique_non_kw": unique_non_kw,
+                "score": score,
+            })
+
+    clusters: list[DuplicateCluster] = []
+    for ch, cands in hash_to_cands.items():
+        if len(cands) < 2:
+            continue
+        files = {c["file"] for c in cands}
+        if cross_file is True and len(files) < 2:
+            continue
+        if cross_file is False and len(files) > 1:
+            continue
+
+        members = [
+            DuplicateMember(
+                file=c["file"],
+                symbol=c["symbol"],
+                start_line=c["start_line"],
+                end_line=c["end_line"],
+                node_count=c["node_count"],
+                stmt_count=0,
+            )
+            for c in cands
+        ]
+        avg_nc = sum(c["node_count"] for c in cands) / len(cands)
+        avg_uniq = sum(c["unique_non_kw"] for c in cands) / len(cands)
+        score = avg_nc * math.log2(max(avg_uniq + 1, 2))
+        if len(files) > 1:
+            score += 20.0
+
+        clusters.append(DuplicateCluster(
+            kind="exact",
+            score=score,
+            members=members,
+            explanation="same canonical subtree (alpha-renamed AST)",
+        ))
+    return clusters
+
+
+# ---------------------------------------------------------------------------
+# Sequence-duplicate detection (query layer, winnowing)
+# ---------------------------------------------------------------------------
+
+
+def _winnow_fingerprints(hashes: list[bytes], w: int = WINNOW_W) -> set[bytes]:
+    """Return the set of winnowing fingerprints for a hash sequence."""
+    if not hashes:
+        return set()
+    fps: set[bytes] = set()
+    for i in range(max(1, len(hashes) - w + 1)):
+        fps.add(min(hashes[i: i + w]))
+    return fps
+
+
+def _query_sequence_clusters(
+    py_files: list[str],
+    min_lines: int,
+    cross_file,
+    symbol_scope,
+) -> list[DuplicateCluster]:
+    """Find sibling-sequence duplicates using winnowing fingerprints."""
+    if not py_files:
+        return []
+    try:
+        from pathlib import Path as _Path
+        scope_resolver = emend_core.PyScopeResolver(
+            str(_Path(py_files[0]).parent), "py"
+        )
+    except Exception:
+        return []
+
+    min_stmts = max(2, min_lines // 2)
+    all_seqs: list[dict] = []
+
+    for file_path in py_files:
+        if symbol_scope and symbol_scope not in file_path:
+            continue
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        try:
+            scope_resolver.index_file(file_path, content)
+            seqs = build_statement_seqs_for_cache(file_path, content, scope_resolver)
+        except Exception:
+            continue
+
+        for seq in seqs:
+            n_stmts = len(seq.get("hashes", []))
+            if n_stmts < min_stmts:
+                continue
+            all_seqs.append({"file": file_path, **seq})
+
+    if len(all_seqs) < 2:
+        return []
+
+    # fingerprint -> set of seq indices
+    fp_to_idxs: dict[bytes, list[int]] = {}
+    for idx, seq in enumerate(all_seqs):
+        hashes = [bytes.fromhex(h) for h in seq.get("hashes", [])]
+        fps = _winnow_fingerprints(hashes)
+        for fp in fps:
+            fp_to_idxs.setdefault(fp, []).append(idx)
+
+    # Union-find to group sequences that share fingerprints
+    parent = list(range(len(all_seqs)))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for fp, idxs in fp_to_idxs.items():
+        if len(idxs) < 2:
+            continue
+        for i in range(1, len(idxs)):
+            _union(idxs[0], idxs[i])
+
+    from collections import defaultdict as _dd
+    groups: dict[int, list[int]] = _dd(list)
+    for i in range(len(all_seqs)):
+        groups[_find(i)].append(i)
+
+    clusters: list[DuplicateCluster] = []
+    for root_idx, member_idxs in groups.items():
+        if len(member_idxs) < 2:
+            continue
+        seqs_in = [all_seqs[i] for i in member_idxs]
+        files = {s["file"] for s in seqs_in}
+        if cross_file is True and len(files) < 2:
+            continue
+        if cross_file is False and len(files) > 1:
+            continue
+
+        members = []
+        for s in seqs_in:
+            n_stmts = len(s.get("hashes", []))
+            start_1 = s["start_line"] + 1    # 0-indexed → 1-indexed
+            end_1 = s["end_line"] + 1
+            if end_1 - start_1 + 1 < min_lines:
+                continue
+            members.append(DuplicateMember(
+                file=s["file"],
+                symbol=s["function_qn"],
+                start_line=start_1,
+                end_line=end_1,
+                node_count=0,
+                stmt_count=n_stmts,
+            ))
+
+        if len(members) < 2:
+            continue
+
+        avg_stmts = sum(m.stmt_count for m in members) / len(members)
+        distinct_kinds = len({
+            k
+            for s in seqs_in
+            for k in s.get("kinds", [])
+        })
+        score = avg_stmts * 10.0 + min(distinct_kinds * 3.0, 15.0)
+        if len(files) > 1:
+            score += 20.0
+
+        clusters.append(DuplicateCluster(
+            kind="sequence",
+            score=score,
+            members=members,
+            explanation=f"shared statement run ({int(avg_stmts)} stmts, winnowing)",
+        ))
+    return clusters
+
+
+# ---------------------------------------------------------------------------
+# Public query / format API
+# ---------------------------------------------------------------------------
+
+
+def query_duplicates(
+    project_path: str,
+    mode: str = "all",
+    file_scope: str | None = None,
+    symbol_scope: str | None = None,
+    limit: int = 50,
+    min_lines: int = 3,
+    min_score: float = 0.0,
+    cross_file: bool | None = None,
+) -> list[DuplicateCluster]:
+    """Find duplicate code clusters in a project.
+
+    Parameters
+    ----------
+    project_path:
+        Root directory or single file to analyze.
+    mode:
+        Detection mode: ``"exact"`` (canonical Merkle hash matching),
+        ``"sequence"`` (winnowing over statement hashes), or ``"all"`` (both).
+    file_scope:
+        Optional path filter. Only files at or under this path are analyzed.
+    symbol_scope:
+        Optional substring filter applied to file paths.
+    limit:
+        Maximum number of clusters to return.
+    min_lines:
+        Minimum line span a finding must cover.
+    min_score:
+        Minimum composite score (0.0 = no threshold).
+    cross_file:
+        ``True`` = cross-file only; ``False`` = intra-file only; ``None`` = both.
+
+    Returns
+    -------
+    list[DuplicateCluster]
+        Clusters sorted by descending score, capped at *limit*.
+    """
+    from pathlib import Path as _Path
+    root = _Path(project_path)
+    if not root.exists():
+        return []
+
+    if root.is_file():
+        py_files = [str(root)]
+    else:
+        if file_scope:
+            scope_path = _Path(file_scope)
+            if scope_path.is_file():
+                py_files = [str(scope_path)]
+            elif scope_path.is_dir():
+                py_files = list(_iter_py_files_query(scope_path))
+            else:
+                py_files = [
+                    p for p in _iter_py_files_query(root)
+                    if file_scope in p
+                ]
+        else:
+            py_files = list(_iter_py_files_query(root))
+
+    if not py_files:
+        return []
+
+    clusters: list[DuplicateCluster] = []
+    if mode in ("exact", "all"):
+        clusters.extend(_query_exact_clusters(
+            py_files,
+            min_lines=min_lines,
+            cross_file=cross_file,
+            symbol_scope=symbol_scope,
+        ))
+    if mode in ("sequence", "all"):
+        clusters.extend(_query_sequence_clusters(
+            py_files,
+            min_lines=min_lines,
+            cross_file=cross_file,
+            symbol_scope=symbol_scope,
+        ))
+
+    if min_score > 0.0:
+        clusters = [c for c in clusters if c.score >= min_score]
+
+    clusters.sort(key=lambda c: (-c.score, -len(c.members)))
+    return clusters[:limit]
+
+
+def format_duplicates_text(clusters: list[DuplicateCluster]) -> str:
+    """Format duplicate clusters as human-readable text."""
+    if not clusters:
+        return ""
+    lines: list[str] = []
+    for i, cluster in enumerate(clusters, 1):
+        lines.append(
+            f"[{i}] {cluster.kind.upper()}  score={cluster.score:.1f}  {cluster.explanation}"
+        )
+        for j, member in enumerate(cluster.members):
+            prefix = "  primary:" if j == 0 else "  also:   "
+            sym = f"  ({member.symbol})" if member.symbol else ""
+            size = (
+                f"  [{member.node_count} nodes]" if member.node_count
+                else (f"  [{member.stmt_count} stmts]" if member.stmt_count else "")
+            )
+            lines.append(
+                f"{prefix} {member.file}:{member.start_line}-{member.end_line}{sym}{size}"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def format_duplicates_json(clusters: list[DuplicateCluster]) -> str:
+    """Format duplicate clusters as JSON."""
+    import json as _json
+    data = [
+        {
+            "kind": c.kind,
+            "score": c.score,
+            "explanation": c.explanation,
+            "members": [
+                {
+                    "file": m.file,
+                    "symbol": m.symbol,
+                    "start_line": m.start_line,
+                    "end_line": m.end_line,
+                    "node_count": m.node_count,
+                    "stmt_count": m.stmt_count,
+                }
+                for m in c.members
+            ],
+        }
+        for c in clusters
+    ]
+    return _json.dumps(data, indent=2)
+
+
+__all__ = [
+    "DupSubtreeFinding",
+    "DupRunFinding",
+    "DuplicateMember",
+    "DuplicateCluster",
+    "DUP_CACHE_VERSION",
+    "canonicalize_file_for_cache",
+    "build_statement_seqs_for_cache",
+    "query_duplicates",
+    "format_duplicates_text",
+    "format_duplicates_json",
+]

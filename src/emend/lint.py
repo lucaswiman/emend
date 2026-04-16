@@ -70,6 +70,20 @@ class DeadCodeConfig:
 
 
 @dataclass
+class DuplicateCodeConfig:
+    """Configuration for the duplicate-code lint rule."""
+    enabled: bool = False
+    rule_name: str = "duplicate-code"
+    mode: str = "all"
+    min_lines: int = 5
+    min_score: float = 50.0
+    cross_file_only: bool = True
+    exclude_tests: bool = True
+    exclude_generated: bool = True
+    message: str = "Duplicate code detected"
+
+
+@dataclass
 class LintViolation:
     """A lint violation found by a rule."""
     rule_name: str
@@ -295,6 +309,24 @@ def load_rules(
         ))
 
     return rules, macros, deadcode_config
+
+
+def load_duplicate_code_config(
+    config_path: str | None = None,
+) -> DuplicateCodeConfig | None:
+    """Load the ``duplicate`` section from a YAML rules document.
+
+    Returns a ``DuplicateCodeConfig`` if the section is present and enabled,
+    otherwise ``None``.
+    """
+    try:
+        config, _path = load_rules_document(
+            config_path,
+            fallbacks=(LEGACY_PATTERNS_PATH,),
+        )
+    except (FileNotFoundError, Exception):
+        return None
+    return _parse_duplicate_code_config(config.get("duplicate"))
 
 
 # Reuse shared helpers from taint module
@@ -535,6 +567,71 @@ def _compile_dsl_pattern(pattern: str) -> re.Pattern[str]:
     return re.compile(''.join(regex_parts), re.IGNORECASE | re.DOTALL)
 
 
+def _parse_duplicate_code_config(raw: object, *, rule_name: str = "duplicate-code") -> DuplicateCodeConfig | None:
+    """Parse the ``duplicate`` section from a YAML rules document."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return DuplicateCodeConfig(enabled=raw, rule_name=rule_name)
+    if not isinstance(raw, dict):
+        return None
+    return DuplicateCodeConfig(
+        enabled=raw.get("enabled", True),
+        rule_name=rule_name,
+        mode=raw.get("mode", "all"),
+        min_lines=int(raw.get("min-lines", raw.get("min_lines", 5))),
+        min_score=float(raw.get("min-score", raw.get("min_score", 50.0))),
+        cross_file_only=raw.get("cross-file-only", raw.get("cross_file_only", True)),
+        exclude_tests=raw.get("exclude-tests", raw.get("exclude_tests", True)),
+        exclude_generated=raw.get("exclude-generated", raw.get("exclude_generated", True)),
+        message=raw.get("message", "Duplicate code detected"),
+    )
+
+
+def _check_duplicate_code(
+    file_paths: list[str],
+    config: DuplicateCodeConfig,
+    project_path: str,
+) -> list[LintViolation]:
+    """Run duplicate code detection as part of lint."""
+    if not config.enabled:
+        return []
+
+    from emend.duplicate import query_duplicates
+
+    violations = []
+    clusters = query_duplicates(
+        project_path=project_path,
+        mode=config.mode,
+        min_lines=config.min_lines,
+        min_score=config.min_score,
+        cross_file=True if config.cross_file_only else None,
+    )
+
+    file_path_set = set(file_paths)
+    for cluster in clusters:
+        # Only emit for members in the scoped file_paths
+        for member in cluster.members[:1]:  # primary location only
+            if member.file not in file_path_set:
+                continue
+            # Build comparison text pointing to first OTHER member
+            others = [m for m in cluster.members if m != member]
+            if not others:
+                continue
+            other = others[0]
+            msg = (
+                f"{config.message}: {cluster.explanation} "
+                f"(also at {other.file}:{other.start_line})"
+            )
+            violations.append(LintViolation(
+                rule_name=config.rule_name,
+                message=msg,
+                file_path=member.file,
+                line=member.start_line,
+            ))
+    return violations
+
+
 def run_lint(
     rules: list[LintRule],
     paths: list[str],
@@ -543,6 +640,7 @@ def run_lint(
     deadcode_config: DeadCodeConfig | None = None,
     project_path: str | None = None,
     language: str = "python",
+    duplicate_code_config: DuplicateCodeConfig | None = None,
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
@@ -554,6 +652,7 @@ def run_lint(
         paths: List of file paths to lint
         fix: If True, apply replace rules to fix violations
         rule_filter: If set, only run the rule with this name
+        duplicate_code_config: If set, run duplicate-code detection
 
     Returns:
         List of LintViolation objects
@@ -1005,5 +1104,19 @@ def run_lint(
                 ))
         except Exception:
             logger.debug("Dead code analysis failed", exc_info=True)
+
+    # --- Duplicate code analysis (if configured) ---
+    if (duplicate_code_config is not None
+            and duplicate_code_config.enabled
+            and (
+                rule_filter is None
+                or rule_filter == duplicate_code_config.rule_name
+                or rule_filter in {"duplicate-code", "duplicate_code", "dupes"}
+            )):
+        dc_project = project_path or "."
+        try:
+            violations.extend(_check_duplicate_code(paths, duplicate_code_config, dc_project))
+        except Exception:
+            logger.debug("Duplicate code analysis failed", exc_info=True)
 
     return violations

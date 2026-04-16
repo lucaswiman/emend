@@ -54,7 +54,7 @@ matches the production CLI and does not leak the experimental surface area.
 
 ## Checklist
 
-- [ ] MCP duplicate-analysis tool exists
-- [ ] CLI and MCP share one backend
-- [ ] MCP response is bounded and stable
-- [ ] MCP tests cover non-trivial + empty-result cases
+- [x] MCP duplicate-analysis tool exists
+- [x] CLI and MCP share one backend
+- [x] MCP response is bounded and stable
+- [x] MCP tests cover non-trivial + empty-result cases

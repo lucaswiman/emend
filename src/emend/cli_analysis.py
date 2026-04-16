@@ -1051,3 +1051,49 @@ def cfg_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+
+@analyze_app.command("dupes")
+def dupes_cmd(
+    path: Annotated[str, typer.Argument(help="Project root directory")] = ".",
+    mode: Annotated[str, typer.Option("--mode", help="Detection mode: exact, sequence, or all")] = "all",
+    file: Annotated[Optional[str], typer.Option("--file", help="Restrict to a specific file")] = None,
+    symbol: Annotated[Optional[str], typer.Option("--symbol", help="Restrict to a specific symbol")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of clusters to show")] = 50,
+    min_lines: Annotated[int, typer.Option("--min-lines", help="Minimum lines for a finding")] = 3,
+    min_score: Annotated[float, typer.Option("--min-score", help="Minimum score threshold")] = 0.0,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    cross_file: Annotated[Optional[bool], typer.Option("--cross-file/--intra-file", help="Filter by cross-file or intra-file")] = None,
+):
+    """Find duplicate code via AST canonicalization.
+
+    Detects exact structural duplicates (same canonical subtree) and
+    sibling-sequence duplicates (shared statement runs across functions).
+
+    Examples:
+        emend analyze dupes
+        emend analyze dupes src/ --mode exact --min-lines 5
+        emend analyze dupes --json --limit 20
+        emend analyze dupes --file src/emend/transform.py
+    """
+    from emend.duplicate import query_duplicates, format_duplicates_text, format_duplicates_json
+
+    clusters = query_duplicates(
+        project_path=path,
+        mode=mode,
+        file_scope=file,
+        symbol_scope=symbol,
+        limit=limit,
+        min_lines=min_lines,
+        min_score=min_score,
+        cross_file=cross_file,
+    )
+
+    if json_output:
+        print(format_duplicates_json(clusters), end='')
+    else:
+        if not clusters:
+            print("No duplicates found.", file=sys.stderr)
+            return
+        print(format_duplicates_text(clusters), end='')

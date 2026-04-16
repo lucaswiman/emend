@@ -62,7 +62,7 @@ that favors actionable duplicate findings and suppresses framework boilerplate.
 
 ## Checklist
 
-- [ ] Production scoring model exists
-- [ ] Boilerplate suppressions cover the audited false positives
-- [ ] Hand-labeled regression corpus is added
-- [ ] `emend` + `sqlalchemy` representative findings survive the filter
+- [x] Production scoring model exists
+- [x] Boilerplate suppressions cover the audited false positives
+- [x] Hand-labeled regression corpus is added
+- [x] `emend` + `sqlalchemy` representative findings survive the filter
