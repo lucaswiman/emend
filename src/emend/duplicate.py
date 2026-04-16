@@ -9,10 +9,7 @@ Shared backend for CLI (``emend analyze dupes``), lint, and MCP.
 
 from __future__ import annotations
 
-import hashlib
 import math
-import pickle
-import zlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from hashlib import blake2b
@@ -59,36 +56,6 @@ MIN_CANDIDATE_DEPTH = 3
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DupSubtreeFinding:
-    """A canonical subtree candidate for duplicate detection."""
-    file: str
-    symbol: str
-    root_kind: str
-    start_line: int
-    end_line: int
-    node_count: int
-    total_lines: int
-    canonical_hash: bytes
-    score: float
-    unique_tokens: int = 0
-    kind_seq: tuple[str, ...] = ()
-    token_seq: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class DupRunFinding:
-    """A sibling-sequence run candidate for duplicate detection."""
-    file: str
-    symbol: str
-    start_line: int
-    end_line: int
-    run_hash: bytes
-    stmt_count: int
-    score: float
-    stmt_kinds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -643,7 +610,7 @@ def _collect_py_files(root_path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-_FileData = dict  # {file_path -> (content, tree, qn_at, def_loc, symbol_index)}
+_FileData = dict[str, tuple[str, Any, dict, dict, list[tuple[str, int, int]]]]
 
 
 def _preparse_files(
@@ -832,29 +799,20 @@ def _query_sequence_clusters(
         for fp in fps:
             fp_to_idxs.setdefault(fp, []).append(idx)
 
-    # Union-find to group sequences sharing fingerprints
-    parent = list(range(len(all_seqs)))
-
-    def _find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def _union(a: int, b: int) -> None:
-        ra, rb = _find(a), _find(b)
-        if ra != rb:
-            parent[ra] = rb
+    from emend.rewrite_engine import UnionFind
+    uf = UnionFind()
+    for i in range(len(all_seqs)):
+        uf.make_set(i)
 
     for fp, idxs in fp_to_idxs.items():
         if len(idxs) < 2:
             continue
         for i in range(1, len(idxs)):
-            _union(idxs[0], idxs[i])
+            uf.union(idxs[0], idxs[i])
 
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(all_seqs)):
-        groups[_find(i)].append(i)
+        groups[uf.find(i)].append(i)
 
     clusters: list[DuplicateCluster] = []
     for root_idx, member_idxs in groups.items():
@@ -1036,8 +994,6 @@ def format_duplicates_json(clusters: list[DuplicateCluster]) -> str:
 
 
 __all__ = [
-    "DupSubtreeFinding",
-    "DupRunFinding",
     "DuplicateMember",
     "DuplicateCluster",
     "DUP_CACHE_VERSION",
