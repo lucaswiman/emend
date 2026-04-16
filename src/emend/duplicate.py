@@ -9,6 +9,7 @@ Shared backend for CLI (``emend analyze dupes``), lint, and MCP.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from hashlib import blake2b
 from typing import Any, Iterator
 
 from emend import emend_core
+
+logger = logging.getLogger(__name__)
 from emend.duplicate_heuristics import (
     is_abstract_stub,
     is_trivial_validator,
@@ -454,6 +457,7 @@ def canonicalize_file_for_cache(
         try:
             kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
         except Exception:
+            logger.debug("canonicalize_subtree failed in %s", file_path, exc_info=True)
             continue
 
         node_count = len(kind_seq)
@@ -543,6 +547,7 @@ def build_statement_seqs_for_cache(
                             stmt, func_start, func_end, qn_at, def_loc
                         )
                     except Exception:
+                        logger.debug("_stmt_canonical_hash failed in %s", file_path, exc_info=True)
                         continue
                     hashes_list.append(h.hex())
                     ranges_list.append([stmt.start_point[0], stmt.end_point[0]])
@@ -586,23 +591,9 @@ def build_statement_seqs_for_cache(
 
 
 def _collect_py_files(root_path: str) -> list[str]:
-    """Collect Python source files under *root_path* using the Rust backend.
-
-    Falls back to ``Path.rglob`` if Rust ``collect_files`` is unavailable.
-    """
-    from pathlib import Path as _Path
-    try:
-        result = [str(p) for p in emend_core.collect_files(root_path, [".py"])]
-        if result:
-            return result
-    except (AttributeError, Exception):
-        pass
-    # Fallback: walk the directory ourselves
-    skip = {".git", "__pycache__", ".venv", "venv", "node_modules", ".emend"}
-    return [
-        str(p) for p in sorted(_Path(root_path).rglob("*.py"))
-        if not any(d in p.parts for d in skip)
-    ]
+    """Collect Python source files under *root_path*."""
+    from emend.file_collection import collect_source_files
+    return collect_source_files(root_path, language="python")
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +774,7 @@ def _query_sequence_clusters(
         try:
             seqs = build_statement_seqs_for_cache(file_path, content, scope_resolver)
         except Exception:
+            logger.debug("build_statement_seqs_for_cache failed in %s", file_path, exc_info=True)
             continue
         for seq in seqs:
             if len(seq.get("hashes", [])) < min_stmts:
@@ -871,6 +863,218 @@ def _query_sequence_clusters(
 # ---------------------------------------------------------------------------
 
 
+def _load_cached_payloads(
+    project_path: str,
+    py_files: list[str],
+) -> dict[str, dict] | None:
+    """Try to load per-file subtree/sequence payloads from dup_cache.
+
+    Returns ``{file_path: {"subtrees": [...], "sequences": [...]}}`` for
+    files that have a cache hit, or ``None`` if the cache is unavailable.
+    """
+    import hashlib
+    import pickle
+    import sqlite3
+    import zlib
+
+    try:
+        from emend.transform import _cache_db_dir
+        db_path = _cache_db_dir(project_path) / "parse.db"
+        if not db_path.exists():
+            return None
+    except Exception:
+        return None
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        cached_rows: dict[str, bytes] = {}
+        for row in conn.execute(
+            "SELECT hash, data FROM dup_cache WHERE version = ?",
+            (DUP_CACHE_VERSION,),
+        ):
+            cached_rows[row[0]] = row[1]
+        conn.close()
+    except Exception:
+        return None
+
+    if not cached_rows:
+        return None
+
+    result: dict[str, dict] = {}
+    for file_path in py_files:
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        content_hash = hashlib.md5(
+            content.encode(), usedforsecurity=False,
+        ).hexdigest()
+        blob = cached_rows.get(content_hash)
+        if blob is not None:
+            try:
+                result[file_path] = pickle.loads(zlib.decompress(blob))
+            except Exception:
+                pass
+    return result if result else None
+
+
+def _clusters_from_cached_subtrees(
+    cached: dict[str, dict],
+    min_lines: int,
+    cross_file: bool | None,
+) -> list[DuplicateCluster]:
+    """Build exact-duplicate clusters from cached subtree payloads."""
+    hash_to_cands: dict[str, list[dict]] = {}
+    for file_path, payload in cached.items():
+        for s in payload.get("subtrees", []):
+            total_lines = s.get("total_lines", s["end_line"] - s["start_line"] + 1)
+            if total_lines < min_lines:
+                continue
+            ch = s["canonical_hash"]
+            ks = tuple(s.get("kind_seq", ()))
+            ts = tuple(s.get("token_seq", ()))
+            nc = s["node_count"]
+            unique_non_kw = len(set(ts) - _PYTHON_KEYWORDS)
+            hash_to_cands.setdefault(ch, []).append({
+                "file": file_path,
+                "symbol": "",
+                "start_line": s["start_line"] + 1,
+                "end_line": s["end_line"] + 1,
+                "node_count": nc,
+                "unique_non_kw": unique_non_kw,
+                "kind_seq": ks,
+                "token_seq": ts,
+            })
+
+    clusters: list[DuplicateCluster] = []
+    for ch, cands in hash_to_cands.items():
+        if len(cands) < 2:
+            continue
+        files = {c["file"] for c in cands}
+        if cross_file is True and len(files) < 2:
+            continue
+        if cross_file is False and len(files) > 1:
+            continue
+
+        members = [
+            DuplicateMember(
+                file=c["file"], symbol=c["symbol"],
+                start_line=c["start_line"], end_line=c["end_line"],
+                node_count=c["node_count"],
+            )
+            for c in cands
+        ]
+        avg_nc = sum(c["node_count"] for c in cands) / len(cands)
+        avg_uniq = sum(c["unique_non_kw"] for c in cands) / len(cands)
+        score = avg_nc * math.log2(max(avg_uniq + 1, 2))
+        if len(files) > 1:
+            score += 20.0
+
+        rep = cands[0]
+        ks = tuple(rep.get("kind_seq", ()))
+        ts = tuple(rep.get("token_seq", ()))
+        penalty = (
+            is_abstract_stub(ks, ts)
+            + is_trivial_validator(int(avg_nc), ks)
+            + is_property_wrapper(ks, ts)
+            + is_tiny_same_file_fragment(members, int(avg_nc))
+            + is_init_self_assignment(ks, ts)
+            + is_dunder_boilerplate(rep.get("symbol", ""), ks)
+        )
+        score = max(0.0, score - penalty)
+        if score <= 0.0:
+            continue
+
+        clusters.append(DuplicateCluster(
+            kind="exact", score=score, members=members,
+            explanation="same canonical subtree (alpha-renamed AST)",
+        ))
+    return clusters
+
+
+def _clusters_from_cached_sequences(
+    cached: dict[str, dict],
+    min_lines: int,
+    cross_file: bool | None,
+) -> list[DuplicateCluster]:
+    """Build sequence-duplicate clusters from cached sequence payloads."""
+    min_stmts = max(2, min_lines // 2)
+    all_seqs: list[dict] = []
+    for file_path, payload in cached.items():
+        for seq in payload.get("sequences", []):
+            if len(seq.get("hashes", [])) < min_stmts:
+                continue
+            all_seqs.append({"file": file_path, **seq})
+
+    if len(all_seqs) < 2:
+        return []
+
+    fp_to_idxs: dict[bytes, list[int]] = {}
+    for idx, seq in enumerate(all_seqs):
+        hashes = [bytes.fromhex(h) for h in seq.get("hashes", [])]
+        fps = _winnow_fingerprints(hashes)
+        for fp in fps:
+            fp_to_idxs.setdefault(fp, []).append(idx)
+
+    from emend.rewrite_engine import UnionFind
+    uf = UnionFind()
+    for i in range(len(all_seqs)):
+        uf.make_set(i)
+    for fp, idxs in fp_to_idxs.items():
+        if len(idxs) < 2:
+            continue
+        for i in range(1, len(idxs)):
+            uf.union(idxs[0], idxs[i])
+
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(all_seqs)):
+        groups[uf.find(i)].append(i)
+
+    clusters: list[DuplicateCluster] = []
+    for root_idx, member_idxs in groups.items():
+        if len(member_idxs) < 2:
+            continue
+        seqs_in = [all_seqs[i] for i in member_idxs]
+        files = {s["file"] for s in seqs_in}
+        if cross_file is True and len(files) < 2:
+            continue
+        if cross_file is False and len(files) > 1:
+            continue
+
+        members = []
+        for s in seqs_in:
+            n_stmts = len(s.get("hashes", []))
+            start_1 = s["start_line"] + 1
+            end_1 = s["end_line"] + 1
+            if end_1 - start_1 + 1 < min_lines:
+                continue
+            members.append(DuplicateMember(
+                file=s["file"], symbol=s["function_qn"],
+                start_line=start_1, end_line=end_1, stmt_count=n_stmts,
+            ))
+        if len(members) < 2:
+            continue
+
+        avg_stmts = sum(m.stmt_count for m in members) / len(members)
+        distinct_kinds = len({k for s in seqs_in for k in s.get("kinds", [])})
+        score = avg_stmts * 10.0 + min(distinct_kinds * 3.0, 15.0)
+        if len(files) > 1:
+            score += 20.0
+
+        avg_nodes = int(avg_stmts * 5)
+        penalty = is_tiny_same_file_fragment(members, avg_nodes)
+        score = max(0.0, score - penalty)
+        if score <= 0.0:
+            continue
+
+        clusters.append(DuplicateCluster(
+            kind="sequence", score=score, members=members,
+            explanation=f"shared statement run ({int(avg_stmts)} stmts, winnowing)",
+        ))
+    return clusters
+
+
 def query_duplicates(
     project_path: str,
     mode: str = "all",
@@ -883,24 +1087,8 @@ def query_duplicates(
 ) -> list[DuplicateCluster]:
     """Find duplicate code clusters in a project.
 
-    Parameters
-    ----------
-    project_path:
-        Root directory or single file to analyze.
-    mode:
-        Detection mode: ``"exact"``, ``"sequence"``, or ``"all"`` (both).
-    file_scope:
-        Optional path filter — only files at or under this path.
-    symbol_scope:
-        Optional substring filter applied to file paths.
-    limit:
-        Maximum clusters to return.
-    min_lines:
-        Minimum line span a finding must cover.
-    min_score:
-        Minimum composite score (0.0 = no threshold).
-    cross_file:
-        ``True`` = cross-file only; ``False`` = intra-file only; ``None`` = both.
+    Uses cached payloads from ``emend index`` when available, falling
+    back to on-the-fly parsing otherwise.
     """
     from pathlib import Path as _Path
     root = _Path(project_path)
@@ -925,18 +1113,30 @@ def query_duplicates(
     if not py_files:
         return []
 
-    # Pre-parse once — shared across exact and sequence modes
-    scope_resolver, file_data = _preparse_files(py_files, symbol_scope)
-    if not file_data:
-        return []
+    if symbol_scope:
+        py_files = [p for p in py_files if symbol_scope in p]
 
-    clusters: list[DuplicateCluster] = []
-    if mode in ("exact", "all"):
-        clusters.extend(_query_exact_clusters(file_data, min_lines, cross_file))
-    if mode in ("sequence", "all"):
-        clusters.extend(_query_sequence_clusters(
-            file_data, scope_resolver, min_lines, cross_file,
-        ))
+    # Fast path: use dup_cache from parse.db if available
+    cached = _load_cached_payloads(project_path, py_files)
+    if cached is not None and len(cached) == len(py_files):
+        logger.debug("query_duplicates: using cached payloads for %d files", len(cached))
+        clusters: list[DuplicateCluster] = []
+        if mode in ("exact", "all"):
+            clusters.extend(_clusters_from_cached_subtrees(cached, min_lines, cross_file))
+        if mode in ("sequence", "all"):
+            clusters.extend(_clusters_from_cached_sequences(cached, min_lines, cross_file))
+    else:
+        # Slow path: parse from scratch
+        scope_resolver, file_data = _preparse_files(py_files, symbol_scope=None)
+        if not file_data:
+            return []
+        clusters = []
+        if mode in ("exact", "all"):
+            clusters.extend(_query_exact_clusters(file_data, min_lines, cross_file))
+        if mode in ("sequence", "all"):
+            clusters.extend(_query_sequence_clusters(
+                file_data, scope_resolver, min_lines, cross_file,
+            ))
 
     if min_score > 0.0:
         clusters = [c for c in clusters if c.score >= min_score]
