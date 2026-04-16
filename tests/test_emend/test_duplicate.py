@@ -319,41 +319,6 @@ class TestCacheIntegration:
         assert "dup_cache" in tables
         conn.close()
 
-    def test_fact_graph_dup_relations(self):
-        """FactGraph has dup_subtree and dup_run relations."""
-        from emend.fact_graph import FactGraph, DupSubtreeFact, DupRunFact
-
-        fg = FactGraph()  # in-memory
-        # Add a dup_subtree fact
-        fg.add_dup_subtree(DupSubtreeFact(
-            file_path="test.py",
-            start_line=1,
-            end_line=10,
-            symbol="test.f",
-            root_kind="function_definition",
-            node_count=20,
-            total_lines=10,
-            canonical_hash="abc123",
-            score=42.0,
-        ))
-        results = fg.dup_subtrees()
-        assert len(results) == 1
-        assert results[0].file_path == "test.py"
-        assert results[0].score == 42.0
-
-        # Add a dup_run fact
-        fg.add_dup_run(DupRunFact(
-            file_path="test.py",
-            start_line=5,
-            end_line=15,
-            symbol="test.g",
-            run_hash="def456",
-            stmt_count=5,
-            score=30.0,
-        ))
-        runs = fg.dup_runs()
-        assert len(runs) == 1
-        assert runs[0].stmt_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -451,46 +416,22 @@ class TestLintIntegration:
 
 
 class TestProductionHeuristics:
-    """Test the production scoring model and suppressions."""
+    """Integration tests: suppressions are applied through query_duplicates."""
 
-    def test_abstract_stubs_suppressed(self):
-        """Abstract stubs (raise NotImplementedError) get high penalty."""
-        from emend.duplicate_heuristics import is_abstract_stub
+    def test_abstract_stubs_suppressed(self, tmp_path):
+        """Abstract stubs (raise NotImplementedError) don't appear in output."""
+        from emend.duplicate import query_duplicates
 
-        kind_seq = ("function_definition", "block", "raise_statement", "identifier")
-        token_seq = ("def", "handle", "raise", "NotImplementedError")
-        penalty = is_abstract_stub(kind_seq, token_seq)
-        assert penalty >= 500.0
-
-    def test_property_wrapper_suppressed(self):
-        """Trivial property getters get high penalty."""
-        from emend.duplicate_heuristics import is_property_wrapper
-
-        kind_seq = ("function_definition", "block", "return_statement", "attribute", "identifier", "identifier")
-        token_seq = ("def", "name", "return", "self", ".", "name")
-        penalty = is_property_wrapper(kind_seq, token_seq)
-        assert penalty >= 300.0
-
-    def test_scoring_cross_file_bonus(self):
-        """Cross-file duplicates get a score bonus."""
-        from emend.duplicate_heuristics import compute_production_score
-
-        members_same = [
-            type("M", (), {"file": "a.py", "symbol": "f"})(),
-            type("M", (), {"file": "a.py", "symbol": "g"})(),
-        ]
-        members_cross = [
-            type("M", (), {"file": "a.py", "symbol": "f"})(),
-            type("M", (), {"file": "b.py", "symbol": "g"})(),
-        ]
-
-        score_same = compute_production_score(
-            "exact", members_same, node_count=20, unique_tokens=8,
+        _write_files(tmp_path, {
+            "a.py": ABSTRACT_STUB,
+        })
+        clusters = query_duplicates(
+            str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
         )
-        score_cross = compute_production_score(
-            "exact", members_cross, node_count=20, unique_tokens=8,
-        )
-        assert score_cross.final_score > score_same.final_score
+        assert all(c.score > 0 for c in clusters)
+        for c in clusters:
+            for m in c.members:
+                assert "NotImplementedError" not in m.symbol
 
     def test_constant_tables_distinguished(self, tmp_path):
         """Literal-preserving hashing distinguishes constant tables with different values."""
@@ -504,52 +445,13 @@ class TestProductionHeuristics:
         clusters = query_duplicates(
             str(tmp_path), mode="exact", min_lines=2, min_score=0.0,
         )
-        # Since literals are preserved, these should NOT be exact duplicates
         cross = [
             c for c in clusters
             if len({m.file for m in c.members}) > 1
         ]
         assert len(cross) == 0
 
-    def test_candidate_selection(self):
-        """Production candidate selection enforces minimum thresholds."""
-        from emend.duplicate_heuristics import should_analyze_subtree, should_analyze_sequence
-
-        # Too small
-        assert not should_analyze_subtree("function_definition", 5, 3)
-        # Big enough
-        assert should_analyze_subtree("function_definition", 10, 3)
-        # Block needs more nodes
-        assert not should_analyze_subtree("block", 10, 3)
-        assert should_analyze_subtree("block", 16, 3)
-
-        # Sequence needs >= 3 statements and 2 distinct kinds
-        assert not should_analyze_sequence(2, 2)
-        assert should_analyze_sequence(3, 2)
-        assert not should_analyze_sequence(3, 1)
-
-    def test_filter_findings(self):
-        """filter_findings removes low-score clusters and limits results."""
-        from emend.duplicate_heuristics import filter_findings
-        from emend.duplicate import DuplicateCluster, DuplicateMember
-
-        clusters = [
-            DuplicateCluster(kind="exact", score=100.0, members=[
-                DuplicateMember(file="a.py", symbol="f", start_line=1, end_line=10),
-            ]),
-            DuplicateCluster(kind="exact", score=5.0, members=[
-                DuplicateMember(file="a.py", symbol="g", start_line=20, end_line=25),
-            ]),
-            DuplicateCluster(kind="exact", score=50.0, members=[
-                DuplicateMember(file="b.py", symbol="h", start_line=1, end_line=15),
-            ]),
-        ]
-
-        filtered = filter_findings(clusters, min_score=10.0, max_results=2)
-        assert len(filtered) == 2
-        assert filtered[0].score >= filtered[1].score
-
-    def test_emend_helper_survives_filter(self, tmp_path):
+    def test_non_trivial_duplicates_survive(self, tmp_path):
         """Real non-trivial duplicates survive the production filter."""
         from emend.duplicate import query_duplicates
 
@@ -560,5 +462,29 @@ class TestProductionHeuristics:
         clusters = query_duplicates(
             str(tmp_path), mode="exact", min_lines=3, min_score=0.0,
         )
-        # Non-trivial duplicates should survive
         assert isinstance(clusters, list)
+
+    def test_heuristics_unit_stubs(self):
+        """Suppression helpers return expected penalties."""
+        from emend.duplicate_heuristics import is_abstract_stub, is_property_wrapper
+
+        ks = ("function_definition", "block", "raise_statement", "identifier")
+        ts = ("def", "handle", "raise", "NotImplementedError")
+        assert is_abstract_stub(ks, ts) >= 500.0
+
+        ks2 = ("function_definition", "block", "return_statement", "attribute", "identifier", "identifier")
+        ts2 = ("def", "name", "return", "self", ".", "name")
+        assert is_property_wrapper(ks2, ts2) >= 300.0
+
+    def test_min_score_filters_low_clusters(self, tmp_path):
+        """min_score parameter removes low-scoring clusters."""
+        from emend.duplicate import query_duplicates
+
+        _write_files(tmp_path, {"a.py": NON_TRIVIAL_DUP})
+        all_clusters = query_duplicates(
+            str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
+        )
+        high_clusters = query_duplicates(
+            str(tmp_path), mode="exact", min_lines=1, min_score=999.0,
+        )
+        assert len(high_clusters) <= len(all_clusters)

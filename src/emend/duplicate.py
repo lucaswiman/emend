@@ -1,11 +1,10 @@
 """Production duplicate code detection via AST canonicalization.
 
-Graduates the experimental AST dedup work (experiments/ast_dedup/) into
-a narrow production surface:
 - Exact canonical Merkle hashes (variable-renamed, literal-preserving)
 - Sibling-sequence duplicate runs (winnowing)
+- Boilerplate suppression via duplicate_heuristics
 
-This module provides the shared backend for CLI, lint, and MCP.
+Shared backend for CLI (``emend analyze dupes``), lint, and MCP.
 """
 
 from __future__ import annotations
@@ -20,12 +19,21 @@ from hashlib import blake2b
 from typing import Any, Iterator
 
 from emend import emend_core
+from emend.duplicate_heuristics import (
+    is_abstract_stub,
+    is_trivial_validator,
+    is_property_wrapper,
+    is_tiny_same_file_fragment,
+    is_init_self_assignment,
+    is_dunder_boilerplate,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 DUP_CACHE_VERSION = "1"
+_SUPPRESSION_THRESHOLD = 500.0
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -725,6 +733,8 @@ def _query_exact_clusters(
                 "end_line": end_0 + 1,
                 "node_count": nc,
                 "unique_non_kw": unique_non_kw,
+                "kind_seq": kind_seq,
+                "token_seq": token_seq,
             })
 
     clusters: list[DuplicateCluster] = []
@@ -752,6 +762,21 @@ def _query_exact_clusters(
         score = avg_nc * math.log2(max(avg_uniq + 1, 2))
         if len(files) > 1:
             score += 20.0
+
+        rep = cands[0]
+        ks = tuple(rep.get("kind_seq", ()))
+        ts = tuple(rep.get("token_seq", ()))
+        penalty = (
+            is_abstract_stub(ks, ts)
+            + is_trivial_validator(int(avg_nc), ks)
+            + is_property_wrapper(ks, ts)
+            + is_tiny_same_file_fragment(members, int(avg_nc))
+            + is_init_self_assignment(ks, ts)
+            + is_dunder_boilerplate(rep.get("symbol", ""), ks)
+        )
+        score = max(0.0, score - penalty)
+        if score <= 0.0:
+            continue
 
         clusters.append(DuplicateCluster(
             kind="exact",
@@ -867,6 +892,12 @@ def _query_sequence_clusters(
         score = avg_stmts * 10.0 + min(distinct_kinds * 3.0, 15.0)
         if len(files) > 1:
             score += 20.0
+
+        avg_nodes = int(avg_stmts * 5)
+        penalty = is_tiny_same_file_fragment(members, avg_nodes)
+        score = max(0.0, score - penalty)
+        if score <= 0.0:
+            continue
 
         clusters.append(DuplicateCluster(
             kind="sequence",

@@ -575,11 +575,6 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm reachable_block {fp, fq, bid}",
         "?[sq, fp, line] := *module_level_ref[sq, fp, line], "
         "fp == $fp  :rm module_level_ref {sq, fp, line}",
-        # Duplicate-analysis relations (Phase 8)
-        "?[fp, sl, el] := *dup_subtree[fp, sl, el, _, _, _, _, _, _], "
-        "fp == $fp  :rm dup_subtree {fp, sl, el => }",
-        "?[fp, sl, el] := *dup_run[fp, sl, el, _, _, _, _], "
-        "fp == $fp  :rm dup_run {fp, sl, el => }",
     ):
         try:
             fdb.run(query, {"fp": file_path})
@@ -2926,13 +2921,9 @@ def _compute_duplicate_payloads(
     """Compute and cache per-file duplicate analysis payloads.
 
     For each Python file whose content hash is not already in ``dup_cache``,
-    this function:
-
-    1. Builds canonical subtree + sibling-sequence payloads via
-       :mod:`emend.duplicate`.
-    2. Stores the compressed payload in ``parse.db`` (``dup_cache`` table).
-    3. Materializes queryable :class:`~emend.fact_graph.DupSubtreeFact` and
-       :class:`~emend.fact_graph.DupRunFact` records into ``facts.db``.
+    builds canonical subtree + sibling-sequence payloads via
+    :mod:`emend.duplicate` and stores the compressed payload in ``parse.db``
+    (``dup_cache`` table).
 
     Only Python (``.py``) files are processed in production v1.
     """
@@ -2980,12 +2971,6 @@ def _compute_duplicate_payloads(
             pass
 
     from emend.duplicate import canonicalize_file_for_cache, build_statement_seqs_for_cache
-    from emend.fact_graph import DupSubtreeFact, DupRunFact
-
-    fdb = _get_facts_db(project_root)
-
-    subtree_facts_by_file: dict[str, list[DupSubtreeFact]] = {}
-    run_facts_by_file: dict[str, list[DupRunFact]] = {}
 
     for file_path, content, content_hash in py_files:
         if content_hash in cached_hashes:
@@ -3002,110 +2987,8 @@ def _compute_duplicate_payloads(
         except Exception:
             continue
 
-        # Accumulate facts.db entries for this file.
-        sub_facts: list[DupSubtreeFact] = []
-        for s in subtrees:
-            sub_facts.append(
-                DupSubtreeFact(
-                    file_path=file_path,
-                    start_line=s["start_line"],
-                    end_line=s["end_line"],
-                    root_kind=s["root_kind"],
-                    node_count=s["node_count"],
-                    total_lines=s["total_lines"],
-                    canonical_hash=s["canonical_hash"],
-                    score=s["score"],
-                )
-            )
-        run_facts: list[DupRunFact] = []
-        for seq in sequences:
-            # Represent each sequence (function body) as a single run fact
-            # keyed by (file, func_start, func_end).  The run_hash is the
-            # blake2b of all statement hashes concatenated, giving a stable
-            # fingerprint for the whole sequence.
-            from hashlib import blake2b as _b2b
-            h = _b2b(digest_size=16)
-            for hx in seq["hashes"]:
-                h.update(bytes.fromhex(hx))
-            run_facts.append(
-                DupRunFact(
-                    file_path=file_path,
-                    start_line=seq["start_line"],
-                    end_line=seq["end_line"],
-                    symbol=seq["function_qn"],
-                    run_hash=h.hexdigest(),
-                    stmt_count=len(seq["hashes"]),
-                    score=float(len(seq["hashes"])),
-                )
-            )
-
-        subtree_facts_by_file[file_path] = sub_facts
-        run_facts_by_file[file_path] = run_facts
-
     conn.commit()
     conn.close()
-
-    # Materialize into facts.db (if available).
-    if fdb is None:
-        return
-
-    for file_path, sub_facts in subtree_facts_by_file.items():
-        # Remove stale facts for this file before inserting fresh ones.
-        try:
-            fdb.run(
-                "?[fp, sl, el] := *dup_subtree[fp, sl, el, _, _, _, _, _, _], "
-                "fp == $fp  :rm dup_subtree {fp, sl, el => }",
-                {"fp": file_path},
-            )
-        except Exception:
-            pass
-        if sub_facts:
-            try:
-                rows = [
-                    [
-                        f.file_path, f.start_line, f.end_line, f.symbol,
-                        f.root_kind, f.node_count, f.total_lines,
-                        f.canonical_hash, f.score,
-                    ]
-                    for f in sub_facts
-                ]
-                fdb.run(
-                    "?[file_path, start_line, end_line, symbol, root_kind, "
-                    "node_count, total_lines, canonical_hash, score] <- $rows "
-                    ":put dup_subtree {file_path, start_line, end_line => "
-                    "symbol, root_kind, node_count, total_lines, canonical_hash, score}",
-                    {"rows": rows},
-                )
-            except Exception:
-                pass
-
-    for file_path, run_facts in run_facts_by_file.items():
-        try:
-            fdb.run(
-                "?[fp, sl, el] := *dup_run[fp, sl, el, _, _, _, _], "
-                "fp == $fp  :rm dup_run {fp, sl, el => }",
-                {"fp": file_path},
-            )
-        except Exception:
-            pass
-        if run_facts:
-            try:
-                rows = [
-                    [
-                        f.file_path, f.start_line, f.end_line, f.symbol,
-                        f.run_hash, f.stmt_count, f.score,
-                    ]
-                    for f in run_facts
-                ]
-                fdb.run(
-                    "?[file_path, start_line, end_line, symbol, run_hash, "
-                    "stmt_count, score] <- $rows "
-                    ":put dup_run {file_path, start_line, end_line => "
-                    "symbol, run_hash, stmt_count, score}",
-                    {"rows": rows},
-                )
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------
