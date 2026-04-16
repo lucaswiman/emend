@@ -315,21 +315,18 @@ def _find_containing_symbol(
 ) -> str:
     """Find the innermost symbol containing a given line.
 
-    symbol_index is [(qn, start_line, end_line), ...] sorted by start_line.
+    *symbol_index* is ``[(qn, start_line, end_line), ...]``.  The
+    innermost symbol is the one with the smallest span (end - start).
     """
     best = ""
+    best_span = 999999
     for qn, sl, el in symbol_index:
         if sl <= line <= el:
-            if not best or (el - sl) < (_find_range(best, symbol_index)):
+            span = el - sl
+            if span < best_span:
                 best = qn
+                best_span = span
     return best
-
-
-def _find_range(qn: str, index: list[tuple[str, int, int]]) -> int:
-    for q, sl, el in index:
-        if q == qn:
-            return el - sl
-    return 999999
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +533,6 @@ def build_statement_seqs_for_cache(
 
     qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
 
-    # Build 0-indexed start_line → qn map from definitions_in_file.
     def_line_to_qn: dict[int, str] = {}
     try:
         defs = scope_resolver.definitions_in_file(file_path)
@@ -614,43 +610,53 @@ def build_statement_seqs_for_cache(
 # ---------------------------------------------------------------------------
 
 
-def _iter_py_files_query(root_path, max_files=500):
-    """Yield Python source file paths under *root_path*, skipping hidden/cache dirs."""
+def _collect_py_files(root_path: str) -> list[str]:
+    """Collect Python source files under *root_path* using the Rust backend.
+
+    Falls back to ``Path.rglob`` if Rust ``collect_files`` is unavailable.
+    """
     from pathlib import Path as _Path
-    n = 0
-    for p in sorted(_Path(root_path).rglob("*.py")):
-        if any(part.startswith(".") or part == "__pycache__" for part in p.parts):
-            continue
-        yield str(p)
-        n += 1
-        if max_files is not None and n >= max_files:
-            return
-
-
-# ---------------------------------------------------------------------------
-# Exact-duplicate detection (query layer)
-# ---------------------------------------------------------------------------
-
-
-def _query_exact_clusters(
-    py_files: list[str],
-    min_lines: int,
-    cross_file,
-    symbol_scope,
-) -> list[DuplicateCluster]:
-    """Find exact structural duplicates by grouping on canonical hash."""
-    if not py_files:
-        return []
     try:
-        from pathlib import Path as _Path
-        scope_resolver = emend_core.PyScopeResolver(
-            str(_Path(py_files[0]).parent), "py"
-        )
-    except Exception:
-        return []
+        result = [str(p) for p in emend_core.collect_files(root_path, [".py"])]
+        if result:
+            return result
+    except (AttributeError, Exception):
+        pass
+    # Fallback: walk the directory ourselves
+    skip = {".git", "__pycache__", ".venv", "venv", "node_modules", ".emend"}
+    return [
+        str(p) for p in sorted(_Path(root_path).rglob("*.py"))
+        if not any(d in p.parts for d in skip)
+    ]
 
-    # canonical_hash (bytes) -> list of candidate dicts
-    hash_to_cands: dict[bytes, list[dict]] = {}
+
+# ---------------------------------------------------------------------------
+# Shared pre-parse step (avoids double work when mode="all")
+# ---------------------------------------------------------------------------
+
+
+_FileData = dict  # {file_path -> (content, tree, qn_at, def_loc, symbol_index)}
+
+
+def _preparse_files(
+    py_files: list[str],
+    symbol_scope: str | None,
+) -> tuple[Any, _FileData]:
+    """Read, parse, and index all *py_files* once.
+
+    Returns ``(scope_resolver, file_data)`` where *file_data* maps each
+    successfully parsed file to its ``(content, tree, qn_at, def_loc,
+    symbol_index)`` tuple.
+    """
+    from pathlib import Path as _Path
+
+    project_root = str(_Path(py_files[0]).parent) if py_files else "."
+    try:
+        scope_resolver = emend_core.PyScopeResolver(project_root, "py")
+    except TypeError:
+        scope_resolver = emend_core.PyScopeResolver(project_root)
+
+    file_data: _FileData = {}
 
     for file_path in py_files:
         if symbol_scope and symbol_scope not in file_path:
@@ -664,25 +670,38 @@ def _query_exact_clusters(
             scope_resolver.index_file(file_path, content)
         except Exception:
             pass
-        try:
-            tree = emend_core.parse_source(content, "py")
-        except Exception:
-            continue
+        tree = emend_core.parse_source(content, "py")
         if tree is None:
             continue
 
         qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+        symbol_index = sorted(
+            [(qn, sl, el) for qn, (sl, el) in def_loc.items()],
+            key=lambda t: (t[1], -(t[2] - t[1])),
+        )
+        file_data[file_path] = (content, tree, qn_at, def_loc, symbol_index)
 
-        # Build symbol index for containing-symbol lookup
-        symbol_index: list[tuple[str, int, int]] = [
-            (qn, sl, el) for qn, (sl, el) in def_loc.items()
-        ]
+    return scope_resolver, file_data
 
+
+# ---------------------------------------------------------------------------
+# Exact-duplicate detection (query layer)
+# ---------------------------------------------------------------------------
+
+
+def _query_exact_clusters(
+    file_data: _FileData,
+    min_lines: int,
+    cross_file,
+) -> list[DuplicateCluster]:
+    """Find exact structural duplicates by grouping on canonical hash."""
+    hash_to_cands: dict[bytes, list[dict]] = {}
+
+    for file_path, (content, tree, qn_at, def_loc, symbol_index) in file_data.items():
         for cand in _iter_candidates(tree):
             start_0 = cand.start_point[0]
             end_0 = cand.end_point[0]
-            total_lines = end_0 - start_0 + 1
-            if total_lines < min_lines:
+            if end_0 - start_0 + 1 < min_lines:
                 continue
 
             try:
@@ -699,17 +718,13 @@ def _query_exact_clusters(
             symbol = _find_containing_symbol(start_0, symbol_index)
             unique_non_kw = len(set(token_seq) - _PYTHON_KEYWORDS)
 
-            vocab = len(set(kind_seq)) + len(set(token_seq))
-            score = nc * math.log2(max(vocab, 2))
-
             hash_to_cands.setdefault(ch, []).append({
                 "file": file_path,
                 "symbol": symbol,
-                "start_line": start_0 + 1,   # 1-indexed
+                "start_line": start_0 + 1,
                 "end_line": end_0 + 1,
                 "node_count": nc,
                 "unique_non_kw": unique_non_kw,
-                "score": score,
             })
 
     clusters: list[DuplicateCluster] = []
@@ -729,7 +744,6 @@ def _query_exact_clusters(
                 start_line=c["start_line"],
                 end_line=c["end_line"],
                 node_count=c["node_count"],
-                stmt_count=0,
             )
             for c in cands
         ]
@@ -764,49 +778,28 @@ def _winnow_fingerprints(hashes: list[bytes], w: int = WINNOW_W) -> set[bytes]:
 
 
 def _query_sequence_clusters(
-    py_files: list[str],
+    file_data: _FileData,
+    scope_resolver,
     min_lines: int,
     cross_file,
-    symbol_scope,
 ) -> list[DuplicateCluster]:
     """Find sibling-sequence duplicates using winnowing fingerprints."""
-    if not py_files:
-        return []
-    try:
-        from pathlib import Path as _Path
-        scope_resolver = emend_core.PyScopeResolver(
-            str(_Path(py_files[0]).parent), "py"
-        )
-    except Exception:
-        return []
-
     min_stmts = max(2, min_lines // 2)
     all_seqs: list[dict] = []
 
-    for file_path in py_files:
-        if symbol_scope and symbol_scope not in file_path:
-            continue
+    for file_path, (content, tree, qn_at, def_loc, symbol_index) in file_data.items():
         try:
-            with open(file_path, encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
-            continue
-        try:
-            scope_resolver.index_file(file_path, content)
             seqs = build_statement_seqs_for_cache(file_path, content, scope_resolver)
         except Exception:
             continue
-
         for seq in seqs:
-            n_stmts = len(seq.get("hashes", []))
-            if n_stmts < min_stmts:
+            if len(seq.get("hashes", [])) < min_stmts:
                 continue
             all_seqs.append({"file": file_path, **seq})
 
     if len(all_seqs) < 2:
         return []
 
-    # fingerprint -> set of seq indices
     fp_to_idxs: dict[bytes, list[int]] = {}
     for idx, seq in enumerate(all_seqs):
         hashes = [bytes.fromhex(h) for h in seq.get("hashes", [])]
@@ -814,7 +807,7 @@ def _query_sequence_clusters(
         for fp in fps:
             fp_to_idxs.setdefault(fp, []).append(idx)
 
-    # Union-find to group sequences that share fingerprints
+    # Union-find to group sequences sharing fingerprints
     parent = list(range(len(all_seqs)))
 
     def _find(x: int) -> int:
@@ -834,8 +827,7 @@ def _query_sequence_clusters(
         for i in range(1, len(idxs)):
             _union(idxs[0], idxs[i])
 
-    from collections import defaultdict as _dd
-    groups: dict[int, list[int]] = _dd(list)
+    groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(all_seqs)):
         groups[_find(i)].append(i)
 
@@ -853,7 +845,7 @@ def _query_sequence_clusters(
         members = []
         for s in seqs_in:
             n_stmts = len(s.get("hashes", []))
-            start_1 = s["start_line"] + 1    # 0-indexed → 1-indexed
+            start_1 = s["start_line"] + 1
             end_1 = s["end_line"] + 1
             if end_1 - start_1 + 1 < min_lines:
                 continue
@@ -862,7 +854,6 @@ def _query_sequence_clusters(
                 symbol=s["function_qn"],
                 start_line=start_1,
                 end_line=end_1,
-                node_count=0,
                 stmt_count=n_stmts,
             ))
 
@@ -871,9 +862,7 @@ def _query_sequence_clusters(
 
         avg_stmts = sum(m.stmt_count for m in members) / len(members)
         distinct_kinds = len({
-            k
-            for s in seqs_in
-            for k in s.get("kinds", [])
+            k for s in seqs_in for k in s.get("kinds", [])
         })
         score = avg_stmts * 10.0 + min(distinct_kinds * 3.0, 15.0)
         if len(files) > 1:
@@ -910,25 +899,19 @@ def query_duplicates(
     project_path:
         Root directory or single file to analyze.
     mode:
-        Detection mode: ``"exact"`` (canonical Merkle hash matching),
-        ``"sequence"`` (winnowing over statement hashes), or ``"all"`` (both).
+        Detection mode: ``"exact"``, ``"sequence"``, or ``"all"`` (both).
     file_scope:
-        Optional path filter. Only files at or under this path are analyzed.
+        Optional path filter — only files at or under this path.
     symbol_scope:
         Optional substring filter applied to file paths.
     limit:
-        Maximum number of clusters to return.
+        Maximum clusters to return.
     min_lines:
         Minimum line span a finding must cover.
     min_score:
         Minimum composite score (0.0 = no threshold).
     cross_file:
         ``True`` = cross-file only; ``False`` = intra-file only; ``None`` = both.
-
-    Returns
-    -------
-    list[DuplicateCluster]
-        Clusters sorted by descending score, capped at *limit*.
     """
     from pathlib import Path as _Path
     root = _Path(project_path)
@@ -938,37 +921,32 @@ def query_duplicates(
     if root.is_file():
         py_files = [str(root)]
     else:
+        resolved = str(root.resolve())
         if file_scope:
             scope_path = _Path(file_scope)
             if scope_path.is_file():
                 py_files = [str(scope_path)]
             elif scope_path.is_dir():
-                py_files = list(_iter_py_files_query(scope_path))
+                py_files = _collect_py_files(str(scope_path))
             else:
-                py_files = [
-                    p for p in _iter_py_files_query(root)
-                    if file_scope in p
-                ]
+                py_files = [p for p in _collect_py_files(resolved) if file_scope in p]
         else:
-            py_files = list(_iter_py_files_query(root))
+            py_files = _collect_py_files(resolved)
 
     if not py_files:
         return []
 
+    # Pre-parse once — shared across exact and sequence modes
+    scope_resolver, file_data = _preparse_files(py_files, symbol_scope)
+    if not file_data:
+        return []
+
     clusters: list[DuplicateCluster] = []
     if mode in ("exact", "all"):
-        clusters.extend(_query_exact_clusters(
-            py_files,
-            min_lines=min_lines,
-            cross_file=cross_file,
-            symbol_scope=symbol_scope,
-        ))
+        clusters.extend(_query_exact_clusters(file_data, min_lines, cross_file))
     if mode in ("sequence", "all"):
         clusters.extend(_query_sequence_clusters(
-            py_files,
-            min_lines=min_lines,
-            cross_file=cross_file,
-            symbol_scope=symbol_scope,
+            file_data, scope_resolver, min_lines, cross_file,
         ))
 
     if min_score > 0.0:

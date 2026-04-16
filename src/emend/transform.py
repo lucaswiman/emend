@@ -2940,9 +2940,7 @@ def _compute_duplicate_payloads(
     import sqlite3 as _sqlite3
     import zlib
 
-    # Bump this version string to invalidate all cached payloads when the
-    # payload schema or canonicalization rules change.
-    DUP_VERSION = "1"
+    from emend.duplicate import DUP_CACHE_VERSION as DUP_VERSION
 
     conn = _sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")

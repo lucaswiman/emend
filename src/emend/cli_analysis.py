@@ -1053,7 +1053,6 @@ def cfg_cmd(
         raise typer.Exit(1)
 
 
-
 @analyze_app.command("dupes")
 def dupes_cmd(
     path: Annotated[str, typer.Argument(help="Project root directory")] = ".",
