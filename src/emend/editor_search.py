@@ -1988,16 +1988,16 @@ class EditorSearchEngine:
         Returns a SearchResult where each item is a duplicate cluster summarized
         as ``(kind, score, primary_location, other_file:line, members_json)``.
         """
-        from emend.duplicate import check_file_duplicates
+        from emend.duplicate import query_duplicates
 
         t0 = time.monotonic()
-        clusters = check_file_duplicates(
-            file_path=file,
+        clusters = query_duplicates(
             project_path=str(self.project_root),
             mode=mode,
             limit=limit,
             min_lines=min_lines,
             min_score=min_score,
+            involves_file=file,
         )
 
         items: list[dict] = []

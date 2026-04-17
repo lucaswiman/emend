@@ -1079,32 +1079,22 @@ def dupes_cmd(
         emend analyze dupes --check-file src/emend/foo.py  # post-write hook
     """
     from emend.duplicate import (
-        check_file_duplicates,
         format_duplicates_json,
         format_duplicates_text,
         query_duplicates,
     )
 
-    if check_file:
-        clusters = check_file_duplicates(
-            file_path=check_file,
-            project_path=path,
-            mode=mode,
-            limit=limit,
-            min_lines=min_lines,
-            min_score=min_score,
-        )
-    else:
-        clusters = query_duplicates(
-            project_path=path,
-            mode=mode,
-            file_scope=file,
-            symbol_scope=symbol,
-            limit=limit,
-            min_lines=min_lines,
-            min_score=min_score,
-            cross_file=cross_file,
-        )
+    clusters = query_duplicates(
+        project_path=path,
+        mode=mode,
+        file_scope=file,
+        symbol_scope=symbol,
+        limit=limit,
+        min_lines=min_lines,
+        min_score=min_score,
+        cross_file=cross_file,
+        involves_file=check_file,
+    )
 
     if json_output:
         print(format_duplicates_json(clusters), end='')

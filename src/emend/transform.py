@@ -874,9 +874,8 @@ def _extract_file_facts(
                         bid, line,
                     ])
 
-    # -- Def-use facts (delegate to shared helper in fact_graph)
-    from emend.fact_graph import _build_def_use_facts
-    for du in _build_def_use_facts(cfgs, sym_facts_for_file, rel_path, module_name):
+    from emend.fact_graph import build_def_use_facts
+    for du in build_def_use_facts(cfgs, sym_facts_for_file, rel_path, module_name):
         result["def_uses"].append([
             du.file_path, du.func_qn, du.var_name, du.kind,
             du.def_block, du.use_block,

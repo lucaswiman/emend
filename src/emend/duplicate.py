@@ -14,6 +14,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from hashlib import blake2b
+from pathlib import Path
 from typing import Any, Iterator
 
 from emend import emend_core
@@ -614,9 +615,7 @@ def _preparse_files(
     successfully parsed file to its ``(content, tree, qn_at, def_loc,
     symbol_index)`` tuple.
     """
-    from pathlib import Path as _Path
-
-    project_root = str(_Path(py_files[0]).parent) if py_files else "."
+    project_root = str(Path(py_files[0]).parent) if py_files else "."
     try:
         scope_resolver = emend_core.PyScopeResolver(project_root, "py")
     except TypeError:
@@ -998,14 +997,18 @@ def query_duplicates(
     min_lines: int = 3,
     min_score: float = 0.0,
     cross_file: bool | None = None,
+    involves_file: str | None = None,
 ) -> list[DuplicateCluster]:
     """Find duplicate code clusters in a project.
 
     Uses cached payloads from ``emend index`` when available, falling
     back to on-the-fly parsing otherwise.
+
+    ``involves_file`` keeps only clusters with at least one member in the
+    given file. Useful for post-write hooks that want "did this edit
+    introduce duplication?" — filtering happens before ``limit`` truncation.
     """
-    from pathlib import Path as _Path
-    root = _Path(project_path)
+    root = Path(project_path)
     if not root.exists():
         return []
 
@@ -1014,7 +1017,7 @@ def query_duplicates(
     else:
         resolved = str(root.resolve())
         if file_scope:
-            scope_path = _Path(file_scope)
+            scope_path = Path(file_scope)
             if scope_path.is_file():
                 py_files = [str(scope_path)]
             elif scope_path.is_dir():
@@ -1030,7 +1033,6 @@ def query_duplicates(
     if symbol_scope:
         py_files = [p for p in py_files if symbol_scope in p]
 
-    # Fast path: use dup_cache from parse.db if available
     cached = _load_cached_payloads(project_path, py_files)
     if cached is not None and len(cached) == len(py_files):
         logger.debug("query_duplicates: using cached payloads for %d files", len(cached))
@@ -1040,7 +1042,6 @@ def query_duplicates(
         if mode in ("sequence", "all"):
             clusters.extend(_clusters_from_cached_sequences(cached, min_lines, cross_file))
     else:
-        # Slow path: parse from scratch
         scope_resolver, file_data = _preparse_files(py_files, symbol_scope=None)
         if not file_data:
             return []
@@ -1052,52 +1053,18 @@ def query_duplicates(
                 file_data, scope_resolver, min_lines, cross_file,
             ))
 
+    if involves_file:
+        target = str(Path(involves_file).resolve())
+        clusters = [
+            c for c in clusters
+            if any(str(Path(m.file).resolve()) == target for m in c.members)
+        ]
+
     if min_score > 0.0:
         clusters = [c for c in clusters if c.score >= min_score]
 
     clusters.sort(key=lambda c: (-c.score, -len(c.members)))
     return clusters[:limit]
-
-
-def check_file_duplicates(
-    file_path: str,
-    project_path: str = ".",
-    mode: str = "all",
-    limit: int = 20,
-    min_lines: int = 5,
-    min_score: float = 0.0,
-) -> list[DuplicateCluster]:
-    """Find duplicate clusters involving *file_path*, scanned against *project_path*.
-
-    Designed for post-write hooks: answer "did the just-written file introduce
-    code that duplicates something elsewhere in the project?"
-
-    Unlike ``query_duplicates(file_scope=file_path)`` which restricts the scan
-    to that one file (missing cross-file clones), this function scans the full
-    project and returns only clusters where at least one member lives in
-    *file_path*.
-    """
-    from pathlib import Path as _Path
-
-    target = str(_Path(file_path).resolve())
-    clusters = query_duplicates(
-        project_path=project_path,
-        mode=mode,
-        file_scope=None,
-        symbol_scope=None,
-        limit=10_000,
-        min_lines=min_lines,
-        min_score=min_score,
-        cross_file=None,
-    )
-
-    def _involves_target(cluster: DuplicateCluster) -> bool:
-        return any(
-            str(_Path(m.file).resolve()) == target for m in cluster.members
-        )
-
-    filtered = [c for c in clusters if _involves_target(c)]
-    return filtered[:limit]
 
 
 def format_duplicates_text(clusters: list[DuplicateCluster]) -> str:
@@ -1155,7 +1122,6 @@ __all__ = [
     "canonicalize_file_for_cache",
     "build_statement_seqs_for_cache",
     "query_duplicates",
-    "check_file_duplicates",
     "format_duplicates_text",
     "format_duplicates_json",
 ]

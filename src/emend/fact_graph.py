@@ -2967,7 +2967,7 @@ class FactGraph:
                 self.add_calls_batch(call_facts)
 
             # -- Def-use facts ----------------------------------------------
-            def_use_facts: list[DefUseFact] = _build_def_use_facts(
+            def_use_facts: list[DefUseFact] = build_def_use_facts(
                 cfgs, sym_facts, rel_path, module_name
             )
             method_call_facts: list[MethodCallFact] = []
@@ -3249,7 +3249,7 @@ class FactGraph:
                     )
 
             # -- Def-use facts with block IDs ----------------------------
-            def_use_facts: list[DefUseFact] = _build_def_use_facts(
+            def_use_facts: list[DefUseFact] = build_def_use_facts(
                 cfgs, sym_facts, rel_path, module_name
             )
             method_call_facts: list[MethodCallFact] = []
@@ -3793,7 +3793,7 @@ def _build_cfg_facts(
     return cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges
 
 
-def _build_def_use_facts(
+def build_def_use_facts(
     cfgs: list[Any],
     sym_facts: list[SymbolFact],
     rel_path: str,
@@ -3861,7 +3861,8 @@ def _build_method_call_facts(
     refs: list[tuple],
     rel_path: str,
     block_ranges: list,
-    normalize_qn: bool = True,
+    *,
+    normalize_qn: bool,
 ) -> list[MethodCallFact]:
     """Extract MethodCallFacts from dotted-name call references.
 

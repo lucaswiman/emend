@@ -1455,15 +1455,15 @@ def check_duplicates(
     array when no duplicates are found — safe to invoke from a ``PostToolUse``
     hook after ``Edit``/``Write``.
     """
-    from emend.duplicate import check_file_duplicates, format_duplicates_json
+    from emend.duplicate import format_duplicates_json, query_duplicates
 
-    clusters = check_file_duplicates(
-        file_path=file_path,
+    clusters = query_duplicates(
         project_path=project or ".",
         mode=mode,
         limit=limit,
         min_lines=min_lines,
         min_score=min_score,
+        involves_file=file_path,
     )
     return format_duplicates_json(clusters)
 
