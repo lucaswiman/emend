@@ -418,6 +418,7 @@ _SCHEMA_INIT = """\
     file_path: String,
     line: Int
 }}
+
 """
 
 

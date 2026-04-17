@@ -59,7 +59,7 @@ Prefer the discriminated tools:
 - search(mode=code|symbol|summary)
 - transform(operation=replace|edit|add|remove|rename|move)
 - references(mode=refs|callers|callees)
-- analyze(mode=graph|deadcode|impact|semantic_context|trace)
+- analyze(mode=graph|deadcode|impact|semantic_context|trace|duplicates)
 - check(mode=lint|policy)
 - facts_query(fact_type=symbols|calls|references|trace_flows|types|imports)
 - mappings(operation=read|write)
@@ -1415,9 +1415,33 @@ def references(
     )
 
 
+def duplicates_analysis(
+    path: str = ".",
+    mode: str = "all",
+    file_path: str | None = None,
+    limit: int = 20,
+    min_lines: int = 5,
+    min_score: float = 0.0,
+    cross_file: bool | None = None,
+) -> str:
+    """Run duplicate detection and return JSON results."""
+    from emend.duplicate import query_duplicates, format_duplicates_json
+
+    clusters = query_duplicates(
+        project_path=path,
+        mode=mode,
+        file_scope=file_path,
+        limit=limit,
+        min_lines=min_lines,
+        min_score=min_score,
+        cross_file=cross_file,
+    )
+    return format_duplicates_json(clusters)
+
+
 @mcp_app.tool()
 def analyze(
-    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, flow, or trace.")] = "graph",
+    mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, flow, trace, or duplicates.")] = "graph",
     path: Annotated[str | None, Field(description="Path scope for deadcode/trace/check-style modes.")] = None,
     selector: Annotated[str | None, Field(description="Selector input for semantic_context/impact modes.")] = None,
     symbol: Annotated[str | None, Field(description="Symbol selector for graph mode.")] = None,
@@ -1499,7 +1523,17 @@ def analyze(
             trace=trace,
             interprocedural=interprocedural,
         )
-    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow, trace."})
+    if analysis_mode == "duplicates":
+        return duplicates_analysis(
+            path=path or ".",
+            mode=mode if mode not in {"graph", "deadcode", "impact", "semantic_context", "flow", "trace", "duplicates"} else "all",
+            file_path=file_path,
+            limit=max_depth,
+            min_lines=5,
+            min_score=0.0,
+            cross_file=True,
+        )
+    return json.dumps({"error": f"Unknown mode {mode!r}. Use: graph, deadcode, impact, semantic_context, flow, trace, duplicates."})
 
 
 @mcp_app.tool()
