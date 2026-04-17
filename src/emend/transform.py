@@ -874,40 +874,14 @@ def _extract_file_facts(
                         bid, line,
                     ])
 
-    # -- Def-use facts
-    for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        for sf in sym_facts_for_file:
-            if sf.name == func_name and sf.file_path == rel_path:
-                func_qn = sf.qualified_name
-                break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
-
-        defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
-        for block in cfg.get_blocks():
-            bid = block["id"]
-            for d in block.get("defs", []) or []:
-                var_name = d[0] if isinstance(d, (list, tuple)) else d
-                dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
-                dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
-                defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
-
-        for block in cfg.get_blocks():
-            bid = block["id"]
-            for u in block.get("uses", []) or []:
-                var_name = u[0] if isinstance(u, (list, tuple)) else u
-                uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
-                ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
-                ukind = u[3] if isinstance(u, (list, tuple)) and len(u) > 3 else "read"
-                if var_name in defs_map:
-                    for def_bid, dl, dc, dk in defs_map[var_name]:
-                        result["def_uses"].append([
-                            rel_path, func_qn, var_name, dk,
-                            def_bid, bid, dl, dc, uline, ucol,
-                        ])
+    # -- Def-use facts (delegate to shared helper in fact_graph)
+    from emend.fact_graph import _build_def_use_facts
+    for du in _build_def_use_facts(cfgs, sym_facts_for_file, rel_path, module_name):
+        result["def_uses"].append([
+            du.file_path, du.func_qn, du.var_name, du.kind,
+            du.def_block, du.use_block,
+            du.def_line, du.def_col, du.use_line, du.use_col,
+        ])
 
     return result
 

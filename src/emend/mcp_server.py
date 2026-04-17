@@ -1440,6 +1440,35 @@ def duplicates_analysis(
 
 
 @mcp_app.tool()
+def check_duplicates(
+    file_path: Annotated[str, Field(description="File to check for duplication (usually the just-written file in a post-write hook).")],
+    project: Annotated[str | None, Field(description="Project root to scan against. Defaults to CWD.")] = None,
+    mode: Annotated[str, Field(description="Detection mode: exact, sequence, or all.")] = "all",
+    limit: Annotated[int, Field(description="Maximum number of clusters to return.")] = 10,
+    min_lines: Annotated[int, Field(description="Minimum lines for a finding.")] = 5,
+    min_score: Annotated[float, Field(description="Minimum score threshold (use ~50 to suppress tiny matches in hooks).")] = 0.0,
+) -> str:
+    """Check whether *file_path* introduces code duplication vs the project.
+
+    Designed for post-write hooks: scans the full project and returns only
+    clusters with at least one member in *file_path*. Returns an empty JSON
+    array when no duplicates are found — safe to invoke from a ``PostToolUse``
+    hook after ``Edit``/``Write``.
+    """
+    from emend.duplicate import check_file_duplicates, format_duplicates_json
+
+    clusters = check_file_duplicates(
+        file_path=file_path,
+        project_path=project or ".",
+        mode=mode,
+        limit=limit,
+        min_lines=min_lines,
+        min_score=min_score,
+    )
+    return format_duplicates_json(clusters)
+
+
+@mcp_app.tool()
 def analyze(
     mode: Annotated[str, Field(description="Analysis mode: graph, deadcode, impact, semantic_context, flow, trace, or duplicates.")] = "graph",
     path: Annotated[str | None, Field(description="Path scope for deadcode/trace/check-style modes.")] = None,

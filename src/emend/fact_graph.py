@@ -3013,28 +3013,10 @@ class FactGraph:
                                 ))
 
             # Method call facts from dotted-name call references.
-            # The scope resolver uses 1-based line numbers, but CFG
-            # def-use facts use 0-based line numbers.  Convert method
-            # call lines to 0-based to match def-use for same-line
-            # comparisons in Datalog taint rules.
             if resolver is not None:
-                from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
-                from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    if _map_ref_kind(kind) == "call" and "." in qn:
-                        parts = qn.rsplit(".", 1)
-                        if len(parts) == 2:
-                            fq, bid = _find_containing_block(block_ranges, line)
-                            if fq == "" and bid == -1:
-                                fq, bid = _MLF, _MLB
-                            method_call_facts.append(MethodCallFact(
-                                file_path=rel_path,
-                                func_qn=fq,
-                                receiver=parts[0].rsplit(".", 1)[-1],
-                                method=parts[1],
-                                block_id=bid,
-                                line=line - 1,
-                            ))
+                method_call_facts = _build_method_call_facts(
+                    refs, rel_path, block_ranges, normalize_qn=False,
+                )
 
             self.add_def_uses_batch(def_use_facts)
             self.add_method_calls_batch(method_call_facts)
@@ -3274,24 +3256,9 @@ class FactGraph:
 
             # -- Method call facts (from call references with dotted names) --
             if resolver is not None:
-                from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
-                from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    qn = _normalize_qn(qn)
-                    if _map_ref_kind(kind) == "call" and "." in qn:
-                        parts = qn.rsplit(".", 1)
-                        if len(parts) == 2:
-                            fq, bid = _find_containing_block(block_ranges, line)
-                            if fq == "" and bid == -1:
-                                fq, bid = _MLF, _MLB
-                            method_call_facts.append(MethodCallFact(
-                                file_path=rel_path,
-                                func_qn=fq,
-                                receiver=parts[0].rsplit(".", 1)[-1],
-                                method=parts[1],
-                                block_id=bid,
-                                line=line - 1,
-                            ))
+                method_call_facts = _build_method_call_facts(
+                    refs, rel_path, block_ranges, normalize_qn=True,
+                )
 
             graph.add_def_uses_batch(def_use_facts)
             graph.add_method_calls_batch(method_call_facts)
@@ -3888,6 +3855,44 @@ def _build_def_use_facts(
                         ))
 
     return def_use_facts
+
+
+def _build_method_call_facts(
+    refs: list[tuple],
+    rel_path: str,
+    block_ranges: list,
+    normalize_qn: bool = True,
+) -> list[MethodCallFact]:
+    """Extract MethodCallFacts from dotted-name call references.
+
+    The scope resolver emits 1-based line numbers, but CFG def-use facts use
+    0-based.  Method-call lines are emitted as 0-based so same-line Datalog
+    taint comparisons work.
+    """
+    from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
+    from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
+
+    facts: list[MethodCallFact] = []
+    for qn, line, _col, _offset, _end_offset, kind, _ann in refs:
+        if normalize_qn:
+            qn = _normalize_qn(qn)
+        if _map_ref_kind(kind) != "call" or "." not in qn:
+            continue
+        parts = qn.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        fq, bid = _find_containing_block(block_ranges, line)
+        if fq == "" and bid == -1:
+            fq, bid = _MLF, _MLB
+        facts.append(MethodCallFact(
+            file_path=rel_path,
+            func_qn=fq,
+            receiver=parts[0].rsplit(".", 1)[-1],
+            method=parts[1],
+            block_id=bid,
+            line=line - 1,
+        ))
+    return facts
 
 
 # ---------------------------------------------------------------------------

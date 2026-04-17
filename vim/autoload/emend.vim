@@ -711,6 +711,21 @@ function! s:on_impact_resolve(result) abort
 endfunction
 
 " ---------------------------------------------------------------------------
+" Duplicate check (post-write hook)
+" ---------------------------------------------------------------------------
+
+function! emend#check_duplicates() abort
+  let l:file = expand('%:p')
+  if empty(l:file)
+    echohl ErrorMsg | echom 'emend: no file for current buffer' | echohl None
+    return
+  endif
+  call emend#send('check_duplicates', {
+        \ 'file': l:file,
+        \ }, function('emend#ui#on_search_result'))
+endfunction
+
+" ---------------------------------------------------------------------------
 " Outline Filter (interactive outline with local filtering)
 " ---------------------------------------------------------------------------
 
