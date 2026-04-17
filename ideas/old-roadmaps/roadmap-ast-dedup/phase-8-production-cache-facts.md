@@ -76,8 +76,8 @@ Add production tests that verify:
 
 ## Checklist
 
-- [ ] `parse.db` gains a content-addressed duplicate payload cache
-- [ ] `facts.db` gains duplicate fact relations
-- [ ] `emend index` computes duplicate payloads for Python files
-- [ ] Incremental refresh works for add/edit/delete
-- [ ] Production tests cover populate + incremental refresh
+- [x] `parse.db` gains a content-addressed duplicate payload cache
+- [x] `facts.db` gains duplicate fact relations
+- [x] `emend index` computes duplicate payloads for Python files
+- [x] Incremental refresh works for add/edit/delete
+- [x] Production tests cover populate + incremental refresh

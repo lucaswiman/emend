@@ -28,10 +28,10 @@ SimHash, shingled-MinHash, and winnowing schemes on the same corpus.
 - [x] Phase 5: Sibling-sequence clone detection (winnowing / k-shingles)
 - [x] Phase 6: Corpus fetcher + runner + statistics report
 - [x] Phase 7: Evaluation writeup for the agent
-- [ ] Phase 8: Production cache + facts integration
-- [ ] Phase 9: CLI + lint surface
-- [ ] Phase 10: MCP duplicate-analysis surface
-- [ ] Phase 11: Production heuristics and false-positive control
+- [x] Phase 8: Production cache + facts integration
+- [x] Phase 9: CLI + lint surface
+- [x] Phase 10: MCP duplicate-analysis surface
+- [x] Phase 11: Production heuristics and false-positive control
 
 Details for each phase are in the sibling files in this directory.
 

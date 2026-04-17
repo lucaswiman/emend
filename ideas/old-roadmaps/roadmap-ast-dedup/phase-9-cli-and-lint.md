@@ -63,7 +63,7 @@ read-only surface tuned for actionable results rather than exhaustive output.
 
 ## Checklist
 
-- [ ] Production duplicate CLI command exists
-- [ ] JSON + text output are stable
-- [ ] Lint integration is config-gated and conservative
-- [ ] Tests cover exact + sequence duplicates
+- [x] Production duplicate CLI command exists
+- [x] JSON + text output are stable
+- [x] Lint integration is config-gated and conservative
+- [x] Tests cover exact + sequence duplicates
