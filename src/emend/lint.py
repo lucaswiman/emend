@@ -454,7 +454,7 @@ def _check_flow_rule(
                     tainted[name] = src_line
 
             if src_match.matched_text:
-                matched_line_text = all_lines[src_line - 1].strip() if src_line <= len(all_lines) else ""
+                matched_line_text = all_lines[src_line - 1].strip() if 1 <= src_line <= len(all_lines) else ""
                 # Handle declaration keywords: const/let/var (TS), let/let mut (Rust)
                 assign_match = re.match(
                     r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',
@@ -507,7 +507,7 @@ def _check_flow_rule(
                             if san_names & tainted_at_sink:
                                 sanitized = True
                                 break
-                            if san_line <= len(all_lines):
+                            if 1 <= san_line <= len(all_lines):
                                 san_line_text = all_lines[san_line - 1].strip()
                                 san_assign = re.match(
                                     r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',

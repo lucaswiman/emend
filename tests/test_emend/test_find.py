@@ -503,6 +503,29 @@ class TestLambdaStarArgs:
         matches = find_pattern("lambda *$ARGS: $EXPR", str(test_file))
         assert len(matches) == 0
 
+    def test_lambda_default_param_pattern_matches_specific_default(self, tmp_path):
+        """'lambda $X=5: $EXPR' only matches lambdas where param default is 5."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "f = lambda x=5: x + 1\n"
+            "g = lambda y: y * 2\n"
+            "h = lambda z=10: z + 3\n"
+        )
+        matches = find_pattern("lambda $X=5: $EXPR", str(test_file))
+        assert len(matches) == 1
+        assert matches[0].matched_text == "lambda x=5: x + 1"
+        assert matches[0].captures["EXPR"] == "x + 1"
+
+    def test_lambda_default_param_pattern_does_not_match_without_default(self, tmp_path):
+        """'lambda $X=5: $EXPR' does NOT match lambdas without defaults."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "f = lambda y: y * 2\n"
+            "g = lambda z: z\n"
+        )
+        matches = find_pattern("lambda $X=5: $EXPR", str(test_file))
+        assert len(matches) == 0
+
 
 # ── Feature 9: Dict Patterns with Literal String Keys (3.6) ──────────────────
 

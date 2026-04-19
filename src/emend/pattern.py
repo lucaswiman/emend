@@ -769,10 +769,22 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
                 metavar = metavar_map[p.arg]
                 if metavar.ellipsis:
                     param_patterns.append({"type": "ellipsis"})
+                    continue
+                if has_default:
+                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
                 else:
                     param_patterns.append({"type": "any"})
             else:
-                param_patterns.append({"type": "name", "value": p.arg})
+                if has_default:
+                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
+                    if dv_ir is None:
+                        return None
+                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
+                else:
+                    param_patterns.append({"type": "name", "value": p.arg})
         if args.vararg:
             if args.vararg.arg in metavar_map:
                 metavar = metavar_map[args.vararg.arg]
