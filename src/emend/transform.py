@@ -4118,21 +4118,15 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
 _CONTENT_REF_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\.content\}")
 
 
-def _extract_string_content_from_text(text: str) -> str | None:
+def _extract_string_content_from_text(text: str, ext: str = "py") -> str | None:
     """Extract the inner content of a string literal from source text.
 
     For a string like ``"MyClass"`` or ``'MyClass'`` returns ``MyClass``.
     Returns None for non-string text or complex strings that cannot be
     trivially unwrapped (f-strings, concatenated strings).
     """
-    text = text.strip()
-    try:
-        result = ast.literal_eval(text)
-        if isinstance(result, str):
-            return result
-    except (ValueError, SyntaxError):
-        pass
-    return None
+    from emend import emend_core as _rust
+    return _rust.parse_string_literal(text, ext)
 
 
 @dataclass
@@ -4873,31 +4867,21 @@ def copy_symbol(
 def _is_valid_replacement(code: str, language: str = "python") -> bool:
     """Verify if the given code string parses as valid syntax.
 
-    For Python, uses the stdlib ``ast`` module.  For other languages, attempts
-    a tree-sitter parse and checks that the tree has no ERROR nodes.  Falls
-    back to ``True`` (accept the replacement) if parsing is unavailable.
+    Uses tree-sitter via ``emend_core.validate_syntax``; accepts the
+    replacement if no tree-sitter grammar is available for the language.
     """
-    if language == "python":
-        try:
-            ast.parse(code, mode='eval')
-            return True
-        except SyntaxError:
-            try:
-                ast.parse(code, mode='exec')
-                return True
-            except SyntaxError:
-                return False
-    else:
-        # For non-Python languages, use tree-sitter validation via Rust
-        try:
-            from emend.language_registry import get_extensions
-            exts = get_extensions(language)
-            ext = exts[0] if exts else None
-            if ext:
-                return _rust.validate_syntax(code, ext)
-        except (AttributeError, Exception):
-            pass
-        # If no tree-sitter validation is available, accept the replacement
+    from emend import emend_core as _rust
+    from emend.language_registry import get_extensions
+    try:
+        exts = get_extensions(language)
+    except Exception:
+        exts = []
+    ext = exts[0] if exts else ("py" if language == "python" else None)
+    if ext is None:
+        return True
+    try:
+        return _rust.validate_syntax(code, ext)
+    except Exception:
         return True
 
 

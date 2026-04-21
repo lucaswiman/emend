@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 from emend.trace import _extract_identifiers
 from emend.rules_config import (
+    DeadCodeConfig,
     LEGACY_PATTERNS_PATH,
     load_rules_document,
     yaml_key,
@@ -52,21 +53,6 @@ class LintRule:
     # Can be a single string ("typescript"), a list (["python", "typescript"]),
     # or None (applies to all languages where the pattern parses).
     language: str | list[str] | None = None
-
-
-@dataclass
-class DeadCodeConfig:
-    """Configuration for the deadcode lint rule."""
-    enabled: bool = False
-    rule_name: str = "deadcode"
-    kind: str | None = None
-    include_private: bool = False
-    exclude_references_from: list[str] | None = None
-    strings_count_as_references: bool = True
-    message: str = "Symbol appears to be unused"
-    entry_point_decorators: list[str] | None = None
-    entry_point_names: list[str] | None = None
-    exclude_paths: list[str] | None = None
 
 
 @dataclass

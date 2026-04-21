@@ -819,7 +819,7 @@ def _sequence_clusters_from_seqs(
         for fp in fps:
             fp_to_idxs.setdefault(fp, []).append(idx)
 
-    from emend.rewrite_engine import UnionFind
+    from emend.union_find import UnionFind
     uf = UnionFind()
     for i in range(len(all_seqs)):
         uf.make_set(i)

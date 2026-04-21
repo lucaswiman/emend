@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -11,6 +12,27 @@ import yaml
 DEFAULT_RULES_PATH = Path(".emend/rules.yaml")
 LEGACY_PATTERNS_PATH = Path(".emend/patterns.yaml")
 LEGACY_POLICIES_PATH = Path(".emend/policies.yaml")
+
+
+@dataclass
+class DeadCodeConfig:
+    """Shared configuration for dead-code detection.
+
+    Used by both the lint engine (where ``enabled``/``rule_name``/``message``
+    control whether and how the ``deadcode`` rule runs) and the policy engine
+    (which only consults the entry-point and exclude-path fields; membership
+    in a ``Policy.checks`` list already answers "should this run").
+    """
+    enabled: bool = False
+    rule_name: str = "deadcode"
+    kind: str | None = None
+    include_private: bool = False
+    exclude_references_from: list[str] | None = None
+    strings_count_as_references: bool = True
+    message: str = "Symbol appears to be unused"
+    entry_point_decorators: list[str] | None = None
+    entry_point_names: list[str] | None = None
+    exclude_paths: list[str] | None = None
 
 
 def load_rules_document(
