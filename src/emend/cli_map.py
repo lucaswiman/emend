@@ -6,7 +6,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import app
+from emend.cli_base import JsonFlag, app
 from emend.component_selector import parse_extended_selector
 from emend.knowledge import (
     IdentifierMapping,
@@ -70,7 +70,7 @@ def map_add_cmd(
     evidence: Annotated[str, typer.Option("--evidence", help="Why this mapping exists.")] = "",
     source_kind: Annotated[str, typer.Option("--source-kind")] = "",
     target_kind: Annotated[str, typer.Option("--target-kind")] = "",
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Add a cross-service identifier mapping."""
     store = MappingStore(".")
@@ -101,7 +101,7 @@ def map_search_cmd(
     target_project: Annotated[Optional[str], typer.Option("--target-project")] = None,
     relationship: Annotated[Optional[str], typer.Option("--rel")] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Search identifier mappings (substring match)."""
 
@@ -126,7 +126,7 @@ def map_lookup_cmd(
     identifier: Annotated[str, typer.Argument(help="Identifier to look up (exact match).")],
     project: Annotated[Optional[str], typer.Option("--project")] = None,
     direction: Annotated[str, typer.Option("--direction", help="source, target, or both.")] = "both",
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Look up mappings for a specific identifier."""
     store = MappingStore(".")
@@ -170,7 +170,7 @@ def map_add_module_cmd(
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
     provenance: Annotated[str, typer.Option("--provenance")] = "manual",
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Register a module prefix -> repo/directory mapping.
 
@@ -200,7 +200,7 @@ def map_add_module_cmd(
 
 @map_app.command("list-modules")
 def map_list_modules_cmd(
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """List all module mappings."""
     store = MappingStore(".")
@@ -225,7 +225,7 @@ def map_update_module_cmd(
     branch: Annotated[str, typer.Option("--branch", help="Branch/tag for gh clone.")] = "",
     subpath: Annotated[str, typer.Option("--subpath", help="Subdirectory within repo.")] = "",
     fetch: Annotated[bool, typer.Option("--fetch", help="Force fetch the latest commits from the remote repo.")] = False,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Update an existing module mapping.
 
@@ -291,7 +291,7 @@ def map_rm_module_cmd(
 def map_resolve_cmd(
     selector: Annotated[str, typer.Argument(help="Selector or module to resolve (e.g. 'payments.models.Order' or 'payments::Order').")],
     location: Annotated[bool, typer.Option("--location", "-l", help="Resolve to file path and line number instead of a selector.")] = False,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonFlag = False,
 ):
     """Unified resolution for modules and selectors.
 

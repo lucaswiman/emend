@@ -6,6 +6,7 @@ from typing import Annotated, Optional
 import typer
 
 from emend.cli_base import (
+    JsonFlag,
     _reject_file_glob,
     _state,
     analyze_app,
@@ -123,7 +124,7 @@ def trace_cmd(
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml")] = None,
     label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific trace label")] = None,
     trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
@@ -171,7 +172,7 @@ def dsl_debug_cmd(
     dsl_type: Annotated[Optional[str], typer.Option("--type", help="DSL type to detect (sql, css, html)")] = None,
     orm: Annotated[str, typer.Option("--orm", help="ORM framework (sqlalchemy, django)")] = "sqlalchemy",
     resolve: Annotated[bool, typer.Option("--resolve", help="Resolve cross-language links")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
 ):
     """[Debug] Detect and analyze embedded DSL regions (SQL, CSS, HTML).
@@ -248,7 +249,7 @@ def refs_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
     exclude_definition: Annotated[bool, typer.Option("--exclude-definition", help="Exclude the definition itself")] = False,
     exclude_imports: Annotated[bool, typer.Option("--exclude-imports", help="Exclude import statements")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     writes_only: Annotated[bool, typer.Option("--writes-only", help="Only show write (assignment) references")] = False,
     reads_only: Annotated[bool, typer.Option("--reads-only", help="Only show read (load) references")] = False,
     calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (not mere references)")] = False,
@@ -417,7 +418,7 @@ def dead_code_cmd(
     path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
     include_private: Annotated[bool, typer.Option("--include-private", help="Include _private symbols")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     exclude_references_from: Annotated[
         Optional[list[str]],
         typer.Option("--exclude-references-from", help="Directories to ignore when scanning for references (e.g. tests/)")
@@ -557,7 +558,7 @@ def impact_cmd(
     selector: Annotated[Optional[str], typer.Argument(help="Selector (file.py::Symbol)")] = None,
     diff: Annotated[Optional[str], typer.Option("--diff", help="Git diff spec (e.g. HEAD, abc..def)")] = None,
     output: Annotated[str, typer.Option("--output", "-o", help="Output mode: symbols, tests, graph")] = "symbols",
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Maximum BFS depth for transitive closure")] = 10,
 ):
@@ -666,7 +667,7 @@ def types_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Filter by binding kind: definition, reference, import, diagnostic")] = None,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     engine: Annotated[str, typer.Option("--engine", help="Type inference engine: pyrefly, pyright, ty, typescript, rust-analyzer, auto")] = "auto",
     definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
 ):
@@ -780,7 +781,7 @@ def facts_cmd(
     label: Annotated[Optional[str], typer.Option("--label", help="Trace label filter (trace_flows)")] = None,
     transitive: Annotated[bool, typer.Option("--transitive", help="Compute transitive closure (calls)")] = False,
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max depth for transitive queries")] = 10,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     limit: Annotated[int, typer.Option("--limit", help="Max results")] = 100,
 ):
     """Query the relational fact graph for code invariants.
@@ -1015,7 +1016,7 @@ def dupes_cmd(
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of clusters to show")] = 50,
     min_lines: Annotated[int, typer.Option("--min-lines", help="Minimum lines for a finding")] = 3,
     min_score: Annotated[float, typer.Option("--min-score", help="Minimum score threshold")] = 0.0,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
     cross_file: Annotated[Optional[bool], typer.Option("--cross-file/--intra-file", help="Filter by cross-file or intra-file")] = None,
 ):
     """Find duplicate code via AST canonicalization.
