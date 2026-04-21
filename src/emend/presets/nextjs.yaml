@@ -1,0 +1,33 @@
+# Next.js trace preset.
+labels:
+  - user_input
+
+sources:
+  # Bracket notation for dynamic key access (standard JS/TS pattern)
+  - {pattern: "params[$X]", label: user_input}
+  - {pattern: "searchParams[$X]", label: user_input}
+  - {pattern: "searchParams.get($X)", label: user_input}
+  - {pattern: "cookies()[$X]", label: user_input}
+  - {pattern: "cookies().get($X)", label: user_input}
+  - {pattern: "headers()[$X]", label: user_input}
+  - {pattern: "headers().get($X)", label: user_input}
+  # Pages Router (req object)
+  - {pattern: "req.query[$X]", label: user_input}
+  - {pattern: "req.body[$X]", label: user_input}
+  - {pattern: "req.body", label: user_input}
+
+sinks:
+  # All sinks labeled user_input so sources flow directly to them
+  - pattern: "dangerouslySetInnerHTML"
+    label: user_input
+    message: "XSS: user input in dangerouslySetInnerHTML"
+  - pattern: "redirect($X)"
+    label: user_input
+    message: "Open redirect: user input in redirect()"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection: user input in eval()"
+
+sanitizers:
+  - {pattern: "encodeURIComponent($X)", label: user_input}
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input}

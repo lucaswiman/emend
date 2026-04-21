@@ -324,11 +324,10 @@ def search(
 
 
 # ---------------------------------------------------------------------------
-# replace
+# replace (internal helper used by transform dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def replace(
     pattern: Annotated[str, Field(description="Pattern to find (e.g. 'print($X)').")],
     replacement: Annotated[str, Field(description="Replacement pattern using same $X captures (e.g. 'logger.info($X)').")],
@@ -380,11 +379,10 @@ def replace(
 
 
 # ---------------------------------------------------------------------------
-# modify (unified edit + add + remove)
+# modify (internal helper used by transform dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def modify(
     selector: Annotated[str, Field(description="Symbol selector with component (e.g. 'file.py::func[returns]', 'file.py::func[params]', 'file.py::Class[bases]').")],
     value: Annotated[str | None, Field(description="New value. Required for 'set' and 'add' modes. Omit for 'remove'.")] = None,
@@ -421,11 +419,10 @@ def modify(
 
 
 # ---------------------------------------------------------------------------
-# refs (find references)
+# refs (internal helper used by references dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def refs(
     selector: Annotated[str, Field(description="Symbol selector (e.g. 'file.py::func_name').")],
     exclude_definition: Annotated[bool, Field(description="Exclude the definition itself from results.")] = False,
@@ -466,11 +463,10 @@ def refs(
 
 
 # ---------------------------------------------------------------------------
-# rename
+# rename (internal helper used by transform dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def rename(
     selector: Annotated[str, Field(description="Symbol selector (file.py::name) or module path (file.py). Uses :: for symbols, bare path for modules.")],
     to: Annotated[str, Field(description="New name for the symbol or module.")],
@@ -510,11 +506,10 @@ def rename(
 
 
 # ---------------------------------------------------------------------------
-# move
+# move (internal helper used by transform dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def move(
     selector: Annotated[str, Field(description="Symbol selector (file.py::name) or module path (file.py). Uses :: for symbols, bare path for modules.")],
     destination: Annotated[str, Field(description="Destination file or package.")],
@@ -561,7 +556,7 @@ def move(
 
 
 # ---------------------------------------------------------------------------
-# graph
+# graph (internal helper used by analyze dispatcher)
 # ---------------------------------------------------------------------------
 
 
@@ -651,7 +646,6 @@ def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | No
         return "\n".join(f"{c} -> {e}" for c, e in edges) or "(no edges found)"
 
 
-@mcp_app.tool()
 def graph(
     file_path: Annotated[str | None, Field(description="Source file to analyze. Produces a full call graph for all functions in the file.")] = None,
     symbol: Annotated[str | None, Field(description="Symbol selector (e.g. 'file.py::func' or 'Class.method'). When given, direction/transitive/depth apply.")] = None,
@@ -675,11 +669,10 @@ def graph(
 
 
 # ---------------------------------------------------------------------------
-# deadcode
+# deadcode (internal helper used by analyze dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def deadcode(
     path: Annotated[str, Field(description="File glob or directory to scan (e.g. 'src/**/*.py').")] = ".",
     kind: Annotated[str | None, Field(description="Symbol kind filter: function, class, method, variable.")] = None,
@@ -769,11 +762,10 @@ def deadcode(
 
 
 # ---------------------------------------------------------------------------
-# lint
+# lint (deprecated; see check dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def lint(
     path: Annotated[str, Field(description="File or directory to lint.")],
     config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml config file.")] = None,
@@ -809,11 +801,10 @@ def lint(
 
 
 # ---------------------------------------------------------------------------
-# impact
+# impact (internal helper used by analyze dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def impact(
     selector: Annotated[str | None, Field(description="Symbol selector (file.py::Symbol). Provide this or diff.")] = None,
     diff: Annotated[str | None, Field(description="Git diff spec (e.g. HEAD, abc..def).")] = None,
@@ -854,11 +845,10 @@ def impact(
 
 
 # ---------------------------------------------------------------------------
-# semantic_context — situational awareness for code agents
+# semantic_context (internal helper used by analyze dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def semantic_context(
     selector: Annotated[str, Field(description=(
         "Symbol selector (e.g. 'file.py::func_name', 'file.py::Class.method'). "
@@ -929,11 +919,11 @@ def semantic_context(
 
 
 # ---------------------------------------------------------------------------
-# trace (data-flow analysis)
+# trace (internal helper used by analyze dispatcher; preserved as Python API
+# because tests import it directly)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def trace_analysis(
     path: Annotated[str, Field(description="File or directory to analyze.")],
     from_pattern: Annotated[str | None, Field(description=(
@@ -1105,11 +1095,10 @@ def facts_query(
 
 
 # ---------------------------------------------------------------------------
-# policy
+# policy (deprecated; see check dispatcher)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def check_policies(
     path: Annotated[str, Field(description="File or directory to check.")],
     config: Annotated[str | None, Field(description="Path to rules.yaml or legacy policies.yaml.")] = None,
@@ -1145,11 +1134,11 @@ def check_policies(
 
 
 # ---------------------------------------------------------------------------
-# Mappings (identifier + module)
+# Mappings (internal helpers used by mappings dispatcher; preserved as Python
+# API because tests import them directly)
 # ---------------------------------------------------------------------------
 
 
-@mcp_app.tool()
 def map_read(
     kind: Annotated[str, Field(description="What to read: 'mapping' or 'module'.")] = "mapping",
     query: Annotated[str, Field(description="Search query (substring match) or exact identifier/module name. Omit to list all.")] = "",
@@ -1215,7 +1204,6 @@ def map_read(
     return json.dumps({"error": f"Unknown kind '{kind}'. Use: mapping, module."})
 
 
-@mcp_app.tool()
 def map_write(
     kind: Annotated[str, Field(description="Entry type: 'mapping' or 'module'.")],
     op: Annotated[str, Field(description="Operation: 'add' or 'delete'.")],
@@ -1439,7 +1427,6 @@ def duplicates_analysis(
     return format_duplicates_json(clusters)
 
 
-@mcp_app.tool()
 def check_duplicates(
     file_path: Annotated[str, Field(description="File to check for duplication (usually the just-written file in a post-write hook).")],
     project: Annotated[str | None, Field(description="Project root to scan against. Defaults to CWD.")] = None,
@@ -1895,8 +1882,8 @@ PROFILES: dict[str, set[str]] = {
     "expert": set(_CORE_TOOLS) | {"mappings"},
 }
 
-# Snapshot all registered tools (including legacy endpoints) so profiles can
-# switch losslessly at runtime.
+# Snapshot all registered MCP tools so profiles can switch losslessly at
+# runtime (e.g. expert profile re-adds the mappings tool after core pruning).
 _ALL_TOOLS: dict[str, Any] = {
     t.name: t for t in mcp_app._tool_manager.list_tools()
 }

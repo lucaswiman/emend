@@ -3508,14 +3508,6 @@ def _files_importing_module(project_root: str, module_dotted: str, language: str
         return None
 
 
-def prefilter_files_structural(files: list[str], name: str) -> list[str]:
-    """Structural pre-filter: use tree-sitter to find files containing
-    an actual identifier matching name (not just substring in strings/comments).
-    """
-    matches = _rust.find_name_in_files(files, name)
-    return list({m.file for m in matches})
-
-
 def visit_project_ts(
     name_hint: str,
     project_path: str,
@@ -3538,9 +3530,12 @@ def visit_project_ts(
                         if f in candidate_files
                         or (target_file and str(Path(f).resolve()) == target_file)]
 
-    # Structural pre-filter
+    # Structural pre-filter: use tree-sitter to find files containing
+    # an actual identifier matching name_hint (not just substring matches
+    # in strings/comments).
     if name_hint:
-        source_files = prefilter_files_structural(source_files, name_hint)
+        _name_matches = _rust.find_name_in_files(source_files, name_hint)
+        source_files = list({m.file for m in _name_matches})
         if target_file and target_file not in source_files:
             source_files.append(target_file)
 
@@ -4177,7 +4172,8 @@ def _filter_matches_by_import(
     for match in matches:
         # Extract the root name from the matched node
         # For simplicity, we use the first identifier in the matched text
-        root_name = _extract_root_name(match.node_text or "")
+        _root_match = re.search(r"[a-zA-Z_]\w*", match.node_text or "")
+        root_name = _root_match.group(0) if _root_match else None
         if not root_name:
             continue
 
@@ -4196,12 +4192,6 @@ def _filter_matches_by_import(
             filtered.append(match)
 
     return filtered
-
-
-def _extract_root_name(text: str) -> str | None:
-    """Extract the first identifier from a code fragment."""
-    match = re.search(r"[a-zA-Z_]\w*", text)
-    return match.group(0) if match else None
 
 
 def _filter_matches_by_scope_local(
@@ -4233,7 +4223,8 @@ def _filter_matches_by_scope_local(
 
     filtered = []
     for match in matches:
-        root_name = _extract_root_name(match.node_text or "")
+        _root_match = re.search(r"[a-zA-Z_]\w*", match.node_text or "")
+        root_name = _root_match.group(0) if _root_match else None
         if not root_name:
             continue
 

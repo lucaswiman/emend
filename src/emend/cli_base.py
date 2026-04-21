@@ -2,6 +2,7 @@ import glob as glob_mod
 import logging
 import re as _re_module
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional
@@ -10,6 +11,28 @@ import click
 import typer
 
 from emend.component_selector import parse_extended_selector
+
+
+@contextmanager
+def cli_error_handler():
+    """Standard CLI error handling: FileNotFoundError -> exit 3, ValueError -> exit 2, Exception -> exit 1.
+
+    `typer.Exit` is re-raised unchanged so commands can signal nonzero exit codes
+    (e.g. lint violations) without being treated as a generic failure.
+    """
+    try:
+        yield
+    except typer.Exit:
+        raise
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(3)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise typer.Exit(2)
+    except Exception as e:
+        print(f"Error: {e!r}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 def _maybe_create_oracle(type_engine: str | None):
@@ -107,13 +130,6 @@ def resolve_file_scopes(
 
 
 _state: dict[str, str] = {"language": "python"}
-
-
-def _is_source_file_query(query: str) -> bool:
-    """Return True if *query* ends with a known source file extension."""
-    from emend.language_registry import is_source_file
-
-    return is_source_file(query)
 
 
 @dataclass
@@ -282,13 +298,13 @@ __all__ = [
     "QueryShape",
     "_LegacyEditGroup",
     "_app_callback",
-    "_is_source_file_query",
     "_maybe_create_oracle",
     "_reject_file_glob",
     "_state",
     "_version_callback",
     "analyze_app",
     "app",
+    "cli_error_handler",
     "detect_query_shape",
     "edit_app",
     "parse_where_clause",

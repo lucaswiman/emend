@@ -1,0 +1,50 @@
+# Express.js (Node.js/TypeScript) trace preset.
+labels:
+  - user_input
+  - html_output
+
+sources:
+  # Bracket notation (standard TypeScript/JavaScript access pattern)
+  - {pattern: "req.params[$X]", label: user_input}
+  - {pattern: "req.query[$X]", label: user_input}
+  - {pattern: "req.body[$X]", label: user_input}
+  - {pattern: "req.headers[$X]", label: user_input}
+  - {pattern: "req.cookies[$X]", label: user_input}
+  # Whole-object access
+  - {pattern: "req.body", label: user_input}
+  # Method-based access (e.g. via get() helpers)
+  - {pattern: "req.query.get($X)", label: user_input}
+  - {pattern: "req.params.get($X)", label: user_input}
+  - {pattern: "req.headers.get($X)", label: user_input}
+
+sinks:
+  # XSS sinks -- labeled user_input so sources flow directly to them
+  - pattern: "res.send($X)"
+    label: user_input
+    message: "XSS: user input in res.send()"
+  - pattern: "res.write($X)"
+    label: user_input
+    message: "XSS: user input in res.write()"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection: user input in eval()"
+  # Assignment form captures the RHS value (the tainted variable)
+  - pattern: "$X.innerHTML = $Y"
+    label: user_input
+    message: "XSS: user input assigned to innerHTML"
+  - pattern: "document.write($X)"
+    label: user_input
+    message: "XSS: user input in document.write()"
+  - pattern: "child_process.exec($X)"
+    label: user_input
+    message: "Command injection: user input in child_process.exec()"
+  - pattern: "exec($X)"
+    label: user_input
+    message: "Command injection: user input in exec()"
+
+sanitizers:
+  - {pattern: "escape($X)", label: user_input}
+  - {pattern: "sanitize($X)", label: user_input}
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input}
+  - {pattern: "validator.escape($X)", label: user_input}
+  - {pattern: "encodeURIComponent($X)", label: user_input}

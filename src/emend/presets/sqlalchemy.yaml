@@ -1,0 +1,28 @@
+# SQLAlchemy trace preset.
+#
+# This preset has no sources -- it is meant to be composed with a
+# framework preset (e.g. Flask or Django) that provides user-input sources.
+labels:
+  - user_input
+
+sources: []
+
+sinks:
+  - pattern: "text($X)"
+    label: user_input
+    message: "SQL injection: user input in text()"
+  - pattern: "TextClause($X)"
+    label: user_input
+    message: "SQL injection: user input in TextClause()"
+  - pattern: "session.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in session.execute()"
+  - pattern: "engine.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in engine.execute()"
+  - pattern: "connection.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in connection.execute()"
+
+sanitizers:
+  - {pattern: "bindparam($X)", label: user_input}

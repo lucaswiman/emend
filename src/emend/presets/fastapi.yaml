@@ -1,0 +1,51 @@
+# FastAPI trace preset.
+#
+# FastAPI's dependency injection system means sources are function parameters
+# annotated with Query/Path/Body etc. This preset covers common sinks and
+# sanitizers. For best results, use with interprocedural analysis.
+labels:
+  - user_input
+  - file_path
+
+# FastAPI sources: common parameter patterns accessible as variables
+# from dependency-injected parameters
+sources:
+  - {pattern: "Query(default=$X)", label: user_input}
+  - {pattern: "Body(default=$X)", label: user_input}
+  - {pattern: "Form(default=$X)", label: user_input}
+  - {pattern: "Header(default=$X)", label: user_input}
+  - {pattern: "Cookie(default=$X)", label: user_input}
+  - {pattern: "File(default=$X)", label: file_path}
+
+sinks:
+  - pattern: "cursor.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in cursor.execute()"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection: user input in eval()"
+  - pattern: "exec($X)"
+    label: user_input
+    message: "Code injection: user input in exec()"
+  - pattern: "os.system($X)"
+    label: user_input
+    message: "Command injection: user input in os.system()"
+  - pattern: "subprocess.call($X)"
+    label: user_input
+    message: "Command injection: user input in subprocess.call()"
+  - pattern: "subprocess.run($X)"
+    label: user_input
+    message: "Command injection: user input in subprocess.run()"
+  - pattern: "open($X)"
+    label: file_path
+    message: "Path traversal: file path in open()"
+  - pattern: "send_file($X)"
+    label: file_path
+    message: "Path traversal: file path in send_file()"
+
+sanitizers:
+  - {pattern: "escape($X)", label: user_input}
+  - {pattern: "bleach.clean($X)", label: user_input}
+  - {pattern: "secure_filename($X)", label: file_path}
+  - {pattern: "int($X)", label: user_input}
+  - {pattern: "float($X)", label: user_input}

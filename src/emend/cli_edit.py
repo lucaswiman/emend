@@ -11,6 +11,7 @@ from emend.cli_base import (
     _reject_file_glob,
     _state,
     app,
+    cli_error_handler,
     edit_app,
     parse_where_clause,
     resolve_file_scopes,
@@ -75,7 +76,7 @@ def edit_set_cmd(
         # Edit return type of all functions returning str (annotation or inferred)
         emend edit '*.py::*[returns]' 'str | None' --returns str --type-engine auto --apply
     """
-    try:
+    with cli_error_handler():
         # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
         if type_engine is not None or returns:
@@ -90,15 +91,6 @@ def edit_set_cmd(
             type_oracle=oracle,
         )
         print(result, end='')
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 @app.command("rm", hidden=True)
@@ -126,18 +118,9 @@ def remove_cmd(
         # Remove a base class
         emend rm models.py::User[bases][OldMixin] --apply
     """
-    try:
+    with cli_error_handler():
         result = cmd_edit(selector_str=selector, rm=True, apply=apply)
         print(result, end='')
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -182,7 +165,7 @@ def delete_cmd(
         # JSON output for tooling
         emend delete models.py::LegacyUser --cascade --json
     """
-    try:
+    with cli_error_handler():
         sel = parse_extended_selector(selector)
         plan = safe_delete(
             sel, cascade=cascade, project_path=project, apply=apply,
@@ -215,16 +198,6 @@ def delete_cmd(
                 print()
                 for diff in plan.diffs.values():
                     print(diff, end='')
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -287,7 +260,7 @@ def add(
         # Add parameter to all functions returning Connection (annotation or inferred)
         emend add '*.py::*[params]' 'timeout: int = 30' --returns Connection --type-engine auto --apply
     """
-    try:
+    with cli_error_handler():
         # Create TypeOracle when --type-engine or --returns is specified
         oracle = None
         if type_engine is not None or returns:
@@ -304,15 +277,6 @@ def add(
             type_oracle=oracle,
         )
         print(result, end='')
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -364,7 +328,7 @@ def replace_cmd(
         emend replace '$X = $Y' '$X: int = $Y' src/*.py --where 'not class' --apply
         emend replace '$X:type[Connection].close()' '$X.shutdown()' src/ --type-engine auto
     """
-    try:
+    with cli_error_handler():
         where_params = parse_where_clause(where or [])
         scope = where_params.get("scope")
         inside = within or where_params.get("inside")
@@ -442,15 +406,6 @@ def replace_cmd(
 
         # Print combined diff
         print("".join(all_diffs), end='')
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -494,7 +449,7 @@ def rename_cmd(
         emend rename file.py::func --to new_func --docs --apply
         emend rename old_utils.py --to new_utils --apply
     """
-    try:
+    with cli_error_handler():
         if '::' in selector:
             # Symbol rename mode
             _reject_file_glob(selector, "rename")
@@ -534,15 +489,6 @@ def rename_cmd(
                         if diff:
                             print(diff)
                 print("\nRun with --apply to apply these changes.")
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -572,7 +518,7 @@ def move_cmd(
         emend mv file.py::MyClass dest.py --apply
         emend mv utils.py pkg --project . --apply
     """
-    try:
+    with cli_error_handler():
         if '::' in selector:
             # Symbol move mode
             _reject_file_glob(selector, "move")
@@ -612,15 +558,6 @@ def move_cmd(
                         if diff:
                             print(diff)
                 print("\nRun with --apply to apply these changes.")
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -649,7 +586,7 @@ def batch_cmd(
     """
     import json as json_mod
 
-    try:
+    with cli_error_handler():
         ops_path = Path(ops_file)
         if not ops_path.exists():
             raise FileNotFoundError(f"Operations file not found: {ops_file}")
@@ -802,16 +739,6 @@ def batch_cmd(
             if not apply:
                 print("\n\nRun with --apply to write changes.")
             print()
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
