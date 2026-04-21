@@ -166,6 +166,13 @@ After installing, run `:helptags ALL` to index this help file.
                         Without an argument, uses the symbol under the cursor.
                         Results can include both impacted symbols and tests.
 
+                                                           *:EmendCheckDupes*
+:EmendCheckDupes        Check whether the current buffer duplicates code
+                        elsewhere in the project.  Runs the AST duplicate
+                        detector and reports any cluster that includes the
+                        current file (exact subtree duplicates and
+                        sibling-sequence duplicates).
+
                                                                 *:EmendStart*
 :EmendStart             Start the emend editor-server process.  This happens
                         automatically when a Python file is opened (see

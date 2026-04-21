@@ -1975,6 +1975,64 @@ class EditorSearchEngine:
             query=f"impact of {qualified_name}",
         )
 
+    def check_duplicates(
+        self,
+        file: str,
+        mode: str = "all",
+        limit: int = 10,
+        min_lines: int = 5,
+        min_score: float = 0.0,
+    ) -> SearchResult:
+        """Check if *file* duplicates code elsewhere in the project.
+
+        Returns a SearchResult where each item is a duplicate cluster summarized
+        as ``(kind, score, primary_location, other_file:line, members_json)``.
+        """
+        from emend.duplicate import query_duplicates
+
+        t0 = time.monotonic()
+        clusters = query_duplicates(
+            project_path=str(self.project_root),
+            mode=mode,
+            limit=limit,
+            min_lines=min_lines,
+            min_score=min_score,
+            involves_file=file,
+        )
+
+        items: list[dict] = []
+        for cluster in clusters:
+            if not cluster.members:
+                continue
+            primary = cluster.members[0]
+            items.append({
+                "name": f"{cluster.kind}:{cluster.explanation}",
+                "kind": "duplicate",
+                "file_path": primary.file,
+                "line": primary.start_line,
+                "end_line": primary.end_line,
+                "score": cluster.score,
+                "members": [
+                    {
+                        "file": m.file,
+                        "symbol": m.symbol,
+                        "start_line": m.start_line,
+                        "end_line": m.end_line,
+                        "node_count": m.node_count,
+                        "stmt_count": m.stmt_count,
+                    }
+                    for m in cluster.members
+                ],
+            })
+
+        elapsed = round((time.monotonic() - t0) * 1000, 2)
+        return SearchResult(
+            items=items,
+            elapsed_ms=elapsed,
+            mode="check_duplicates",
+            query=f"dupes in {file}",
+        )
+
     def types_at_cursor(self, file: str, line: int = 0, col: int = 0) -> SearchResult:
         """Return type information for the symbol at cursor position."""
         t0 = time.monotonic()
@@ -2730,6 +2788,14 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             qualified_name=params.get("qualified_name", ""),
             file=params.get("file", ""),
             limit=int(params.get("limit", 50)),
+        ).to_dict()
+    elif method == "check_duplicates":
+        return engine.check_duplicates(
+            file=params.get("file", ""),
+            mode=params.get("mode", "all"),
+            limit=int(params.get("limit", 10)),
+            min_lines=int(params.get("min_lines", 5)),
+            min_score=float(params.get("min_score", 0.0)),
         ).to_dict()
     elif method == "buffer_open":
         fp = params.pop("file", "")

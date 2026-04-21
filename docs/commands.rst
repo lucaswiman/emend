@@ -169,6 +169,8 @@ Subcommands:
 +----------------+---------------------------------------------------+
 | ``dsl``        | Debug embedded DSL detection                      |
 +----------------+---------------------------------------------------+
+| ``dupes``      | Find duplicate code via AST canonicalization      |
++----------------+---------------------------------------------------+
 
 Examples:
 
@@ -182,6 +184,45 @@ Examples:
    emend analyze trace src/ --preset flask --interprocedural
    emend analyze facts --type references --symbol package.module.func --json
    emend analyze cfg src/module.py --format json
+   emend analyze dupes src/                                   # scan whole tree
+   emend analyze dupes --check-file src/emend/foo.py --json   # post-write hook
+
+``analyze dupes`` detects exact structural duplicates (alpha-renamed AST
+subtrees) and sibling-sequence duplicates (shared statement runs across
+functions). Useful flags:
+
+- ``--mode exact|sequence|all`` -- which detector(s) to run.
+- ``--file PATH`` -- restrict the scan to one file or directory (intra-scope only).
+- ``--check-file PATH`` -- scan the whole project and report only clusters with at
+  least one member in ``PATH``. Designed for post-write hooks; returns exit
+  code 0 and empty JSON (``[]``) when nothing is found.
+- ``--min-lines N`` / ``--min-score S`` -- tighten the signal/noise floor.
+- ``--json`` -- machine-readable output with line ranges, scores, and members.
+
+Post-write hook example (Claude Code ``settings.json``): run the duplicate
+check after every successful ``Edit``/``Write`` and surface non-trivial
+findings back to the model.
+
+.. code-block:: json
+
+   {
+     "hooks": {
+       "PostToolUse": [
+         {
+           "matcher": "Edit|Write|MultiEdit",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "emend analyze dupes --check-file \"$CLAUDE_TOOL_FILE_PATH\" --min-score 100 --limit 5"
+             }
+           ]
+         }
+       ]
+     }
+   }
+
+The equivalent MCP tool ``check_duplicates(file_path=..., project=...)``
+can be invoked by the model directly without a shell hook.
 
 
 tool

@@ -309,6 +309,21 @@ class TestImpact:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Duplicate check
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDuplicates:
+    def test_check_duplicates_mode(self, engine):
+        eng, proj = engine
+        result = _dispatch(eng, "check_duplicates", {
+            "file": str(proj / "app.py"),
+        })
+        assert result["mode"] == "check_duplicates"
+        assert isinstance(result["items"], list)
+
+
+# ---------------------------------------------------------------------------
 # Tests: Incremental search / background reindex
 # ---------------------------------------------------------------------------
 

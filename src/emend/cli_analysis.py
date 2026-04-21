@@ -1058,6 +1058,7 @@ def dupes_cmd(
     path: Annotated[str, typer.Argument(help="Project root directory")] = ".",
     mode: Annotated[str, typer.Option("--mode", help="Detection mode: exact, sequence, or all")] = "all",
     file: Annotated[Optional[str], typer.Option("--file", help="Restrict to a specific file")] = None,
+    check_file: Annotated[Optional[str], typer.Option("--check-file", help="Scan the full project and report only duplicates involving this file (for post-write hooks)")] = None,
     symbol: Annotated[Optional[str], typer.Option("--symbol", help="Restrict to a specific symbol")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of clusters to show")] = 50,
     min_lines: Annotated[int, typer.Option("--min-lines", help="Minimum lines for a finding")] = 3,
@@ -1075,8 +1076,13 @@ def dupes_cmd(
         emend analyze dupes src/ --mode exact --min-lines 5
         emend analyze dupes --json --limit 20
         emend analyze dupes --file src/emend/transform.py
+        emend analyze dupes --check-file src/emend/foo.py  # post-write hook
     """
-    from emend.duplicate import query_duplicates, format_duplicates_text, format_duplicates_json
+    from emend.duplicate import (
+        format_duplicates_json,
+        format_duplicates_text,
+        query_duplicates,
+    )
 
     clusters = query_duplicates(
         project_path=path,
@@ -1087,6 +1093,7 @@ def dupes_cmd(
         min_lines=min_lines,
         min_score=min_score,
         cross_file=cross_file,
+        involves_file=check_file,
     )
 
     if json_output:
