@@ -13,6 +13,14 @@ import typer
 from emend.component_selector import parse_extended_selector
 
 
+# Shared Typer flag type aliases. Using these keeps CLI signatures short and
+# gives the same flag identical help text across commands. Commands that need
+# a short option (e.g. ``-a``) or distinct wording continue to declare
+# ``typer.Option`` inline.
+ApplyFlag = Annotated[bool, typer.Option("--apply", help="Apply changes (default is dry-run)")]
+JsonFlag = Annotated[bool, typer.Option("--json", help="Output as JSON")]
+
+
 @contextmanager
 def cli_error_handler():
     """Standard CLI error handling: FileNotFoundError -> exit 3, ValueError -> exit 2, Exception -> exit 1.
@@ -295,6 +303,8 @@ def _app_callback(
 
 
 __all__ = [
+    "ApplyFlag",
+    "JsonFlag",
     "QueryShape",
     "_LegacyEditGroup",
     "_app_callback",

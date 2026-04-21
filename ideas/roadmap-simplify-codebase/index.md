@@ -26,23 +26,24 @@ The pre-implementation audit numbers should be treated as upper bounds.
 
 ## Phase C — decisions recorded (2026-04-21)
 
-- [ ] C1. `rewrite_engine.py` — **decision: keep, mark experimental; extract `UnionFind` to its own module.** Module is 643 lines with 23 real tests, zero xfails, recent bug-fix activity (commits #152, #164). Hidden CLI (`saturate`). Only external dep is `duplicate.py` using `UnionFind`. Action: extract `UnionFind` to `src/emend/union_find.py`; add experimental docstring to `rewrite_engine.py` and the `saturate` command.
+- [x] C1. `rewrite_engine.py` — **decision: keep, mark experimental; extract `UnionFind` to its own module.** Module is 643 lines with 23 real tests, zero xfails, recent bug-fix activity (commits #152, #164). Hidden CLI (`saturate`). Only external dep is `duplicate.py` using `UnionFind`. Action: extract `UnionFind` to `src/emend/union_find.py`; add experimental docstring to `rewrite_engine.py` and the `saturate` command. **Done in commit 8d8a7fc (#190).**
 - [x] ~~C2. Merge `flow_ir.py` adapter layer~~ — **marked invalid.** Not pure indirection: 422 lines = ~30% converters + a 188-line `_execute_via_datalog()` that resolves source/sink/sanitizer patterns via `LocationResolver`, builds Datalog tuples, and falls back to the Python engine on failure. Collapsing would duplicate the bridge in `lint.py` and `policy.py`. 12 dedicated tests in `test_flow_ir.py` directly exercise the IR.
-- [ ] C3. Unify `DeadCodeCheck` / `DeadCodeConfig` — **decision: unify.** Both are config dataclasses that feed the same `find_dead_code()` in `transform.py:6544`. Pure config-level duplication. Flow-rule engines (lint's `_check_flow_rule` vs `flow_ir.execute_flow_spec`) stay separate — they take genuinely different paths (lint drives `--fix`; policy drives Datalog witness traces).
+- [x] C3. Unify `DeadCodeCheck` / `DeadCodeConfig` — **decision: unify.** Both are config dataclasses that feed the same `find_dead_code()` in `transform.py:6544`. Pure config-level duplication. Flow-rule engines (lint's `_check_flow_rule` vs `flow_ir.execute_flow_spec`) stay separate — they take genuinely different paths (lint drives `--fix`; policy drives Datalog witness traces). **Done in commit 8d8a7fc (#190): `DeadCodeConfig` lives in `rules_config.py`; `policy.DeadCodeCheck` is an alias.**
 - [x] ~~C4. `language_plugins.py` plugin protocol~~ — **marked invalid.** Protocol is NOT Python-only: `languages/rust/plugin.py` and `languages/typescript/plugin.py` actively use `TreeSitterImportHandler`, `DocCommentHandler`, `TreeSitterPatternCompiler` stubs. Inlining would only remove `python_plugin.py` (288 lines) while leaving the 716-line `language_plugins.py` intact because 60% is reusable multi-language stubs.
 - [x] ~~C5. Extract interprocedural trace~~ — **deferred (no decision requested this session).**
 
 ## Phase D — `CommonFlags` Typer dataclass (deferred from A2)
 
-- [ ] D1. Consolidate `--apply` / `--json` / `--output` into a shared `CommonFlags` dataclass across CLI modules (~50)
+- [x] D1. Consolidate `--apply` / `--json` / `--output` into a shared `CommonFlags` dataclass across CLI modules (~50)
   - Risk: medium — touches 15+ command signatures.
+  - **Done**: added `ApplyFlag`/`JsonFlag` `Annotated` type aliases in `cli_base.py` and applied them across `cli_edit.py`, `cli_analysis.py`, `cli_checks.py`, `cli_map.py` (20 call sites). `--output` values diverge too much across the two remaining commands (`impact --output symbols|tests|graph` vs `grep --output code|...`) to share a type alias. Commands with a `-a` short option or custom help (e.g. `cp --apply -a`, `saturate --apply -a`) keep inline declarations.
 
 ## Phase E — Rust extension capability gaps (blocks further design-philosophy cleanup)
 
 Phase B4 had to leave several `ast`/regex usages in `transform.py` because `emend_core` doesn't yet expose the needed APIs.
 
-- [ ] E1. `emend_core.parse_string_literal(text, ext) -> str` — unescape a Python/JSON/etc. string-literal source fragment to its value. Half already exists (`rust/src/pattern.rs:572 extract_string_content` — private). Just needs PyO3 wrapper. **Approved this session.**
-- [ ] E2. `emend_core.validate_syntax(code, ext, *, mode='expression'|'statement')` — currently called optimistically but the function isn't actually exposed. Needed to delete `_is_valid_replacement`'s `ast.parse` fallback. **Approved this session.**
+- [x] E1. `emend_core.parse_string_literal(text, ext) -> str` — unescape a Python/JSON/etc. string-literal source fragment to its value. Half already exists (`rust/src/pattern.rs:572 extract_string_content` — private). Just needs PyO3 wrapper. **Approved this session. Done in commit 8d8a7fc (#190): `transform._extract_string_content_from_text` now delegates to `emend_core.parse_string_literal`.**
+- [x] E2. `emend_core.validate_syntax(code, ext, *, mode='expression'|'statement')` — currently called optimistically but the function isn't actually exposed. Needed to delete `_is_valid_replacement`'s `ast.parse` fallback. **Approved this session. Done in commit 8d8a7fc (#190): `transform._is_valid_replacement` delegates to `emend_core.validate_syntax`, which wraps the snippet in top-level/expression/statement contexts and returns `true` if any parses cleanly.**
 - [x] ~~E3. JSONC parsing~~ — **skipped.** 100-150 Rust lines + new tree-sitter-json grammar dep to save ~6 Python lines; net negative. Current regex stripping stays.
 
 Each of E1/E2 unlocks 15–25 additional Python lines for deletion.

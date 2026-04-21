@@ -3,7 +3,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import _state, app, resolve_file_scopes, resolve_files
+from emend.cli_base import JsonFlag, _state, app, resolve_file_scopes, resolve_files
 from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 
 @app.command("lint")
@@ -77,7 +77,7 @@ def policy_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to check")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy policies.yaml")] = None,
     policy_name: Annotated[Optional[str], typer.Option("--policy", "-p", help="Run only a specific policy")] = None,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
 ):
     """Run policy checks against source code.
 
@@ -139,7 +139,7 @@ def check_cmd(
     rule_name: Annotated[Optional[str], typer.Option("--rule", help="Run only a specific rule")] = None,
     kind: Annotated[Optional[str], typer.Option("--kind", help="Restrict to one rule kind: match, flow, deadcode, type")] = None,
     fix: Annotated[bool, typer.Option("--fix", help="Apply auto-fixes for match rules")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
 ):
     """Run unified project rules from ``.emend/rules.yaml``."""
     try:

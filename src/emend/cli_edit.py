@@ -7,6 +7,8 @@ import typer
 
 from emend import ast_commands
 from emend.cli_base import (
+    ApplyFlag,
+    JsonFlag,
     _maybe_create_oracle,
     _reject_file_glob,
     _state,
@@ -41,10 +43,7 @@ def edit_set_cmd(
         bool,
         typer.Option("--rm", help="Remove component or symbol")
     ] = False,
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes to file")
-    ] = False,
+    apply: ApplyFlag = False,
     returns: Annotated[
         Optional[list[str]],
         typer.Option("--returns", help="Only edit symbols whose return type matches (annotation or inferred)")
@@ -96,10 +95,7 @@ def edit_set_cmd(
 @app.command("rm", hidden=True)
 def remove_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol or file.py::Symbol[component])")],
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes to file")
-    ] = False,
+    apply: ApplyFlag = False,
 ):
     """Remove a symbol or component.
 
@@ -131,14 +127,8 @@ def delete_cmd(
         bool,
         typer.Option("--cascade", help="Transitively delete symbols that become dead after removal")
     ] = False,
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes to files (default: dry-run)")
-    ] = False,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json", help="Output as JSON")
-    ] = False,
+    apply: ApplyFlag = False,
+    json_output: JsonFlag = False,
     project: Annotated[
         Optional[str],
         typer.Option("--project", help="Project root directory")
@@ -217,10 +207,7 @@ def add(
         Optional[int],
         typer.Option("--at", help="Insert at position (0-indexed)")
     ] = None,
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes to file")
-    ] = False,
+    apply: ApplyFlag = False,
     returns: Annotated[
         Optional[list[str]],
         typer.Option("--returns", help="Only add to symbols whose return type matches (annotation or inferred)")
@@ -285,10 +272,7 @@ def replace_cmd(
     pattern: Annotated[str, typer.Argument(help="Pattern to find (e.g., 'print($X)')")],
     replacement: Annotated[str, typer.Argument(help="Replacement pattern (e.g., 'logger.info($X)')")],
     paths: Annotated[list[str], typer.Argument(help="File, glob, or directory scope(s) to modify")],
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes to file (default is dry-run)")
-    ] = False,
+    apply: ApplyFlag = False,
     within: Annotated[
         Optional[str],
         typer.Option("--within", help="Only replace inside this structural container")
@@ -433,7 +417,7 @@ def copy_to_cmd(
 def rename_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol rename, or file.py for module rename)")],
     new_name: Annotated[str, typer.Option("--to", help="New name")],
-    apply: Annotated[bool, typer.Option("--apply", help="Apply changes")] = False,
+    apply: ApplyFlag = False,
     docs: Annotated[bool, typer.Option("--docs", help="Rename in docstrings (symbol mode only)")] = False,
     no_hierarchy: Annotated[bool, typer.Option("--no-hierarchy", help="Don't rename in class hierarchy (symbol mode only)")] = False,
     unsure: Annotated[bool, typer.Option("--unsure", help="Rename uncertain occurrences (symbol mode only)")] = False,
@@ -498,7 +482,7 @@ def move_cmd(
     destination: Annotated[str, typer.Argument(help="Destination file or package")],
     dedent: Annotated[bool, typer.Option("--dedent", help="Dedent nested symbols (symbol mode only)")] = False,
     no_update_imports: Annotated[bool, typer.Option("--no-update-imports", help="Don't update imports (symbol mode only)")] = False,
-    apply: Annotated[bool, typer.Option("--apply", help="Apply changes")] = False,
+    apply: ApplyFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
 ):
     """Move a symbol or module with automatic import updates.
@@ -564,10 +548,7 @@ def move_cmd(
 @app.command("batch", hidden=True)
 def batch_cmd(
     ops_file: Annotated[str, typer.Argument(help="YAML or JSON file with operations")],
-    apply: Annotated[
-        bool,
-        typer.Option("--apply", help="Apply changes (default is dry-run)")
-    ] = False,
+    apply: ApplyFlag = False,
 ):
     """Apply batch refactoring operations from a YAML or JSON file.
 
@@ -748,7 +729,7 @@ def saturate_cmd(
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rewrites.yaml")] = None,
     apply: Annotated[bool, typer.Option("--apply", "-a", help="Apply rewrites")] = False,
     max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max saturation iterations")] = 30,
-    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+    json_output: JsonFlag = False,
 ):
     """Experimental: apply equality saturation rewrites.
 
