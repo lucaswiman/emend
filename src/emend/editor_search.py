@@ -2041,7 +2041,7 @@ class EditorSearchEngine:
         try:
             from emend.type_oracle import create_type_oracle
             oracle = create_type_oracle(engine="pyrefly", project_root=str(self.project_root))
-            file_types = oracle.get_file_types(file)
+            file_types = oracle.infer_file(Path(file))
             if file_types:
                 file_types.build_index()
                 # Try to find type at the given position
@@ -2432,7 +2432,7 @@ class EditorSearchEngine:
 
         target_names = {parent.rsplit(".", 1)[-1] for parent in inferred_parents}
         items: list[dict] = []
-        for node in ast.walk(tree):
+        for node in _ast.walk(tree):
             if not isinstance(node, _ast.ClassDef) or node.name not in target_names:
                 continue
             for child in node.body:
@@ -2458,7 +2458,7 @@ class EditorSearchEngine:
         """Extract a direct class member name from a class-body statement."""
         import ast as _ast
 
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             return node.name
         if isinstance(node, (_ast.Assign, _ast.AnnAssign)):
             targets = node.targets if isinstance(node, _ast.Assign) else [node.target]
@@ -2624,8 +2624,7 @@ class EditorSearchEngine:
         # Read symbols from the resolved file
         try:
             from emend.ast_utils import find_nested_definitions
-            content = Path(file_part).read_text()
-            symbols = find_nested_definitions(content)
+            symbols = find_nested_definitions(file_part)
         except Exception:
             return []
 

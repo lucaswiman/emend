@@ -876,3 +876,77 @@ class TestPatternPrefilter:
             assert result.items == []
         finally:
             engine.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: wrong arguments and method names
+# ---------------------------------------------------------------------------
+
+
+class TestEditorSearchBugFixes:
+    def test_complete_via_mapping_passes_filepath_not_content(self, tmp_path):
+        """_complete_via_mapping must pass a file path (not content)
+        to find_nested_definitions."""
+        from unittest.mock import patch, MagicMock
+        from emend.editor_search import EditorSearchEngine
+
+        src = tmp_path / "mod.py"
+        src.write_text("class Foo:\n    def bar(self): pass\n")
+
+        engine = EditorSearchEngine(str(tmp_path))
+        try:
+            with patch("emend.ast_utils.find_nested_definitions") as mock_fnd:
+                mock_fnd.return_value = []
+                mock_store = MagicMock()
+                mock_store.resolve_selector.return_value = f"{src}::Foo"
+                with patch("emend.knowledge.MappingStore", return_value=mock_store):
+                    engine._complete_via_mapping(
+                        "Foo", member_prefix="", limit=10, seen=set(),
+                    )
+                if mock_fnd.called:
+                    arg = mock_fnd.call_args[0][0]
+                    assert not arg.startswith("class "), (
+                        "find_nested_definitions was called with file content "
+                        "instead of a file path"
+                    )
+        finally:
+            engine.close()
+
+    def test_types_at_cursor_calls_infer_file_not_get_file_types(self, tmp_path):
+        """types_at_cursor must call oracle.infer_file(), not the
+        non-existent oracle.get_file_types()."""
+        from unittest.mock import patch, MagicMock
+        from emend.editor_search import EditorSearchEngine
+
+        src = tmp_path / "app.py"
+        src.write_text("x: int = 1\n")
+
+        engine = EditorSearchEngine(str(tmp_path))
+        try:
+            mock_oracle = MagicMock()
+            mock_oracle.infer_file.return_value = None
+            with patch(
+                "emend.type_oracle.create_type_oracle", return_value=mock_oracle
+            ):
+                result = engine.types_at_cursor(str(src), line=1, col=0)
+            assert not hasattr(mock_oracle, "get_file_types") or \
+                not mock_oracle.get_file_types.called, \
+                "Should call infer_file(), not get_file_types()"
+            mock_oracle.infer_file.assert_called_once()
+        finally:
+            engine.close()
+
+    def test_class_member_name_consistent_ast_module(self):
+        """_class_member_name should use the same ast module reference
+        throughout (not mix global ast and local _ast)."""
+        import ast
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine.__new__(EditorSearchEngine)
+        func_node = ast.parse("def foo(): pass").body[0]
+        result = engine._class_member_name(func_node)
+        assert result == "foo"
+
+        async_func = ast.parse("async def bar(): pass").body[0]
+        result2 = engine._class_member_name(async_func)
+        assert result2 == "bar"
