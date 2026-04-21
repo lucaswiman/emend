@@ -17,7 +17,6 @@ import json
 import logging
 import posixpath
 import re
-import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Union
@@ -29,23 +28,6 @@ logger = logging.getLogger(__name__)
 # Fact types (stable dataclass API)
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class TraceDatalogConfig:
-    """Grouped parameters for :meth:`FactGraph.trace_propagation_datalog`.
-
-    Collects sources, sinks, and analysis options into a single config
-    object to reduce the method's parameter count.
-    """
-    sources: list[tuple[str, str, str, int, str]]  # (file_path, func_qn, var_name, block_id, label)
-    sinks: list[tuple[str, str, str, int, str]] = field(default_factory=list)
-    effect_sinks: list[tuple[str, str]] = field(default_factory=list)  # (label, effect_kind)
-    sanitizers: list[tuple[str, str, str, int, str]] = field(default_factory=list)
-    sanitizer_quantifier: str = "all_paths"  # "all_paths" or "some_path"
-    sanitizer_lines: list[tuple[str, str, str, int, int]] = field(default_factory=list)
-    sink_lines: list[tuple[str, str, str, int, int]] = field(default_factory=list)
-    scope_kills: list[tuple[str, str, str, int]] = field(default_factory=list)
-    scalar_types: list[str] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class SymbolFact:
@@ -579,14 +561,12 @@ class FactGraph:
         """Bulk-insert type binding facts."""
         if not facts:
             return
-        rows = [
-            [f.symbol_qn, f.file_path, f.line, f.binding_kind, f.type_str]
-            for f in facts
-        ]
-        self._client.run(
-            "?[symbol_qn, file_path, line, binding_kind, type_str] <- $rows "
-            ":put type_binding {symbol_qn, file_path, line, binding_kind => type_str}",
-            {"rows": rows},
+        rows = [[f.symbol_qn, f.file_path, f.line, f.binding_kind, f.type_str] for f in facts]
+        self._put_batch(
+            "type_binding",
+            "symbol_qn, file_path, line, binding_kind, type_str",
+            "symbol_qn, file_path, line, binding_kind => type_str",
+            rows,
         )
 
     def add_import(self, fact: ImportFact) -> None:
@@ -643,19 +623,23 @@ class FactGraph:
 
     # -- Batch mutation (for build_from_project performance) ---------------
 
+    def _put_batch(self, relation: str, cols: str, schema: str, rows: list[list[Any]]) -> None:
+        """Run ``?[<cols>] <- $rows :put <relation> {<schema>}``.
+
+        Caller is responsible for skipping empty inserts.
+        """
+        self._client.run(
+            f"?[{cols}] <- $rows :put {relation} {{{schema}}}",
+            {"rows": rows},
+        )
+
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
         if not facts:
             return
-        rows = [
-            [f.qualified_name, f.file_path, f.name, f.kind, f.line, f.end_line, f.parent or ""]
-            for f in facts
-        ]
-        self._client.run(
-            "?[qualified_name, file_path, name, kind, line, end_line, parent] <- $rows "
-            ":put symbol {qualified_name => file_path, name, kind, line, end_line, parent}",
-            {"rows": rows},
-        )
+        rows = [[f.qualified_name, f.file_path, f.name, f.kind, f.line, f.end_line, f.parent or ""] for f in facts]
+        cols = "qualified_name, file_path, name, kind, line, end_line, parent"
+        self._put_batch("symbol", cols, "qualified_name => file_path, name, kind, line, end_line, parent", rows)
 
     def add_calls_batch(self, facts: list[CallFact]) -> None:
         """Bulk-insert call facts."""
@@ -664,20 +648,23 @@ class FactGraph:
         rows = [[f.caller_qn, f.callee_qn, f.file_path, f.line, f.col, f.func_qn, f.block_id] for f in facts]
         reverse_rows = [[f.callee_qn, f.caller_qn, f.file_path, f.line, f.col, f.func_qn, f.block_id] for f in facts]
         file_rows = [[f.file_path, f.caller_qn, f.callee_qn, f.line, f.col, f.func_qn, f.block_id] for f in facts]
-        self._client.run(
-            "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] <- $rows "
-            ":put call {caller_qn, callee_qn, file_path, line, col => func_qn, block_id}",
-            {"rows": rows},
+        self._put_batch(
+            "call",
+            "caller_qn, callee_qn, file_path, line, col, func_qn, block_id",
+            "caller_qn, callee_qn, file_path, line, col => func_qn, block_id",
+            rows,
         )
-        self._client.run(
-            "?[callee_qn, caller_qn, file_path, line, col, func_qn, block_id] <- $rows "
-            ":put call_by_callee {callee_qn, caller_qn, file_path, line, col => func_qn, block_id}",
-            {"rows": reverse_rows},
+        self._put_batch(
+            "call_by_callee",
+            "callee_qn, caller_qn, file_path, line, col, func_qn, block_id",
+            "callee_qn, caller_qn, file_path, line, col => func_qn, block_id",
+            reverse_rows,
         )
-        self._client.run(
-            "?[file_path, caller_qn, callee_qn, line, col, func_qn, block_id] <- $rows "
-            ":put call_by_file {file_path, caller_qn, callee_qn, line, col => func_qn, block_id}",
-            {"rows": file_rows},
+        self._put_batch(
+            "call_by_file",
+            "file_path, caller_qn, callee_qn, line, col, func_qn, block_id",
+            "file_path, caller_qn, callee_qn, line, col => func_qn, block_id",
+            file_rows,
         )
 
     def add_references_batch(self, facts: list[ReferenceFact]) -> None:
@@ -685,46 +672,35 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.symbol_qn, f.file_path, f.line, f.col, f.ref_kind, f.func_qn, f.block_id] for f in facts]
-        self._client.run(
-            "?[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id] <- $rows "
-            ":put reference {symbol_qn, file_path, line, col => ref_kind, func_qn, block_id}",
-            {"rows": rows},
+        self._put_batch(
+            "reference",
+            "symbol_qn, file_path, line, col, ref_kind, func_qn, block_id",
+            "symbol_qn, file_path, line, col => ref_kind, func_qn, block_id",
+            rows,
         )
         module_rows = [[f.symbol_qn, f.file_path, f.line] for f in facts if f.func_qn == "" and f.block_id == -1]
         if module_rows:
-            self._client.run(
-                "?[symbol_qn, file_path, line] <- $rows "
-                ":put module_level_ref {symbol_qn, file_path, line}",
-                {"rows": module_rows},
-            )
+            self._put_batch("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line", module_rows)
 
     def add_imports_batch(self, facts: list[ImportFact]) -> None:
         """Bulk-insert import facts."""
         if not facts:
             return
-        rows = [
-            [f.importing_file, f.imported_module, f.imported_name or "", f.line, f.alias or ""]
-            for f in facts
-        ]
-        self._client.run(
-            "?[importing_file, imported_module, imported_name, line, alias] <- $rows "
-            ":put import {importing_file, imported_module, imported_name, line => alias}",
-            {"rows": rows},
+        rows = [[f.importing_file, f.imported_module, f.imported_name or "", f.line, f.alias or ""] for f in facts]
+        self._put_batch(
+            "import",
+            "importing_file, imported_module, imported_name, line, alias",
+            "importing_file, imported_module, imported_name, line => alias",
+            rows,
         )
 
     def add_cfg_edges_batch(self, facts: list[CfgEdgeFact]) -> None:
         """Bulk-insert CFG edge facts."""
         if not facts:
             return
-        rows = [
-            [f.file_path, f.func_qn, f.from_block, f.to_block, f.edge_kind, f.from_line, f.to_line]
-            for f in facts
-        ]
-        self._client.run(
-            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] <- $rows "
-            ":put cfg_edge {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
-            {"rows": rows},
-        )
+        rows = [[f.file_path, f.func_qn, f.from_block, f.to_block, f.edge_kind, f.from_line, f.to_line] for f in facts]
+        cols = "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line"
+        self._put_batch("cfg_edge", cols, cols, rows)
 
     def add_def_uses_batch(self, facts: list[DefUseFact]) -> None:
         """Bulk-insert def-use facts."""
@@ -734,10 +710,11 @@ class FactGraph:
             [f.file_path, f.func_qn, f.var_name, f.kind, f.def_block, f.use_block, f.def_line, f.def_col, f.use_line, f.use_col]
             for f in facts
         ]
-        self._client.run(
-            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- $rows "
-            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col}",
-            {"rows": rows},
+        self._put_batch(
+            "def_use",
+            "file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col",
+            "file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col",
+            rows,
         )
 
     def add_cfg_block(self, fact: CfgBlockFact) -> None:
@@ -755,10 +732,11 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.file_path, f.func_qn, f.block_id, f.is_entry, f.is_exit] for f in facts]
-        self._client.run(
-            "?[file_path, func_qn, block_id, is_entry, is_exit] <- $rows "
-            ":put cfg_block {file_path, func_qn, block_id => is_entry, is_exit}",
-            {"rows": rows},
+        self._put_batch(
+            "cfg_block",
+            "file_path, func_qn, block_id, is_entry, is_exit",
+            "file_path, func_qn, block_id => is_entry, is_exit",
+            rows,
         )
 
     def add_method_call(self, fact: MethodCallFact) -> None:
@@ -779,11 +757,8 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.file_path, f.func_qn, f.receiver, f.method, f.block_id, f.line] for f in facts]
-        self._client.run(
-            "?[file_path, func_qn, receiver, method, block_id, line] <- $rows "
-            ":put method_call {file_path, func_qn, receiver, method, block_id, line}",
-            {"rows": rows},
-        )
+        cols = "file_path, func_qn, receiver, method, block_id, line"
+        self._put_batch("method_call", cols, cols, rows)
 
     def add_decorator_on(self, fact: DecoratorOnFact) -> None:
         """Add a decorator-on fact."""
@@ -798,11 +773,7 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.symbol_qn, f.decorator] for f in facts]
-        self._client.run(
-            "?[symbol_qn, decorator] <- $rows "
-            ":put decorator_on {symbol_qn, decorator}",
-            {"rows": rows},
-        )
+        self._put_batch("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator", rows)
 
     def add_source_loc(self, fact: SourceLocFact) -> None:
         """Add a source location fact."""
@@ -819,10 +790,11 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.file_path, f.loc_kind, f.loc_id, f.line, f.col, f.end_line, f.rel_line] for f in facts]
-        self._client.run(
-            "?[file_path, loc_kind, loc_id, line, col, end_line, rel_line] <- $rows "
-            ":put source_loc {file_path, loc_kind, loc_id => line, col, end_line, rel_line}",
-            {"rows": rows},
+        self._put_batch(
+            "source_loc",
+            "file_path, loc_kind, loc_id, line, col, end_line, rel_line",
+            "file_path, loc_kind, loc_id => line, col, end_line, rel_line",
+            rows,
         )
 
     def add_func_summary(self, fact: FuncSummaryFact) -> None:
@@ -840,10 +812,11 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.func_qn, f.param_name, f.flows_to_return, f.flows_to_sink, f.sink_label] for f in facts]
-        self._client.run(
-            "?[func_qn, param_name, flows_to_return, flows_to_sink, sink_label] <- $rows "
-            ":put func_summary {func_qn, param_name => flows_to_return, flows_to_sink, sink_label}",
-            {"rows": rows},
+        self._put_batch(
+            "func_summary",
+            "func_qn, param_name, flows_to_return, flows_to_sink, sink_label",
+            "func_qn, param_name => flows_to_return, flows_to_sink, sink_label",
+            rows,
         )
 
     def add_entry_point_decorator(self, fact: EntryPointDecoratorFact) -> None:
@@ -859,11 +832,7 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.decorator] for f in facts]
-        self._client.run(
-            "?[decorator] <- $rows "
-            ":put entry_point_decorator {decorator}",
-            {"rows": rows},
-        )
+        self._put_batch("entry_point_decorator", "decorator", "decorator", rows)
 
     def add_entry_point_name(self, fact: EntryPointNameFact) -> None:
         """Add an entry point name fact."""
@@ -878,22 +847,14 @@ class FactGraph:
         if not facts:
             return
         rows = [[f.name] for f in facts]
-        self._client.run(
-            "?[name] <- $rows "
-            ":put entry_point_name {name}",
-            {"rows": rows},
-        )
+        self._put_batch("entry_point_name", "name", "name", rows)
 
     def add_exported_symbols_batch(self, qns: list[str]) -> None:
         """Bulk-insert exported symbol qualified names."""
         if not qns:
             return
         rows = [[qn] for qn in qns]
-        self._client.run(
-            "?[qualified_name] <- $rows "
-            ":put exported_symbol {qualified_name}",
-            {"rows": rows},
-        )
+        self._put_batch("exported_symbol", "qualified_name", "qualified_name", rows)
 
     # -- Post-processing ---------------------------------------------------
 
@@ -2561,132 +2522,120 @@ class FactGraph:
                 results.append(fact)
         return results
 
+    def _query_all(
+        self,
+        relation: str,
+        select_cols: str,
+        mapper: Callable[[list[Any]], Any],
+        relation_cols: str | None = None,
+    ) -> list[Any]:
+        """Run ``?[select_cols] := *relation[relation_cols]`` and map each row.
+
+        When *relation_cols* is omitted, it defaults to *select_cols*.
+        """
+        rel = relation_cols if relation_cols is not None else select_cols
+        result = self._client.run(f"?[{select_cols}] := *{relation}[{rel}]")
+        return [mapper(r) for r in result["rows"]]
+
     def _all_calls(self) -> list[CallFact]:
-        result = self._client.run(
-            "?[caller, callee, fp, line, col, fq, bid] := *call[caller, callee, fp, line, col, fq, bid]"
+        return self._query_all(
+            "call", "caller, callee, fp, line, col, fq, bid",
+            lambda r: CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
+                               col=r[4], func_qn=r[5], block_id=r[6]),
         )
-        return [
-            CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
-                     col=r[4], func_qn=r[5], block_id=r[6])
-            for r in result["rows"]
-        ]
 
     def _all_references(self) -> list[ReferenceFact]:
-        result = self._client.run(
-            "?[qn, fp, line, col, kind, fq, bid] := *reference[qn, fp, line, col, kind, fq, bid]"
+        return self._query_all(
+            "reference", "qn, fp, line, col, kind, fq, bid",
+            lambda r: ReferenceFact(symbol_qn=r[0], file_path=r[1], line=r[2], col=r[3],
+                                    ref_kind=r[4], func_qn=r[5], block_id=r[6]),
         )
-        return [
-            ReferenceFact(symbol_qn=r[0], file_path=r[1], line=r[2], col=r[3],
-                          ref_kind=r[4], func_qn=r[5], block_id=r[6])
-            for r in result["rows"]
-        ]
 
     def _all_types(self) -> list[TypeFact]:
-        result = self._client.run(
-            "?[qn, ts, fp, line, bk] := *type_binding[qn, fp, line, bk, ts]"
+        return self._query_all(
+            "type_binding", "qn, ts, fp, line, bk",
+            lambda r: TypeFact(symbol_qn=r[0], type_str=r[1], file_path=r[2], line=r[3], binding_kind=r[4]),
+            relation_cols="qn, fp, line, bk, ts",
         )
-        return [
-            TypeFact(symbol_qn=r[0], type_str=r[1], file_path=r[2], line=r[3], binding_kind=r[4])
-            for r in result["rows"]
-        ]
 
     def _all_imports(self) -> list[ImportFact]:
-        result = self._client.run(
-            "?[f, mod, name, alias, line] := *import[f, mod, name, line, alias]"
-        )
-        return [
-            ImportFact(
+        return self._query_all(
+            "import", "f, mod, name, alias, line",
+            lambda r: ImportFact(
                 importing_file=r[0], imported_module=r[1],
                 imported_name=r[2] if r[2] else None,
                 alias=r[3] if r[3] else None, line=r[4],
-            )
-            for r in result["rows"]
-        ]
+            ),
+            relation_cols="f, mod, name, line, alias",
+        )
 
     def _all_cfg_edges(self) -> list[CfgEdgeFact]:
-        result = self._client.run(
-            "?[fp, fq, fb, tb, ek, fl, tl] := *cfg_edge[fp, fq, fb, tb, ek, fl, tl]"
-        )
-        return [
-            CfgEdgeFact(
+        return self._query_all(
+            "cfg_edge", "fp, fq, fb, tb, ek, fl, tl",
+            lambda r: CfgEdgeFact(
                 file_path=r[0], func_qn=r[1], from_block=r[2],
                 to_block=r[3], edge_kind=r[4], from_line=r[5], to_line=r[6],
-            )
-            for r in result["rows"]
-        ]
+            ),
+        )
 
     def _all_def_uses(self) -> list[DefUseFact]:
-        result = self._client.run(
-            "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := *def_use[fp, fq, vn, k, db, ub, dl, ul, dc, uc]"
-        )
-        return [
-            DefUseFact(
+        return self._query_all(
+            "def_use", "fp, fq, vn, k, db, ub, dl, dc, ul, uc",
+            lambda r: DefUseFact(
                 file_path=r[0], func_qn=r[1], var_name=r[2],
                 kind=r[3], def_block=r[4], use_block=r[5],
                 def_line=r[6], def_col=r[7], use_line=r[8], use_col=r[9],
-            )
-            for r in result["rows"]
-        ]
+            ),
+            relation_cols="fp, fq, vn, k, db, ub, dl, ul, dc, uc",
+        )
 
     def _all_method_calls(self) -> list[MethodCallFact]:
-        result = self._client.run(
-            "?[fp, fq, rcv, meth, bid, ln] := *method_call[fp, fq, rcv, meth, bid, ln]"
-        )
-        return [
-            MethodCallFact(
+        return self._query_all(
+            "method_call", "fp, fq, rcv, meth, bid, ln",
+            lambda r: MethodCallFact(
                 file_path=r[0], func_qn=r[1], receiver=r[2],
                 method=r[3], block_id=r[4], line=r[5],
-            )
-            for r in result["rows"]
-        ]
+            ),
+        )
 
     def _all_cfg_blocks(self) -> list[CfgBlockFact]:
-        result = self._client.run(
-            "?[fp, fq, bid, ie, ix] := *cfg_block[fp, fq, bid, ie, ix]"
+        return self._query_all(
+            "cfg_block", "fp, fq, bid, ie, ix",
+            lambda r: CfgBlockFact(file_path=r[0], func_qn=r[1], block_id=r[2],
+                                   is_entry=r[3], is_exit=r[4]),
         )
-        return [
-            CfgBlockFact(file_path=r[0], func_qn=r[1], block_id=r[2],
-                         is_entry=r[3], is_exit=r[4])
-            for r in result["rows"]
-        ]
 
     def _all_decorator_on(self) -> list[DecoratorOnFact]:
-        result = self._client.run(
-            "?[sqn, dec] := *decorator_on[sqn, dec]"
+        return self._query_all(
+            "decorator_on", "sqn, dec",
+            lambda r: DecoratorOnFact(symbol_qn=r[0], decorator=r[1]),
         )
-        return [DecoratorOnFact(symbol_qn=r[0], decorator=r[1]) for r in result["rows"]]
 
     def _all_source_locs(self) -> list[SourceLocFact]:
-        result = self._client.run(
-            "?[fp, lk, lid, line, col, el, rl] := *source_loc[fp, lk, lid, line, col, el, rl]"
+        return self._query_all(
+            "source_loc", "fp, lk, lid, line, col, el, rl",
+            lambda r: SourceLocFact(file_path=r[0], loc_kind=r[1], loc_id=r[2],
+                                    line=r[3], col=r[4], end_line=r[5], rel_line=r[6]),
         )
-        return [
-            SourceLocFact(file_path=r[0], loc_kind=r[1], loc_id=r[2],
-                         line=r[3], col=r[4], end_line=r[5], rel_line=r[6])
-            for r in result["rows"]
-        ]
 
     def _all_func_summaries(self) -> list[FuncSummaryFact]:
-        result = self._client.run(
-            "?[fq, pn, ftr, fts, sl] := *func_summary[fq, pn, ftr, fts, sl]"
+        return self._query_all(
+            "func_summary", "fq, pn, ftr, fts, sl",
+            lambda r: FuncSummaryFact(func_qn=r[0], param_name=r[1], flows_to_return=r[2],
+                                      flows_to_sink=r[3], sink_label=r[4]),
         )
-        return [
-            FuncSummaryFact(func_qn=r[0], param_name=r[1], flows_to_return=r[2],
-                           flows_to_sink=r[3], sink_label=r[4])
-            for r in result["rows"]
-        ]
 
     def _all_entry_point_decorators(self) -> list[EntryPointDecoratorFact]:
-        result = self._client.run(
-            "?[dec] := *entry_point_decorator[dec]"
+        return self._query_all(
+            "entry_point_decorator", "dec",
+            lambda r: EntryPointDecoratorFact(decorator=r[0]),
         )
-        return [EntryPointDecoratorFact(decorator=r[0]) for r in result["rows"]]
 
     def _all_entry_point_names(self) -> list[EntryPointNameFact]:
-        result = self._client.run(
-            "?[name] := *entry_point_name[name]"
+        return self._query_all(
+            "entry_point_name", "name",
+            lambda r: EntryPointNameFact(name=r[0]),
         )
-        return [EntryPointNameFact(name=r[0]) for r in result["rows"]]
 
     # -- Serialization ----------------------------------------------------
 

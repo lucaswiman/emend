@@ -7,16 +7,17 @@ import typer
 
 from emend import ast_commands
 from emend.cli_base import (
-    _is_source_file_query,
     _maybe_create_oracle,
     _state,
     app,
+    cli_error_handler,
     detect_query_shape,
     parse_where_clause,
     resolve_file_scopes,
     resolve_files,
 )
 from emend.component_selector import parse_extended_selector
+from emend.language_registry import is_source_file
 from emend.transform import cmd_lookup, find_pattern_in_project
 
 _ANSI_RESET = "\033[0m"
@@ -436,7 +437,7 @@ def search(
             _query_path = Path(query)
             if (not _query_path.exists()
                     and '/' not in query
-                    and not _is_source_file_query(query)
+                    and not is_source_file(query)
                     and not ('*' in query or '?' in query)):
                 scope_hint = explicit_files[0] if explicit_files else path
                 if scope_hint:
@@ -502,7 +503,7 @@ def search(
     else:
         effective_output = "selector"
 
-    try:
+    with cli_error_handler():
         # ---- Create TypeOracle if needed ----
         oracle = None
         if type_engine is not None or (is_pattern_mode and (":type[" in query or ":returns[" in query)):
@@ -756,12 +757,3 @@ def search(
             _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
             _emit_dsl_overlay(explicit_files, _state["language"], path or file_or_pattern or ".", search_term=_search_term)
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)

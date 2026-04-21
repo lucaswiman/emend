@@ -1,0 +1,35 @@
+# React (TypeScript/JavaScript) trace preset.
+labels:
+  - user_input
+
+sources:
+  - {pattern: "useSearchParams()", label: user_input}
+  # Specific window.location property patterns (dot-notation works for property access)
+  - {pattern: "window.location.hash", label: user_input}
+  - {pattern: "window.location.search", label: user_input}
+  - {pattern: "window.location.href", label: user_input}
+  - {pattern: "window.location.pathname", label: user_input}
+  - {pattern: "window.location", label: user_input}
+  - {pattern: "document.cookie", label: user_input}
+  - {pattern: "localStorage.getItem($X)", label: user_input}
+  - {pattern: "sessionStorage.getItem($X)", label: user_input}
+
+sinks:
+  # All XSS sinks labeled user_input so sources flow directly to them
+  - pattern: "dangerouslySetInnerHTML"
+    label: user_input
+    message: "XSS: user input in dangerouslySetInnerHTML"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection: user input in eval()"
+  - pattern: "document.write($X)"
+    label: user_input
+    message: "XSS: user input in document.write()"
+  # Assignment form captures the RHS value (the tainted variable)
+  - pattern: "$X.innerHTML = $Y"
+    label: user_input
+    message: "XSS: user input assigned to innerHTML"
+
+sanitizers:
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input}
+  - {pattern: "encodeURIComponent($X)", label: user_input}

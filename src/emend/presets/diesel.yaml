@@ -1,0 +1,29 @@
+# Diesel (Rust) trace preset.
+#
+# This preset has no sources -- it is meant to be composed with a framework
+# preset (e.g. actix-web or axum) that provides user-input sources.
+#
+# Note: Rust path-qualified calls like `diesel::sql_query()` cannot be
+# expressed as emend patterns. The patterns below use method-call style that
+# IS matchable. Use `$X.execute($Y)` to catch raw SQL execution.
+labels:
+  - user_input
+
+sources: []
+
+sinks:
+  # Method-call sinks that work with the tree-sitter Rust pattern engine
+  - pattern: "$X.execute($Y)"
+    label: user_input
+    message: "SQL injection: user input in .execute()"
+  - pattern: "$X.load($Y)"
+    label: user_input
+    message: "SQL injection: user input in .load()"
+  - pattern: "$X.get_result($Y)"
+    label: user_input
+    message: "SQL injection: user input in .get_result()"
+
+sanitizers:
+  - {pattern: "$X.filter($Y)", label: user_input}
+  - {pattern: "$X.select($Y)", label: user_input}
+  - {pattern: "$X.bind_sql($Y)", label: user_input}

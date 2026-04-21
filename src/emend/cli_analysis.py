@@ -10,6 +10,7 @@ from emend.cli_base import (
     _state,
     analyze_app,
     app,
+    cli_error_handler,
     resolve_files,
 )
 from emend.component_selector import parse_extended_selector
@@ -267,7 +268,7 @@ def refs_cmd(
         emend refs src/module.py::process --calls-only
         emend refs src/module.py::process --calls-only --project src/
     """
-    try:
+    with cli_error_handler():
         _reject_file_glob(selector, "refs")
         parsed_selector = parse_extended_selector(selector)
 
@@ -383,15 +384,6 @@ def refs_cmd(
                         for lnk in _matched:
                             print(f"{lnk.dsl_symbol.host_file}:{lnk.dsl_symbol.host_line}", flush=True)
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -414,18 +406,9 @@ def graph_cmd(
         emend graph src/module.py --format dot
         emend graph src/module.py --format json
     """
-    try:
+    with cli_error_handler():
         result = generate_graph(file, project_path=project, format=format)
         print(result)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -495,7 +478,7 @@ def dead_code_cmd(
         emend deadcode . --entry-point-name plugin_init
         emend deadcode . --unused-modules
     """
-    try:
+    with cli_error_handler():
         results = find_dead_code(
             project_path=path,
             kind=kind,
@@ -566,15 +549,6 @@ def dead_code_cmd(
                 print("No dead code found.")
             else:
                 print(f"\nFound {count} potentially dead result(s).", file=sys.stderr)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -608,7 +582,7 @@ def impact_cmd(
         print("Error: provide a selector argument or --diff option", file=sys.stderr)
         raise typer.Exit(2)
 
-    try:
+    with cli_error_handler():
         selectors_list = None
         if selector:
             sel = parse_extended_selector(selector)
@@ -684,16 +658,6 @@ def impact_cmd(
                     print("DSL impacts:")
                     for f, l, r in dsl_impacts:
                         print(f"  {f}:{l}  {r}")
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 
@@ -938,7 +902,7 @@ def cfg_cmd(
         emend cfg src/app.py --function process --format dot
         emend cfg src/ --unreachable --format json
     """
-    try:
+    with cli_error_handler():
         from emend.cfg import (
             build_cfgs_for_file,
             find_unreachable_blocks,
@@ -1039,18 +1003,6 @@ def cfg_cmd(
                 parts.append(f"# {cfg_files[i]}")
                 parts.append(format_cfg_text(cfg))
             print("\n\n".join(parts))
-
-    except typer.Exit:
-        raise
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(3)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        raise typer.Exit(2)
-    except Exception as e:
-        print(f"Error: {e!r}", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 @analyze_app.command("dupes")

@@ -773,53 +773,75 @@ def _to_pascal_case(name: str) -> str:
     return "".join(word.capitalize() for word in name.split("_"))
 
 
-# Regex to find class definitions: "class ClassName(..."
+# Regex fallback for class definitions: still used by resolve_graphql_links.
+# Replaced for ORM resolution by tree-sitter via emend_core.collect_symbols_from_str().
 _CLASS_DEF_RE = re.compile(r'^class\s+(\w+)\s*[\(:]', re.MULTILINE)
-# Regex to find __tablename__ assignments
-_TABLENAME_RE = re.compile(r'__tablename__\s*=\s*["\'](\w+)["\']')
 
 
-def _find_classes_in_file(file_path: str) -> list[tuple[str, int, str]]:
-    """Return list of (class_name, line_number, file_path) for all classes in file."""
+def _index_classes_and_tablenames(
+    file_path: str,
+) -> tuple[list[tuple[str, int]], dict[str, tuple[str, int]]]:
+    """Index classes and ``__tablename__`` assignments in a Python file via tree-sitter.
+
+    Uses ``emend_core.collect_symbols_from_str()`` to enumerate class definitions
+    and their child variable assignments, then matches each ``__tablename__``
+    variable to a string literal on the same line range to extract the table
+    name. This replaces the previous regex-based scanning.
+
+    Returns:
+        ``(classes, tablename_mapping)`` where:
+
+        * ``classes`` is a list of ``(class_name, line)`` tuples in source order.
+        * ``tablename_mapping`` maps ``tablename -> (class_name, line)`` for
+          string-literal ``__tablename__`` assignments inside class bodies.
+    """
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+        from emend import emend_core as _rust  # type: ignore[attr-defined]
+        symbols = _rust.collect_symbols_from_str(source, ext="py")
+        string_literals = _rust.collect_string_literals(source, "py")
+    except Exception:
+        return [], {}
 
-    results = []
-    for m in _CLASS_DEF_RE.finditer(source):
-        class_name = m.group(1)
-        line = source[:m.start()].count('\n') + 1
-        results.append((class_name, line, file_path))
-    return results
+    # Index string literals by start line so we can look up RHS values on a
+    # __tablename__ variable's line. The original regex only matched
+    # single-line quoted-identifier assignments; we mirror that semantics.
+    strings_by_line: dict[int, list[tuple[int, str]]] = {}
+    for _sb, _eb, start_line, start_col, _el, _ec, content in string_literals:
+        strings_by_line.setdefault(start_line, []).append((start_col, content))
+
+    classes: list[tuple[str, int]] = []
+    tablename_mapping: dict[str, tuple[str, int]] = {}
+
+    for sym in symbols:
+        if sym.get("kind") != "class":
+            continue
+        class_name = sym["name"]
+        classes.append((class_name, sym["line"]))
+
+        for child in sym.get("children", []):
+            if child.get("kind") != "variable" or child.get("name") != "__tablename__":
+                continue
+            var_line = child["line"]
+            var_col = child.get("col_offset", 0)
+            # Find a string literal on the assignment's start line whose
+            # column is to the right of the variable name (i.e. the RHS).
+            # `\w+` in the original regex required an identifier-shaped value.
+            for col, content in strings_by_line.get(var_line, []):
+                if col >= var_col and content and content.isidentifier():
+                    tablename_mapping.setdefault(content, (class_name, var_line))
+                    break
+
+    return classes, tablename_mapping
 
 
 def _find_tablename_mapping(file_path: str) -> dict[str, tuple[str, int]]:
-    """Return mapping of tablename -> (class_name, line) for __tablename__ in file."""
-    try:
-        source = Path(file_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
+    """Return mapping of tablename -> (class_name, line) for __tablename__ in file.
 
-    mapping: dict[str, tuple[str, int]] = {}
-
-    # Find all class defs and scan their bodies for __tablename__
-    lines = source.split('\n')
-    current_class: str | None = None
-    for i, line in enumerate(lines, start=1):
-        class_match = _CLASS_DEF_RE.match(line)
-        if class_match:
-            current_class = class_match.group(1)
-        elif current_class and line and not line[0].isspace():
-            # A non-blank, non-indented line that is not a class definition
-            # signals that we have left the previous class body.
-            current_class = None
-        if current_class:
-            tn_match = _TABLENAME_RE.search(line)
-            if tn_match:
-                tablename = tn_match.group(1)
-                mapping[tablename] = (current_class, i)
-
+    Thin wrapper over :func:`_index_classes_and_tablenames` kept for backward
+    compatibility with callers that only need the tablename mapping.
+    """
+    _classes, mapping = _index_classes_and_tablenames(file_path)
     return mapping
 
 
@@ -857,13 +879,14 @@ def resolve_orm_links(
     tablename_index: dict[str, tuple[str, str, int]] = {}
 
     for py_file in py_files:
-        for class_name, line, fpath in _find_classes_in_file(str(py_file)):
+        fpath = str(py_file)
+        classes, tablename_mapping = _index_classes_and_tablenames(fpath)
+        for class_name, line in classes:
             if class_name not in class_index:
                 class_index[class_name] = (fpath, line)
-
-        for tablename, (class_name, line) in _find_tablename_mapping(str(py_file)).items():
+        for tablename, (class_name, line) in tablename_mapping.items():
             if tablename not in tablename_index:
-                tablename_index[tablename] = (class_name, str(py_file), line)
+                tablename_index[tablename] = (class_name, fpath, line)
 
     links: list[DslLink] = []
 

@@ -1,0 +1,32 @@
+# Node.js SQL (label-based) trace preset.
+#
+# This preset has no sources -- it is meant to be composed with a
+# framework preset (e.g. express) that provides user-input sources.
+labels:
+  - user_input
+
+sources: []
+
+sinks:
+  - pattern: "pool.query($X)"
+    label: user_input
+    message: "SQL injection: user input in pool.query()"
+  - pattern: "connection.query($X)"
+    label: user_input
+    message: "SQL injection: user input in connection.query()"
+  - pattern: "knex.raw($X)"
+    label: user_input
+    message: "SQL injection: user input in knex.raw()"
+  - pattern: "sequelize.query($X)"
+    label: user_input
+    message: "SQL injection: user input in sequelize.query()"
+  - pattern: "db.query($X)"
+    label: user_input
+    message: "SQL injection: user input in db.query()"
+  # Note: prisma.$queryRaw cannot be expressed as an emend pattern because
+  # the $ in $queryRaw is a literal part of the Prisma API method name,
+  # not a metavar. Use prisma.$queryRawUnsafe in code reviews instead.
+
+sanitizers:
+  - {pattern: "pool.query($X, $PARAMS)", label: user_input}
+  - {pattern: "connection.query($X, $PARAMS)", label: user_input}

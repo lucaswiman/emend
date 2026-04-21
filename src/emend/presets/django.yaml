@@ -1,0 +1,52 @@
+# Django trace preset.
+labels:
+  - user_input
+  - file_path
+  - html_output
+
+sources:
+  - {pattern: "request.GET.get($X)", label: user_input}
+  - {pattern: "request.GET[$X]", label: user_input}
+  - {pattern: "request.POST.get($X)", label: user_input}
+  - {pattern: "request.POST[$X]", label: user_input}
+  - {pattern: "request.body", label: user_input}
+  - {pattern: "request.META.get($X)", label: user_input}
+  - {pattern: "request.COOKIES.get($X)", label: user_input}
+  - {pattern: "request.FILES.get($X)", label: file_path}
+  - {pattern: "request.FILES[$X]", label: file_path}
+
+sinks:
+  - pattern: "cursor.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in raw SQL"
+  - pattern: "RawSQL($X)"
+    label: user_input
+    message: "SQL injection: user input in RawSQL()"
+  - pattern: "extra(where=[$X])"
+    label: user_input
+    message: "SQL injection: user input in extra(where=)"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection"
+  - pattern: "exec($X)"
+    label: user_input
+    message: "Code injection"
+  - pattern: "os.system($X)"
+    label: user_input
+    message: "Command injection"
+  - pattern: "subprocess.call($X)"
+    label: user_input
+    message: "Command injection"
+  - pattern: "mark_safe($X)"
+    label: user_input
+    message: "XSS: user input in mark_safe()"
+  - pattern: "format_html($X)"
+    label: user_input
+    message: "XSS: check format_html() arguments"
+
+sanitizers:
+  - {pattern: "escape($X)", label: user_input}
+  - {pattern: "conditional_escape($X)", label: user_input}
+  - {pattern: "int($X)", label: user_input}
+  - {pattern: "float($X)", label: user_input}
+  - {pattern: "slugify($X)", label: user_input}

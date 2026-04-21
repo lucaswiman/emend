@@ -1,0 +1,55 @@
+# Flask trace preset.
+labels:
+  - user_input
+  - file_path
+  - html_output
+
+sources:
+  - {pattern: "request.args.get($X)", label: user_input}
+  - {pattern: "request.args[$X]", label: user_input}
+  - {pattern: "request.form.get($X)", label: user_input}
+  - {pattern: "request.form[$X]", label: user_input}
+  - {pattern: "request.json.get($X)", label: user_input}
+  - {pattern: "request.data", label: user_input}
+  - {pattern: "request.cookies.get($X)", label: user_input}
+  - {pattern: "request.headers.get($X)", label: user_input}
+  - {pattern: "request.files[$X]", label: file_path}
+
+sinks:
+  - pattern: "cursor.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in cursor.execute()"
+  - pattern: "db.engine.execute($X)"
+    label: user_input
+    message: "SQL injection: user input in engine.execute()"
+  - pattern: "eval($X)"
+    label: user_input
+    message: "Code injection: user input in eval()"
+  - pattern: "exec($X)"
+    label: user_input
+    message: "Code injection: user input in exec()"
+  - pattern: "os.system($X)"
+    label: user_input
+    message: "Command injection: user input in os.system()"
+  - pattern: "subprocess.call($X)"
+    label: user_input
+    message: "Command injection: user input in subprocess.call()"
+  - pattern: "subprocess.run($X)"
+    label: user_input
+    message: "Command injection: user input in subprocess.run()"
+  - pattern: "open($X)"
+    label: file_path
+    message: "Path traversal: file path in open()"
+  - pattern: "send_file($X)"
+    label: file_path
+    message: "Path traversal: file path in send_file()"
+  - pattern: "Markup($X)"
+    label: html_output
+    message: "XSS: unescaped user input in Markup()"
+
+sanitizers:
+  - {pattern: "escape($X)", label: user_input}
+  - {pattern: "bleach.clean($X)", label: html_output}
+  - {pattern: "secure_filename($X)", label: file_path}
+  - {pattern: "int($X)", label: user_input}
+  - {pattern: "float($X)", label: user_input}

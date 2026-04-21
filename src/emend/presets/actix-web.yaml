@@ -1,0 +1,38 @@
+# Actix-web (Rust) trace preset.
+#
+# Note: Rust path-qualified calls (e.g. `web::Query`, `Command::arg`) cannot
+# be expressed as emend patterns because the tree-sitter Rust grammar treats
+# the full `A::B` path as a single opaque identifier. The patterns below use
+# method-call style (`$X.into_inner()`) and simple function names that ARE
+# matchable by the pattern engine.
+labels:
+  - user_input
+  - file_path
+
+sources:
+  # Actix extractors expose user data via .into_inner()
+  - {pattern: "$X.into_inner()", label: user_input}
+  # Cookie / header access via method calls
+  - {pattern: "req.cookie($X)", label: user_input}
+  - {pattern: "$X.get($Y)", label: user_input}
+
+sinks:
+  - pattern: "execute_query($X)"
+    label: user_input
+    message: "SQL injection: user input in execute_query()"
+  - pattern: "execute($X)"
+    label: user_input
+    message: "SQL injection: user input in execute()"
+  - pattern: "$X.arg($Y)"
+    label: user_input
+    message: "Command injection: user input passed to .arg()"
+  - pattern: "$X.write($Y)"
+    label: file_path
+    message: "Path traversal: file path in .write()"
+
+sanitizers:
+  - {pattern: "$X.parse::<i32>()", label: user_input}
+  - {pattern: "$X.parse::<u32>()", label: user_input}
+  - {pattern: "$X.parse::<i64>()", label: user_input}
+  - {pattern: "$X.parse::<u64>()", label: user_input}
+  - {pattern: "$X.parse::<f64>()", label: user_input}
