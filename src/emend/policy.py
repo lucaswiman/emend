@@ -15,6 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from emend.rules_config import (
+    DeadCodeConfig,
     LEGACY_POLICIES_PATH,
     LEGACY_PATTERNS_PATH,
     load_rules_document,
@@ -23,6 +24,12 @@ from emend.rules_config import (
     yaml_key,
     as_list,
 )
+
+# Policy and lint share the same dead-code configuration dataclass.
+# ``DeadCodeCheck`` is kept as an alias for readability in policy-side code
+# (where it appears alongside ``FlowCheck``, ``StructuralCheck``, etc.) and
+# for backwards compatibility with external importers.
+DeadCodeCheck = DeadCodeConfig
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +60,6 @@ class TypeCheck:
     symbol_pattern: str
     expected_type: str
     kind: str = "has_type"  # "has_type" or "returns"
-
-
-@dataclass
-class DeadCodeCheck:
-    """Dead code detection policy."""
-    entry_point_decorators: list[str] = field(default_factory=list)
-    entry_point_names: list[str] = field(default_factory=list)
-    exclude_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -24,13 +24,13 @@ The pre-implementation audit numbers should be treated as upper bounds.
 
 ---
 
-## Phase C — needs design decisions (see Open Questions below)
+## Phase C — decisions recorded (2026-04-21)
 
-- [ ] C1. Decide fate of `rewrite_engine.py` (~600)
-- [ ] C2. Merge `flow_ir.py` adapter layer into `lint.py` + `policy.py` (~300)
-- [ ] C3. Unify `policy.py` ↔ `lint.py` check hierarchy (`DeadCodeCheck`/`DeadCodeConfig`, `FlowCheck`/flow-rule `LintRule`) (~100)
-- [ ] C4. Decide whether `language_plugins.py` plugin protocol is justified given Python is the only language plugin (~200–300)
-- [ ] C5. Extract interprocedural trace from `trace.py` into its own module; move `_compile_dsl_pattern` from `lint.py` to `dsl.py` (~100–200)
+- [ ] C1. `rewrite_engine.py` — **decision: keep, mark experimental; extract `UnionFind` to its own module.** Module is 643 lines with 23 real tests, zero xfails, recent bug-fix activity (commits #152, #164). Hidden CLI (`saturate`). Only external dep is `duplicate.py` using `UnionFind`. Action: extract `UnionFind` to `src/emend/union_find.py`; add experimental docstring to `rewrite_engine.py` and the `saturate` command.
+- [x] ~~C2. Merge `flow_ir.py` adapter layer~~ — **marked invalid.** Not pure indirection: 422 lines = ~30% converters + a 188-line `_execute_via_datalog()` that resolves source/sink/sanitizer patterns via `LocationResolver`, builds Datalog tuples, and falls back to the Python engine on failure. Collapsing would duplicate the bridge in `lint.py` and `policy.py`. 12 dedicated tests in `test_flow_ir.py` directly exercise the IR.
+- [ ] C3. Unify `DeadCodeCheck` / `DeadCodeConfig` — **decision: unify.** Both are config dataclasses that feed the same `find_dead_code()` in `transform.py:6544`. Pure config-level duplication. Flow-rule engines (lint's `_check_flow_rule` vs `flow_ir.execute_flow_spec`) stay separate — they take genuinely different paths (lint drives `--fix`; policy drives Datalog witness traces).
+- [x] ~~C4. `language_plugins.py` plugin protocol~~ — **marked invalid.** Protocol is NOT Python-only: `languages/rust/plugin.py` and `languages/typescript/plugin.py` actively use `TreeSitterImportHandler`, `DocCommentHandler`, `TreeSitterPatternCompiler` stubs. Inlining would only remove `python_plugin.py` (288 lines) while leaving the 716-line `language_plugins.py` intact because 60% is reusable multi-language stubs.
+- [x] ~~C5. Extract interprocedural trace~~ — **deferred (no decision requested this session).**
 
 ## Phase D — `CommonFlags` Typer dataclass (deferred from A2)
 
@@ -39,38 +39,25 @@ The pre-implementation audit numbers should be treated as upper bounds.
 
 ## Phase E — Rust extension capability gaps (blocks further design-philosophy cleanup)
 
-Phase B4 had to leave several `ast`/regex usages in `transform.py` because `emend_core` doesn't yet expose the needed APIs. To finish the design-philosophy migration, Rust would need:
+Phase B4 had to leave several `ast`/regex usages in `transform.py` because `emend_core` doesn't yet expose the needed APIs.
 
-- [ ] E1. `emend_core.parse_string_literal(text) -> str` — unescape a Python/JSON/etc. string-literal source fragment to its value. Needed to delete `_extract_string_content_from_text` (uses `ast.literal_eval`).
-- [ ] E2. `emend_core.validate_syntax(code, ext, *, mode='expression'|'statement')` — currently called optimistically but the function isn't actually exposed. Needed to delete `_is_valid_replacement`'s `ast.parse` fallback.
-- [ ] E3. JSONC parsing (comments + trailing commas) — currently done with regex in `transform.py:_load_tsconfig`. Could go through tree-sitter JSON grammar if we register one.
+- [ ] E1. `emend_core.parse_string_literal(text, ext) -> str` — unescape a Python/JSON/etc. string-literal source fragment to its value. Half already exists (`rust/src/pattern.rs:572 extract_string_content` — private). Just needs PyO3 wrapper. **Approved this session.**
+- [ ] E2. `emend_core.validate_syntax(code, ext, *, mode='expression'|'statement')` — currently called optimistically but the function isn't actually exposed. Needed to delete `_is_valid_replacement`'s `ast.parse` fallback. **Approved this session.**
+- [x] ~~E3. JSONC parsing~~ — **skipped.** 100-150 Rust lines + new tree-sitter-json grammar dep to save ~6 Python lines; net negative. Current regex stripping stays.
 
-Each of these would unlock 15–25 additional Python lines for deletion.
+Each of E1/E2 unlocks 15–25 additional Python lines for deletion.
 
 ---
 
-## Open questions for next session
+## Open questions — resolved 2026-04-21
 
-These determine the scope of Phase C. Please answer before that phase starts:
-
-1. **`rewrite_engine.py` (`emend saturate`)** — is the equality-saturation rewrite engine real product surface area, or experimental scaffolding that can be deleted? Only callers found are the `saturate` CLI command and a `UnionFind` import in `duplicate.py`. Options:
-   - (a) Delete entirely (~600 lines saved); move `UnionFind` into `duplicate.py`. Removes the `saturate` CLI command.
-   - (b) Keep but mark experimental; hide from `--help`; possibly move to an `experimental/` subpackage.
-   - (c) Keep as-is.
-
-2. **`flow_ir.py` adapter layer** — do you agree with collapsing it into the two callers (`lint.py` + `policy.py`)? It's a 422-line indirection that mostly converts dataclasses. Concern: if a future check engine needs the IR, we'll re-create it.
-
-3. **`policy.py` vs `lint.py` overlap** — happy to unify `DeadCodeCheck`/`DeadCodeConfig` and the flow-check hierarchies into a shared model? Or are the two systems intentionally distinct (lint = developer linting, policy = CI gates)?
-
-4. **`language_plugins.py` plugin protocol** — given `python_plugin.py` is the only implementation, the plugin protocol exists for a multi-language future that lives in Rust+TOML now. Should we:
-   - (a) Inline `python_plugin.py` into `transform.py` and delete the protocol/registry (~200–300 lines).
-   - (b) Keep the protocol as documented extension point.
-
-5. **Phase B2.3 (Datalog query helper)** — this was skipped because `refs_datalog`/`callers_datalog`/`callees_datalog`/`graph_datalog` have meaningfully different shapes (different return types, dynamic clause building, branching on `file_path`). If you want it pushed through anyway, possible to extract a narrower helper that only covers the two near-identical methods (`callers_datalog`/`callees_datalog`). Estimated saving: ~5–8 lines. Worth it?
-
-6. **Rust extensions for design-philosophy compliance (Phase E)** — willing to extend `emend_core` to add `parse_string_literal`, `validate_syntax` (with mode), and tree-sitter JSONC? Each unlocks 15–25 Python lines + removes a CLAUDE.md design-philosophy violation. The Rust work is small but non-trivial.
-
-7. **`_CLASS_DEF_RE` in `dsl.py`** — Phase B3 left this regex in place because `resolve_graphql_links` still uses it. Want a follow-up phase to convert GraphQL link resolution to tree-sitter as well? Estimated saving: ~10 lines.
+1. **`rewrite_engine.py`** → (b) keep, mark experimental; extract `UnionFind` to its own module.
+2. **`flow_ir.py`** → marked invalid (not pure indirection; holds 188-line Datalog/Python bridge).
+3. **`policy.py` vs `lint.py`** → unify `DeadCodeCheck`/`DeadCodeConfig` only; flow-rule engines stay separate.
+4. **`language_plugins.py`** → marked invalid (protocol is actively multi-language via Rust/TypeScript plugins).
+5. **Datalog query helper** → skipped (~4 net-line saving; hurts Datalog query readability).
+6. **Rust extensions (Phase E)** → do E1 (`parse_string_literal`) and E2 (`validate_syntax`); skip E3 (JSONC) — 100-150 Rust lines for 6 Python lines is net negative.
+7. **`_CLASS_DEF_RE`** → defer full GraphQL→tree-sitter conversion; delete dead `_RESOLVER_CLASS_RE` at `dsl.py:148`.
 
 ## Files of interest after Phases A+B
 

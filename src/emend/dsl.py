@@ -144,12 +144,6 @@ _GQL_QUERY_DEF_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Resolver class/function patterns (Python + TypeScript)
-_RESOLVER_CLASS_RE = re.compile(r'class\s+(\w+(?:Resolver|Query|Mutation))\s*[\(:]', re.MULTILINE)
-_RESOLVER_DECORATOR_RE = re.compile(
-    r'@(?:strawberry\.type|Resolver|resolver|Query|Mutation|Subscription)\b'
-)
-
 
 def _get_string_literals(
     source: str, file_path: str

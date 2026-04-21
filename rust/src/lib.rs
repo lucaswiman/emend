@@ -272,6 +272,108 @@ fn collect_comments(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, String)>
     Ok(pattern::collect_comments(source, ext))
 }
 
+/// Parse a source-text fragment as a single string literal and return its content.
+///
+/// If `text` (after trimming whitespace) is a single string literal in the given
+/// language, returns `Some(content)` with the inner content (quotes stripped).
+/// Otherwise returns `None` — e.g. for f-strings, concatenated strings, or
+/// non-string expressions.
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
+/// Defaults to "py" if not provided.
+#[pyfunction]
+#[pyo3(signature = (text, ext="py"))]
+fn parse_string_literal(text: &str, ext: &str) -> PyResult<Option<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let literals = pattern::collect_string_literals(trimmed, ext);
+    // Require exactly one literal that spans the whole trimmed input.
+    if literals.len() != 1 {
+        return Ok(None);
+    }
+    let (start, end, _sl, _sc, _el, _ec, content) = &literals[0];
+    if *start as usize != 0 || *end as usize != trimmed.len() {
+        return Ok(None);
+    }
+    Ok(Some(content.clone()))
+}
+
+/// Validate that `code` parses without syntax errors in the given language.
+///
+/// Uses tree-sitter to parse the code. Mirrors the permissive "is this a
+/// reasonable replacement snippet?" contract: accepts any of (a) parse as
+/// top-level, (b) parse wrapped in an expression context, (c) parse wrapped
+/// in a statement context. Returns `true` if any form parses cleanly.
+///
+/// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
+/// Defaults to "py" if not provided.
+#[pyfunction]
+#[pyo3(signature = (code, ext="py"))]
+fn validate_syntax(code: &str, ext: &str) -> PyResult<bool> {
+    if parses_clean(code, ext) {
+        return Ok(true);
+    }
+    if let Some(wrapped) = wrap_as_expression(code, ext) {
+        if parses_clean(&wrapped, ext) {
+            return Ok(true);
+        }
+    }
+    if let Some(wrapped) = wrap_as_statement(code, ext) {
+        if parses_clean(&wrapped, ext) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parses_clean(code: &str, ext: &str) -> bool {
+    match pattern::parse_by_extension(code, ext) {
+        Some(tree) => !has_error_or_missing(tree.root_node()),
+        None => false,
+    }
+}
+
+fn wrap_as_expression(code: &str, ext: &str) -> Option<String> {
+    match ext {
+        "py" | "pyi" => Some(format!("_ = ({})", code)),
+        "rs" => Some(format!("fn __v() {{ let _ = ({}); }}", code)),
+        "ts" | "tsx" | "js" | "jsx" => Some(format!("const __v = ({});", code)),
+        _ => None,
+    }
+}
+
+fn wrap_as_statement(code: &str, ext: &str) -> Option<String> {
+    match ext {
+        "py" | "pyi" => {
+            let indented = code.replace('\n', "\n    ");
+            Some(format!("def __v():\n    {}", indented))
+        }
+        "rs" => Some(format!("fn __v() {{ {} }}", code)),
+        "ts" | "tsx" | "js" | "jsx" => Some(format!("function __v() {{ {} }}", code)),
+        _ => None,
+    }
+}
+
+fn has_error_or_missing(node: tree_sitter::Node) -> bool {
+    if node.is_error() || node.is_missing() {
+        return true;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            if has_error_or_missing(cursor.node()) {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Extract all call sites from source code using tree-sitter.
 ///
 /// Returns a list of (callee, [arg1, arg2, ...], line, col, is_method) tuples.
@@ -320,6 +422,8 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(collect_string_literals, m)?)?;
     m.add_function(wrap_pyfunction!(collect_comments, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_string_literal, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_syntax, m)?)?;
     m.add_function(wrap_pyfunction!(extract_call_sites, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
