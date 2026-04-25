@@ -10,6 +10,7 @@ import logging
 import re
 
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
+from emend import emend_core as _rust
 
 logger = logging.getLogger(__name__)
 

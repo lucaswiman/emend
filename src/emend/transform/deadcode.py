@@ -304,6 +304,45 @@ def _parse_decorator_name(dec: str) -> tuple[str, str]:
     return dec_clean, dec_basename
 
 
+# Default decorators that indicate a symbol is an external interface
+_EXTERNAL_INTERFACE_DECORATORS = frozenset({
+    'app.route', 'app.get', 'app.post', 'app.put', 'app.delete', 'app.patch',
+    'router.get', 'router.post', 'router.put', 'router.delete', 'router.patch',
+    'api_view', 'action',
+    'rpc_endpoint', 'grpc_method',
+    'click.command', 'click.group',
+    'app.command',
+    'strawberry.mutation', 'strawberry.query', 'strawberry.subscription',
+    'graphene.resolve',
+    'task', 'celery.task', 'shared_task',
+    'webhook', 'endpoint',
+    'message_handler', 'event_handler',
+})
+
+_EXTERNAL_INTERFACE_BASENAMES = frozenset({
+    'route', 'get', 'post', 'put', 'delete', 'patch', 'head', 'options',
+    'command', 'task', 'endpoint', 'webhook',
+    'mutation', 'query', 'subscription',
+    'rpc', 'grpc', 'api',
+})
+
+# Patterns in callees that indicate async side effects
+_ASYNC_SIDE_EFFECT_PATTERNS = frozenset({
+    'delay', 'apply_async', 'send_task',
+    'submit', 'create_task', 'ensure_future',
+    'run_in_executor',
+})
+
+# Patterns in callees that indicate I/O or external effects
+_SIDE_EFFECT_CALLEE_PATTERNS = {
+    'db_write': {'save', 'commit', 'add', 'delete', 'update', 'insert',
+                 'execute', 'executemany', 'bulk_create', 'bulk_update'},
+    'network': {'request', 'get', 'post', 'put', 'fetch', 'urlopen', 'send'},
+    'file_io': {'write', 'open', 'unlink', 'remove', 'rename', 'mkdir'},
+    'cache': {'set', 'delete', 'clear', 'invalidate'},
+}
+
+
 @dataclass
 class Danger:
     """A potential hazard the agent should know about before editing."""
@@ -645,6 +684,7 @@ def semantic_context(
 
     # ---- Detect side effects from callees ---------------------------------
     # Build a prefix to identify local-scope callees (e.g., set.add on local vars)
+    from .project_iter import _file_to_module
     _module = _file_to_module(file_path, project_root)
     _local_prefix = f"{_module}.{'.'.join(symbol_path)}."
     side_effects: list[SideEffect] = []
