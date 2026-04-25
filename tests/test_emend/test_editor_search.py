@@ -936,17 +936,29 @@ class TestEditorSearchBugFixes:
         finally:
             engine.close()
 
-    def test_class_member_name_consistent_ast_module(self):
-        """_class_member_name should use the same ast module reference
-        throughout (not mix global ast and local _ast)."""
-        import ast
+    def test_class_member_name_uses_tree_sitter(self):
+        """_class_member_name should work with tree-sitter PyNode (not ast nodes).
+
+        This is the tree-sitter replacement for the old AST-based implementation.
+        It now accepts PyNode instances from emend_core.parse_source().
+        """
+        from emend import emend_core as _ec
         from emend.editor_search import EditorSearchEngine
 
         engine = EditorSearchEngine.__new__(EditorSearchEngine)
-        func_node = ast.parse("def foo(): pass").body[0]
-        result = engine._class_member_name(func_node)
-        assert result == "foo"
 
-        async_func = ast.parse("async def bar(): pass").body[0]
-        result2 = engine._class_member_name(async_func)
-        assert result2 == "bar"
+        # function_definition inside a class body
+        src = "class C:\n    def foo(self): pass\n    async def bar(self): pass\n    x: int = 5\n    y = 10\n"
+        py_tree = _ec.parse_source(src, "py")
+        class_node = py_tree.root.named_children()[0]
+        body_node = class_node.child_by_field_name("body")
+        members = list(body_node.named_children())
+
+        # first member is an expression_statement wrapping function_definition
+        assert engine._class_member_name(members[0]) == "foo"
+        # second member is async def bar
+        assert engine._class_member_name(members[1]) == "bar"
+        # annotated assignment x: int = 5
+        assert engine._class_member_name(members[2]) == "x"
+        # plain assignment y = 10
+        assert engine._class_member_name(members[3]) == "y"

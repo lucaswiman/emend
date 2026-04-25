@@ -39,7 +39,6 @@ changing the public API.
 
 from __future__ import annotations
 
-import ast
 import json
 import hashlib
 import logging
@@ -2343,6 +2342,16 @@ class EditorSearchEngine:
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items[:limit], elapsed_ms=elapsed, mode="complete", query=prefix)
 
+    @staticmethod
+    def _ts_walk(node: Any):
+        """Recursively yield a PyNode and all its named descendants (depth-first).
+
+        Replaces ``ast.walk()`` for tree-sitter ``PyNode`` trees.
+        """
+        yield node
+        for child in node.named_children():
+            yield from EditorSearchEngine._ts_walk(child)
+
     def _complete_local_attributes(
         self,
         parent: str,
@@ -2354,14 +2363,15 @@ class EditorSearchEngine:
         limit: int,
     ) -> tuple[list[dict], list[str]]:
         """Return attribute completions seen on a local receiver plus inferred type targets."""
-        import ast as _ast
+        from emend import emend_core as _ec
 
-        try:
-            tree = _ast.parse(self._normalize_completion_source(source, line, parent))
-        except Exception:
+        py_tree = _ec.parse_source(
+            self._normalize_completion_source(source, line, parent), "py"
+        )
+        if py_tree is None:
             return [], []
 
-        scope_node = self._find_enclosing_scope_node(tree, line)
+        scope_node = self._find_enclosing_scope_node(py_tree.root, line)
         if scope_node is None:
             return [], []
 
@@ -2369,11 +2379,18 @@ class EditorSearchEngine:
         inferred_parents: list[str] = []
         inferred_seen: set[str] = set()
 
-        for node in _ast.walk(scope_node):
-            if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
-                if node.value.id == parent:
-                    attr_names.add(node.attr)
-            elif isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+        for node in self._ts_walk(scope_node):
+            if node.kind == "attribute":
+                obj = node.child_by_field_name("object")
+                attr = node.child_by_field_name("attribute")
+                if (
+                    obj is not None
+                    and obj.kind == "identifier"
+                    and obj.text() == parent
+                    and attr is not None
+                ):
+                    attr_names.add(attr.text())
+            elif node.kind == "assignment":
                 candidate = self._infer_receiver_target(node, parent, import_names)
                 if candidate and candidate not in inferred_seen:
                     inferred_seen.add(candidate)
@@ -2421,21 +2438,27 @@ class EditorSearchEngine:
         limit: int,
     ) -> list[dict]:
         """Complete members from class definitions available in the current source."""
-        import ast as _ast
+        from emend import emend_core as _ec
 
         if limit <= 0 or not inferred_parents:
             return []
-        try:
-            tree = _ast.parse(source)
-        except Exception:
+        py_tree = _ec.parse_source(source, "py")
+        if py_tree is None:
             return []
 
         target_names = {parent.rsplit(".", 1)[-1] for parent in inferred_parents}
         items: list[dict] = []
-        for node in _ast.walk(tree):
-            if not isinstance(node, _ast.ClassDef) or node.name not in target_names:
+        for node in self._ts_walk(py_tree.root):
+            if node.kind != "class_definition":
                 continue
-            for child in node.body:
+            name_node = node.child_by_field_name("name")
+            class_name = name_node.text() if name_node is not None else ""
+            if class_name not in target_names:
+                continue
+            body_node = node.child_by_field_name("body")
+            if body_node is None:
+                continue
+            for child in body_node.named_children():
                 member_name = self._class_member_name(child)
                 if not member_name:
                     continue
@@ -2447,7 +2470,7 @@ class EditorSearchEngine:
                 items.append({
                     "word": member_name,
                     "kind": "member",
-                    "menu": f"[class:{node.name}]",
+                    "menu": f"[class:{class_name}]",
                     "score": 1500,
                 })
                 if len(items) >= limit:
@@ -2455,31 +2478,51 @@ class EditorSearchEngine:
         return items
 
     def _class_member_name(self, node: Any) -> str | None:
-        """Extract a direct class member name from a class-body statement."""
-        import ast as _ast
+        """Extract a direct class member name from a class-body PyNode statement.
 
-        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-            return node.name
-        if isinstance(node, (_ast.Assign, _ast.AnnAssign)):
-            targets = node.targets if isinstance(node, _ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, _ast.Name):
-                    return target.id
+        Accepts a ``PyNode`` from a class body block.  Unwraps
+        ``expression_statement`` wrappers (tree-sitter wraps bare expressions).
+        """
+        # Unwrap expression_statement wrapper
+        inner = node
+        if node.kind == "expression_statement":
+            children = node.named_children()
+            if not children:
+                return None
+            inner = children[0]
+
+        if inner.kind == "function_definition":
+            name_node = inner.child_by_field_name("name")
+            return name_node.text() if name_node is not None else None
+
+        if inner.kind == "assignment":
+            left = inner.child_by_field_name("left")
+            if left is not None and left.kind == "identifier":
+                return left.text()
+
         return None
 
-    def _find_enclosing_scope_node(self, tree: Any, line: int) -> Any | None:
-        """Return the innermost function/class/module node containing the cursor."""
-        if line <= 0:
-            return tree
+    def _find_enclosing_scope_node(self, root: Any, line: int) -> Any | None:
+        """Return the innermost function/class/module PyNode containing the cursor.
 
-        candidate = tree
+        ``root`` is a ``PyNode`` (the root of a ``parse_source`` result).
+        ``line`` is 1-based.  Returns the root itself when ``line <= 0`` or no
+        narrower scope is found.
+        """
+        if line <= 0:
+            return root
+
+        candidate = root
         candidate_span = float("inf")
-        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-        for node in ast.walk(tree):
-            if not isinstance(node, scope_types):
+        _SCOPE_KINDS = ("function_definition", "class_definition")
+        for node in self._ts_walk(root):
+            if node.kind not in _SCOPE_KINDS:
                 continue
-            start = getattr(node, "lineno", 0)
-            end = getattr(node, "end_lineno", start)
+            start_row, _ = node.start_point
+            end_row, _ = node.end_point
+            # Convert to 1-based line numbers
+            start = start_row + 1
+            end = end_row + 1
             if start <= line <= end:
                 span = end - start
                 if span < candidate_span:
@@ -2493,22 +2536,29 @@ class EditorSearchEngine:
         parent: str,
         import_names: dict[str, str],
     ) -> str | None:
-        """Infer the target type/module path assigned to a receiver name."""
-        import ast as _ast
+        """Infer the target type/module path assigned to a receiver name.
 
-        if isinstance(node, _ast.Assign):
-            targets = node.targets
-            value = node.value
-            annotation = None
-        elif isinstance(node, _ast.AnnAssign):
-            targets = [node.target]
-            value = node.value
-            annotation = node.annotation
-        else:
+        ``node`` is a ``PyNode`` with kind ``"assignment"``.
+        Handles both plain assignment (``x = ...``) and annotated assignment
+        (``x: Type = ...`` or ``x: Type``).
+        """
+        if node.kind != "assignment":
             return None
 
-        if not any(isinstance(target, _ast.Name) and target.id == parent for target in targets):
+        # Check that ``parent`` appears as the LHS identifier.
+        left = node.child_by_field_name("left")
+        if left is None or left.kind != "identifier" or left.text() != parent:
             return None
+
+        # Prefer RHS value; fall back to type annotation.
+        value = node.child_by_field_name("right")
+        annotation_node = node.child_by_field_name("type")
+        # "type" field wraps the annotation in a "type" node; unwrap it.
+        annotation = (
+            annotation_node.named_children()[0]
+            if (annotation_node is not None and annotation_node.named_children())
+            else annotation_node
+        )
 
         inferred = self._qualified_name_from_expr(value, import_names)
         if inferred:
@@ -2520,27 +2570,42 @@ class EditorSearchEngine:
         expr: Any | None,
         import_names: dict[str, str],
     ) -> str | None:
-        """Extract a dotted name from a simple AST expression."""
-        import ast as _ast
-
+        """Extract a dotted name from a simple tree-sitter PyNode expression."""
         if expr is None:
             return None
-        if isinstance(expr, _ast.Call):
-            return self._qualified_name_from_expr(expr.func, import_names)
-        if isinstance(expr, _ast.Name):
-            return import_names.get(expr.id, expr.id)
-        if isinstance(expr, _ast.Attribute):
+        kind = expr.kind
+
+        if kind == "call":
+            func = expr.child_by_field_name("function")
+            return self._qualified_name_from_expr(func, import_names)
+
+        if kind == "identifier":
+            name = expr.text()
+            return import_names.get(name, name)
+
+        if kind == "attribute":
+            # Build dotted name by walking the attribute chain.
             parts: list[str] = []
             current = expr
-            while isinstance(current, _ast.Attribute):
-                parts.append(current.attr)
-                current = current.value
-            if isinstance(current, _ast.Name):
-                root = import_names.get(current.id, current.id)
+            while current is not None and current.kind == "attribute":
+                attr = current.child_by_field_name("attribute")
+                if attr is not None:
+                    parts.append(attr.text())
+                current = current.child_by_field_name("object")
+            if current is not None and current.kind == "identifier":
+                root = import_names.get(current.text(), current.text())
                 parts.append(root)
                 return ".".join(reversed(parts))
-        if isinstance(expr, _ast.Subscript):
-            return self._qualified_name_from_expr(expr.value, import_names)
+
+        if kind == "subscript":
+            value = expr.child_by_field_name("value")
+            return self._qualified_name_from_expr(value, import_names)
+
+        # Unwrap "type" wrapper node used in annotated assignments.
+        if kind == "type":
+            children = expr.named_children()
+            return self._qualified_name_from_expr(children[0] if children else None, import_names)
+
         return None
 
     def complete_diagnostics(self, prefix: str, file: str = "", line: int = 0, col: int = 0) -> SearchResult:
@@ -2570,28 +2635,66 @@ class EditorSearchEngine:
         """Parse imports from a Python file or hot buffer.
 
         Returns ``{local_name: qualified_source}``.
+        Uses tree-sitter via ``emend_core.parse_source`` instead of Python's
+        ``ast`` module, consistent with emend's language-agnostic design.
         """
-        import ast as _ast
+        from emend import emend_core as _ec
 
         try:
             source = self._read_file_or_hot(file)
             if source is None:
                 source = Path(file).read_text()
-            tree = _ast.parse(source)
+            py_tree = _ec.parse_source(source, "py")
         except Exception:
             return {}
 
+        if py_tree is None:
+            return {}
+
         names: dict[str, str] = {}
-        for node in _ast.iter_child_nodes(tree):
-            if isinstance(node, _ast.Import):
-                for alias in node.names:
-                    local = alias.asname or alias.name.split(".")[-1]
-                    names[local] = alias.name
-            elif isinstance(node, _ast.ImportFrom):
-                module = node.module or ""
-                for alias in node.names:
-                    local = alias.asname or alias.name
-                    names[local] = f"{module}.{alias.name}" if module else alias.name
+        for node in py_tree.root.named_children():
+            if node.kind == "import_statement":
+                # import os  /  import numpy as np  /  import sys.path
+                for child in node.named_children():
+                    if child.kind == "dotted_name":
+                        full_name = child.text()
+                        local = full_name.split(".")[-1]
+                        names[local] = full_name
+                    elif child.kind == "aliased_import":
+                        name_node = child.child_by_field_name("name")
+                        alias_node = child.child_by_field_name("alias")
+                        full_name = name_node.text() if name_node is not None else ""
+                        local = (
+                            alias_node.text()
+                            if alias_node is not None
+                            else full_name.split(".")[-1]
+                        )
+                        if full_name:
+                            names[local] = full_name
+
+            elif node.kind == "import_from_statement":
+                # from module import name  /  from module import name as alias
+                module_node = node.child_by_field_name("module_name")
+                module = ""
+                module_byte_range: tuple[int, int] | None = None
+                if module_node is not None and module_node.kind == "dotted_name":
+                    module = module_node.text()
+                    module_byte_range = module_node.byte_range()
+                # Relative imports (module_node.kind == "relative_import"): skip
+                for child in node.named_children():
+                    # Skip the module_name child (identified by byte range)
+                    if module_byte_range is not None and child.byte_range() == module_byte_range:
+                        continue
+                    if child.kind == "dotted_name":
+                        name = child.text()
+                        names[name] = f"{module}.{name}" if module else name
+                    elif child.kind == "aliased_import":
+                        name_node = child.child_by_field_name("name")
+                        alias_node = child.child_by_field_name("alias")
+                        name = name_node.text() if name_node is not None else ""
+                        local = alias_node.text() if alias_node is not None else name
+                        if name:
+                            names[local] = f"{module}.{name}" if module else name
         return names
 
     def _complete_via_mapping(

@@ -66,18 +66,20 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
   - Risk: low for the code; **user-visible** — confirm with the user before
     starting, and document in `CHANGELOG.md`.
 
-- [ ] **Phase 5 — purge `editor_search.py` `import ast` sites**
-  - 6 inline `import ast as _ast` calls (lines 2357, 2424, 2459, 2497, 2524,
-    2574) that parse Python source ad-hoc. Each is a design-philosophy
-    violation per `CLAUDE.md`'s "Tree-sitter and Configuration" section.
-  - Replace each with `emend_core.collect_symbols_from_str()` or a targeted
-    tree-sitter query via `PyTree`/`PyNode` (the latter was added in
-    `rust/src/tree_py.rs`).
-  - May need a small `emend_core` capability extension if existing APIs
-    don't cover one of the use cases — note the gap if so (à la Phase E).
-  - Risk: medium — `editor_search` is hot path for vim plugin; verify with
-    `test_editor_search.py`, `test_editor_search_files.py`, and
-    `test_vim_rpc.py`.
+- [x] **Phase 5 — purge `editor_search.py` `import ast` sites**
+  - All 7 `import ast` / `import ast as _ast` sites removed (top-level line 42
+    plus 6 inline sites at lines 2357, 2424, 2459, 2497, 2524, 2574).
+  - Replaced with `emend_core.parse_source()` + `PyTree`/`PyNode` traversal.
+  - Added `EditorSearchEngine._ts_walk()` static helper (replaces `ast.walk()`).
+  - All completions (`_complete_local_attributes`, `_complete_source_parent_members`,
+    `_class_member_name`, `_find_enclosing_scope_node`, `_infer_receiver_target`,
+    `_qualified_name_from_expr`) and import parsing (`_extract_import_names`)
+    now use tree-sitter via `emend_core`.
+  - No gaps — `PyTree`/`PyNode` covered all use cases.
+  - Test `test_class_member_name_consistent_ast_module` renamed to
+    `test_class_member_name_uses_tree_sitter` with updated PyNode-based fixture.
+  - Full test suite: 3060 passed, 3 skipped, 1 xfailed (0 failures).
+  - No Rust extension changes required.
 
 - [ ] **Phase 6 — decompose `mcp_server.py` into `mcp/` package**
   - 1,939 lines of MCP tool wrappers. After Phases 1+2, most tools are
