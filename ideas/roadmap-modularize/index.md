@@ -24,13 +24,28 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
 
 ## Phases
 
-- [ ] **Phase 1 — split `transform.py` into a `transform/` package** (highest leverage)
+- [x] **Phase 1 — split `transform.py` into a `transform/` package** (highest leverage)
   - See [phase-1-split-transform.md](phase-1-split-transform.md).
   - Goal: 7 sibling modules of <1500 lines each; `transform/__init__.py`
     re-exports the public surface so all callers (CLI, MCP, lint, policy)
     keep working without import changes.
   - Risk: low — splits along function boundaries, no behavior change. Tests
     cover every command surface.
+  - **Status**: split landed in commits 2250088 / 9727a5e on
+    `claude/modularize-phase-1-split-transform`; follow-ups 3b380b0,
+    070c747, 3811e08, 684f674 fixed missing imports
+    (`re`, `lru_cache`, `emend_core as _rust`), restored a dropped
+    `@dataclass` on `PatternMatch`, relocated misplaced
+    semantic-context constants from `impact.py` to `deadcode.py`, and
+    re-targeted three `test_language_plugin_bugs.py` patches that no
+    longer reach the now-submodule-local symbols. `make test`: 3060
+    passed, 2 failed (both `test_knowledge.py::TestMCPTools` — pre-
+    existing pydantic / Python 3.14 incompatibility, fails on the
+    original `transform.py` too).
+  - **Open follow-up**: `transform/index.py` is 1795 lines, exceeding the
+    <1500-line acceptance criterion. Candidates for a sub-split:
+    `_index_batch`/`_extract_*` extraction (~300 lines), the venv-index
+    block at lines 984-1259 (~275 lines, could move to its own module).
 
 - [ ] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
   - See [phase-2-unify-checks.md](phase-2-unify-checks.md).
