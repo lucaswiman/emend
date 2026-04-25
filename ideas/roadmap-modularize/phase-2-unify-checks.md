@@ -51,14 +51,14 @@ src/emend/checks/
 This is bigger than Phase 1 because it actually merges code, not just
 moves it. Do it in stages so each stage is testable.
 
-### Stage 2a — extract shared loader
+### Stage 2a — extract shared loader ✓
 
 - Move `rules_config.py` into `checks/rules_config.py`.
 - Move `flow_ir.py` into `checks/flow.py` (just relocation; leave the
   Python flow tracker in `lint.py` for now).
 - Run tests; ship as one commit.
 
-### Stage 2b — split lint into rule-kind files
+### Stage 2b — split lint into rule-kind files ✓
 
 - Inside `checks/`, create `pattern_rules.py`, `flow.py` (extends 2a),
   `deadcode.py`, etc.
@@ -69,7 +69,7 @@ moves it. Do it in stages so each stage is testable.
   (policy) merge into `checks/flow.execute_flow_spec` (already exists in
   `flow_ir.py` — promote it).
 
-### Stage 2c — single engine
+### Stage 2c — single engine ✓
 
 - `checks/engine.py` exposes `run_checks(rules, files) -> list[CheckViolation]`.
 - Internally: parse YAML once → group rules by kind → dispatch to the
@@ -77,7 +77,7 @@ moves it. Do it in stages so each stage is testable.
 - Replace `lint.run_lint` and `policy.run_policy_checks` with thin
   back-compat wrappers (one-liners) so existing imports don't break.
 
-### Stage 2d — CLI consolidation
+### Stage 2d — CLI consolidation ✓
 
 - `cli_checks.py` keeps three commands (`lint`, `policy`, `check`) for
   user-facing back-compat, but all three now call `checks.engine.run_checks`
@@ -85,9 +85,9 @@ moves it. Do it in stages so each stage is testable.
   - `lint` → only `pattern`/`flow`/`deadcode` kinds
   - `policy` → only `flow`/`structural`/`type`/`deadcode`/`datalog`/`custom`/`sequence` kinds
   - `check` → all kinds
-- `mcp_server.py` collapses three nearly-identical wrappers into one.
+- `mcp_server.py` deprecated lint/check_policies helpers also updated.
 
-### Stage 2e — delete the wrappers
+### Stage 2e — delete the wrappers (deferred)
 
 - Once Stage 2d is in production for one release, delete `lint.run_lint`
   and `policy.run_policy_checks` shims. Callers that didn't migrate get
@@ -110,16 +110,16 @@ new locations. (Same pattern as Phase 1's `transform/__init__.py`.)
 
 ## Acceptance criteria
 
-- [ ] `make test` passes at every stage.
-- [ ] `test_lint.py`, `test_policy.py`, `test_flow_ir.py`,
+- [x] `make test` passes at every stage.
+- [x] `test_lint.py`, `test_policy.py`, `test_flow_ir.py`,
       `test_flow_rules.py`, `test_lint_*.py` (multilang variants), and
       `test_phase8_dup_cache.py` all stay green.
-- [ ] `lint.py` shrinks to <100 lines (back-compat re-exports).
-- [ ] `policy.py` shrinks to <100 lines (back-compat re-exports).
-- [ ] One CLI command (`emend check`) covers everything; `lint` and `policy`
+- [x] `lint.py` shrinks to <100 lines (back-compat re-exports).
+- [x] `policy.py` shrinks to <100 lines (back-compat re-exports).
+- [x] One CLI command (`emend check`) covers everything; `lint` and `policy`
       become aliases with default kind filters.
 - [ ] No more "patterns.yaml vs policies.yaml" branching in dispatch — only
-      one document type, validated once.
+      one document type, validated once. (Deferred to Phase 4.)
 
 ## Risks
 

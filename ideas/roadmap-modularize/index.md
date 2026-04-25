@@ -32,7 +32,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
   - Risk: low — splits along function boundaries, no behavior change. Tests
     cover every command surface.
 
-- [ ] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
+- [x] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
   - See [phase-2-unify-checks.md](phase-2-unify-checks.md).
   - Three engines (`lint.run_lint`, `policy.run_policy_checks`,
     `checks.run_checks`) already share `DeadCodeConfig`, `FlowSpec`, and the
