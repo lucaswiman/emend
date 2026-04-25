@@ -1,10 +1,27 @@
+"""CLI commands for lint, policy, and check.
+
+All three commands now route through checks.engine.run_checks with different
+``allowed_kinds`` filters:
+  - lint  → match / flow / deadcode kinds
+  - policy → flow / structural / type / deadcode / datalog / custom / sequence
+  - check  → all kinds (no filter)
+
+This consolidation is Stage 2d of the modularize roadmap.
+"""
+
 import sys
 from typing import Annotated, Optional
 
 import typer
 
 from emend.cli_base import JsonFlag, _state, app, resolve_file_scopes, resolve_files
-from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
+from emend.checks.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
+
+# Kind sets for CLI filter dispatch
+_LINT_KINDS = {"match", "flow", "deadcode"}
+_POLICY_KINDS = {"flow", "structural", "type", "deadcode", "datalog", "custom", "sequence"}
+_ALL_KINDS = _LINT_KINDS | _POLICY_KINDS
+
 
 @app.command("lint")
 def lint_cmd(
@@ -35,14 +52,12 @@ def lint_cmd(
         emend lint src/ --rule no-print
     """
     try:
-        from emend.lint import load_rules, run_lint
+        from emend.checks.engine import run_checks
 
         config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
         if not config_path.exists():
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
-
-        rules, macros, deadcode_config = load_rules(str(config_path))
 
         _lang = _state["language"]
         # Lint scans all source languages by default so that
@@ -50,10 +65,14 @@ def lint_cmd(
         resolved, _ = resolve_files(path, language=None)
         files = [str(f) for f in resolved]
 
-        violations = run_lint(
-            rules, files, fix=fix, rule_filter=rule,
-            deadcode_config=deadcode_config, project_path=path,
+        violations = run_checks(
+            files,
+            config=str(config_path),
+            rule_name=rule,
+            fix=fix,
             language=_lang,
+            project_path=path,
+            allowed_kinds=_LINT_KINDS,
         )
 
         for v in violations:
@@ -69,7 +88,6 @@ def lint_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
-
 
 
 @app.command("policy")
@@ -92,7 +110,8 @@ def policy_cmd(
         emend policy src/ --json
     """
     try:
-        from emend.policy import load_policies, run_policy_checks, format_policy_violations
+        import json as _json
+        from emend.checks.engine import run_checks
 
         config_path = resolve_rules_path(
             config,
@@ -102,22 +121,56 @@ def policy_cmd(
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
-        policies = load_policies(str(config_path))
-        if policy_name:
-            policies = [p for p in policies if p.name == policy_name]
-            if not policies:
-                print(f"Error: Policy '{policy_name}' not found.", file=sys.stderr)
-                raise typer.Exit(2)
-
         _lang = _state["language"]
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        violations = run_policy_checks(files, policies, language=_lang, project_path=path)
+        violations = run_checks(
+            files,
+            config=str(config_path),
+            rule_name=policy_name,
+            language=_lang,
+            project_path=path,
+            allowed_kinds=_POLICY_KINDS,
+        )
 
-        output = format_policy_violations(violations, json_output=json_output)
-        if output:
-            print(output, end='' if not output.endswith('\n') else '')
+        if json_output:
+            print(_json.dumps([
+                {
+                    "rule": v.rule_name,
+                    "kind": v.kind,
+                    "severity": v.severity,
+                    "message": v.message,
+                    "file": v.file_path,
+                    "line": v.line,
+                    "col": v.col,
+                    "witness": v.witness or [],
+                }
+                for v in violations
+            ], indent=2))
+        else:
+            if not violations:
+                print("No policy violations found.")
+            else:
+                for v in violations:
+                    location = f"{v.file_path}:{v.line}"
+                    if v.col:
+                        location += f":{v.col}"
+                    print(f"[{v.severity.upper()}] {v.rule_name}: {location}: {v.message}")
+                    for w in v.witness or []:
+                        print(f"  | {w}")
+
+                error_count = sum(1 for v in violations if v.severity == "error")
+                warning_count = sum(1 for v in violations if v.severity == "warning")
+                info_count = sum(1 for v in violations if v.severity == "info")
+                parts = []
+                if error_count:
+                    parts.append(f"{error_count} error(s)")
+                if warning_count:
+                    parts.append(f"{warning_count} warning(s)")
+                if info_count:
+                    parts.append(f"{info_count} info(s)")
+                print(f"\nFound {len(violations)} violation(s): {', '.join(parts)}")
 
         if violations:
             raise typer.Exit(1)
@@ -129,7 +182,6 @@ def policy_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
-
 
 
 @app.command("check")
@@ -145,7 +197,7 @@ def check_cmd(
     try:
         import json as _json
 
-        from emend.checks import run_checks
+        from emend.checks.engine import run_checks
 
         _lang = _state["language"]
         resolved, _ = resolve_file_scopes(paths or ["."], language=_lang)
