@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
+import re
 
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector

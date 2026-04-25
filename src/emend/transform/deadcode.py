@@ -2,6 +2,7 @@
 from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging

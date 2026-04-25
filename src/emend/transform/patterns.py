@@ -1,5 +1,6 @@
 """Pattern matching, find, replace, copy, and symbol source utilities."""
 from __future__ import annotations
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+@dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
     node_text: str | None

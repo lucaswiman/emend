@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 import difflib
 import logging
+import re
 
 from ..component_selector import ExtendedSelector
 from emend import emend_core as _rust
