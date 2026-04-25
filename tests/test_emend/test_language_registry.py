@@ -9,7 +9,7 @@ from emend.language_registry import (
     is_source_file,
     detect_exported_names,
 )
-from emend.cli import resolve_files
+from emend.cli_base import resolve_files
 
 
 # ---------------------------------------------------------------------------

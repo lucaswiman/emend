@@ -5,7 +5,7 @@ import handling, doc comment handling, language detection, and plugin loading.
 """
 import pytest
 from pathlib import Path
-from emend.cli import resolve_files
+from emend.cli_base import resolve_files
 from emend.transform import find_pattern, visit_project_ts
 from emend.ast_commands import collect_symbols
 from emend.language_registry import (

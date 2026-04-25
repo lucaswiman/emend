@@ -106,7 +106,7 @@ def search(
 ) -> str:
     """Search for code or symbols with explicit modes."""
     import re as _re
-    from emend.cli import resolve_files, resolve_file_scopes, parse_where_clause, detect_query_shape
+    from emend.cli_base import resolve_files, resolve_file_scopes, parse_where_clause, detect_query_shape
 
     mode = (mode or "code").lower()
     if mode not in {"code", "symbol", "summary", "auto"}:
@@ -340,7 +340,7 @@ def replace(
     Supports $X metavariables in both pattern and replacement.
     By default shows a diff (dry-run). Set apply=True to write changes.
     """
-    from emend.cli import resolve_files, parse_where_clause
+    from emend.cli_base import resolve_files, parse_where_clause
 
     where_params = parse_where_clause([where] if where else [])
     scope = where_params.get("scope")
@@ -775,7 +775,7 @@ def lint(
     """Lint Python files using rules from .emend/rules.yaml or legacy patterns.yaml."""
     from pathlib import Path as _Path
     from emend.lint import load_rules, run_lint
-    from emend.cli import resolve_files
+    from emend.cli_base import resolve_files
 
     config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
     if not config_path.exists():
@@ -959,7 +959,7 @@ def trace_analysis(
         load_trace_config, run_trace_analysis, format_violations,
         TraceConfig, TraceSource, TraceSink, TraceSanitizer,
     )
-    from emend.cli import resolve_files
+    from emend.cli_base import resolve_files
 
     # Build config from inline params, preset, or config file
     if from_pattern and to_pattern:
@@ -1111,7 +1111,7 @@ def check_policies(
     """
     from pathlib import Path as _Path
     from emend.policy import load_policies, run_policy_checks, format_policy_violations
-    from emend.cli import resolve_files
+    from emend.cli_base import resolve_files
 
     config_path = resolve_rules_path(
         config,
@@ -1562,7 +1562,7 @@ def check(
 ) -> str:
     """Run unified project rules from ``rules.yaml``."""
     from emend.checks import run_checks
-    from emend.cli import resolve_file_scopes
+    from emend.cli_base import resolve_file_scopes
 
     resolved, _ = resolve_file_scopes(paths or ["."], language="python")
     file_paths = [str(f) for f in resolved]

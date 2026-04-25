@@ -109,14 +109,14 @@ Run `grep -rn "from emend.cli import" src/ tests/` and `grep -rn
 
 ## Acceptance criteria
 
-- [ ] Every `@app.command` / `@edit_app.command` / `@analyze_app.command`
+- [x] Every `@app.command` / `@edit_app.command` / `@analyze_app.command`
       / `@tool_app.command` / `@map_app.command` decorator lives in
       `cli.py` (verified via `grep -rn "@\(app\|edit_app\|analyze_app\|tool_app\|map_app\)\.command" src/emend/`).
-- [ ] `emend --help`, `emend edit --help`, `emend analyze --help`,
+- [x] `emend --help`, `emend edit --help`, `emend analyze --help`,
       `emend tool --help`, `emend map --help` are byte-identical to
       pre-refactor output.
-- [ ] `test_cli_surface_consolidation.py` passes.
-- [ ] `cli.py` `__all__` contains only verified-external symbols.
+- [x] `test_cli_surface_consolidation.py` passes.
+- [x] `cli.py` `__all__` contains only verified-external symbols.
 
 ## Caveats
 

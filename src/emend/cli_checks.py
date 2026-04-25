@@ -3,10 +3,9 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import JsonFlag, _state, app, resolve_file_scopes, resolve_files
+from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
 from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
 
-@app.command("lint")
 def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],
     config: Annotated[
@@ -72,7 +71,6 @@ def lint_cmd(
 
 
 
-@app.command("policy")
 def policy_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to check")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy policies.yaml")] = None,
@@ -132,7 +130,6 @@ def policy_cmd(
 
 
 
-@app.command("check")
 def check_cmd(
     paths: Annotated[Optional[list[str]], typer.Argument(help="File or directory scope(s) to check")] = None,
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,

@@ -384,9 +384,10 @@ make test TESTS="-k default"
 4. If the command should be exposed to LLM clients, add an MCP tool wrapper in `mcp_server.py`.
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
-> Note: `ideas/roadmap-modularize/phase-3-single-source-cli-registration.md`
-> proposes consolidating step 2/3 so `cli.py` is the only registration
-> site. Until that lands, keep both in sync.
+> Note: Phase 3 of `ideas/roadmap-modularize/` is done: `cli.py` is now the
+> only file that registers commands. Add the Typer function to the appropriate
+> `cli_*.py` module, then add a `CommandSpec` entry in `cli.py`'s `COMMANDS`
+> list. No more dual registration.
 
 ## Code Conventions
 

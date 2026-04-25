@@ -4,10 +4,8 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import app, tool_app
 from emend.transform import warm_caches
 
-@app.command("index", hidden=True)
 def index_cmd(
     path: Annotated[
         str,
@@ -156,7 +154,6 @@ def index_cmd(
 
 
 
-@app.command("editor-search", hidden=True)
 def editor_search_cmd(
     query: Annotated[str, typer.Argument(help="Search query (symbol name, pattern with $, or selector with ::)")],
     path: Annotated[
@@ -220,7 +217,6 @@ def editor_search_cmd(
 
 
 
-@app.command("editor-server", hidden=True)
 def editor_server_cmd(
     path: Annotated[
         str,
@@ -259,7 +255,6 @@ def editor_server_cmd(
 
 
 
-@app.command("mcp")
 def mcp_cmd(
     transport: Annotated[
         str,

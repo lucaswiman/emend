@@ -1836,7 +1836,7 @@ class EditorSearchEngine:
 
     def _replace(self, pattern: str, replacement: str, file: str, inside: str | None, not_inside: str | None, apply: bool) -> SearchResult:
         from emend.transform import replace_pattern
-        from emend.cli import resolve_files
+        from emend.cli_base import resolve_files
         t0 = time.monotonic()
         items: list[dict] = []
         search_path = file if file else str(self.project_root)

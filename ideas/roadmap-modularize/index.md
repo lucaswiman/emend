@@ -41,7 +41,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     policy violation types are nearly isomorphic (`checks.CheckViolation`
     already normalises both).
 
-- [ ] **Phase 3 — single-source CLI registration**
+- [x] **Phase 3 — single-source CLI registration**
   - Today every `cli_*.py` file declares `@app.command("name", hidden=True)`
     *and* `cli.py` re-registers each function under namespaced subapps
     (`edit set`, `analyze refs`, etc.). Two registration sites means renaming
