@@ -1,24 +1,27 @@
-"""Unified rule runner for ``.emend/rules.yaml``."""
+"""Unified check engine for emend.
+
+Schema validation choice:
+    emend's rules.yaml mixes lint rules (under ``rules:``) and policy definitions
+    (under ``policies:``).  Rather than a unified schema validated at parse time,
+    we use **per-kind schema validation** at dispatch time:
+      - lint / pattern rules are validated when parsed by load_rules()
+      - policy / structural / type / etc. rules are validated by validate_policies()
+    This matches the pre-existing behaviour and avoids false positives on YAML
+    documents that intentionally omit sections not used by the active kind filter.
+    The single document is loaded once in run_checks() and passed to both engines.
+
+This module is the single entry point for all check kinds.  CLI commands
+(``emend lint``, ``emend policy``, ``emend check``) and MCP tools all call
+``run_checks()`` with an appropriate ``allowed_kinds`` filter.
+
+Note: imports from lint/policy are deferred inside functions to avoid circular
+imports via the rules_config shim chain.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-
-from emend.lint import load_rules, run_lint, LintViolation, LintRule, DeadCodeConfig
-from emend.policy import (
-    load_policies,
-    run_policy_checks,
-    PolicyViolation,
-    FlowCheck,
-    StructuralCheck,
-    TypeCheck,
-    DeadCodeCheck,
-    DatalogCheck,
-    CustomCheck,
-    SequenceCheck,
-    Policy,
-)
 
 
 @dataclass
@@ -34,13 +37,18 @@ class CheckViolation:
     witness: list[str] | None = None
 
 
-def _lint_kind(rule: LintRule) -> str:
+def _lint_kind(rule: Any) -> str:
     if rule.flows_from and rule.flows_to:
         return "flow"
     return "match"
 
 
 def _policy_check_kind(check: Any) -> str:
+    # Import lazily to avoid circular imports
+    from emend.policy import (
+        FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck,
+        DatalogCheck, SequenceCheck, CustomCheck,
+    )
     if isinstance(check, FlowCheck):
         return "flow"
     if isinstance(check, StructuralCheck):
@@ -59,13 +67,14 @@ def _policy_check_kind(check: Any) -> str:
 
 
 def _filter_policies(
-    policies: list[Policy],
+    policies: list[Any],
     *,
     rule_name: str | None,
     kind: str | None,
     allowed_kinds: set[str],
-) -> list[Policy]:
-    filtered: list[Policy] = []
+) -> list[Any]:
+    from emend.policy import Policy
+    filtered: list[Any] = []
     for policy in policies:
         if rule_name is not None and policy.name != rule_name:
             continue
@@ -82,7 +91,11 @@ def _filter_policies(
     return filtered
 
 
-def _lint_violations_to_checks(violations: list[LintViolation], rules_by_name: dict[str, LintRule], deadcode_config: DeadCodeConfig | None) -> list[CheckViolation]:
+def _lint_violations_to_checks(
+    violations: list[Any],
+    rules_by_name: dict[str, Any],
+    deadcode_config: Any | None,
+) -> list[CheckViolation]:
     normalized: list[CheckViolation] = []
     for violation in violations:
         if deadcode_config is not None and violation.rule_name == deadcode_config.rule_name:
@@ -112,7 +125,7 @@ def _lint_violations_to_checks(violations: list[LintViolation], rules_by_name: d
     return normalized
 
 
-def _policy_violations_to_checks(violations: list[PolicyViolation]) -> list[CheckViolation]:
+def _policy_violations_to_checks(violations: list[Any]) -> list[CheckViolation]:
     return [
         CheckViolation(
             rule_name=v.policy_name,
@@ -128,6 +141,12 @@ def _policy_violations_to_checks(violations: list[PolicyViolation]) -> list[Chec
     ]
 
 
+def load_rules(config_path: str | None = None) -> Any:
+    """Load rules from YAML config. Convenience re-export for callers of checks."""
+    from emend.lint import load_rules as _load_rules
+    return _load_rules(config_path)
+
+
 def run_checks(
     paths: list[str],
     *,
@@ -137,13 +156,52 @@ def run_checks(
     fix: bool = False,
     language: str = "python",
     project_path: str | None = None,
+    allowed_kinds: set[str] | None = None,
 ) -> list[CheckViolation]:
-    """Run unified rules from ``rules.yaml`` with compatibility fallback."""
+    """Run unified rules from ``rules.yaml`` with compatibility fallback.
+
+    Args:
+        paths: File paths to check.
+        config: Path to rules.yaml (default: .emend/rules.yaml).
+        rule_name: Only run this rule by name.
+        kind: Only run rules of this kind (match, flow, deadcode, type, ...).
+        fix: Apply auto-fixes for match rules.
+        language: Source language hint (default: python).
+        project_path: Project root for cross-file analysis.
+        allowed_kinds: Explicit allow-list of kinds for CLI command filtering.
+            When None, all kinds are run. Takes precedence over ``kind``.
+
+    Returns:
+        Sorted list of CheckViolation objects.
+    """
+    from emend.lint import load_rules as _load_rules, run_lint
+    from emend.policy import load_policies, run_policy_checks
+
     normalized: list[CheckViolation] = []
 
-    lint_kinds = {"match", "flow", "deadcode"}
-    if kind is None or kind in lint_kinds:
-        lint_rules, _macros, deadcode_config = load_rules(config)
+    # Determine which kinds to run.  ``allowed_kinds`` is set by CLI commands
+    # to implement lint/policy/check command semantics; ``kind`` is a user
+    # filter applied on top of that.
+    if allowed_kinds is None:
+        effective_lint_kinds = {"match", "flow", "deadcode"}
+        effective_policy_kinds = {"type", "datalog", "custom", "sequence"}
+    else:
+        effective_lint_kinds = allowed_kinds & {"match", "flow", "deadcode"}
+        effective_policy_kinds = allowed_kinds & {"type", "datalog", "custom", "sequence"}
+
+    # Apply per-invocation kind filter
+    if kind is not None:
+        effective_lint_kinds = effective_lint_kinds & {kind}
+        effective_policy_kinds = effective_policy_kinds & {kind}
+
+    # Flow checks live in both lint (via _check_flow_rule) and policy
+    # (via FlowCheck). When kind == "flow" or all kinds, run both.
+    if kind is None or kind == "flow":
+        if allowed_kinds is None or "flow" in allowed_kinds:
+            effective_policy_kinds |= {"flow"}
+
+    if effective_lint_kinds:
+        lint_rules, _macros, deadcode_config = _load_rules(config)
         selected_lint_rules = lint_rules
         if rule_name is not None:
             selected_lint_rules = [rule for rule in lint_rules if rule.name == rule_name]
@@ -161,7 +219,7 @@ def run_checks(
             paths,
             fix=fix,
             rule_filter=lint_rule_filter,
-            deadcode_config=deadcode_config if kind in (None, "deadcode") else None,
+            deadcode_config=deadcode_config if (kind is None or kind == "deadcode") and "deadcode" in effective_lint_kinds else None,
             project_path=project_path,
             language=language,
         )
@@ -173,14 +231,13 @@ def run_checks(
             )
         )
 
-    policy_kinds = {"type", "datalog", "custom", "sequence"}
-    if kind is None or kind in policy_kinds:
+    if effective_policy_kinds:
         policies = load_policies(config)
         selected_policies = _filter_policies(
             policies,
             rule_name=rule_name,
             kind=kind,
-            allowed_kinds=policy_kinds,
+            allowed_kinds=effective_policy_kinds,
         )
         if selected_policies:
             policy_violations = run_policy_checks(
@@ -191,5 +248,5 @@ def run_checks(
             )
             normalized.extend(_policy_violations_to_checks(policy_violations))
 
-    normalized.sort(key=lambda violation: (violation.file_path, violation.line, violation.col, violation.rule_name))
+    normalized.sort(key=lambda v: (v.file_path, v.line, v.col, v.rule_name))
     return normalized
