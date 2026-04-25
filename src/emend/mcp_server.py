@@ -773,21 +773,19 @@ def lint(
     rule: Annotated[str | None, Field(description="Run only a specific rule by name.")] = None,
 ) -> str:
     """Lint Python files using rules from .emend/rules.yaml or legacy patterns.yaml."""
-    from pathlib import Path as _Path
-    from emend.lint import load_rules, run_lint
+    from emend.checks.engine import run_checks
     from emend.cli import resolve_files
 
     config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
     if not config_path.exists():
         return f"Error: Config file not found: {config_path}"
 
-    rules, macros, deadcode_config = load_rules(str(config_path))
     resolved, _ = resolve_files(path)
     files = [str(f) for f in resolved]
 
-    violations = run_lint(
-        rules, files, fix=fix, rule_filter=rule,
-        deadcode_config=deadcode_config, project_path=path,
+    violations = run_checks(
+        files, config=str(config_path), rule_name=rule, fix=fix,
+        project_path=path, allowed_kinds={"match", "flow", "deadcode"},
     )
 
     if not violations:
@@ -1109,8 +1107,7 @@ def check_policies(
     Policies combine flow analysis, structural checks, type constraints,
     and dead code detection into named, reusable compliance rules.
     """
-    from pathlib import Path as _Path
-    from emend.policy import load_policies, run_policy_checks, format_policy_violations
+    from emend.checks.engine import run_checks
     from emend.cli import resolve_files
 
     config_path = resolve_rules_path(
@@ -1120,17 +1117,22 @@ def check_policies(
     if not config_path.exists():
         return json.dumps({"error": f"Config file not found: {config_path}"})
 
-    policies = load_policies(str(config_path))
-    if policy_name:
-        policies = [p for p in policies if p.name == policy_name]
-        if not policies:
-            return json.dumps({"error": f"Policy '{policy_name}' not found."})
-
     resolved, _ = resolve_files(path)
     files = [str(f) for f in resolved]
 
-    violations = run_policy_checks(files, policies)
-    return format_policy_violations(violations, json_output=True)
+    violations = run_checks(
+        files, config=str(config_path), rule_name=policy_name,
+        project_path=path,
+        allowed_kinds={"flow", "structural", "type", "deadcode", "datalog", "custom", "sequence"},
+    )
+    return json.dumps([
+        {
+            "rule": v.rule_name, "kind": v.kind, "severity": v.severity,
+            "message": v.message, "file": v.file_path,
+            "line": v.line, "col": v.col, "witness": v.witness or [],
+        }
+        for v in violations
+    ], indent=2)
 
 
 # ---------------------------------------------------------------------------
