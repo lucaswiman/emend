@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
-from fnmatch import fnmatch
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
 from emend.trace import _extract_identifiers
-from emend.rules_config import (
+from emend.checks.rules_config import (
     DeadCodeConfig,
     LEGACY_PATTERNS_PATH,
     load_rules_document,
@@ -21,64 +19,21 @@ from emend.rules_config import (
     expand_macros,
     expand_not_through,
 )
-
-
-@dataclass
-class FlowWitness:
-    """A witness trace for a flow violation."""
-    source_line: int
-    source_text: str
-    sink_line: int
-    sink_text: str
-    taint_chain: list[tuple[int, str]]  # (line, variable_name) steps from source to sink
-
-
-@dataclass
-class LintRule:
-    """A lint rule definition."""
-    name: str
-    find: str
-    message: str
-    not_inside: str | None = None
-    replace: str | None = None
-    # Flow predicates
-    flows_from: str | None = None  # source pattern
-    flows_to: str | None = None  # sink pattern
-    not_through: str | None = None  # sanitizer pattern
-    # DSL mode: "sql", "css", "html", etc.  When set, the rule matches
-    # inside embedded DSL regions rather than host-language code.
-    dsl: str | None = None
-    files: list[str] | None = None
-    # Language scope: restrict this rule to files of a specific language.
-    # Can be a single string ("typescript"), a list (["python", "typescript"]),
-    # or None (applies to all languages where the pattern parses).
-    language: str | list[str] | None = None
-
-
-@dataclass
-class DuplicateCodeConfig:
-    """Configuration for the duplicate-code lint rule."""
-    enabled: bool = False
-    rule_name: str = "duplicate-code"
-    mode: str = "all"
-    min_lines: int = 5
-    min_score: float = 50.0
-    cross_file_only: bool = True
-    exclude_tests: bool = True
-    exclude_generated: bool = True
-    message: str = "Duplicate code detected"
-
-
-@dataclass
-class LintViolation:
-    """A lint violation found by a rule."""
-    rule_name: str
-    message: str
-    file_path: str
-    line: int
-    col: int = 0
-    match_text: str = ""
-    witness: FlowWitness | None = None
+# Import canonical data model from checks/ package
+from emend.checks.pattern_rules import (  # noqa: E402
+    LintRule,
+    LintViolation,
+    FlowWitness,
+    _rule_matches_language,
+    _detect_file_language,
+    _path_matches_rule_globs,
+    _compile_dsl_pattern,
+)
+from emend.checks.duplicates import (  # noqa: E402
+    DuplicateCodeConfig,
+    parse_duplicate_code_config as _parse_duplicate_code_config,
+    run_duplicate_code_check as _check_duplicate_code_impl,
+)
 
 
 def parse_noqa_comments(source: str, language: str = "python") -> dict[int, set[str] | None]:
@@ -172,36 +127,6 @@ def _parse_deadcode_config(raw_dc: object, *, rule_name: str = "deadcode") -> De
         entry_point_names=_coerce_optional_str_list(ep_names),
         exclude_paths=_coerce_optional_str_list(yaml_key(raw_dc, "exclude_paths")),
     )
-
-
-def _rule_matches_language(rule: LintRule, file_language: str) -> bool:
-    """Return True if *rule* should apply to a file with *file_language*."""
-    if rule.language is None:
-        return True
-    if isinstance(rule.language, str):
-        return rule.language == file_language
-    return file_language in rule.language
-
-
-def _detect_file_language(file_path: str, fallback: str = "python") -> str:
-    """Detect language from file extension, falling back to *fallback*."""
-    from emend.language_registry import detect_language
-
-    return detect_language(file_path) or fallback
-
-
-def _path_matches_rule_globs(file_path: str, globs: list[str] | None) -> bool:
-    if not globs:
-        return True
-    normalized = file_path.replace("\\", "/")
-    path_obj = Path(normalized)
-    for pattern in globs:
-        if fnmatch(normalized, pattern) or path_obj.match(pattern):
-            return True
-        prefixed = pattern if pattern.startswith("**/") else f"**/{pattern}"
-        if fnmatch(normalized, prefixed) or path_obj.match(prefixed):
-            return True
-    return False
 
 
 def load_rules(
@@ -530,92 +455,25 @@ def _check_flow_rule(
     return violations
 
 
-def _compile_dsl_pattern(pattern: str) -> re.Pattern[str]:
-    """Compile a DSL lint pattern to a regex.
-
-    Supports ``$METAVAR`` placeholders that match identifiers, and
-    ``$...METAVAR`` for capturing multiple tokens.  Other text is
-    matched literally (case-insensitive for SQL).  Whitespace in the
-    pattern matches any whitespace including newlines.
-    """
-    parts = re.split(r'(\$\.\.\.?\w+|\$\w+)', pattern)
-    regex_parts: list[str] = []
-    for part in parts:
-        if part.startswith("$..."):
-            regex_parts.append(r'(.+?)')
-        elif part.startswith("$"):
-            regex_parts.append(r'(\w+(?:\.\w+)*(?:\s*,\s*\w+(?:\.\w+)*)*)')
-        else:
-            escaped = re.escape(part)
-            # Replace whitespace runs with \s+ for cross-line matching
-            escaped = re.sub(r'(\\ )+', r'\\s+', escaped)
-            regex_parts.append(escaped)
-    return re.compile(''.join(regex_parts), re.IGNORECASE | re.DOTALL)
-
-
-def _parse_duplicate_code_config(raw: object, *, rule_name: str = "duplicate-code") -> DuplicateCodeConfig | None:
-    """Parse the ``duplicate`` section from a YAML rules document."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return DuplicateCodeConfig(enabled=raw, rule_name=rule_name)
-    if not isinstance(raw, dict):
-        return None
-    return DuplicateCodeConfig(
-        enabled=raw.get("enabled", True),
-        rule_name=rule_name,
-        mode=raw.get("mode", "all"),
-        min_lines=int(raw.get("min-lines", raw.get("min_lines", 5))),
-        min_score=float(raw.get("min-score", raw.get("min_score", 50.0))),
-        cross_file_only=raw.get("cross-file-only", raw.get("cross_file_only", True)),
-        exclude_tests=raw.get("exclude-tests", raw.get("exclude_tests", True)),
-        exclude_generated=raw.get("exclude-generated", raw.get("exclude_generated", True)),
-        message=raw.get("message", "Duplicate code detected"),
-    )
-
-
 def _check_duplicate_code(
     file_paths: list[str],
     config: DuplicateCodeConfig,
     project_path: str,
 ) -> list[LintViolation]:
-    """Run duplicate code detection as part of lint."""
-    if not config.enabled:
-        return []
+    """Run duplicate code detection as part of lint.
 
-    from emend.duplicate import query_duplicates
-
-    violations = []
-    clusters = query_duplicates(
-        project_path=project_path,
-        mode=config.mode,
-        min_lines=config.min_lines,
-        min_score=config.min_score,
-        cross_file=True if config.cross_file_only else None,
-    )
-
-    file_path_set = set(file_paths)
-    for cluster in clusters:
-        # Only emit for members in the scoped file_paths
-        for member in cluster.members[:1]:  # primary location only
-            if member.file not in file_path_set:
-                continue
-            # Build comparison text pointing to first OTHER member
-            others = [m for m in cluster.members if m != member]
-            if not others:
-                continue
-            other = others[0]
-            msg = (
-                f"{config.message}: {cluster.explanation} "
-                f"(also at {other.file}:{other.start_line})"
-            )
-            violations.append(LintViolation(
-                rule_name=config.rule_name,
-                message=msg,
-                file_path=member.file,
-                line=member.start_line,
-            ))
-    return violations
+    Delegates to checks/duplicates.py and converts dicts to LintViolation.
+    """
+    raw_violations = _check_duplicate_code_impl(file_paths, config, project_path)
+    return [
+        LintViolation(
+            rule_name=v["rule_name"],
+            message=v["message"],
+            file_path=v["file_path"],
+            line=v["line"],
+        )
+        for v in raw_violations
+    ]
 
 
 def run_lint(

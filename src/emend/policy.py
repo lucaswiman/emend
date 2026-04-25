@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from emend.rules_config import (
+from emend.checks.rules_config import (
     DeadCodeConfig,
     LEGACY_POLICIES_PATH,
     LEGACY_PATTERNS_PATH,
@@ -24,6 +24,12 @@ from emend.rules_config import (
     yaml_key,
     as_list,
 )
+# Import canonical dataclasses from checks/ sub-modules
+from emend.checks.structural import StructuralCheck
+from emend.checks.types import TypeCheck
+from emend.checks.datalog import DatalogCheck
+from emend.checks.custom import CustomCheck
+from emend.checks.sequence import SequenceCheck, SequenceStep, SequencePathConstraint
 
 # Policy and lint share the same dead-code configuration dataclass.
 # ``DeadCodeCheck`` is kept as an alias for readability in policy-side code
@@ -43,72 +49,6 @@ class FlowCheck:
     flows_to: str
     not_through: str | None = None
     label: str = ""
-
-
-@dataclass
-class StructuralCheck:
-    """Pattern must/must-not appear in certain scopes."""
-    pattern: str
-    inside: str | None = None
-    not_inside: str | None = None
-    where: str | None = None
-
-
-@dataclass
-class TypeCheck:
-    """Type constraint check on symbols."""
-    symbol_pattern: str
-    expected_type: str
-    kind: str = "has_type"  # "has_type" or "returns"
-
-
-@dataclass
-class CustomCheck:
-    """Expert query using raw query source."""
-    query_source: str
-
-
-@dataclass
-class DatalogCheck:
-    """CozoScript Datalog query check.
-
-    The query must return rows with at least ``line``, ``col``, ``message``
-    columns. Each returned row becomes a policy violation.
-    """
-    cozoscript: str
-
-
-@dataclass
-class SequenceStep:
-    """A single step in a temporal sequence rule."""
-    bind: str  # step label (e.g. "load", "mutate")
-    pattern: str | None = None  # pattern to match (e.g. "$OBJ = session.query($MODEL)")
-    effect: str | None = None  # effect predicate (e.g. "writes($OBJ)")
-    type_constraint: str | None = None  # optional type constraint
-
-
-@dataclass
-class SequencePathConstraint:
-    """Path constraint between two consecutive sequence steps."""
-    from_step: str  # step label (e.g. "load")
-    to_step: str  # step label (e.g. "mutate")
-    not_through: list[str] = field(default_factory=list)  # patterns that must not appear on any path
-    not_through_scope: list[str] = field(default_factory=list)  # scope boundary patterns
-
-
-@dataclass
-class SequenceCheck:
-    """Multi-step temporal sequence check.
-
-    Each rule defines an ordered list of steps (matched by pattern or effect)
-    with binding constraints across steps and CFG-path constraints between them.
-    Examples: TOCTOU, double-free, use-after-close.
-    """
-    name: str
-    message: str
-    sequence: list[SequenceStep]
-    path_constraints: list[SequencePathConstraint] = field(default_factory=list)
-    severity: str = "error"
 
 
 # Union of all check types

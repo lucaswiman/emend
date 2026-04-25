@@ -40,6 +40,10 @@ emend = "emend.cli:main"
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
+[tool.pytest.ini_options]
+# Use worktree src/ so that emend.checks resolves to checks/ package (not checks.py)
+pythonpath = ["src"]
+
 [tool.maturin]
 # Python source layout: src/emend/*.py is packaged alongside the Rust extension
 python-source = "src"
