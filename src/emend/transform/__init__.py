@@ -15,9 +15,9 @@ import sys
 import io
 import json
 import time
-from .component_selector import ExtendedSelector, parse_extended_selector
-from .language_plugins import NOQA_PATTERN as _NOQA_PATTERN
-from .pattern import (
+from ..component_selector import ExtendedSelector, parse_extended_selector
+from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
+from ..pattern import (
     parse_pattern,
     compile_pattern_to_rust_ir,
     compile_constraint_to_rust_ir,
@@ -28,7 +28,7 @@ from .pattern import (
 
 if TYPE_CHECKING:
     import sqlite3
-    from .type_oracle import TypeOracle
+    from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
 
@@ -1296,7 +1296,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     import pickle
     import sqlite3
     import zlib
-    from .query import _collect_symbols as _collect_symbols_ts
+    from emend.query import _collect_symbols as _collect_symbols_ts
     from emend import emend_core as _rust
 
     db_path, source_root, project_root, file_batch = args
@@ -4242,7 +4242,7 @@ def _filter_matches_by_type_oracle(
         return []
 
     from pathlib import Path
-    from .type_oracle import parse_type_string
+    from emend.type_oracle import parse_type_string
 
     # Get type info for the file
     file_types = type_oracle.infer_file(Path(file_path))
@@ -4402,7 +4402,7 @@ def find_pattern(
 
     # Post-filter by scope if requested
     if scope is not None:
-        from .ast_utils import find_nested_definitions, find_symbol_by_path
+        from emend.ast_utils import find_nested_definitions, find_symbol_by_path
         symbols = find_nested_definitions(file_path)
         target_sym = find_symbol_by_path(symbols, scope)
         if target_sym:
@@ -4458,7 +4458,7 @@ selector: ExtendedSelector, apply: bool = False) -> str:
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
     # Use tree-sitter symbols to find the target symbol's range
-    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
     symbols = find_nested_definitions(str(file_path))
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
@@ -4531,7 +4531,7 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
         return code
 
     # Handle symbol-based selectors
-    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
     symbols = find_nested_definitions(str(file_path))
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
@@ -5100,7 +5100,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     The result is cached in-process by project root to avoid re-opening the
     CozoDB connection on every call (which is expensive).
     """
-    from .fact_graph import FactGraph
+    from emend.fact_graph import FactGraph
 
     project_root = _find_project_root(project_path)
     if project_root in _fact_graph_cache:
@@ -5126,7 +5126,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     # Path 2: build via warm_caches, then load
     logger.info("Building index for %s (first run may be slow)", project_path)
-    from .type_oracle import TypeEngineUnavailableError
+    from emend.type_oracle import TypeEngineUnavailableError
     try:
         warm_caches(project_path)
     except TypeEngineUnavailableError:
@@ -5188,7 +5188,7 @@ def find_references(
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_qn = f"{target_module}.{symbol_name}"
 
-    from .fact_graph import FactGraph
+    from emend.fact_graph import FactGraph
 
     graph = _get_or_build_fact_graph(scan_root)
 
@@ -5736,7 +5736,7 @@ def _parse_diff_to_selectors(
     if not changed_files:
         return []
 
-    from .ast_utils import find_nested_definitions, find_symbol_by_line
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_line
 
     selectors: list[str] = []
     seen: set[str] = set()
@@ -6285,7 +6285,7 @@ def semantic_context(
     Returns:
         SemanticContext with dangers, flow, callers, tests, etc.
     """
-    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
 
     file_path = selector.file_path
     symbol_path = selector.symbol_path
@@ -6463,7 +6463,7 @@ def semantic_context(
     # Get return type from source if available
     # (NestedSymbol doesn't have returns, so we check SymbolInfo)
     try:
-        from .query import query_symbols
+        from emend.query import query_symbols
         sym_infos = query_symbols(file_path, selector_str=qualified_name)
         if sym_infos and sym_infos[0].returns:
             data_out.append(DataFlow(
@@ -6884,7 +6884,7 @@ def safe_delete(
     Returns:
         A ``DeletePlan`` with the list of deletions and per-file diffs.
     """
-    from .ast_utils import find_nested_definitions, find_symbol_by_path
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
 
     scan_root = project_path or _find_project_root(selector.file_path)
 
@@ -8239,7 +8239,7 @@ def _expand_selector_with_returns_filter(
     Returns concrete selectors for each matching symbol.
     """
     import fnmatch as _fnmatch
-    from .query import _collect_symbols, _filter_by_returns_with_oracle
+    from emend.query import _collect_symbols, _filter_by_returns_with_oracle
 
     file_path = Path(selector.file_path)
     if not file_path.exists():
