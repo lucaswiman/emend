@@ -442,7 +442,7 @@ class TestFindSourceRootLanguageThreading:
         from unittest.mock import patch
         from emend.transform import query_symbol_index
 
-        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
+        with patch("emend.transform.index._ensure_index_fresh", return_value=False) as mock_eif:
             query_symbol_index(str(tmp_path), language="rust")
             assert mock_eif.called
             call_kwargs = mock_eif.call_args.kwargs
@@ -457,7 +457,7 @@ class TestFindSourceRootLanguageThreading:
         from unittest.mock import patch
         from emend.transform import query_reference_index
 
-        with patch("emend.transform._ensure_index_fresh", return_value=False) as mock_eif:
+        with patch("emend.transform.index._ensure_index_fresh", return_value=False) as mock_eif:
             query_reference_index(str(tmp_path), "some.symbol", language="typescript")
             assert mock_eif.called
             call_kwargs = mock_eif.call_args.kwargs
@@ -474,8 +474,8 @@ class TestFindSourceRootLanguageThreading:
         mock_graph = MagicMock()
         mock_graph.dead_code_unified.return_value = ([], [])
 
-        with patch("emend.transform._get_or_build_fact_graph", return_value=mock_graph):
-            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
+        with patch("emend.transform.refs._get_or_build_fact_graph", return_value=mock_graph):
+            with patch("emend.transform.project_iter._find_project_root", return_value=str(tmp_path)):
                 result = list(find_dead_code(str(tmp_path)))
 
         assert result == []
