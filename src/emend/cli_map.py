@@ -6,7 +6,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import JsonFlag, app
+from emend.cli_base import JsonFlag
 from emend.component_selector import parse_extended_selector
 from emend.knowledge import (
     IdentifierMapping,
@@ -18,7 +18,6 @@ from emend.knowledge import (
 )
 
 map_app = typer.Typer(help="Identifier and module mappings.")
-app.add_typer(map_app, name="map")
 
 
 def _infer_module_subpath(module_prefix: str, path: str, subpath: str) -> str:
@@ -58,7 +57,6 @@ def _infer_module_subpath(module_prefix: str, path: str, subpath: str) -> str:
 
     return subpath
 
-@map_app.command("add")
 def map_add_cmd(
     source_project: Annotated[str, typer.Argument(help="Source project/repo.")],
     source_id: Annotated[str, typer.Argument(help="Source identifier (e.g. 'users.UserService.create').")],
@@ -94,7 +92,6 @@ def map_add_cmd(
 
 
 
-@map_app.command("search")
 def map_search_cmd(
     query: Annotated[str, typer.Argument(help="Search query.")],
     source_project: Annotated[Optional[str], typer.Option("--source-project")] = None,
@@ -121,7 +118,6 @@ def map_search_cmd(
 
 
 
-@map_app.command("lookup")
 def map_lookup_cmd(
     identifier: Annotated[str, typer.Argument(help="Identifier to look up (exact match).")],
     project: Annotated[Optional[str], typer.Option("--project")] = None,
@@ -141,7 +137,6 @@ def map_lookup_cmd(
 
 
 
-@map_app.command("rm")
 def map_rm_cmd(
     source_identifier: Annotated[str, typer.Argument(help="Source identifier to delete mappings for.")],
     source_project: Annotated[Optional[str], typer.Option("--source-project")] = None,
@@ -162,7 +157,6 @@ def map_rm_cmd(
 
 
 
-@map_app.command("add-module")
 def map_add_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix (e.g. 'payments').")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
@@ -198,7 +192,6 @@ def map_add_module_cmd(
 
 
 
-@map_app.command("list-modules")
 def map_list_modules_cmd(
     json_output: JsonFlag = False,
 ):
@@ -217,7 +210,6 @@ def map_list_modules_cmd(
 
 
 
-@map_app.command("update-module")
 def map_update_module_cmd(
     module_prefix: Annotated[str, typer.Argument(help="Module prefix to update.")],
     repo: Annotated[str, typer.Option("--repo", help="GitHub repo (org/name).")] = "",
@@ -272,7 +264,6 @@ def map_update_module_cmd(
 
 
 
-@map_app.command("rm-module")
 def map_rm_module_cmd(
     prefix: Annotated[str, typer.Argument(help="Module prefix to delete.")],
 ):
@@ -287,7 +278,6 @@ def map_rm_module_cmd(
 
 
 
-@map_app.command("resolve")
 def map_resolve_cmd(
     selector: Annotated[str, typer.Argument(help="Selector or module to resolve (e.g. 'payments.models.Order' or 'payments::Order').")],
     location: Annotated[bool, typer.Option("--location", "-l", help="Resolve to file path and line number instead of a selector.")] = False,

@@ -56,7 +56,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     policy violation types are nearly isomorphic (`checks.CheckViolation`
     already normalises both).
 
-- [ ] **Phase 3 — single-source CLI registration**
+- [x] **Phase 3 — single-source CLI registration**
   - Today every `cli_*.py` file declares `@app.command("name", hidden=True)`
     *and* `cli.py` re-registers each function under namespaced subapps
     (`edit set`, `analyze refs`, etc.). Two registration sites means renaming
@@ -68,6 +68,16 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     `QueryShape`, `_reject_file_glob`, etc. (verify no external importers
     first; these look like accidental exports from when `cli.py` was monolithic).
   - Risk: low — pure mechanical refactor; covered by `test_cli_surface_consolidation.py`.
+  - **Status**: landed on `claude/modularize-agent-swarm-e0nzk`. All
+    `@app.command` / `@edit_app.command` / `@analyze_app.command` /
+    `@tool_app.command` / `@map_app.command` decorators removed from
+    `cli_*.py`; `cli.py` now drives registration through a single
+    `_COMMANDS` table of `_CmdEntry` records (subapp, name, fn, hidden,
+    no_args_is_help, aliases). `cli.py` `__all__` reduced to
+    `{"app", "main"}`; internal callers updated to import helpers from
+    `cli_base` instead of the old re-exports. Hidden alias `dsl-debug`
+    re-added after a missed alias broke `test_dsl.py::TestDslDebugCommand`.
+    `make test`: 3060 passed, 3 skipped, 1 xfailed.
 
 - [ ] **Phase 4 — drop legacy `patterns.yaml` / `policies.yaml` fallbacks**
   - Canonical config is `.emend/rules.yaml` (added in

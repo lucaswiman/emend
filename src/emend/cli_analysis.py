@@ -9,8 +9,6 @@ from emend.cli_base import (
     JsonFlag,
     _reject_file_glob,
     _state,
-    analyze_app,
-    app,
     cli_error_handler,
     resolve_files,
 )
@@ -118,7 +116,6 @@ def _trace_cmd_impl(
 
 
 
-@app.command("trace", hidden=True)
 def trace_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml")] = None,
@@ -166,7 +163,6 @@ def trace_cmd(
 
 
 
-@app.command("dsl-debug", hidden=True)
 def dsl_debug_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     dsl_type: Annotated[Optional[str], typer.Option("--type", help="DSL type to detect (sql, css, html)")] = None,
@@ -244,7 +240,6 @@ def dsl_debug_cmd(
 
 
 
-@app.command("refs", hidden=True)
 def refs_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol)")],
     exclude_definition: Annotated[bool, typer.Option("--exclude-definition", help="Exclude the definition itself")] = False,
@@ -389,7 +384,6 @@ def refs_cmd(
 
 
 
-@app.command("graph", hidden=True)
 def graph_cmd(
     file: Annotated[str, typer.Argument(help="Python file to analyze")],
     format: Annotated[str, typer.Option("--format", "-f", help="Output format: plain, json, dot")] = "plain",
@@ -413,7 +407,6 @@ def graph_cmd(
 
 
 
-@app.command("deadcode", hidden=True)
 def dead_code_cmd(
     path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
@@ -553,7 +546,6 @@ def dead_code_cmd(
 
 
 
-@app.command("impact", hidden=True)
 def impact_cmd(
     selector: Annotated[Optional[str], typer.Argument(help="Selector (file.py::Symbol)")] = None,
     diff: Annotated[Optional[str], typer.Option("--diff", help="Git diff spec (e.g. HEAD, abc..def)")] = None,
@@ -662,7 +654,6 @@ def impact_cmd(
 
 
 
-@app.command("types", hidden=True)
 def types_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Filter by symbol name")] = None,
@@ -770,7 +761,6 @@ def types_cmd(
 
 
 
-@app.command("facts", hidden=True)
 def facts_cmd(
     project: Annotated[str, typer.Argument(help="Project root directory")] = ".",
     fact_type: Annotated[str, typer.Option("--type", "-t", help="Fact type: symbols, calls, references, trace_flows (or taint_flows), types, imports")] = "symbols",
@@ -877,7 +867,6 @@ def facts_cmd(
 
 
 
-@app.command("cfg", hidden=True)
 def cfg_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
     function: Annotated[
@@ -1006,7 +995,6 @@ def cfg_cmd(
             print("\n\n".join(parts))
 
 
-@analyze_app.command("dupes")
 def dupes_cmd(
     path: Annotated[str, typer.Argument(help="Project root directory")] = ".",
     mode: Annotated[str, typer.Option("--mode", help="Detection mode: exact, sequence, or all")] = "all",

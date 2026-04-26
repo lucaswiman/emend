@@ -12,9 +12,7 @@ from emend.cli_base import (
     _maybe_create_oracle,
     _reject_file_glob,
     _state,
-    app,
     cli_error_handler,
-    edit_app,
     parse_where_clause,
     resolve_file_scopes,
     resolve_files,
@@ -32,7 +30,6 @@ from emend.transform import (
     safe_delete,
 )
 
-@app.command("set", hidden=True)
 def edit_set_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol[component])")],
     value: Annotated[
@@ -92,7 +89,6 @@ def edit_set_cmd(
         print(result, end='')
 
 
-@app.command("rm", hidden=True)
 def remove_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol or file.py::Symbol[component])")],
     apply: ApplyFlag = False,
@@ -120,7 +116,6 @@ def remove_cmd(
 
 
 
-@app.command("delete", hidden=True)
 def delete_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol)")],
     cascade: Annotated[
@@ -191,7 +186,6 @@ def delete_cmd(
 
 
 
-@app.command("add", hidden=True)
 def add(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol[component])")],
     value: Annotated[str, typer.Argument(help="Value to add")],
@@ -267,7 +261,6 @@ def add(
 
 
 
-@app.command("replace", hidden=True)
 def replace_cmd(
     pattern: Annotated[str, typer.Argument(help="Pattern to find (e.g., 'print($X)')")],
     replacement: Annotated[str, typer.Argument(help="Replacement pattern (e.g., 'logger.info($X)')")],
@@ -393,7 +386,6 @@ def replace_cmd(
 
 
 
-@app.command("cp", hidden=True)
 def copy_to_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol.path)")],
     destination: Annotated[str, typer.Argument(help="Destination file path")],
@@ -413,7 +405,6 @@ def copy_to_cmd(
 
 
 
-@app.command("rename", hidden=True)
 def rename_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol rename, or file.py for module rename)")],
     new_name: Annotated[str, typer.Option("--to", help="New name")],
@@ -476,7 +467,6 @@ def rename_cmd(
 
 
 
-@app.command("mv", hidden=True)
 def move_cmd(
     selector: Annotated[str, typer.Argument(help="Selector (file.py::Symbol for symbol move, or file.py for module move)")],
     destination: Annotated[str, typer.Argument(help="Destination file or package")],
@@ -545,7 +535,6 @@ def move_cmd(
 
 
 
-@app.command("batch", hidden=True)
 def batch_cmd(
     ops_file: Annotated[str, typer.Argument(help="YAML or JSON file with operations")],
     apply: ApplyFlag = False,
@@ -723,7 +712,6 @@ def batch_cmd(
 
 
 
-@app.command("saturate", hidden=True)
 def saturate_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to rewrite")],
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rewrites.yaml")] = None,

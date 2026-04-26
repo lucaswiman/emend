@@ -9,7 +9,6 @@ from emend import ast_commands
 from emend.cli_base import (
     _maybe_create_oracle,
     _state,
-    app,
     cli_error_handler,
     detect_query_shape,
     parse_where_clause,
@@ -133,7 +132,6 @@ def _print_pattern_match_code(
         else:
             print(line_text, flush=True)
 
-@app.command("find")
 def search(
     query: Annotated[str, typer.Argument(help="Pattern with $X metavars, selector (file.py::sym), or file/dir path")],
     files: Annotated[
