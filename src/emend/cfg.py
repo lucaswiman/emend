@@ -48,9 +48,10 @@ def build_cfgs_for_file(file_path: str, *, ext: str | None = None) -> list[Any]:
 def format_cfg_text(cfg) -> str:
     """Human-readable text representation of a single CFG."""
     lines: list[str] = []
+    # Rust returns 0-based tree-sitter rows; display as 1-based.
     lines.append(
         f"function {cfg.func_name} "
-        f"(lines {cfg.func_start_line}-{cfg.func_end_line}, "
+        f"(lines {cfg.func_start_line + 1}-{cfg.func_end_line + 1}, "
         f"{cfg.block_count()} blocks, {cfg.edge_count()} edges)"
     )
 
@@ -63,7 +64,7 @@ def format_cfg_text(cfg) -> str:
             tag = " [exit]"
 
         lines.append(
-            f"  B{bid}{tag}  lines {block['start_line']}-{block['end_line']}"
+            f"  B{bid}{tag}  lines {block['start_line'] + 1}-{block['end_line'] + 1}"
         )
         if block["defs"]:
             defs_str = ", ".join(d[0] for d in block["defs"])

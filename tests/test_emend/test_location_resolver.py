@@ -158,6 +158,58 @@ def bar():
         loc = resolver.resolve(str(p), 1)
         assert loc.is_module_level
 
+    def test_block_id_resolved_for_function_not_at_row_zero(self, tmp_path):
+        """Lines inside a branching function NOT at row 0 must resolve to
+        distinct block ids for the true/false branches.  Regression:
+        from_source added func_start (0-based) to already-absolute block
+        lines instead of converting 0→1-based, causing block lookup misses."""
+        source = """\
+x = 1
+
+def foo():
+    if x:
+        y = 2
+    else:
+        z = 3
+    return y
+"""
+        p = tmp_path / "test.py"
+        p.write_text(source)
+        resolver = LocationResolver.from_source(str(p), source)
+        # line 5: "        y = 2" (true branch)
+        loc_true = resolver.resolve(str(p), 5)
+        # line 7: "        z = 3" (else branch)
+        loc_else = resolver.resolve(str(p), 7)
+        assert "foo" in loc_true.func_qn
+        assert "foo" in loc_else.func_qn
+        # The two branches must resolve to different blocks
+        assert loc_true.block_id != loc_else.block_id
+
+    def test_block_func_qn_for_non_first_function(self, tmp_path):
+        """The func_qn on block ranges built by from_source must match the
+        enclosing function.  Regression: 0-based func_start_line was passed
+        to _find_innermost_func which expects 1-based."""
+        source = """\
+def foo():
+    x = 1
+
+def bar():
+    if True:
+        y = 2
+    else:
+        z = 3
+"""
+        p = tmp_path / "test.py"
+        p.write_text(source)
+        resolver = LocationResolver.from_source(str(p), source)
+        # line 6: "        y = 2" inside bar's true branch
+        loc_bar_true = resolver.resolve(str(p), 6)
+        # line 8: "        z = 3" inside bar's else branch
+        loc_bar_else = resolver.resolve(str(p), 8)
+        assert "bar" in loc_bar_true.func_qn
+        assert "bar" in loc_bar_else.func_qn
+        assert loc_bar_true.block_id != loc_bar_else.block_id
+
 
 class TestLocationResolverFromFactGraph:
     """Test resolver when FactGraph is available."""

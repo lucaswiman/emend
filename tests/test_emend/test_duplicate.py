@@ -476,6 +476,24 @@ class TestProductionHeuristics:
         ts2 = ("def", "name", "return", "self", ".", "name")
         assert is_property_wrapper(ks2, ts2) >= 300.0
 
+    def test_trivial_validator_isinstance_suppressed(self):
+        """isinstance validators (small if-statements) must be suppressed."""
+        from emend.duplicate_heuristics import is_trivial_validator
+
+        ks = ("if_statement", "call", "identifier", "raise_statement")
+        ts = ("if", "isinstance", "x", "int", "raise", "TypeError")
+        assert is_trivial_validator(8, ks, ts) >= 400.0
+
+    def test_trivial_validator_non_isinstance_call_not_suppressed(self):
+        """A small if-statement with a non-isinstance call must NOT be
+        suppressed.  Regression: 'call' in kind_seq matched any function
+        call, not just isinstance."""
+        from emend.duplicate_heuristics import is_trivial_validator
+
+        ks = ("if_statement", "call", "identifier", "block", "expression_statement")
+        ts = ("if", "validate", "data", "process", "data")
+        assert is_trivial_validator(8, ks, ts) == 0.0
+
     def test_min_score_filters_low_clusters(self, tmp_path):
         """min_score parameter removes low-scoring clusters."""
         from emend.duplicate import query_duplicates

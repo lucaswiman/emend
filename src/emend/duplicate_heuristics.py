@@ -48,6 +48,7 @@ def is_abstract_stub(
 def is_trivial_validator(
     node_count: int,
     kind_seq: tuple[str, ...],
+    token_seq: tuple[str, ...] = (),
 ) -> float:
     """Detect tiny ``isinstance``/raise/return validators.
 
@@ -56,15 +57,13 @@ def is_trivial_validator(
 
       - node_count < 12
       - root kind is ``if_statement``
-      - ``isinstance`` is present in the kind/token context (caller supplies
-        that in the kind_seq as a pseudo-token, or it will appear in token_seq
-        for callers who pass tokens via kind_seq — the heuristic is lenient)
+      - ``isinstance`` appears in the token sequence
     """
     if node_count >= 12:
         return 0.0
 
     is_if_root = kind_seq and kind_seq[0] == "if_statement"
-    has_isinstance = "isinstance" in kind_seq or "call" in kind_seq
+    has_isinstance = "isinstance" in token_seq or "isinstance" in kind_seq
     if is_if_root and has_isinstance:
         return 500.0
 
