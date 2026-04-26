@@ -762,45 +762,6 @@ def deadcode(
 
 
 # ---------------------------------------------------------------------------
-# lint (deprecated; see check dispatcher)
-# ---------------------------------------------------------------------------
-
-
-def lint(
-    path: Annotated[str, Field(description="File or directory to lint.")],
-    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml config file.")] = None,
-    fix: Annotated[bool, Field(description="Auto-apply fix replacements.")] = False,
-    rule: Annotated[str | None, Field(description="Run only a specific rule by name.")] = None,
-) -> str:
-    """Lint Python files using rules from .emend/rules.yaml or legacy patterns.yaml."""
-    from pathlib import Path as _Path
-    from emend.lint import load_rules, run_lint
-    from emend.cli_base import resolve_files
-
-    config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
-    if not config_path.exists():
-        return f"Error: Config file not found: {config_path}"
-
-    rules, macros, deadcode_config = load_rules(str(config_path))
-    resolved, _ = resolve_files(path)
-    files = [str(f) for f in resolved]
-
-    violations = run_lint(
-        rules, files, fix=fix, rule_filter=rule,
-        deadcode_config=deadcode_config, project_path=path,
-    )
-
-    if not violations:
-        return "No violations found."
-
-    lines = [
-        f"{v.file_path}:{v.line}:{v.col}: [{v.rule_name}] {v.message}"
-        for v in violations
-    ]
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # impact (internal helper used by analyze dispatcher)
 # ---------------------------------------------------------------------------
 
@@ -1092,45 +1053,6 @@ def facts_query(
         return json.dumps([dataclasses.asdict(i) for i in imports[:limit]], indent=2)
 
     return json.dumps({"error": f"Unknown fact_type: {_fact_type}"})
-
-
-# ---------------------------------------------------------------------------
-# policy (deprecated; see check dispatcher)
-# ---------------------------------------------------------------------------
-
-
-def check_policies(
-    path: Annotated[str, Field(description="File or directory to check.")],
-    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy policies.yaml.")] = None,
-    policy_name: Annotated[str | None, Field(description="Run only a specific policy by name.")] = None,
-) -> str:
-    """Run policy checks against source code.
-
-    Policies combine flow analysis, structural checks, type constraints,
-    and dead code detection into named, reusable compliance rules.
-    """
-    from pathlib import Path as _Path
-    from emend.policy import load_policies, run_policy_checks, format_policy_violations
-    from emend.cli_base import resolve_files
-
-    config_path = resolve_rules_path(
-        config,
-        fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
-    )
-    if not config_path.exists():
-        return json.dumps({"error": f"Config file not found: {config_path}"})
-
-    policies = load_policies(str(config_path))
-    if policy_name:
-        policies = [p for p in policies if p.name == policy_name]
-        if not policies:
-            return json.dumps({"error": f"Policy '{policy_name}' not found."})
-
-    resolved, _ = resolve_files(path)
-    files = [str(f) for f in resolved]
-
-    violations = run_policy_checks(files, policies)
-    return format_policy_violations(violations, json_output=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1558,9 +1480,15 @@ def check(
     config: Annotated[str | None, Field(description="Rules config path. Defaults to .emend/rules.yaml with legacy fallback.")] = None,
     rule: Annotated[str | None, Field(description="Run only one named rule.")] = None,
     kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type.")] = None,
+    mode: Annotated[str | None, Field(description="Engine mode: 'lint' (pattern/flow/deadcode), 'policy' (structural/type/datalog/custom/sequence), or None for all.")] = None,
     fix: Annotated[bool, Field(description="Apply auto-fixes for match rules when available.")] = False,
 ) -> str:
-    """Run unified project rules from ``rules.yaml``."""
+    """Run unified project rules from ``rules.yaml``.
+
+    Routes through the single checks engine. Use mode='lint' to restrict to
+    pattern/flow/deadcode rules, mode='policy' for structural/type/datalog/
+    custom/sequence policies, or omit mode for all rules.
+    """
     from emend.checks import run_checks
     from emend.cli_base import resolve_file_scopes
 
@@ -1572,6 +1500,7 @@ def check(
         config=config,
         rule_name=rule,
         kind=kind,
+        mode=mode,
         fix=fix,
         language="python",
         project_path=project_path,
