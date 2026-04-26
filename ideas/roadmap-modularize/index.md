@@ -138,13 +138,25 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     sync/async `def` name extraction). `make test`: 3060 passed,
     3 skipped, 1 xfailed.
 
-- [ ] **Phase 6 — decompose `mcp_server.py` into `mcp/` package**
+- [x] **Phase 6 — decompose `mcp_server.py` into `mcp/` package**
   - 1,939 lines of MCP tool wrappers. After Phases 1+2, most tools are
     one-liners that re-pack args and call `transform.X` or `checks.X`.
   - Plan: split by domain mirroring the CLI: `mcp/find.py`, `mcp/edit.py`,
     `mcp/analyze.py`, `mcp/checks.py`, `mcp/tooling.py`. A small
     `mcp/dispatch.py` holds the `FastMCP` app and registration table.
   - Risk: low — covered by `test_mcp_server.py`.
+  - **Status**: landed on `claude/modularize-agent-swarm-e0nzk`. `mcp_server.py`
+    reduced from 1,868 lines to 48-line backward-compat shim. New package:
+    `mcp/__init__.py` (91 lines, re-exports), `mcp/dispatch.py` (185 lines,
+    `FastMCP` instance + profile/schema/run infrastructure), `mcp/find.py`
+    (255 lines, `search` tool), `mcp/edit.py` (258 lines, `transform` tool
+    + `replace`/`modify`/`rename`/`move` helpers), `mcp/analyze.py` (586
+    lines, `references` + `analyze` tools + all analysis helpers),
+    `mcp/checks.py` (56 lines, `check` tool), `mcp/tooling.py` (361 lines,
+    `facts_query` + `mappings` + `grammar_and_cookbook` tools + helpers).
+    All `from emend.mcp_server import X` callers unchanged. Tool names,
+    parameter shapes, and registration order identical to before.
+    `make test`: 3060 passed, 3 skipped, 1 xfailed.
 
 ## Out of scope (already evaluated)
 
