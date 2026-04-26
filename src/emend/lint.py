@@ -14,7 +14,6 @@ from emend.transform import find_pattern, replace_pattern, extract_pattern_liter
 from emend.trace import _extract_identifiers
 from emend.rules_config import (
     DeadCodeConfig,
-    LEGACY_PATTERNS_PATH,
     load_rules_document,
     yaml_key,
     as_list,
@@ -66,10 +65,7 @@ def load_duplicate_code_config(
     otherwise ``None``.
     """
     try:
-        config, _path = load_rules_document(
-            config_path,
-            fallbacks=(LEGACY_PATTERNS_PATH,),
-        )
+        config, _path = load_rules_document(config_path)
     except (FileNotFoundError, Exception):
         return None
     return _parse_duplicate_code_config(config.get("duplicate"))

@@ -4,13 +4,13 @@ from typing import Annotated, Optional
 import typer
 
 from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
-from emend.rules_config import LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH, resolve_rules_path
+from emend.rules_config import resolve_rules_path
 
 def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],
     config: Annotated[
         Optional[str],
-        typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml config file")
+        typer.Option("--config", help="Path to rules.yaml config file")
     ] = None,
     fix: Annotated[
         bool,
@@ -23,8 +23,7 @@ def lint_cmd(
 ):
     """Lint files using unified rules from a YAML config.
 
-    Reads rules from .emend/rules.yaml by default, falling back to the legacy
-    .emend/patterns.yaml when needed.
+    Reads rules from .emend/rules.yaml by default.
     Rules define patterns to find and optional replacements.
 
     Examples:
@@ -36,7 +35,7 @@ def lint_cmd(
     try:
         from emend.checks import run_checks
 
-        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
+        config_path = resolve_rules_path(config)
         if not config_path.exists():
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
@@ -73,7 +72,7 @@ def lint_cmd(
 
 def policy_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to check")],
-    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy policies.yaml")] = None,
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,
     policy_name: Annotated[Optional[str], typer.Option("--policy", "-p", help="Run only a specific policy")] = None,
     json_output: JsonFlag = False,
 ):
@@ -81,7 +80,7 @@ def policy_cmd(
 
     Policies combine flow analysis, structural checks, type constraints,
     and dead code detection into named, reusable compliance rules loaded
-    from .emend/rules.yaml by default, falling back to .emend/policies.yaml.
+    from .emend/rules.yaml.
 
     Examples:
         emend policy src/
@@ -93,10 +92,7 @@ def policy_cmd(
         from emend.checks import run_checks
         from emend.policy import format_policy_violations, PolicyViolation
 
-        config_path = resolve_rules_path(
-            config,
-            fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
-        )
+        config_path = resolve_rules_path(config)
         if not config_path.exists():
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)

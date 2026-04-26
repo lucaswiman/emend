@@ -2,8 +2,6 @@
 
 from emend.checks.rules_config import (  # noqa: F401
     DEFAULT_RULES_PATH,
-    LEGACY_PATTERNS_PATH,
-    LEGACY_POLICIES_PATH,
     DeadCodeConfig,
     load_rules_document,
     load_yaml_config_with_fallback,

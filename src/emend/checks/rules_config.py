@@ -10,8 +10,6 @@ import yaml
 
 
 DEFAULT_RULES_PATH = Path(".emend/rules.yaml")
-LEGACY_PATTERNS_PATH = Path(".emend/patterns.yaml")
-LEGACY_POLICIES_PATH = Path(".emend/policies.yaml")
 
 
 @dataclass
@@ -37,39 +35,16 @@ class DeadCodeConfig:
 
 def load_rules_document(
     config_path: str | Path | None = None,
-    *,
-    fallbacks: Iterable[str | Path] = (),
 ) -> tuple[dict[str, Any], Path]:
-    """Load a rules document with canonical + legacy fallback behavior."""
+    """Load a rules document from the canonical path or a given path."""
     if config_path is None:
-        candidates = [DEFAULT_RULES_PATH, *[Path(p) for p in fallbacks]]
+        resolved = DEFAULT_RULES_PATH if DEFAULT_RULES_PATH.exists() else None
+        if resolved is None:
+            raise FileNotFoundError(f"Config file not found: {DEFAULT_RULES_PATH}")
     else:
-        requested = Path(config_path)
-        candidates = [requested]
-        fallback_names = {Path(p).name for p in fallbacks}
-
-        # For legacy filenames, prefer a sibling rules.yaml.
-        if requested.name in fallback_names:
-            sibling_rules = requested.with_name(DEFAULT_RULES_PATH.name)
-            if sibling_rules not in candidates:
-                candidates.append(sibling_rules)
-
-        # If caller passed the canonical filename explicitly, allow legacy
-        # fallbacks in the same directory.
-        if requested.name == DEFAULT_RULES_PATH.name:
-            for fallback in fallbacks:
-                sibling_legacy = requested.with_name(Path(fallback).name)
-                if sibling_legacy not in candidates:
-                    candidates.append(sibling_legacy)
-
-    resolved: Path | None = None
-    for candidate in candidates:
-        if candidate.exists():
-            resolved = candidate
-            break
-    if resolved is None:
-        missing = Path(config_path) if config_path is not None else DEFAULT_RULES_PATH
-        raise FileNotFoundError(f"Config file not found: {missing}")
+        resolved = Path(config_path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"Config file not found: {resolved}")
 
     with open(resolved) as f:
         data = yaml.safe_load(f) or {}
@@ -124,23 +99,11 @@ def resolve_config_path_with_fallback(
 
 def resolve_rules_path(
     config_path: str | Path | None = None,
-    *,
-    fallbacks: Iterable[str | Path] = (),
 ) -> Path:
-    """Resolve the active rules/policy config path with canonical fallback."""
+    """Resolve the active rules config path."""
     if config_path is None:
-        candidates = [DEFAULT_RULES_PATH, *[Path(p) for p in fallbacks]]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
         return DEFAULT_RULES_PATH
-
-    requested = Path(config_path)
-    resolved = resolve_config_path_with_fallback(
-        requested,
-        legacy_names=[Path(p).name for p in fallbacks],
-    )
-    return resolved or requested
+    return Path(config_path)
 
 
 def yaml_key(raw: dict[str, Any], *keys: str) -> Any:

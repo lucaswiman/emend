@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 from emend.rules_config import (
     DeadCodeConfig,
-    LEGACY_POLICIES_PATH,
-    LEGACY_PATTERNS_PATH,
     load_rules_document,
     expand_macros,
     expand_not_through,
@@ -293,10 +291,7 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
 
 def load_policies(config_path: str | Path | None = None) -> list[Policy]:
     """Load policies from a YAML file."""
-    data, path = load_rules_document(
-        config_path,
-        fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
-    )
+    data, path = load_rules_document(config_path)
 
     if "policies" not in data and "rules" not in data:
         raise ValueError(

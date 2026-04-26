@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 from emend.checks.rules_config import (  # noqa: E402
     DeadCodeConfig,
-    LEGACY_PATTERNS_PATH,
     load_rules_document,
     yaml_key,
     as_list,
@@ -168,10 +167,7 @@ def load_rules(
     config_path: str | None = None,
 ) -> "tuple[list[LintRule], dict[str, str], DeadCodeConfig | None]":
     """Parse a YAML rules file into LintRule objects."""
-    config, _path = load_rules_document(
-        config_path,
-        fallbacks=(LEGACY_PATTERNS_PATH,),
-    )
+    config, _path = load_rules_document(config_path)
 
     macros = config.get("macros", {}) or {}
     raw_rules = config.get("rules", {}) or {}

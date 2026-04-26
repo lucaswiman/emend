@@ -13,7 +13,7 @@ from emend.cli_base import (
     resolve_files,
 )
 from emend.component_selector import parse_extended_selector
-from emend.rules_config import LEGACY_PATTERNS_PATH, resolve_rules_path
+from emend.rules_config import resolve_rules_path
 from emend.transform import (
     DeadBlock,
     DeadModule,
@@ -43,7 +43,7 @@ def _trace_cmd_impl(
     try:
         from emend.trace import load_trace_config, run_trace_analysis, format_violations
 
-        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
+        config_path = resolve_rules_path(config)
         if not config_path.exists() and preset is None:
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
@@ -118,7 +118,7 @@ def _trace_cmd_impl(
 
 def trace_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to analyze")],
-    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml or legacy patterns.yaml")] = None,
+    config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,
     label: Annotated[Optional[str], typer.Option("--label", help="Only check a specific trace label")] = None,
     trace: Annotated[bool, typer.Option("--trace", help="Show full propagation traces")] = False,
     json_output: JsonFlag = False,
@@ -142,8 +142,7 @@ def trace_cmd(
     For example, --max-chain-depth 2 detects sinks up to 2 call levels
     deep (A calls B which has a sink).  Default is unlimited.
 
-    Configuration is read from .emend/rules.yaml by default, falling back to
-    the legacy trace section in .emend/patterns.yaml. Use --preset to load
+    Configuration is read from .emend/rules.yaml by default. Use --preset to load
     built-in rules for a specific framework (django, flask, sqlalchemy,
     fastapi, all).
 

@@ -19,7 +19,7 @@ from emend.transform import (
     find_impact,
     semantic_context as _semantic_context,
 )
-from emend.rules_config import LEGACY_PATTERNS_PATH, resolve_rules_path
+from emend.rules_config import resolve_rules_path
 
 from emend.mcp.dispatch import mcp_app
 
@@ -172,7 +172,7 @@ def deadcode(
     entry_point_decorators: Annotated[list[str] | None, Field(description="Decorators that mark entry points (not dead even if unreferenced). E.g. ['app.route', 'celery.task'].")] = None,
     entry_point_names: Annotated[list[str] | None, Field(description="Function names that are entry points. E.g. ['main', 'cli'].")] = None,
     exclude_paths: Annotated[list[str] | None, Field(description="Glob patterns for paths to exclude. E.g. ['tests/**', 'migrations/**'].")] = None,
-    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml config. Direct params above override config values.")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml config. Direct params above override config values.")] = None,
 ) -> str:
     """Find potentially dead (unreferenced) code. Returns JSON."""
     from emend.lint import load_rules
@@ -183,7 +183,7 @@ def deadcode(
     cfg_ep_names = None
     cfg_excl_paths = None
 
-    config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
+    config_path = resolve_rules_path(config)
     if config_path.exists():
         _, _, deadcode_config = load_rules(str(config_path))
         if deadcode_config is not None:
@@ -344,7 +344,7 @@ def trace_analysis(
         "(e.g. 'escape($X)')."
     ))] = None,
     preset: Annotated[str | None, Field(description="Load framework-specific rules: flask, django, sqlalchemy, fastapi. Can combine with inline patterns.")] = None,
-    config: Annotated[str | None, Field(description="Path to rules.yaml or legacy patterns.yaml. Not needed if using inline mode or preset.")] = None,
+    config: Annotated[str | None, Field(description="Path to rules.yaml. Not needed if using inline mode or preset.")] = None,
     label: Annotated[str | None, Field(description="Only check a specific trace label.")] = None,
     trace: Annotated[bool, Field(description="Include propagation traces in output.")] = False,
     interprocedural: Annotated[bool, Field(description="Enable cross-function analysis with fixed-point iteration.")] = False,
@@ -377,7 +377,7 @@ def trace_analysis(
         if not trace_config:
             return json.dumps({"error": f"Unknown preset: {preset}"})
     else:
-        config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
+        config_path = resolve_rules_path(config)
         if not config_path.exists():
             return json.dumps({"error": f"Config file not found: {config_path}. Provide from_pattern + to_pattern for inline mode, or use preset=."})
         trace_config = load_trace_config(str(config_path))

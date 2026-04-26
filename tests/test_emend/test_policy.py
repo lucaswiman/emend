@@ -151,8 +151,8 @@ class TestLoadPolicies:
         assert isinstance(structural.checks[0], StructuralCheck)
         assert isinstance(flow.checks[0], FlowCheck)
 
-    def test_load_unified_rules_via_legacy_policies_path(self, tmp_path):
-        _write_rules(tmp_path, {
+    def test_load_unified_rules_loads_rules_and_policies(self, tmp_path):
+        config_path = _write_rules(tmp_path, {
             "macros": {"input": "request.args.get($X)"},
             "rules": {
                 "no-print": {
@@ -177,7 +177,7 @@ class TestLoadPolicies:
                 },
             },
         })
-        policies = load_policies(str(tmp_path / ".emend" / "policies.yaml"))
+        policies = load_policies(config_path)
         by_name = {p.name: p for p in policies}
         assert "no-print" in by_name
         assert "no-sqli" in by_name
@@ -188,7 +188,7 @@ class TestLoadPolicies:
         assert isinstance(by_name["deadcode-check"].checks[0], DeadCodeCheck)
 
     def test_load_unified_rules_top_level_deadcode(self, tmp_path):
-        _write_rules(tmp_path, {
+        config_path = _write_rules(tmp_path, {
             "deadcode": {
                 "entry-point-decorators": ["app.command"],
             },
@@ -196,7 +196,7 @@ class TestLoadPolicies:
                 "no-print": {"match": "print($X)", "message": "No print"},
             },
         })
-        policies = load_policies(str(tmp_path / ".emend" / "policies.yaml"))
+        policies = load_policies(config_path)
         names = {p.name for p in policies}
         assert "no-print" in names
         assert "deadcode" in names

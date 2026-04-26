@@ -1,7 +1,7 @@
 """Framework-specific trace analysis presets.
 
 Each preset is a YAML file shipped under :mod:`emend.presets`.  The schema
-matches the ``trace:`` section of ``.emend/patterns.yaml`` and is parsed by
+matches the ``trace:`` section of ``.emend/rules.yaml`` and is parsed by
 :func:`emend.trace._trace_config_from_trace_section`.
 
 Public API:

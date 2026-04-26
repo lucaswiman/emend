@@ -99,7 +99,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     re-added after a missed alias broke `test_dsl.py::TestDslDebugCommand`.
     `make test`: 3060 passed, 3 skipped, 1 xfailed.
 
-- [ ] **Phase 4 — drop legacy `patterns.yaml` / `policies.yaml` fallbacks**
+- [x] **Phase 4 — drop legacy `patterns.yaml` / `policies.yaml` fallbacks**
   - Canonical config is `.emend/rules.yaml` (added in
     `roadmap-simplify-codebase` Phase B/C). Legacy paths are still threaded
     as `fallbacks=(LEGACY_PATTERNS_PATH, LEGACY_POLICIES_PATH)` through six
@@ -110,6 +110,20 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     `LEGACY_*` constants.
   - Risk: low for the code; **user-visible** — confirm with the user before
     starting, and document in `CHANGELOG.md`.
+  - **Status**: hard-removed (no deprecation shim) per user request.
+    `LEGACY_PATTERNS_PATH` and `LEGACY_POLICIES_PATH` constants deleted from
+    `checks/rules_config.py` and the shim `rules_config.py`. `load_rules_document`
+    and `resolve_rules_path` simplified to drop `fallbacks=` parameter entirely.
+    Call-sites updated in `lint.py`, `policy.py`, `cli_checks.py`,
+    `cli_analysis.py`, `trace.py`, `checks/pattern_rules.py`, `mcp/analyze.py`.
+    Help text updated in `cli_checks.py`, `cli_analysis.py`, `mcp/analyze.py`.
+    Docstrings updated in `trace.py`, `trace_presets.py`, `presets/__init__.py`.
+    Tests: `test_load_rules_falls_back_to_rules_yaml` deleted from `test_lint.py`;
+    `test_load_unified_rules_top_level_deadcode` in `test_policy.py` updated to
+    pass `rules.yaml` path directly instead of relying on fallback.
+    CHANGELOG entry added. `make test`: baseline had 37 pre-existing failures
+    (test_list_symbols, test_map_unified, test_move, test_phase9_parity);
+    post-change results match baseline (no new failures from this phase).
 
 - [x] **Phase 5 — purge `editor_search.py` `import ast` sites**
   - 6 inline `import ast as _ast` calls (lines 2357, 2424, 2459, 2497, 2524,

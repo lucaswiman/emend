@@ -34,7 +34,7 @@ def _write_rules_config(tmp_path, config_dict):
 
 
 def test_trace_load_config_from_unified_flow_rules(tmp_path):
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "macros": {
             "input": "request.args.get($X)",
         },
@@ -51,7 +51,7 @@ def test_trace_load_config_from_unified_flow_rules(tmp_path):
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     assert config.labels == ["sql-injection"]
     assert len(config.sources) == 1
     assert config.sources[0].pattern == "request.args.get($X)"
@@ -64,7 +64,7 @@ def test_trace_load_config_from_unified_flow_rules(tmp_path):
 
 
 def test_trace_load_config_merges_trace_section_and_unified_flow_rules(tmp_path):
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "trace": {
             "sources": [
                 {"pattern": "request.form[$X]", "label": "legacy-source"},
@@ -84,7 +84,7 @@ def test_trace_load_config_merges_trace_section_and_unified_flow_rules(tmp_path)
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     assert {s.label for s in config.sources} == {"legacy-source", "sql-injection"}
     assert {s.label for s in config.sinks} == {"legacy-source", "sql-injection"}
 
@@ -643,7 +643,7 @@ def test_trace_load_config_dict_form_flow_rules(tmp_path):
     like "{'pattern': '...', 'type_constraint': '...'}" instead of
     extracting the actual pattern.
     """
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "rules": {
             "redis-get-set": {
                 "flow": {
@@ -662,7 +662,7 @@ def test_trace_load_config_dict_form_flow_rules(tmp_path):
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     assert len(config.sources) == 1
     assert config.sources[0].pattern == "$R.get($KEY)"
     assert config.sources[0].type_constraint == "Redis"
@@ -673,7 +673,7 @@ def test_trace_load_config_dict_form_flow_rules(tmp_path):
 
 def test_trace_dict_form_mixed_string_and_dict(tmp_path):
     """Mixed string-form and dict-form in the same config should both work."""
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "rules": {
             "string-form": {
                 "flow": {
@@ -695,7 +695,7 @@ def test_trace_dict_form_mixed_string_and_dict(tmp_path):
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     patterns = {s.pattern for s in config.sources}
     assert "request.args.get($X)" in patterns
     assert "$R.get($KEY)" in patterns
@@ -711,7 +711,7 @@ def test_trace_dict_form_mixed_string_and_dict(tmp_path):
 
 def test_trace_exclude_paths_from_yaml(tmp_path):
     """exclude_paths in trace config YAML should be loaded."""
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "trace": {
             "labels": ["test"],
             "sources": [{"pattern": "$X.get($K)", "label": "test"}],
@@ -721,13 +721,13 @@ def test_trace_exclude_paths_from_yaml(tmp_path):
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     assert config.exclude_paths == ["*/migrations/*.py", "tests/**"]
 
 
 def test_trace_exclude_paths_from_unified_rules(tmp_path):
     """exclude_paths at top level of unified rules config should be loaded."""
-    _write_rules_config(tmp_path, {
+    config_file = _write_rules_config(tmp_path, {
         "exclude_paths": ["*/migrations/*.py"],
         "rules": {
             "test-rule": {
@@ -740,7 +740,7 @@ def test_trace_exclude_paths_from_unified_rules(tmp_path):
         },
     })
 
-    config = load_trace_config(str(tmp_path / ".emend" / "patterns.yaml"))
+    config = load_trace_config(str(config_file))
     assert "*/migrations/*.py" in config.exclude_paths
 
 
