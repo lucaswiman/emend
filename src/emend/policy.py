@@ -1,6 +1,6 @@
 """Policy engine for emend: declarative checks on top of analysis capabilities.
 
-Loads policy definitions from ``.emend/policies.yaml`` and runs them against
+Loads policy definitions from ``.emend/rules.yaml`` and runs them against
 a project, producing structured violations with witness traces.
 """
 
@@ -25,10 +25,15 @@ from emend.rules_config import (
     as_list,
 )
 
+# Import check types from their canonical modules.
+from emend.checks.structural import StructuralCheck
+from emend.checks.types import TypeCheck
+from emend.checks.datalog import DatalogCheck
+from emend.checks.custom import CustomCheck
+from emend.checks.sequence import SequenceCheck, SequenceStep, SequencePathConstraint
+
 # Policy and lint share the same dead-code configuration dataclass.
-# ``DeadCodeCheck`` is kept as an alias for readability in policy-side code
-# (where it appears alongside ``FlowCheck``, ``StructuralCheck``, etc.) and
-# for backwards compatibility with external importers.
+# ``DeadCodeCheck`` is kept as an alias for readability in policy-side code.
 DeadCodeCheck = DeadCodeConfig
 
 
@@ -43,72 +48,6 @@ class FlowCheck:
     flows_to: str
     not_through: str | None = None
     label: str = ""
-
-
-@dataclass
-class StructuralCheck:
-    """Pattern must/must-not appear in certain scopes."""
-    pattern: str
-    inside: str | None = None
-    not_inside: str | None = None
-    where: str | None = None
-
-
-@dataclass
-class TypeCheck:
-    """Type constraint check on symbols."""
-    symbol_pattern: str
-    expected_type: str
-    kind: str = "has_type"  # "has_type" or "returns"
-
-
-@dataclass
-class CustomCheck:
-    """Expert query using raw query source."""
-    query_source: str
-
-
-@dataclass
-class DatalogCheck:
-    """CozoScript Datalog query check.
-
-    The query must return rows with at least ``line``, ``col``, ``message``
-    columns. Each returned row becomes a policy violation.
-    """
-    cozoscript: str
-
-
-@dataclass
-class SequenceStep:
-    """A single step in a temporal sequence rule."""
-    bind: str  # step label (e.g. "load", "mutate")
-    pattern: str | None = None  # pattern to match (e.g. "$OBJ = session.query($MODEL)")
-    effect: str | None = None  # effect predicate (e.g. "writes($OBJ)")
-    type_constraint: str | None = None  # optional type constraint
-
-
-@dataclass
-class SequencePathConstraint:
-    """Path constraint between two consecutive sequence steps."""
-    from_step: str  # step label (e.g. "load")
-    to_step: str  # step label (e.g. "mutate")
-    not_through: list[str] = field(default_factory=list)  # patterns that must not appear on any path
-    not_through_scope: list[str] = field(default_factory=list)  # scope boundary patterns
-
-
-@dataclass
-class SequenceCheck:
-    """Multi-step temporal sequence check.
-
-    Each rule defines an ordered list of steps (matched by pattern or effect)
-    with binding constraints across steps and CFG-path constraints between them.
-    Examples: TOCTOU, double-free, use-after-close.
-    """
-    name: str
-    message: str
-    sequence: list[SequenceStep]
-    path_constraints: list[SequencePathConstraint] = field(default_factory=list)
-    severity: str = "error"
 
 
 # Union of all check types
@@ -221,7 +160,6 @@ def _build_unified_policy(
 
     if isinstance(rule_def.get("flow"), dict) and not checks:
         flow_def = rule_def["flow"]
-        # Keep compatibility with older partial flow rules by skipping empty checks.
         if flow_def.get("from") and flow_def.get("to"):
             checks.append(FlowCheck(
                 flows_from=expand_macros(str(flow_def["from"]), macros),
@@ -240,12 +178,17 @@ def _build_unified_policy(
     )
 
 
-def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
-    """Parse a single check definition from a YAML dict.
+def _as_list(val: Any) -> list[str]:
+    """Coerce a value to a list of strings."""
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val]
+    return list(val)
 
-    Accepts both underscore (``flows_from``) and hyphenated (``flows-from``)
-    key variants so that YAML files can use the more natural hyphenated form.
-    """
+
+def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
+    """Parse a single check definition from a YAML dict."""
     check_type = raw.get("type", "")
     if check_type == "flow":
         flows_from = yaml_key(raw, "flows_from")
@@ -313,11 +256,9 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
                 effect=step_raw.get("effect"),
                 type_constraint=yaml_key(step_raw, "type_constraint"),
             ))
-        # Parse path constraints
         path_constraints = []
         raw_path = raw.get("path", {})
         for path_key, path_val in raw_path.items():
-            # path_key is like "load -> mutate"
             parts = [p.strip() for p in path_key.split("->")]
             if len(parts) != 2:
                 raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
@@ -350,29 +291,8 @@ def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
         raise ValueError(f"Unknown check type: {check_type!r}")
 
 
-def _as_list(val: Any) -> list[str]:
-    """Coerce a value to a list of strings."""
-    if val is None:
-        return []
-    if isinstance(val, str):
-        return [val]
-    return list(val)
-
-
 def load_policies(config_path: str | Path | None = None) -> list[Policy]:
-    """Load policies from a YAML file.
-
-    Args:
-        config_path: Path to the policies YAML file.  Defaults to
-            ``.emend/policies.yaml`` relative to the current directory.
-
-    Returns:
-        List of ``Policy`` objects.
-
-    Raises:
-        FileNotFoundError: If the config file does not exist.
-        ValueError: If the config file is malformed.
-    """
+    """Load policies from a YAML file."""
     data, path = load_rules_document(
         config_path,
         fallbacks=(LEGACY_POLICIES_PATH, LEGACY_PATTERNS_PATH),
@@ -405,7 +325,6 @@ def load_policies(config_path: str | Path | None = None) -> list[Policy]:
         if policy is not None:
             policies.append(policy)
 
-    # Top-level deadcode block in rules.yaml acts as a default deadcode policy.
     top_level_deadcode = data.get("deadcode")
     if top_level_deadcode is not None and all(p.name != "deadcode" for p in policies):
         deadcode_policy = _build_unified_policy(
@@ -427,33 +346,26 @@ def load_policies(config_path: str | Path | None = None) -> list[Policy]:
 # ---------------------------------------------------------------------------
 
 def validate_policies(policies: list[Policy]) -> list[str]:
-    """Validate a list of policies and return any error messages.
-
-    Returns an empty list if all policies are valid.
-    """
+    """Validate a list of policies and return any error messages."""
     errors: list[str] = []
     seen_names: set[str] = set()
 
     for i, policy in enumerate(policies):
         prefix = f"Policy #{i + 1} ({policy.name!r})"
 
-        # Duplicate name check
         if policy.name in seen_names:
             errors.append(f"{prefix}: duplicate policy name")
         seen_names.add(policy.name)
 
-        # Name validation
         if not policy.name or not policy.name.strip():
             errors.append(f"Policy #{i + 1}: name is required")
 
-        # Severity validation
         if policy.severity not in _VALID_SEVERITIES:
             errors.append(
                 f"{prefix}: invalid severity {policy.severity!r}, "
                 f"must be one of {sorted(_VALID_SEVERITIES)}"
             )
 
-        # Must have at least one check
         if not policy.checks:
             errors.append(f"{prefix}: must have at least one check")
 
@@ -507,7 +419,7 @@ def validate_policies(policies: list[Policy]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Check runners
+# Check runners — delegate to checks/<kind>.py
 # ---------------------------------------------------------------------------
 
 def _run_flow_check(
@@ -547,32 +459,8 @@ def _run_structural_check(
     source: str,
     language: str,
 ) -> list[PolicyViolation]:
-    """Run a structural pattern check using transform.find_pattern."""
-    from emend.transform import find_pattern
-
-    matches = find_pattern(
-        check.pattern,
-        file_path,
-        inside=check.inside,
-        not_inside=check.not_inside,
-        where=check.where,
-        source_override=source,
-        language=language,
-    )
-
-    violations: list[PolicyViolation] = []
-    for m in matches:
-        violations.append(PolicyViolation(
-            file_path=file_path,
-            line=m.line or 0,
-            col=m.col or 0,
-            policy_name=policy.name,
-            check_name=f"structural:{check.pattern}",
-            severity=policy.severity,
-            message=policy.description,
-            witness=[m.matched_text or m.node_text or ""],
-        ))
-    return violations
+    from emend.checks.structural import run_structural_check
+    return run_structural_check(check, policy, file_path, source, language)
 
 
 def _run_type_check(
@@ -583,63 +471,8 @@ def _run_type_check(
     language: str,
     project_root: str | None = None,
 ) -> list[PolicyViolation]:
-    """Run a type constraint check using the type oracle.
-
-    Finds symbols matching ``symbol_pattern``, then checks their inferred type
-    against ``expected_type``.
-    """
-    from emend.transform import find_pattern
-
-    # Build the oracle-aware pattern with type constraint
-    if check.kind == "returns":
-        augmented_pattern = f"{check.symbol_pattern}:returns[{check.expected_type}]"
-    else:
-        augmented_pattern = f"{check.symbol_pattern}:type[{check.expected_type}]"
-
-    # First find matches of the plain symbol pattern to identify candidates
-    all_matches = find_pattern(
-        check.symbol_pattern,
-        file_path,
-        source_override=source,
-        language=language,
-    )
-
-    # Then find matches that satisfy the type constraint
-    type_oracle = None
-    if project_root:
-        try:
-            from emend.type_oracle import create_type_oracle
-            type_oracle = create_type_oracle(project_root=Path(project_root))
-        except Exception:
-            logger.debug("Could not create type oracle for type check", exc_info=True)
-
-    typed_matches = find_pattern(
-        augmented_pattern,
-        file_path,
-        source_override=source,
-        type_oracle=type_oracle,
-        language=language,
-    )
-
-    # Violations are symbols that matched the pattern but NOT the type constraint
-    typed_positions = {(m.line, m.col) for m in typed_matches}
-    violations: list[PolicyViolation] = []
-    for m in all_matches:
-        if (m.line, m.col) not in typed_positions:
-            violations.append(PolicyViolation(
-                file_path=file_path,
-                line=m.line or 0,
-                col=m.col or 0,
-                policy_name=policy.name,
-                check_name=f"type:{check.kind}:{check.expected_type}",
-                severity=policy.severity,
-                message=(
-                    f"{policy.description}: expected {check.kind} "
-                    f"{check.expected_type!r} on {m.matched_text or m.node_text or '?'}"
-                ),
-                witness=[m.matched_text or m.node_text or ""],
-            ))
-    return violations
+    from emend.checks.types import run_type_check
+    return run_type_check(check, policy, file_path, source, language, project_root)
 
 
 def _run_deadcode_check(
@@ -647,27 +480,8 @@ def _run_deadcode_check(
     policy: Policy,
     project_path: str,
 ) -> list[PolicyViolation]:
-    """Run dead code detection as a policy check."""
-    from emend.transform import find_dead_code
-
-    violations: list[PolicyViolation] = []
-    for ds in find_dead_code(
-        project_path,
-        entry_point_decorators=check.entry_point_decorators or None,
-        entry_point_names=check.entry_point_names or None,
-        exclude_paths=check.exclude_paths or None,
-    ):
-        violations.append(PolicyViolation(
-            file_path=ds.file_path,
-            line=ds.line,
-            col=0,
-            policy_name=policy.name,
-            check_name="deadcode",
-            severity=policy.severity,
-            message=f"{policy.description}: {ds.name} ({ds.reason})",
-            witness=[ds.selector],
-        ))
-    return violations
+    from emend.checks.deadcode import run_deadcode_check
+    return run_deadcode_check(check, policy, project_path)
 
 
 def _run_custom_check(
@@ -677,56 +491,8 @@ def _run_custom_check(
     source: str,
     language: str,
 ) -> list[PolicyViolation]:
-    """Run a custom expert query.
-
-    The ``query_source`` is executed as a Python expression with access to
-    emend's ``find_pattern`` and the file content.  It must return a list
-    of dicts with at least ``line``, ``col``, ``message`` keys.
-    """
-    from emend.transform import find_pattern
-
-    local_ns: dict[str, Any] = {
-        "find_pattern": find_pattern,
-        "file_path": file_path,
-        "source": source,
-        "language": language,
-    }
-
-    try:
-        result = eval(  # noqa: S307 - intentional expert-mode eval
-            compile(check.query_source, f"<policy:{policy.name}>", "eval"),
-            {"__builtins__": {}},
-            local_ns,
-        )
-    except Exception as exc:
-        return [PolicyViolation(
-            file_path=file_path,
-            line=0,
-            col=0,
-            policy_name=policy.name,
-            check_name="custom:error",
-            severity=policy.severity,
-            message=f"Custom check failed: {exc}",
-        )]
-
-    if not isinstance(result, list):
-        return []
-
-    violations: list[PolicyViolation] = []
-    for entry in result:
-        if not isinstance(entry, dict):
-            continue
-        violations.append(PolicyViolation(
-            file_path=file_path,
-            line=entry.get("line", 0),
-            col=entry.get("col", 0),
-            policy_name=policy.name,
-            check_name="custom",
-            severity=policy.severity,
-            message=entry.get("message", policy.description),
-            witness=entry.get("witness", []),
-        ))
-    return violations
+    from emend.checks.custom import run_custom_check
+    return run_custom_check(check, policy, file_path, source, language)
 
 
 def _run_datalog_check(
@@ -734,62 +500,8 @@ def _run_datalog_check(
     policy: Policy,
     project_path: str,
 ) -> list[PolicyViolation]:
-    """Run a CozoScript Datalog query against the project's fact graph.
-
-    The query must return columns that include at least ``file_path``
-    and ``line``.  An optional ``message`` column overrides the policy
-    description.  All other columns are added to the witness list.
-    """
-    from emend.fact_graph import FactGraph
-
-    violations: list[PolicyViolation] = []
-    try:
-        graph = FactGraph.build_from_project(project_path)
-        result = graph.run_query(check.cozoscript)
-    except Exception as exc:
-        return [PolicyViolation(
-            file_path="<project>",
-            line=0,
-            col=0,
-            policy_name=policy.name,
-            check_name="datalog:error",
-            severity=policy.severity,
-            message=f"Datalog check failed: {exc}",
-        )]
-
-    headers = result.get("headers", [])
-    rows = result.get("rows", [])
-
-    # Find column indices
-    def _col_idx(name: str) -> int | None:
-        try:
-            return headers.index(name)
-        except ValueError:
-            return None
-
-    _fp = _col_idx("file_path")
-    _f = _col_idx("file")
-    fp_idx = _fp if _fp is not None else _f if _f is not None else 0
-    _ln = _col_idx("line")
-    line_idx = _ln if _ln is not None else (1 if len(headers) > 1 else 0)
-    msg_idx = _col_idx("message")
-
-    for row in rows:
-        file_path = str(row[fp_idx]) if fp_idx is not None and fp_idx < len(row) else "<unknown>"
-        line = int(row[line_idx]) if line_idx is not None and line_idx < len(row) else 0
-        message = str(row[msg_idx]) if msg_idx is not None and msg_idx < len(row) else policy.description
-        witness = [f"{h}={v}" for h, v in zip(headers, row)]
-        violations.append(PolicyViolation(
-            file_path=file_path,
-            line=line,
-            col=0,
-            policy_name=policy.name,
-            check_name="datalog",
-            severity=policy.severity,
-            message=message,
-            witness=witness,
-        ))
-    return violations
+    from emend.checks.datalog import run_datalog_check
+    return run_datalog_check(check, policy, project_path)
 
 
 def _run_sequence_check(
@@ -797,101 +509,8 @@ def _run_sequence_check(
     policy: Policy,
     project_path: str,
 ) -> list[PolicyViolation]:
-    """Run a temporal sequence check against the project's fact graph.
-
-    Resolves each step via pattern matching (Python), then compiles to
-    a CozoScript Datalog query for CFG-reachability and def-use liveness
-    checks via ``compile_sequence_rule()`` in ``fact_graph.py``.
-    """
-    from emend.fact_graph import FactGraph, compile_sequence_rule
-
-    violations: list[PolicyViolation] = []
-    try:
-        graph = FactGraph.build_from_project(project_path)
-    except Exception as exc:
-        return [PolicyViolation(
-            file_path="<project>",
-            line=0, col=0,
-            policy_name=policy.name,
-            check_name=f"sequence:{check.name}:error",
-            severity=policy.severity,
-            message=f"Sequence check setup failed: {exc}",
-        )]
-
-    try:
-        result = compile_sequence_rule(graph, check)
-        if result is None:
-            return []
-        query_str, step_data = result
-        query_result = graph.run_query(query_str)
-    except Exception as exc:
-        return [PolicyViolation(
-            file_path="<project>",
-            line=0, col=0,
-            policy_name=policy.name,
-            check_name=f"sequence:{check.name}:error",
-            severity=policy.severity,
-            message=f"Sequence check failed: {exc}",
-        )]
-
-    headers = query_result.get("headers", [])
-    rows = query_result.get("rows", [])
-
-    for row in rows:
-        row_dict = dict(zip(headers, row))
-        fp = row_dict.get("fp", "<unknown>")
-        fq = row_dict.get("fq", "")
-        first_line = row_dict.get("first_line", 0)
-        last_line = row_dict.get("last_line", 0)
-
-        # Build WitnessStep entries from per-step line columns
-        from emend.flow_ir import WitnessStep, format_witness as _fmt_witness
-
-        witness_steps: list[WitnessStep] = []
-        for h, v in zip(headers, row):
-            if h not in ("fp", "fq") and h.startswith("line_"):
-                step_idx = h.replace("line_", "")
-                step_name = ""
-                try:
-                    idx = int(step_idx)
-                    if idx < len(check.sequence):
-                        step_name = check.sequence[idx].bind
-                except (ValueError, IndexError):
-                    pass
-                witness_steps.append(WitnessStep(
-                    file_path=str(fp),
-                    func_qn=str(fq),
-                    block_id=0,
-                    line=int(v),
-                    var_name=step_name,
-                    kind="step",
-                ))
-            elif h in ("first_line", "last_line"):
-                kind = "source" if h == "first_line" else "sink"
-                witness_steps.append(WitnessStep(
-                    file_path=str(fp),
-                    func_qn=str(fq),
-                    block_id=0,
-                    line=int(v),
-                    kind=kind,
-                ))
-
-        witness = _fmt_witness(witness_steps) if witness_steps else [
-            f"{h}={v}" for h, v in zip(headers, row) if h not in ("fp", "fq")
-        ]
-
-        violations.append(PolicyViolation(
-            file_path=str(fp),
-            line=int(first_line),
-            col=0,
-            policy_name=policy.name,
-            check_name=f"sequence:{check.name}",
-            severity=check.severity,
-            message=check.message,
-            witness=witness,
-        ))
-
-    return violations
+    from emend.checks.sequence import run_sequence_check
+    return run_sequence_check(check, policy, project_path)
 
 
 # ---------------------------------------------------------------------------
@@ -905,23 +524,11 @@ def run_policy_checks(
     language: str = "python",
     project_path: str | None = None,
 ) -> list[PolicyViolation]:
-    """Run all policy checks against the given file paths.
-
-    Args:
-        paths: List of file paths to check.
-        policies: List of ``Policy`` objects to enforce.
-        language: Source language (default ``"python"``).
-        project_path: Project root directory (needed for dead code and type
-            checks that require cross-file analysis).
-
-    Returns:
-        List of ``PolicyViolation`` objects, sorted by file path and line.
-    """
+    """Run all policy checks against the given file paths."""
     from emend import emend_core
 
     violations: list[PolicyViolation] = []
 
-    # Separate project-level policies from per-file policies
     deadcode_policies: list[tuple[Policy, DeadCodeCheck]] = []
     datalog_policies: list[tuple[Policy, DatalogCheck]] = []
     sequence_policies: list[tuple[Policy, SequenceCheck]] = []
@@ -938,7 +545,6 @@ def run_policy_checks(
             else:
                 file_policies.append((policy, check))
 
-    # Run project-level checks
     if deadcode_policies and project_path:
         for policy, check in deadcode_policies:
             violations.extend(_run_deadcode_check(check, policy, project_path))
@@ -951,9 +557,7 @@ def run_policy_checks(
         for policy, check in sequence_policies:
             violations.extend(_run_sequence_check(check, policy, project_path))
 
-    # Run per-file checks
     if file_policies:
-        # Batch-read files via Rust for performance
         file_contents: dict[str, str] = dict(
             emend_core.read_and_filter_files(paths, [])
         )
@@ -987,7 +591,6 @@ def run_policy_checks(
                         exc_info=True,
                     )
 
-    # Sort by file path, then line
     violations.sort(key=lambda v: (v.file_path, v.line, v.col))
     return violations
 
@@ -1001,15 +604,7 @@ def format_policy_violations(
     *,
     json_output: bool = False,
 ) -> str:
-    """Format policy violations for display.
-
-    Args:
-        violations: List of violations to format.
-        json_output: If True, output as JSON.
-
-    Returns:
-        Formatted string.
-    """
+    """Format policy violations for display."""
     if json_output:
         data = []
         for v in violations:
@@ -1047,7 +642,6 @@ def format_policy_violations(
         for w in v.witness:
             lines.append(f"    | {w}")
 
-    # Summary
     error_count = sum(1 for v in violations if v.severity == "error")
     warning_count = sum(1 for v in violations if v.severity == "warning")
     info_count = sum(1 for v in violations if v.severity == "info")
