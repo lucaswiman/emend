@@ -47,7 +47,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     `_index_batch`/`_extract_*` extraction (~300 lines), the venv-index
     block at lines 984-1259 (~275 lines, could move to its own module).
 
-- [ ] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
+- [x] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
   - See [phase-2-unify-checks.md](phase-2-unify-checks.md).
   - Three engines (`lint.run_lint`, `policy.run_policy_checks`,
     `checks.run_checks`) already share `DeadCodeConfig`, `FlowSpec`, and the
@@ -55,6 +55,26 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
   - Risk: medium — touches CLI dispatch and MCP wrappers, but the lint and
     policy violation types are nearly isomorphic (`checks.CheckViolation`
     already normalises both).
+  - **Status**: landed on `claude/modularize-agent-swarm-e0nzk` in commits
+    91ab117 (2a), df3a508 (2b), 2ce213f (2c), cd3b245 (2d).
+    Stage 2a: `src/emend/checks/` package created; `checks.py` converted
+    to package (`checks/engine.py`); `rules_config.py` and `flow_ir.py`
+    reduced to one-line shims re-exporting from `checks/rules_config.py`
+    and `checks/flow.py`. Stage 2b: per-kind modules created
+    (`pattern_rules.py`, `structural.py`, `types.py`, `deadcode.py`,
+    `datalog.py`, `custom.py`, `sequence.py`, `duplicates.py`); `lint.py`
+    reduced to 805 LOC (from 1108) by importing shared types/helpers from
+    `checks/`; `policy.py` reduced to 658 LOC (from 1064) by importing check
+    types from `checks/`. Stage 2c: `checks/engine.py` gains `mode` parameter
+    (`lint`/`policy`/`all`) and `LINT_KINDS`/`POLICY_KINDS` constants;
+    `cli_checks.py` lint_cmd and policy_cmd now route through `run_checks`.
+    Schema decision: per-kind dispatch (not unified schema), matching the
+    existing two-document model (rules + policies). Stage 2d: dead `lint()`
+    and `check_policies()` MCP helpers removed; `check` MCP tool gains
+    `mode` parameter. `make test`: 3060 passed, 3 skipped, 1 xfailed.
+  - **Open follow-up**: Stage 2e (fully reducing `lint.py` and `policy.py`
+    to <100-line shims by removing `run_lint`/`run_policy_checks`
+    implementation bodies) is deferred until the next release per plan.
 
 - [x] **Phase 3 — single-source CLI registration**
   - Today every `cli_*.py` file declares `@app.command("name", hidden=True)`
