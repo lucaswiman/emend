@@ -128,24 +128,49 @@ def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[Ch
     ]
 
 
+# Rule kinds owned by the lint engine (pattern/flow/deadcode rules).
+LINT_KINDS = frozenset({"match", "flow", "deadcode"})
+# Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
+POLICY_KINDS = frozenset({"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
+# All known kinds.
+ALL_KINDS = LINT_KINDS | POLICY_KINDS
+
+
 def run_checks(
     paths: list[str],
     *,
     config: str | None = None,
     rule_name: str | None = None,
     kind: str | None = None,
+    mode: str | None = None,
     fix: bool = False,
     language: str = "python",
     project_path: str | None = None,
 ) -> list[CheckViolation]:
-    """Run unified rules from ``rules.yaml`` with compatibility fallback."""
+    """Run unified rules from ``rules.yaml``.
+
+    Args:
+        paths: Files to check.
+        config: Path to rules.yaml (defaults to .emend/rules.yaml).
+        rule_name: Restrict to one rule by name.
+        kind: Restrict to one rule kind (match, flow, deadcode, type, …).
+        mode: Restrict by engine: ``"lint"`` (pattern/flow/deadcode rules),
+            ``"policy"`` (structural/type/datalog/custom/sequence policies),
+            or ``None`` / ``"all"`` (both engines).
+        fix: Apply auto-fix replacements for pattern rules.
+        language: Source language for parsing.
+        project_path: Project root for cross-file analysis.
+    """
     from emend.lint import load_rules, run_lint
     from emend.policy import load_policies, run_policy_checks
 
     normalized: list[CheckViolation] = []
 
+    run_lint_engine = mode in (None, "lint", "all")
+    run_policy_engine = mode in (None, "policy", "all")
+
     lint_kinds = {"match", "flow", "deadcode"}
-    if kind is None or kind in lint_kinds:
+    if run_lint_engine and (kind is None or kind in lint_kinds):
         lint_rules, _macros, deadcode_config = load_rules(config)
         selected_lint_rules = lint_rules
         if rule_name is not None:
@@ -176,8 +201,8 @@ def run_checks(
             )
         )
 
-    policy_kinds = {"type", "datalog", "custom", "sequence"}
-    if kind is None or kind in policy_kinds:
+    policy_kinds = {"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
+    if run_policy_engine and (kind is None or kind in policy_kinds):
         policies = load_policies(config)
         selected_policies = _filter_policies(
             policies,

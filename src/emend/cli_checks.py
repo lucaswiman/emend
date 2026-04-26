@@ -34,25 +34,25 @@ def lint_cmd(
         emend lint src/ --rule no-print
     """
     try:
-        from emend.lint import load_rules, run_lint
+        from emend.checks import run_checks
 
         config_path = resolve_rules_path(config, fallbacks=(LEGACY_PATTERNS_PATH,))
         if not config_path.exists():
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
-        rules, macros, deadcode_config = load_rules(str(config_path))
-
         _lang = _state["language"]
-        # Lint scans all source languages by default so that
-        # multi-language projects are covered in a single invocation.
         resolved, _ = resolve_files(path, language=None)
         files = [str(f) for f in resolved]
 
-        violations = run_lint(
-            rules, files, fix=fix, rule_filter=rule,
-            deadcode_config=deadcode_config, project_path=path,
+        violations = run_checks(
+            files,
+            config=str(config_path),
+            rule_name=rule,
+            mode="lint",
+            fix=fix,
             language=_lang,
+            project_path=path,
         )
 
         for v in violations:
@@ -90,7 +90,8 @@ def policy_cmd(
         emend policy src/ --json
     """
     try:
-        from emend.policy import load_policies, run_policy_checks, format_policy_violations
+        from emend.checks import run_checks
+        from emend.policy import format_policy_violations, PolicyViolation
 
         config_path = resolve_rules_path(
             config,
@@ -100,22 +101,66 @@ def policy_cmd(
             print(f"Error: Config file not found: {config_path}", file=sys.stderr)
             raise typer.Exit(2)
 
-        policies = load_policies(str(config_path))
-        if policy_name:
-            policies = [p for p in policies if p.name == policy_name]
-            if not policies:
-                print(f"Error: Policy '{policy_name}' not found.", file=sys.stderr)
-                raise typer.Exit(2)
-
         _lang = _state["language"]
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        violations = run_policy_checks(files, policies, language=_lang, project_path=path)
+        violations = run_checks(
+            files,
+            config=str(config_path),
+            rule_name=policy_name,
+            mode="policy",
+            language=_lang,
+            project_path=path,
+        )
 
-        output = format_policy_violations(violations, json_output=json_output)
-        if output:
-            print(output, end='' if not output.endswith('\n') else '')
+        if json_output:
+            import json as _json
+            data = [
+                {
+                    "file": v.file_path,
+                    "line": v.line,
+                    "col": v.col,
+                    "policy": v.rule_name,
+                    "check": v.kind,
+                    "severity": v.severity,
+                    "message": v.message,
+                    "witness": v.witness or [],
+                }
+                for v in violations
+            ]
+            output = _json.dumps(data, indent=2)
+            if output:
+                print(output, end='' if not output.endswith('\n') else '')
+        else:
+            current_policy = ""
+            for v in violations:
+                if v.rule_name != current_policy:
+                    if current_policy:
+                        print()
+                    print(f"[{v.severity.upper()}] {v.rule_name}")
+                    current_policy = v.rule_name
+                location = f"{v.file_path}:{v.line}"
+                if v.col:
+                    location += f":{v.col}"
+                print(f"  {location}: {v.message}")
+                for w in v.witness or []:
+                    print(f"    | {w}")
+            if violations:
+                error_count = sum(1 for v in violations if v.severity == "error")
+                warning_count = sum(1 for v in violations if v.severity == "warning")
+                info_count = sum(1 for v in violations if v.severity == "info")
+                parts = []
+                if error_count:
+                    parts.append(f"{error_count} error(s)")
+                if warning_count:
+                    parts.append(f"{warning_count} warning(s)")
+                if info_count:
+                    parts.append(f"{info_count} info(s)")
+                print()
+                print(f"Found {len(violations)} violation(s): {', '.join(parts)}")
+            else:
+                print("No policy violations found.")
 
         if violations:
             raise typer.Exit(1)
