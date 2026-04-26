@@ -3,22 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from emend.lint import load_rules, run_lint, LintViolation, LintRule, DeadCodeConfig
-from emend.policy import (
-    load_policies,
-    run_policy_checks,
-    PolicyViolation,
-    FlowCheck,
-    StructuralCheck,
-    TypeCheck,
-    DeadCodeCheck,
-    DatalogCheck,
-    CustomCheck,
-    SequenceCheck,
-    Policy,
-)
+if TYPE_CHECKING:
+    from emend.lint import LintViolation, LintRule
+    from emend.policy import PolicyViolation, Policy, FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck, DatalogCheck, CustomCheck, SequenceCheck
+    from emend.rules_config import DeadCodeConfig
 
 
 @dataclass
@@ -34,13 +24,17 @@ class CheckViolation:
     witness: list[str] | None = None
 
 
-def _lint_kind(rule: LintRule) -> str:
+def _lint_kind(rule: "LintRule") -> str:
     if rule.flows_from and rule.flows_to:
         return "flow"
     return "match"
 
 
 def _policy_check_kind(check: Any) -> str:
+    from emend.policy import (
+        FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck,
+        DatalogCheck, SequenceCheck, CustomCheck,
+    )
     if isinstance(check, FlowCheck):
         return "flow"
     if isinstance(check, StructuralCheck):
@@ -59,12 +53,14 @@ def _policy_check_kind(check: Any) -> str:
 
 
 def _filter_policies(
-    policies: list[Policy],
+    policies: "list[Policy]",
     *,
     rule_name: str | None,
     kind: str | None,
     allowed_kinds: set[str],
-) -> list[Policy]:
+) -> "list[Policy]":
+    from emend.policy import Policy
+
     filtered: list[Policy] = []
     for policy in policies:
         if rule_name is not None and policy.name != rule_name:
@@ -82,7 +78,11 @@ def _filter_policies(
     return filtered
 
 
-def _lint_violations_to_checks(violations: list[LintViolation], rules_by_name: dict[str, LintRule], deadcode_config: DeadCodeConfig | None) -> list[CheckViolation]:
+def _lint_violations_to_checks(
+    violations: "list[LintViolation]",
+    rules_by_name: "dict[str, LintRule]",
+    deadcode_config: "DeadCodeConfig | None",
+) -> list[CheckViolation]:
     normalized: list[CheckViolation] = []
     for violation in violations:
         if deadcode_config is not None and violation.rule_name == deadcode_config.rule_name:
@@ -112,7 +112,7 @@ def _lint_violations_to_checks(violations: list[LintViolation], rules_by_name: d
     return normalized
 
 
-def _policy_violations_to_checks(violations: list[PolicyViolation]) -> list[CheckViolation]:
+def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[CheckViolation]:
     return [
         CheckViolation(
             rule_name=v.policy_name,
@@ -128,21 +128,49 @@ def _policy_violations_to_checks(violations: list[PolicyViolation]) -> list[Chec
     ]
 
 
+# Rule kinds owned by the lint engine (pattern/flow/deadcode rules).
+LINT_KINDS = frozenset({"match", "flow", "deadcode"})
+# Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
+POLICY_KINDS = frozenset({"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
+# All known kinds.
+ALL_KINDS = LINT_KINDS | POLICY_KINDS
+
+
 def run_checks(
     paths: list[str],
     *,
     config: str | None = None,
     rule_name: str | None = None,
     kind: str | None = None,
+    mode: str | None = None,
     fix: bool = False,
     language: str = "python",
     project_path: str | None = None,
 ) -> list[CheckViolation]:
-    """Run unified rules from ``rules.yaml`` with compatibility fallback."""
+    """Run unified rules from ``rules.yaml``.
+
+    Args:
+        paths: Files to check.
+        config: Path to rules.yaml (defaults to .emend/rules.yaml).
+        rule_name: Restrict to one rule by name.
+        kind: Restrict to one rule kind (match, flow, deadcode, type, …).
+        mode: Restrict by engine: ``"lint"`` (pattern/flow/deadcode rules),
+            ``"policy"`` (structural/type/datalog/custom/sequence policies),
+            or ``None`` / ``"all"`` (both engines).
+        fix: Apply auto-fix replacements for pattern rules.
+        language: Source language for parsing.
+        project_path: Project root for cross-file analysis.
+    """
+    from emend.lint import load_rules, run_lint
+    from emend.policy import load_policies, run_policy_checks
+
     normalized: list[CheckViolation] = []
 
+    run_lint_engine = mode in (None, "lint", "all")
+    run_policy_engine = mode in (None, "policy", "all")
+
     lint_kinds = {"match", "flow", "deadcode"}
-    if kind is None or kind in lint_kinds:
+    if run_lint_engine and (kind is None or kind in lint_kinds):
         lint_rules, _macros, deadcode_config = load_rules(config)
         selected_lint_rules = lint_rules
         if rule_name is not None:
@@ -173,8 +201,8 @@ def run_checks(
             )
         )
 
-    policy_kinds = {"type", "datalog", "custom", "sequence"}
-    if kind is None or kind in policy_kinds:
+    policy_kinds = {"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
+    if run_policy_engine and (kind is None or kind in policy_kinds):
         policies = load_policies(config)
         selected_policies = _filter_policies(
             policies,

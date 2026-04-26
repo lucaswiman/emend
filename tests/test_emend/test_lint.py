@@ -29,48 +29,6 @@ def _write_rules_config(tmp_path, config_dict):
     return config_file
 
 
-def test_load_rules_falls_back_to_rules_yaml(tmp_path):
-    config = {
-        "macros": {
-            "input": "request.args.get($X)",
-        },
-        "rules": {
-            "no-print": {
-                "match": "print($X)",
-                "message": "No print",
-                "not-within": "def test_$_",
-                "fix": "logger.info($X)",
-                "files": "src/**/*.py",
-            },
-            "sql-injection": {
-                "flow": {
-                    "from": "{input}",
-                    "to": "cursor.execute($Q)",
-                    "not-through": "escape($X)",
-                },
-                "message": "Unsafe flow",
-            },
-        },
-    }
-    _write_rules_config(tmp_path, config)
-
-    rules, macros, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
-
-    assert deadcode is None
-    assert macros["input"] == "request.args.get($X)"
-    assert {r.name for r in rules} == {"no-print", "sql-injection"}
-
-    no_print = next(r for r in rules if r.name == "no-print")
-    assert no_print.find == "print($X)"
-    assert no_print.not_inside == "def test_$_"
-    assert no_print.replace == "logger.info($X)"
-    assert no_print.files == ["src/**/*.py"]
-
-    sqli = next(r for r in rules if r.name == "sql-injection")
-    assert sqli.flows_from == "request.args.get($X)"
-    assert sqli.flows_to == "cursor.execute($Q)"
-    assert sqli.not_through == "escape($X)"
-
 
 def test_load_rules_reads_deadcode_from_rule_block(tmp_path):
     config = {
@@ -84,9 +42,9 @@ def test_load_rules_reads_deadcode_from_rule_block(tmp_path):
             },
         },
     }
-    _write_rules_config(tmp_path, config)
+    config_file = _write_rules_config(tmp_path, config)
 
-    rules, _, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
+    rules, _, deadcode = load_rules(str(config_file))
 
     assert rules == []
     assert deadcode is not None
@@ -908,9 +866,9 @@ def test_load_rules_dict_form_flow_rules_do_not_crash(tmp_path):
             },
         },
     }
-    _write_rules_config(tmp_path, config)
+    config_file = _write_rules_config(tmp_path, config)
 
-    rules, macros, deadcode = load_rules(str(tmp_path / ".emend" / "patterns.yaml"))
+    rules, macros, deadcode = load_rules(str(config_file))
 
     assert {r.name for r in rules} == {"typed-flow-rule", "lint-rule"}
     typed_rule = next(r for r in rules if r.name == "typed-flow-rule")

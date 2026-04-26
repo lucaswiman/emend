@@ -294,37 +294,37 @@ class TestOutputSelectors:
 
 class TestRejectFileGlobs:
     def test_reject_glob_find_references(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         with pytest.raises(ValueError, match="not supported for find-references"):
             _reject_file_glob("**/*.py::func", "find-references")
 
     def test_reject_glob_rename(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         with pytest.raises(ValueError, match="not supported for rename"):
             _reject_file_glob("*.py::func", "rename")
 
     def test_reject_glob_move(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         with pytest.raises(ValueError, match="not supported for move"):
             _reject_file_glob("**/*.py::func", "move")
 
     def test_reject_glob_callers(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         with pytest.raises(ValueError, match="not supported for callers"):
             _reject_file_glob("*.py::func", "callers")
 
     def test_reject_glob_callees(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         with pytest.raises(ValueError, match="not supported for callees"):
             _reject_file_glob("*.py::func", "callees")
 
     def test_no_reject_for_concrete_path(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         # Should not raise for concrete paths
         _reject_file_glob("file.py::func", "find-references")
 
     def test_no_reject_symbol_wildcard(self):
-        from emend.cli import _reject_file_glob
+        from emend.cli_base import _reject_file_glob
         # Symbol wildcards are fine (the * is after ::)
         _reject_file_glob("file.py::Test*", "find-references")
 
@@ -336,7 +336,7 @@ class TestRejectFileGlobs:
 
 class TestResolveFiles:
     def test_resolve_directory(self, tmp_path):
-        from emend.cli import resolve_files
+        from emend.cli_base import resolve_files
         (tmp_path / "a.py").write_text("x = 1\n")
         (tmp_path / "b.py").write_text("y = 2\n")
         (tmp_path / "sub").mkdir()
@@ -347,7 +347,7 @@ class TestResolveFiles:
         assert len(files) == 3
 
     def test_resolve_glob(self, tmp_path):
-        from emend.cli import resolve_files
+        from emend.cli_base import resolve_files
         (tmp_path / "a.py").write_text("x = 1\n")
         (tmp_path / "b.py").write_text("y = 2\n")
         (tmp_path / "c.txt").write_text("z = 3\n")
@@ -357,7 +357,7 @@ class TestResolveFiles:
         assert len(files) == 2
 
     def test_resolve_single_file(self, tmp_path):
-        from emend.cli import resolve_files
+        from emend.cli_base import resolve_files
         (tmp_path / "a.py").write_text("x = 1\n")
 
         files, is_multi = resolve_files(str(tmp_path / "a.py"))

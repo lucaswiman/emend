@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from emend.transform import find_pattern, PatternMatch
 from emend.rules_config import (
-    LEGACY_PATTERNS_PATH,
     as_list,
     expand_macros,
     load_rules_document,
@@ -89,7 +88,7 @@ class TraceScopeSanitizer:
 
 @dataclass
 class TraceConfig:
-    """Configuration for taint analysis from patterns.yaml."""
+    """Configuration for taint analysis loaded from a rules YAML file."""
     labels: list[str] = field(default_factory=list)
     sources: list[TraceSource] = field(default_factory=list)
     sinks: list[TraceSink] = field(default_factory=list)
@@ -373,7 +372,7 @@ def load_trace_config(config_path: str) -> TraceConfig:
     Reads the ``trace`` section from the given YAML config file.
 
     Args:
-        config_path: Path to the YAML config file (typically .emend/patterns.yaml).
+        config_path: Path to the YAML config file (typically .emend/rules.yaml).
 
     Returns:
         A TraceConfig with sources, sinks, sanitizers, and labels.
@@ -381,10 +380,7 @@ def load_trace_config(config_path: str) -> TraceConfig:
     Raises:
         FileNotFoundError: If the config file does not exist.
     """
-    config, _path = load_rules_document(
-        config_path,
-        fallbacks=(LEGACY_PATTERNS_PATH,),
-    )
+    config, _path = load_rules_document(config_path)
 
     raw_section = config.get("trace")
     if raw_section is None:

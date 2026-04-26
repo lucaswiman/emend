@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed
+
+- **Legacy `.emend/patterns.yaml` and `.emend/policies.yaml` fallback paths.**
+  All rule loading now requires `.emend/rules.yaml` (the canonical layout
+  added in the simplify roadmap). Migrate by renaming or merging legacy
+  files into a single `rules.yaml` document. Users with the old filenames
+  will see a clear "Config file not found" error pointing at the expected
+  path.
+
 ### Trace Analysis (renamed from `taint`)
 
 - **Renamed `taint` → `trace`**: The taint analysis engine is now called "trace" to reflect that it is a general labeled data-flow tracer, not only for security taint analysis. All classes (`TraceConfig`, `TraceSource`, `TraceSink`, `TraceSanitizer`, `TraceViolation`), source files (`trace.py`, `trace_presets.py`), CLI commands (`emend trace`), Datalog relations (`trace_flow`, `trace_source`, `trace_sink`), and YAML config sections (`trace:`) have been renamed.

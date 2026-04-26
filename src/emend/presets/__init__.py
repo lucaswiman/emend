@@ -2,5 +2,5 @@
 
 Each ``<name>.yaml`` here is loaded by :func:`emend.trace_presets.get_preset`
 and parsed into a :class:`emend.trace.TraceConfig` using the same schema as
-the ``trace:`` section of ``.emend/patterns.yaml``.
+the ``trace:`` section of ``.emend/rules.yaml``.
 """
