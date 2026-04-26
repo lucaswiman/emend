@@ -936,17 +936,23 @@ class TestEditorSearchBugFixes:
         finally:
             engine.close()
 
-    def test_class_member_name_consistent_ast_module(self):
-        """_class_member_name should use the same ast module reference
-        throughout (not mix global ast and local _ast)."""
-        import ast
+    def test_class_member_name_uses_tree_sitter(self):
+        """_class_member_name extracts member names via tree-sitter PyNode."""
+        import emend.emend_core as _ec
         from emend.editor_search import EditorSearchEngine
 
         engine = EditorSearchEngine.__new__(EditorSearchEngine)
-        func_node = ast.parse("def foo(): pass").body[0]
-        result = engine._class_member_name(func_node)
-        assert result == "foo"
 
-        async_func = ast.parse("async def bar(): pass").body[0]
-        result2 = engine._class_member_name(async_func)
-        assert result2 == "bar"
+        # Sync function definition
+        ts_tree = _ec.parse_source("class C:\n    def foo(self): pass\n", "py")
+        class_def = ts_tree.root.named_children()[0]
+        body = class_def.child_by_field_name("body")
+        func_node = body.named_children()[0]
+        assert engine._class_member_name(func_node) == "foo"
+
+        # Async function definition
+        ts_tree2 = _ec.parse_source("class C:\n    async def bar(self): pass\n", "py")
+        class_def2 = ts_tree2.root.named_children()[0]
+        body2 = class_def2.child_by_field_name("body")
+        async_node = body2.named_children()[0]
+        assert engine._class_member_name(async_node) == "bar"

@@ -91,7 +91,7 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
   - Risk: low for the code; **user-visible** — confirm with the user before
     starting, and document in `CHANGELOG.md`.
 
-- [ ] **Phase 5 — purge `editor_search.py` `import ast` sites**
+- [x] **Phase 5 — purge `editor_search.py` `import ast` sites**
   - 6 inline `import ast as _ast` calls (lines 2357, 2424, 2459, 2497, 2524,
     2574) that parse Python source ad-hoc. Each is a design-philosophy
     violation per `CLAUDE.md`'s "Tree-sitter and Configuration" section.
@@ -103,6 +103,20 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
   - Risk: medium — `editor_search` is hot path for vim plugin; verify with
     `test_editor_search.py`, `test_editor_search_files.py`, and
     `test_vim_rpc.py`.
+  - **Status**: landed alongside Phase 3 on
+    `claude/modularize-agent-swarm-e0nzk`. Top-level `import ast` and the
+    six inline `_ast` sites in `editor_search.py` removed; replaced with
+    `emend_core.parse_source(...)` plus a small `_walk_nodes` PyNode
+    DFS helper at module scope. Affected helpers:
+    `_attribute_completions_from_local`, `_class_member_completions`,
+    `_class_member_name`, `_find_enclosing_scope_node`,
+    `_infer_receiver_target`, and `_complete_self_in_class`. No new
+    `emend_core` API needed — `parse_source`, `PyTree`, and `PyNode`
+    already covered every site. `test_class_member_name_consistent_ast_module`
+    in `test_editor_search.py` rewritten as
+    `test_class_member_name_uses_tree_sitter` (still verifies the
+    sync/async `def` name extraction). `make test`: 3060 passed,
+    3 skipped, 1 xfailed.
 
 - [ ] **Phase 6 — decompose `mcp_server.py` into `mcp/` package**
   - 1,939 lines of MCP tool wrappers. After Phases 1+2, most tools are
