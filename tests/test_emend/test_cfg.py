@@ -577,6 +577,22 @@ class TestOutput:
         text = format_cfg_text(cfgs[0])
         assert "function f" in text
 
+    def test_text_format_lines_are_1_based(self):
+        """format_cfg_text must display 1-based line numbers.
+
+        Regression: Rust returns 0-based tree-sitter rows but the formatter
+        displayed them without conversion, producing confusing 0-based output.
+        """
+        from emend.cfg import format_cfg_text
+
+        cfgs = _build("""\
+            def f():
+                x = 1
+        """)
+        text = format_cfg_text(cfgs[0])
+        assert "lines 1-" in text
+        assert "lines 0-" not in text
+
     def test_json_format(self):
         from emend.cfg import format_cfgs_json
 

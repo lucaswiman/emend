@@ -194,15 +194,13 @@ class LocationResolver:
             from emend.cfg import build_cfgs_for_source
             cfgs = build_cfgs_for_source(source, ext=ext)
             for cfg in cfgs:
-                func_start = cfg.func_start_line  # 1-based, absolute line in source
+                # CFG lines from Rust are 0-based tree-sitter rows;
+                # convert to 1-based to match symbol / FactGraph conventions.
+                func_start_1b = cfg.func_start_line + 1
+                func_qn = _find_innermost_func(func_ranges, func_start_1b)
                 for block in cfg.get_blocks():
-                    # CFG block start/end lines are relative to the function start
-                    abs_start = func_start + block["start_line"]
-                    abs_end = func_start + block["end_line"]
-                    if abs_start <= 0:
-                        abs_start = func_start
-                    # Match block to the enclosing function qn
-                    func_qn = _find_innermost_func(func_ranges, func_start)
+                    abs_start = block["start_line"] + 1
+                    abs_end = block["end_line"] + 1
                     block_ranges.append((func_qn, block["id"], abs_start, abs_end))
         except Exception:
             logger.debug(

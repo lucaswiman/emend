@@ -755,7 +755,7 @@ def _exact_clusters_from_cands(
         ts = tuple(rep.get("token_seq", ()))
         penalty = (
             is_abstract_stub(ks, ts)
-            + is_trivial_validator(int(avg_nc), ks)
+            + is_trivial_validator(int(avg_nc), ks, ts)
             + is_property_wrapper(ks, ts)
             + is_tiny_same_file_fragment(members, int(avg_nc))
             + is_init_self_assignment(ks, ts)
