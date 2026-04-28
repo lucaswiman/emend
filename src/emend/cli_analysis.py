@@ -23,6 +23,7 @@ from emend.transform import (
     find_references,
     generate_graph,
 )
+from emend.cli_output import emit_json
 
 logger = logging.getLogger("emend.cli.analysis")
 
@@ -275,7 +276,6 @@ def refs_cmd(
                 )
             callers = find_callers(parsed_selector, project_path=project)
             if json_output:
-                import json
                 data = [
                     {
                         "file_path": ref.file_path,
@@ -284,7 +284,7 @@ def refs_cmd(
                     }
                     for ref in callers
                 ]
-                print(json.dumps(data, indent=2))
+                emit_json(data)
             else:
                 for ref in callers:
                     print(f"{ref.file_path}:{ref.line}", flush=True)
@@ -300,7 +300,6 @@ def refs_cmd(
         )
 
         if json_output:
-            import json
             refs_data = [
                 {
                     "file_path": ref.file_path,
@@ -313,7 +312,7 @@ def refs_cmd(
                 }
                 for ref in references
             ]
-            print(json.dumps(refs_data, indent=2))
+            emit_json(refs_data)
         else:
             for ref in references:
                 marker = ""
@@ -362,7 +361,6 @@ def refs_cmd(
                 ]
                 if _matched:
                     if json_output:
-                        import json
                         dsl_refs = [
                             {
                                 "file_path": lnk.dsl_symbol.host_file,
@@ -374,7 +372,7 @@ def refs_cmd(
                             }
                             for lnk in _matched
                         ]
-                        print(json.dumps(dsl_refs, indent=2))
+                        emit_json(dsl_refs)
                     else:
                         for lnk in _matched:
                             print(f"{lnk.dsl_symbol.host_file}:{lnk.dsl_symbol.host_line}", flush=True)
@@ -522,8 +520,7 @@ def dead_code_cmd(
             if not data:
                 print("[]")
             else:
-                import json
-                print(json.dumps(data, indent=2))
+                emit_json(data)
         else:
             count = 0
             for d in results:
@@ -598,7 +595,6 @@ def impact_cmd(
                 pass
 
         if json_output:
-            import json
             data = {
                 "changed_symbols": result.changed_symbols,
                 "impacted_symbols": result.impacted_symbols,
@@ -613,7 +609,7 @@ def impact_cmd(
                     {"file": f, "line": l, "reason": r}
                     for f, l, r in dsl_impacts
                 ]
-            print(json.dumps(data, indent=2))
+            emit_json(data)
         elif output == "tests":
             if not result.impacted_tests:
                 print("No impacted tests found.")
@@ -684,8 +680,6 @@ def types_cmd(
     """
     from emend.type_oracle import create_type_oracle
 
-    import json as json_mod
-
     try:
         target = Path(path)
         is_glob = "*" in path or "?" in path
@@ -742,7 +736,7 @@ def types_cmd(
                     "kind": b.binding_kind,
                 }
                 data.append(entry)
-            print(json_mod.dumps(data, indent=2))
+            emit_json(data)
         else:
             if not all_bindings:
                 print("No type information found.")
@@ -787,7 +781,6 @@ def facts_cmd(
         emend facts . --type trace_flows --label user_input
         emend facts . --type imports --file src/app.py
     """
-    import json as json_mod
     import dataclasses
 
     try:
@@ -837,7 +830,7 @@ def facts_cmd(
 
         if extra:
             if json_output:
-                print(json_mod.dumps(extra, indent=2))
+                emit_json(extra)
             else:
                 for key, val in extra.items():
                     if isinstance(val, list):
@@ -849,7 +842,7 @@ def facts_cmd(
         elif results:
             data = [dataclasses.asdict(f) for f in results[:limit]]
             if json_output:
-                print(json_mod.dumps(data, indent=2))
+                emit_json(data)
             else:
                 for item in data:
                     parts = [f"{k}={v}" for k, v in item.items() if v is not None]
@@ -967,8 +960,7 @@ def cfg_cmd(
                         })
 
             if output_format == "json":
-                import json
-                print(json.dumps(results, indent=2))
+                emit_json(results)
             else:
                 if not results:
                     print("No unreachable blocks found.")
