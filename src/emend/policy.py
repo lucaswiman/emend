@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -185,108 +186,135 @@ def _as_list(val: Any) -> list[str]:
     return list(val)
 
 
+def _parse_flow_check(raw: dict[str, Any]) -> FlowCheck:
+    flows_from = yaml_key(raw, "flows_from")
+    flows_to = yaml_key(raw, "flows_to")
+    if not flows_from or not flows_to:
+        raise ValueError("FlowCheck requires 'flows_from' and 'flows_to'")
+    return FlowCheck(
+        flows_from=flows_from,
+        flows_to=flows_to,
+        not_through=yaml_key(raw, "not_through"),
+        label=yaml_key(raw, "label") or "",
+    )
+
+
+def _parse_structural_check(raw: dict[str, Any]) -> StructuralCheck:
+    pattern = raw.get("pattern")
+    if not pattern:
+        raise ValueError("StructuralCheck requires 'pattern'")
+    return StructuralCheck(
+        pattern=pattern,
+        inside=raw.get("inside"),
+        not_inside=yaml_key(raw, "not_inside"),
+        where=raw.get("where"),
+    )
+
+
+def _parse_type_check(raw: dict[str, Any]) -> TypeCheck:
+    kind = raw.get("kind", "has_type")
+    symbol_pattern = yaml_key(raw, "symbol_pattern")
+    expected_type = yaml_key(raw, "expected_type")
+    if not symbol_pattern or not expected_type:
+        raise ValueError(
+            "TypeCheck requires 'symbol_pattern' and 'expected_type'"
+        )
+    return TypeCheck(
+        symbol_pattern=symbol_pattern,
+        expected_type=expected_type,
+        kind=kind,
+    )
+
+
+def _parse_deadcode_check(raw: dict[str, Any]) -> DeadCodeCheck:
+    return DeadCodeCheck(
+        entry_point_decorators=_as_list(yaml_key(raw, "entry_point_decorators")),
+        entry_point_names=_as_list(yaml_key(raw, "entry_point_names")),
+        exclude_paths=_as_list(yaml_key(raw, "exclude_paths")),
+    )
+
+
+def _parse_custom_check(raw: dict[str, Any]) -> CustomCheck:
+    query_source = yaml_key(raw, "query_source")
+    if not query_source:
+        raise ValueError("CustomCheck requires 'query_source'")
+    return CustomCheck(query_source=query_source)
+
+
+def _parse_datalog_check(raw: dict[str, Any]) -> DatalogCheck:
+    cozoscript = raw.get("cozoscript") or yaml_key(raw, "query")
+    if not cozoscript:
+        raise ValueError("DatalogCheck requires 'cozoscript' or 'query'")
+    return DatalogCheck(cozoscript=cozoscript)
+
+
+def _parse_sequence_check(raw: dict[str, Any]) -> SequenceCheck:
+    name = raw.get("name", "")
+    message = raw.get("message", "")
+    if not name:
+        raise ValueError("SequenceCheck requires 'name'")
+    raw_sequence = raw.get("sequence", [])
+    if not raw_sequence or len(raw_sequence) < 2:
+        raise ValueError("SequenceCheck requires at least 2 steps in 'sequence'")
+    steps = []
+    for step_raw in raw_sequence:
+        steps.append(SequenceStep(
+            bind=step_raw.get("bind", ""),
+            pattern=step_raw.get("pattern"),
+            effect=step_raw.get("effect"),
+            type_constraint=yaml_key(step_raw, "type_constraint"),
+        ))
+    path_constraints = []
+    raw_path = raw.get("path", {})
+    for path_key, path_val in raw_path.items():
+        parts = [p.strip() for p in path_key.split("->")]
+        if len(parts) != 2:
+            raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
+        nt_patterns = []
+        for item in _as_list(path_val.get("not_through", [])):
+            if isinstance(item, dict):
+                nt_patterns.append(item.get("pattern", ""))
+            else:
+                nt_patterns.append(item)
+        nts_patterns = []
+        for item in _as_list(yaml_key(path_val, "not_through_scope") or []):
+            if isinstance(item, dict):
+                nts_patterns.append(item.get("pattern", ""))
+            else:
+                nts_patterns.append(item)
+        path_constraints.append(SequencePathConstraint(
+            from_step=parts[0],
+            to_step=parts[1],
+            not_through=nt_patterns,
+            not_through_scope=nts_patterns,
+        ))
+    return SequenceCheck(
+        name=name,
+        message=message,
+        sequence=steps,
+        path_constraints=path_constraints,
+        severity=raw.get("severity", "error"),
+    )
+
+
+_CHECK_PARSERS: dict[str, Callable[[dict[str, Any]], PolicyCheck]] = {
+    "flow": _parse_flow_check,
+    "structural": _parse_structural_check,
+    "type": _parse_type_check,
+    "deadcode": _parse_deadcode_check,
+    "custom": _parse_custom_check,
+    "datalog": _parse_datalog_check,
+    "sequence": _parse_sequence_check,
+}
+
+
 def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
     """Parse a single check definition from a YAML dict."""
     check_type = raw.get("type", "")
-    if check_type == "flow":
-        flows_from = yaml_key(raw, "flows_from")
-        flows_to = yaml_key(raw, "flows_to")
-        if not flows_from or not flows_to:
-            raise ValueError("FlowCheck requires 'flows_from' and 'flows_to'")
-        return FlowCheck(
-            flows_from=flows_from,
-            flows_to=flows_to,
-            not_through=yaml_key(raw, "not_through"),
-            label=yaml_key(raw, "label") or "",
-        )
-    elif check_type == "structural":
-        pattern = raw.get("pattern")
-        if not pattern:
-            raise ValueError("StructuralCheck requires 'pattern'")
-        return StructuralCheck(
-            pattern=pattern,
-            inside=raw.get("inside"),
-            not_inside=yaml_key(raw, "not_inside"),
-            where=raw.get("where"),
-        )
-    elif check_type == "type":
-        kind = raw.get("kind", "has_type")
-        symbol_pattern = yaml_key(raw, "symbol_pattern")
-        expected_type = yaml_key(raw, "expected_type")
-        if not symbol_pattern or not expected_type:
-            raise ValueError(
-                "TypeCheck requires 'symbol_pattern' and 'expected_type'"
-            )
-        return TypeCheck(
-            symbol_pattern=symbol_pattern,
-            expected_type=expected_type,
-            kind=kind,
-        )
-    elif check_type == "deadcode":
-        return DeadCodeCheck(
-            entry_point_decorators=_as_list(yaml_key(raw, "entry_point_decorators")),
-            entry_point_names=_as_list(yaml_key(raw, "entry_point_names")),
-            exclude_paths=_as_list(yaml_key(raw, "exclude_paths")),
-        )
-    elif check_type == "custom":
-        query_source = yaml_key(raw, "query_source")
-        if not query_source:
-            raise ValueError("CustomCheck requires 'query_source'")
-        return CustomCheck(query_source=query_source)
-    elif check_type == "datalog":
-        cozoscript = raw.get("cozoscript") or yaml_key(raw, "query")
-        if not cozoscript:
-            raise ValueError("DatalogCheck requires 'cozoscript' or 'query'")
-        return DatalogCheck(cozoscript=cozoscript)
-    elif check_type == "sequence":
-        name = raw.get("name", "")
-        message = raw.get("message", "")
-        if not name:
-            raise ValueError("SequenceCheck requires 'name'")
-        raw_sequence = raw.get("sequence", [])
-        if not raw_sequence or len(raw_sequence) < 2:
-            raise ValueError("SequenceCheck requires at least 2 steps in 'sequence'")
-        steps = []
-        for step_raw in raw_sequence:
-            steps.append(SequenceStep(
-                bind=step_raw.get("bind", ""),
-                pattern=step_raw.get("pattern"),
-                effect=step_raw.get("effect"),
-                type_constraint=yaml_key(step_raw, "type_constraint"),
-            ))
-        path_constraints = []
-        raw_path = raw.get("path", {})
-        for path_key, path_val in raw_path.items():
-            parts = [p.strip() for p in path_key.split("->")]
-            if len(parts) != 2:
-                raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
-            nt_patterns = []
-            for item in _as_list(path_val.get("not_through", [])):
-                if isinstance(item, dict):
-                    nt_patterns.append(item.get("pattern", ""))
-                else:
-                    nt_patterns.append(item)
-            nts_patterns = []
-            for item in _as_list(yaml_key(path_val, "not_through_scope") or []):
-                if isinstance(item, dict):
-                    nts_patterns.append(item.get("pattern", ""))
-                else:
-                    nts_patterns.append(item)
-            path_constraints.append(SequencePathConstraint(
-                from_step=parts[0],
-                to_step=parts[1],
-                not_through=nt_patterns,
-                not_through_scope=nts_patterns,
-            ))
-        return SequenceCheck(
-            name=name,
-            message=message,
-            sequence=steps,
-            path_constraints=path_constraints,
-            severity=raw.get("severity", "error"),
-        )
-    else:
+    parser = _CHECK_PARSERS.get(check_type)
+    if parser is None:
         raise ValueError(f"Unknown check type: {check_type!r}")
+    return parser(raw)
 
 
 def load_policies(config_path: str | Path | None = None) -> list[Policy]:
