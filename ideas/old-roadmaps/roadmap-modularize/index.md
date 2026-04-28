@@ -42,10 +42,10 @@ Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
     passed, 2 failed (both `test_knowledge.py::TestMCPTools` — pre-
     existing pydantic / Python 3.14 incompatibility, fails on the
     original `transform.py` too).
-  - **Open follow-up**: `transform/index.py` is 1795 lines, exceeding the
-    <1500-line acceptance criterion. Candidates for a sub-split:
-    `_index_batch`/`_extract_*` extraction (~300 lines), the venv-index
-    block at lines 984-1259 (~275 lines, could move to its own module).
+  - **Follow-up resolved**: venv-index block extracted to
+    `transform/venv_index.py` (289 LOC); `_index_batch` split into
+    `_check_cache_hits` / `_write_index_rows` helpers. `transform/index.py`
+    now 1558 LOC.
 
 - [x] **Phase 2 — unify lint/policy/checks/flow_ir into a `checks/` package**
   - See [phase-2-unify-checks.md](phase-2-unify-checks.md).
