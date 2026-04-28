@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from emend.component_selector import parse_extended_selector
+from emend.component_selector import parse_extended_selector, parse_selector
 from emend.transform import find_pattern, cmd_lookup
 from emend import ast_commands
 
@@ -122,9 +122,8 @@ def search(
         file_for_summary = files[0] if files else query
         selector_for_summary = None
         if "::" in query and not files:
-            parts = query.split("::", 1)
-            file_for_summary = parts[0]
-            selector_for_summary = parts[1] or None
+            file_for_summary, sym_part = parse_selector(query)
+            selector_for_summary = sym_part or None
 
         from pathlib import Path
 
@@ -224,8 +223,7 @@ def search(
     if has_selector or is_line_selector or ("::" in query and not is_line_selector):
         selector_str = query
         if "::" in query and not is_line_selector:
-            parts = query.split("::", 1)
-            file_or_pattern = parts[0]
+            file_or_pattern, _ = parse_selector(query)
         elif is_line_selector:
             m = _re.search(r"^(.+?):\d+", query)
             if m:

@@ -1202,7 +1202,8 @@ class EditorSearchEngine:
             # Bare name — treat as symbol search
             return self._search_symbols(selector, limit=limit)
 
-        file_part, sym_part = selector.split("::", 1)
+        from emend.component_selector import parse_selector
+        file_part, sym_part = parse_selector(selector)
         sym_part = sym_part.strip()
         file_part = file_part.strip()
 
@@ -2697,7 +2698,8 @@ class EditorSearchEngine:
         if not selector or "::" not in selector:
             return []
 
-        file_part, sym_part = selector.split("::", 1)
+        from emend.component_selector import parse_selector
+        file_part, sym_part = parse_selector(selector)
         if not Path(file_part).is_file():
             return []
 
@@ -2927,8 +2929,9 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
     """
     if "::" not in selector:
         return None
-    
-    file_path, symbol_path = selector.split("::", 1)
+
+    from emend.component_selector import parse_selector
+    file_path, symbol_path = parse_selector(selector)
     if not Path(file_path).is_file():
         return None
 
