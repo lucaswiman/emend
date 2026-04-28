@@ -5,6 +5,7 @@ import typer
 
 from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
 from emend.rules_config import resolve_rules_path
+from emend.cli_output import emit_json
 
 def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],
@@ -181,8 +182,6 @@ def check_cmd(
 ):
     """Run unified project rules from ``.emend/rules.yaml``."""
     try:
-        import json as _json
-
         from emend.checks import run_checks
 
         _lang = _state["language"]
@@ -200,7 +199,7 @@ def check_cmd(
         )
 
         if json_output:
-            print(_json.dumps([
+            emit_json([
                 {
                     "rule": violation.rule_name,
                     "kind": violation.kind,
@@ -212,7 +211,7 @@ def check_cmd(
                     "witness": violation.witness or [],
                 }
                 for violation in violations
-            ], indent=2))
+            ])
         else:
             for violation in violations:
                 print(

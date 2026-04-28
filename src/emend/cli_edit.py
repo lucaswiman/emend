@@ -29,6 +29,7 @@ from emend.transform import (
     replace_pattern,
     safe_delete,
 )
+from emend.cli_output import emit_json
 
 def edit_set_cmd(
     selector: Annotated[str, typer.Argument(help="Symbol selector (file.py::Symbol[component])")],
@@ -157,14 +158,13 @@ def delete_cmd(
         )
 
         if json_output:
-            import json
             data = {
                 "target": plan.target,
                 "deletions": plan.deletions,
                 "files_affected": list(plan.diffs.keys()),
                 "applied": apply,
             }
-            print(json.dumps(data, indent=2))
+            emit_json(data)
         else:
             if not plan.deletions:
                 print("Nothing to delete.")
@@ -760,7 +760,6 @@ def saturate_cmd(
             all_results.extend(results)
 
         if json_output:
-            import json
             data = [
                 {
                     "file": r.file_path,
@@ -772,7 +771,7 @@ def saturate_cmd(
                 }
                 for r in all_results
             ]
-            print(json.dumps(data, indent=2))
+            emit_json(data)
         elif not all_results:
             print("No rewrites found.")
         else:

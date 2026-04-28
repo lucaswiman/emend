@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import click
 import typer
 
-from emend.component_selector import parse_extended_selector
+from emend.component_selector import parse_extended_selector, parse_selector
 
 
 # Shared Typer flag type aliases. Using these keeps CLI signatures short and
@@ -60,7 +60,8 @@ def _maybe_create_oracle(type_engine: str | None):
 
 def _reject_file_glob(selector_str: str, command_name: str) -> None:
     """Raise ValueError if selector contains file globs (for commands that don't support them)."""
-    if "*" in selector_str.split("::")[0] or "?" in selector_str.split("::")[0]:
+    file_part, _ = parse_selector(selector_str)
+    if "*" in file_part or "?" in file_part:
         raise ValueError(
             f"File glob selectors are not supported for {command_name}. "
             "Use a specific file path instead."
@@ -158,7 +159,7 @@ def detect_query_shape(query: str, path: str | None = None) -> QueryShape:
     has_selector = False
 
     if "::" in query and not is_line_selector:
-        file_part, right_part = query.split("::", 1)
+        file_part, right_part = parse_selector(query)
         if "$" in right_part:
             is_pattern_mode = True
         else:

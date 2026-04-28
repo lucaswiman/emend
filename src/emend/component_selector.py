@@ -21,6 +21,17 @@ class _PseudoClassMarker:
         self.value = value
 
 
+def parse_selector(selector: str) -> tuple[str, str]:
+    """Split ``file::symbol`` into ``(file, symbol)``.
+
+    If no ``::`` is present, returns ``(selector, "")`` so callers can treat
+    the absence of a symbol part uniformly. Only the first ``::`` is used as a
+    separator; further ``::`` occurrences stay in the symbol part.
+    """
+    file_part, _sep, sym_part = selector.partition("::")
+    return file_part, sym_part
+
+
 @dataclass
 class NestedSymbol:
     """Represents a discovered symbol with nesting information."""

@@ -1,4 +1,3 @@
-import json as _json
 import os
 import sys
 from pathlib import Path
@@ -16,6 +15,7 @@ from emend.knowledge import (
     mapping_to_dict,
     module_mapping_to_dict,
 )
+from emend.cli_output import emit_json
 
 map_app = typer.Typer(help="Identifier and module mappings.")
 
@@ -86,7 +86,7 @@ def map_add_cmd(
     )
     store.add_mapping(m)
     if json_output:
-        print(_json.dumps(mapping_to_dict(m), indent=2))
+        emit_json(mapping_to_dict(m))
     else:
         print(f"Added mapping: {source_project}::{source_id} -> {target_project}::{target_id} ({relationship})")
 
@@ -108,7 +108,7 @@ def map_search_cmd(
         target_project=target_project, relationship=relationship, limit=limit,
     )
     if json_output:
-        print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+        emit_json([mapping_to_dict(m) for m in results])
     elif not results:
         print("No matching mappings.")
     else:
@@ -128,7 +128,7 @@ def map_lookup_cmd(
     store = MappingStore(".")
     results = store.find_mappings_for(identifier, project=project, direction=direction)
     if json_output:
-        print(_json.dumps([mapping_to_dict(m) for m in results], indent=2))
+        emit_json([mapping_to_dict(m) for m in results])
     elif not results:
         print(f"No mappings found for '{identifier}'.")
     else:
@@ -185,7 +185,7 @@ def map_add_module_cmd(
     )
     store.add_module_mapping(m)
     if json_output:
-        print(_json.dumps(module_mapping_to_dict(m), indent=2))
+        emit_json(module_mapping_to_dict(m))
     else:
         target = repo if repo else path
         print(f"Added module mapping: {module_prefix} -> {target}")
@@ -199,7 +199,7 @@ def map_list_modules_cmd(
     store = MappingStore(".")
     results = store.list_module_mappings()
     if json_output:
-        print(_json.dumps([module_mapping_to_dict(m) for m in results], indent=2))
+        emit_json([module_mapping_to_dict(m) for m in results])
     elif not results:
         print("No module mappings registered.")
     else:
@@ -257,7 +257,7 @@ def map_update_module_cmd(
 
     saved = store.get_module_mapping_by_prefix(module_prefix)
     if json_output:
-        print(_json.dumps(module_mapping_to_dict(saved), indent=2))  # type: ignore[arg-type]
+        emit_json(module_mapping_to_dict(saved))  # type: ignore[arg-type]
     else:
         target = saved.repo if saved.repo else saved.local_path  # type: ignore[union-attr]
         print(f"Updated module mapping '{module_prefix}' -> {target}")
@@ -338,11 +338,11 @@ def map_resolve_cmd(
             target = find_symbol_by_path(symbols, symbol_parts)
             if target:
                 if json_output:
-                    print(_json.dumps({
+                    emit_json({
                         "file": file_path,
                         "line": target.line_start,
                         "kind": target.kind
-                    }, indent=2))
+                    })
                 else:
                     print(f"File: {file_path}")
                     print(f"Line: {target.line_start}")
@@ -351,7 +351,7 @@ def map_resolve_cmd(
 
         # If no symbol parts or symbol not found, just return the file.
         if json_output:
-            print(_json.dumps({"file": file_path, "line": 1}, indent=2))
+            emit_json({"file": file_path, "line": 1})
         else:
             print(f"File: {file_path}")
             print("Line: 1")
@@ -365,7 +365,7 @@ def map_resolve_cmd(
         if json_output:
             d = module_mapping_to_dict(mm)
             if resolved: d["resolved_path"] = resolved
-            print(_json.dumps(d, indent=2))
+            emit_json(d)
         else:
             print(f"Module '{selector}' -> {mm.repo or mm.local_path}")
             if resolved: print(f"Local path: {resolved}")
@@ -376,7 +376,7 @@ def map_resolve_cmd(
     if resolved_sel:
         if json_output:
             sel = parse_extended_selector(resolved_sel)
-            print(_json.dumps({"selector": resolved_sel, "path": sel.file_path}, indent=2))
+            emit_json({"selector": resolved_sel, "path": sel.file_path})
         else:
             print(resolved_sel)
         return

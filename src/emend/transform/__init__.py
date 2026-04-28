@@ -35,7 +35,6 @@ from .index import (
     _compute_duplicate_payloads,
     _ensure_cache_ignore_files,
     _ensure_index_fresh,
-    _ensure_venv_index,
     _extract_all_exports_text,
     _extract_noqa_lines,
     _get_cached_qnames,
@@ -43,15 +42,18 @@ from .index import (
     _lookup_via_modmap,
     _query_symbol_index_cozo,
     _scan_manifest,
-    _venv_db_path,
     ManifestScanResult,
     get_index_status,
-    lookup_venv_symbol,
     query_import_graph,
     query_reference_index,
     query_symbol_index,
     warm_caches,
+)
+from .venv_index import (
     _build_venv_index,
+    _ensure_venv_index,
+    _venv_db_path,
+    lookup_venv_symbol,
 )
 
 # ---------------------------------------------------------------------------

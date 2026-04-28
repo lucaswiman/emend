@@ -81,55 +81,23 @@ def _extract_noqa_lines(source: str) -> set[int]:
     return result
 
 
-def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
-    """Worker function for process-pool indexing.
+def _check_cache_hits(
+    db_path: str, all_hashes: list[bytes]
+) -> tuple[set[bytes], set[bytes], set[bytes], set[bytes]]:
+    """Pre-check which content hashes are already present in cache tables.
 
-    Runs in a subprocess.  Parses a batch of files, resolves qualified names,
-    collects symbol definitions, import relationships, reference entries,
-    and DSL symbols, then writes directly to the SQLite disk cache.
-
-    Files whose content hash is already present in all cache tables are
-    skipped (cache-hit fast path).
-
-    Args:
-        args: (db_path, source_root, project_root, [(file_path, content), ...])
-
-    Returns:
-        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count, dsl_count).
+    Returns four sets of cached hashes — one per cache table
+    (``qn_index``, ``symbol_index``, ``import_graph``, ``reference_index``).
+    On any error, returns empty sets so the caller processes everything.
     """
-    import pickle
     import sqlite3
-    import zlib
-    from emend.query import _collect_symbols as _collect_symbols_ts
-    from emend import emend_core as _rust
 
-    from .cache import _init_cache_schema, _SCHEMA_VERSION
-    from .deadcode import _is_likely_entry_point
-    db_path, source_root, project_root, file_batch = args
-    qn_rows: list[tuple[bytes, bytes]] = []
-    sym_rows: list[tuple] = []
-    import_rows: list[tuple[bytes, str, str]] = []
-    ref_rows: list[tuple] = []
-    dsl_rows: list[tuple] = []
-
-    if not file_batch:
-        return (0, 0, 0, 0, 0, 0, 0)
-
-    # Scope resolver for QN and reference collection (replaces MetadataWrapper).
-    scope_resolver = _rust.PyScopeResolver(project_root)
-
-    # Compute content hashes up-front so we can bulk-check the cache.
-    file_hashes: list[tuple[bytes, str, str]] = [
-        (hashlib.md5(content.encode(), usedforsecurity=False).digest(), py_file, content)
-        for py_file, content in file_batch
-    ]
-    all_hashes = [h for h, _, _ in file_hashes]
-
-    # Pre-check which hashes are already present in cache tables.
     cached_qn: set[bytes] = set()
     cached_sym: set[bytes] = set()
     cached_import: set[bytes] = set()
     cached_ref: set[bytes] = set()
+    if not all_hashes:
+        return cached_qn, cached_sym, cached_import, cached_ref
     try:
         conn_check = sqlite3.connect(db_path, timeout=30)
         conn_check.execute("PRAGMA journal_mode=WAL")
@@ -167,7 +135,146 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 pass
         conn_check.close()
     except Exception:
-        pass  # If pre-check fails, process everything
+        pass  # If pre-check fails, caller processes everything
+    return cached_qn, cached_sym, cached_import, cached_ref
+
+
+def _write_index_rows(
+    db_path: str,
+    qn_rows: list[tuple[bytes, bytes]],
+    sym_rows: list[tuple],
+    import_rows: list[tuple[bytes, str, str]],
+    ref_rows: list[tuple],
+    dsl_rows: list[tuple],
+) -> None:
+    """Bulk-write collected index rows to the SQLite cache.
+
+    Performs a delete-then-insert for the per-file-derived tables so that
+    a second indexing pass replaces stale rows.  Errors are swallowed —
+    the worker process must not raise.
+    """
+    import sqlite3
+    from .cache import _init_cache_schema
+
+    has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
+    if not has_data:
+        return
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        # Ensure schema exists (idempotent; normally pre-created by
+        # warm_caches, but needed when _index_batch is called directly).
+        _init_cache_schema(conn)
+        if qn_rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
+            )
+        if sym_rows:
+            # Bulk-delete old entries before inserting
+            hashes_with_syms = list({r[0] for r in sym_rows})
+            placeholders = ",".join("?" * len(hashes_with_syms))
+            conn.execute(
+                f"DELETE FROM symbol_index WHERE content_hash IN ({placeholders})",
+                hashes_with_syms,
+            )
+            conn.executemany(
+                "INSERT INTO symbol_index "
+                "(content_hash, file_path, name, qualified_name, module_qn, kind, "
+                "line, end_line, depth, parent, bases, signature, returns, decorators, "
+                "is_entry_point, is_exported, has_noqa) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sym_rows,
+            )
+        if import_rows:
+            hashes_with_imports = list({r[0] for r in import_rows})
+            placeholders = ",".join("?" * len(hashes_with_imports))
+            conn.execute(
+                f"DELETE FROM import_graph WHERE content_hash IN ({placeholders})",
+                hashes_with_imports,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO import_graph "
+                "(content_hash, file_path, imported_module) "
+                "VALUES (?, ?, ?)",
+                import_rows,
+            )
+        if ref_rows:
+            hashes_with_refs = list({r[0] for r in ref_rows})
+            placeholders = ",".join("?" * len(hashes_with_refs))
+            conn.execute(
+                f"DELETE FROM reference_index WHERE content_hash IN ({placeholders})",
+                hashes_with_refs,
+            )
+            conn.executemany(
+                "INSERT INTO reference_index "
+                "(content_hash, target_qn, file_path, line, col, ref_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ref_rows,
+            )
+        if dsl_rows:
+            hashes_with_dsl = list({r[-1] for r in dsl_rows})
+            placeholders = ",".join("?" * len(hashes_with_dsl))
+            conn.execute(
+                f"DELETE FROM dsl_symbols WHERE content_hash IN ({placeholders})",
+                hashes_with_dsl,
+            )
+            conn.executemany(
+                "INSERT INTO dsl_symbols "
+                "(name, kind, dsl, host_file, host_start_line, host_start_col, "
+                "host_end_line, host_end_col, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                dsl_rows,
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
+    """Worker function for process-pool indexing.
+
+    Runs in a subprocess.  Parses a batch of files, resolves qualified names,
+    collects symbol definitions, import relationships, reference entries,
+    and DSL symbols, then writes directly to the SQLite disk cache.
+
+    Files whose content hash is already present in all cache tables are
+    skipped (cache-hit fast path).
+
+    Args:
+        args: (db_path, source_root, project_root, [(file_path, content), ...])
+
+    Returns:
+        (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count, dsl_count).
+    """
+    import pickle
+    import zlib
+    from emend.query import _collect_symbols as _collect_symbols_ts
+    from emend import emend_core as _rust
+
+    from .deadcode import _is_likely_entry_point
+    db_path, source_root, project_root, file_batch = args
+    qn_rows: list[tuple[bytes, bytes]] = []
+    sym_rows: list[tuple] = []
+    import_rows: list[tuple[bytes, str, str]] = []
+    ref_rows: list[tuple] = []
+    dsl_rows: list[tuple] = []
+
+    if not file_batch:
+        return (0, 0, 0, 0, 0, 0, 0)
+
+    # Scope resolver for QN and reference collection (replaces MetadataWrapper).
+    scope_resolver = _rust.PyScopeResolver(project_root)
+
+    # Compute content hashes up-front so we can bulk-check the cache.
+    file_hashes: list[tuple[bytes, str, str]] = [
+        (hashlib.md5(content.encode(), usedforsecurity=False).digest(), py_file, content)
+        for py_file, content in file_batch
+    ]
+    all_hashes = [h for h, _, _ in file_hashes]
+
+    cached_qn, cached_sym, cached_import, cached_ref = _check_cache_hits(
+        db_path, all_hashes,
+    )
 
     skipped = 0
     processed = 0
@@ -310,77 +417,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
-    has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
-    if has_data:
-        try:
-            conn = sqlite3.connect(db_path, timeout=30)
-            # Ensure schema exists (idempotent; normally pre-created by
-            # warm_caches, but needed when _index_batch is called directly).
-            _init_cache_schema(conn)
-            if qn_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
-                )
-            if sym_rows:
-                # Bulk-delete old entries before inserting
-                hashes_with_syms = list({r[0] for r in sym_rows})
-                placeholders = ",".join("?" * len(hashes_with_syms))
-                conn.execute(
-                    f"DELETE FROM symbol_index WHERE content_hash IN ({placeholders})",
-                    hashes_with_syms,
-                )
-                conn.executemany(
-                    "INSERT INTO symbol_index "
-                    "(content_hash, file_path, name, qualified_name, module_qn, kind, "
-                    "line, end_line, depth, parent, bases, signature, returns, decorators, "
-                    "is_entry_point, is_exported, has_noqa) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    sym_rows,
-                )
-            if import_rows:
-                hashes_with_imports = list({r[0] for r in import_rows})
-                placeholders = ",".join("?" * len(hashes_with_imports))
-                conn.execute(
-                    f"DELETE FROM import_graph WHERE content_hash IN ({placeholders})",
-                    hashes_with_imports,
-                )
-                conn.executemany(
-                    "INSERT OR IGNORE INTO import_graph "
-                    "(content_hash, file_path, imported_module) "
-                    "VALUES (?, ?, ?)",
-                    import_rows,
-                )
-            if ref_rows:
-                hashes_with_refs = list({r[0] for r in ref_rows})
-                placeholders = ",".join("?" * len(hashes_with_refs))
-                conn.execute(
-                    f"DELETE FROM reference_index WHERE content_hash IN ({placeholders})",
-                    hashes_with_refs,
-                )
-                conn.executemany(
-                    "INSERT INTO reference_index "
-                    "(content_hash, target_qn, file_path, line, col, ref_kind) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    ref_rows,
-                )
-            if dsl_rows:
-                hashes_with_dsl = list({r[-1] for r in dsl_rows})
-                placeholders = ",".join("?" * len(hashes_with_dsl))
-                conn.execute(
-                    f"DELETE FROM dsl_symbols WHERE content_hash IN ({placeholders})",
-                    hashes_with_dsl,
-                )
-                conn.executemany(
-                    "INSERT INTO dsl_symbols "
-                    "(name, kind, dsl, host_file, host_start_line, host_start_col, "
-                    "host_end_line, host_end_col, content_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    dsl_rows,
-                )
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
+    _write_index_rows(db_path, qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
 
     # NOTE: CozoDB facts.db is NOT written here — it's built by the caller
     # (_build_facts_db) after all workers complete, extracting directly
@@ -776,6 +813,7 @@ def query_symbol_index(
     # Fallback: if no results and not constrained to a specific file,
     # try looking up the symbol in venv site-packages.
     if not results and not file_path:
+        from .venv_index import lookup_venv_symbol
         venv_results = lookup_venv_symbol(
             project_path,
             name_pattern=name_pattern,
@@ -980,282 +1018,6 @@ def _lookup_via_modmap(
             store.close()
         except Exception:
             pass
-
-
-def _venv_db_path(project_root: str) -> Path:
-    """Return the path to the venv-specific parse cache DB."""
-    from .cache import _cache_db_dir
-    return _cache_db_dir(project_root) / "parse_venv.db"
-
-
-def _ensure_venv_index(project_root: str, language: str = "python") -> Path | None:
-    """Build or refresh the venv symbol index.
-
-    Creates ``parse_venv.db`` in ``.emend/cache/`` with the same
-    ``symbol_index`` schema as the project cache.  The index is rebuilt
-    when the site-packages directory's mtime changes.
-
-    Returns the DB path, or ``None`` if venv lookup is disabled / no venv.
-    """
-    import sqlite3 as _sql3
-    from .cache import _init_cache_schema
-
-    from emend.project_config import resolve_environment_path
-
-    site_packages = resolve_environment_path(project_root, language)
-    if site_packages is None:
-        return None
-
-    db_path = _venv_db_path(project_root)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Check freshness: compare site-packages mtime with stored value
-    import os
-    try:
-        sp_mtime = os.stat(str(site_packages)).st_mtime_ns
-    except OSError:
-        return None
-
-    try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        return None
-
-    try:
-        # Create schema if needed
-        _init_cache_schema(conn)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS venv_meta "
-            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-
-        # Check stored mtime
-        row = conn.execute(
-            "SELECT value FROM venv_meta WHERE key = 'site_packages_mtime'"
-        ).fetchone()
-        if row and row[0] == str(sp_mtime):
-            # Index is fresh
-            count = conn.execute("SELECT COUNT(*) FROM symbol_index").fetchone()[0]
-            if count > 0:
-                conn.close()
-                return db_path
-
-        conn.close()
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    # (Re)build the venv index
-    logger.info("Building venv symbol index for %s", site_packages)
-    _build_venv_index(str(db_path), str(site_packages), project_root, str(sp_mtime))
-    return db_path
-
-
-def _build_venv_index(
-    db_path: str, site_packages: str, project_root: str, sp_mtime: str
-) -> None:
-    """Scan site-packages and populate the venv symbol index."""
-    import sqlite3 as _sql3
-    from emend.query import _collect_symbols
-    from .cache import _init_cache_schema
-
-    sp = Path(site_packages)
-    # Collect .py and .pyi files, skipping common non-package dirs
-    skip_names = {"__pycache__", ".git", "bin", "include", "share", "Scripts"}
-    py_files: list[Path] = []
-    stack = [sp]
-    while stack:
-        d = stack.pop()
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.is_dir():
-                if entry.name not in skip_names and not entry.name.startswith("."):
-                    # Only descend into directories that look like Python packages
-                    # (have __init__.py or are dist-info) or are top-level
-                    if (entry / "__init__.py").exists() or (entry / "__init__.pyi").exists():
-                        stack.append(entry)
-                    elif entry.suffix in (".dist-info", ".egg-info"):
-                        pass  # skip metadata dirs
-                    elif entry.parent == sp:
-                        # Top-level dir without __init__.py — could be namespace package
-                        stack.append(entry)
-            elif entry.suffix in (".py", ".pyi"):
-                py_files.append(entry)
-
-    logger.info("Venv index: found %d Python files in %s", len(py_files), site_packages)
-
-    conn = _sql3.connect(db_path, timeout=30)
-    _init_cache_schema(conn)
-
-    # Clear old data
-    conn.execute("DELETE FROM symbol_index")
-    conn.commit()
-
-    sym_rows: list[tuple] = []
-    for fpath in py_files:
-        try:
-            content = fpath.read_text(errors="replace")
-        except Exception:
-            continue
-
-        content_hash = hashlib.md5(content.encode(), usedforsecurity=False).digest()
-
-        try:
-            symbols = _collect_symbols(fpath, content)
-        except Exception:
-            continue
-
-        # Compute module_qn from path relative to site-packages
-        rel = fpath.relative_to(sp)
-        module_parts = list(rel.parts[:-1])
-        stem = rel.stem
-        if stem != "__init__":
-            module_parts.append(stem)
-        module_qn = ".".join(module_parts)
-
-        for sym in symbols:
-            parts = sym.path.split("::", 1)
-            dotted = parts[1] if len(parts) > 1 else sym.name
-            m_qn = f"{module_qn}.{dotted}" if module_qn else dotted
-            sig = None
-            if sym.parameters:
-                ret_str = f" -> {sym.returns}" if sym.returns else ""
-                sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
-            sym_rows.append((
-                content_hash,
-                str(fpath),
-                sym.name,
-                dotted,
-                m_qn,
-                sym.kind,
-                sym.line,
-                sym.end_line,
-                sym.depth,
-                sym.parent,
-                sig,
-                sym.returns,
-                ",".join(sym.decorators) if sym.decorators else None,
-                0,  # is_entry_point
-                0,  # is_exported
-                0,  # has_noqa
-            ))
-
-    if sym_rows:
-        conn.executemany(
-            "INSERT INTO symbol_index "
-            "(content_hash, file_path, name, qualified_name, module_qn, kind, "
-            "line, end_line, depth, parent, signature, returns, decorators, "
-            "is_entry_point, is_exported, has_noqa) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            sym_rows,
-        )
-        conn.commit()
-
-    # Store mtime
-    conn.execute(
-        "INSERT OR REPLACE INTO venv_meta (key, value) VALUES (?, ?)",
-        ("site_packages_mtime", sp_mtime),
-    )
-    conn.commit()
-    conn.close()
-    logger.info("Venv index: indexed %d symbols from %d files", len(sym_rows), len(py_files))
-
-
-def lookup_venv_symbol(
-    project_path: str,
-    *,
-    name_pattern: str | None = None,
-    qualified_name: str | None = None,
-    kind: str | None = None,
-    limit: int = 0,
-    language: str = "python",
-) -> list[dict]:
-    """Search the venv symbol index for symbol definitions.
-
-    Uses a separate ``parse_venv.db`` cache that is built lazily on first
-    lookup and refreshed when the venv's site-packages directory changes.
-
-    Returns a list of symbol dicts (same shape as ``query_symbol_index``),
-    or an empty list if no venv is found or lookup is disabled.
-    """
-    import sqlite3 as _sql3
-    from .project_iter import _find_project_root
-
-    project_root = _find_project_root(project_path)
-    db_path = _ensure_venv_index(project_root, language)
-    if db_path is None:
-        return []
-
-    try:
-        conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
-        return []
-
-    try:
-        conditions: list[str] = []
-        params: list = []
-
-        if name_pattern:
-            if "*" in name_pattern or "?" in name_pattern:
-                conditions.append("name GLOB ?")
-                params.append(name_pattern)
-            else:
-                conditions.append("name = ?")
-                params.append(name_pattern)
-
-        if kind:
-            conditions.append("kind = ?")
-            params.append(kind)
-
-        if qualified_name:
-            # Match exact or prefix (e.g. "requests.get" matches
-            # module_qn "requests.api.get" via qualified_name column)
-            conditions.append(
-                "(qualified_name = ? OR module_qn = ? OR module_qn LIKE ?)"
-            )
-            params.extend([qualified_name, qualified_name, qualified_name + ".%"])
-
-        where = " AND ".join(conditions) if conditions else "1=1"
-        query = (
-            f"SELECT name, qualified_name, kind, file_path, line, end_line, "
-            f"depth, parent, signature, returns, decorators "
-            f"FROM symbol_index WHERE {where} ORDER BY name, file_path, line"
-        )
-        if limit > 0:
-            query += f" LIMIT {limit}"
-
-        rows = conn.execute(query, params).fetchall()
-        results = []
-        for row in rows:
-            results.append({
-                "name": row[0],
-                "qualified_name": row[1],
-                "kind": row[2],
-                "file_path": row[3],
-                "line": row[4],
-                "end_line": row[5],
-                "depth": row[6],
-                "parent": row[7],
-                "signature": row[8],
-                "returns": row[9],
-                "decorators": row[10].split(",") if row[10] else [],
-            })
-        conn.close()
-        return results
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        return []
 
 
 def query_reference_index(
