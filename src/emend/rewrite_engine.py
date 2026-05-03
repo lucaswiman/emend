@@ -326,7 +326,7 @@ _ATTR_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\.\s*([A-Za-z_]\w*)
 _METAVAR_RE = re.compile(r"^\$[A-Za-z_]\w*$")
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 _NUMBER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
-_STRING_RE = re.compile(r'^(["\']).*\1$')
+_STRING_RE = re.compile(r'''^(?:"[^"]*"|'[^']*')$''')
 
 
 def parse_expr(expr: str, egraph: EGraph) -> int:
@@ -337,9 +337,21 @@ def parse_expr(expr: str, egraph: EGraph) -> int:
     """
     expr = expr.strip()
 
-    # Parenthesized expression
+    # Parenthesized expression — only strip when the closing paren matches
+    # the opening one (e.g. "(a + b)" but not "(a) + (b)").
     if expr.startswith("(") and expr.endswith(")"):
-        return parse_expr(expr[1:-1], egraph)
+        depth = 0
+        matches_end = True
+        for i, ch in enumerate(expr):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i < len(expr) - 1:
+                matches_end = False
+                break
+        if matches_end:
+            return parse_expr(expr[1:-1], egraph)
 
     # Metavariable
     if _METAVAR_RE.match(expr):
@@ -485,7 +497,7 @@ def _match_expr_pattern(
 def _apply_substitution(template: str, captures: dict[str, str]) -> str:
     """Apply captured metavar values to a template string."""
     result = template
-    for var, val in captures.items():
+    for var, val in sorted(captures.items(), key=lambda kv: len(kv[0]), reverse=True):
         result = result.replace(f"${var}", val)
     return result
 

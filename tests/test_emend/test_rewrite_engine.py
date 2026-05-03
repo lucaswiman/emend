@@ -9,6 +9,8 @@ from emend.rewrite_engine import (
     RewriteRule,
     SaturationResult,
     UnionFind,
+    _apply_substitution,
+    enode_to_source,
     load_rewrite_rules,
     parse_expr,
     run_saturation,
@@ -185,6 +187,55 @@ class TestParseExpr:
         node = eg.extract(eid)
         assert node is not None
         assert "hello" in node.op
+
+    def test_parenthesized_binop_not_misstripped(self):
+        """parse_expr('(a) + (b)') must parse children as clean identifiers."""
+        eg = EGraph()
+        eid = parse_expr("(a) + (b)", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "binop:+"
+        left = eg.extract(node.children[0])
+        right = eg.extract(node.children[1])
+        assert left is not None and left.op == "name:a", f"left child was {left}"
+        assert right is not None and right.op == "name:b", f"right child was {right}"
+
+    def test_parenthesized_subexpr_preserved(self):
+        """Parens around a single sub-expression should be fine."""
+        eg = EGraph()
+        eid = parse_expr("(x)", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "name:x"
+
+    def test_nested_paren_groups(self):
+        """'(a) + (b)' must parse all operands cleanly."""
+        eg = EGraph()
+        eid = parse_expr("(a) + (b)", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "binop:+"
+        src = enode_to_source(node, eg)
+        assert ")" not in src and "(" not in src, f"stray parens in output: {src}"
+
+    def test_string_concat_not_single_string(self):
+        """'"abc" + "def"' must parse as binop, not a single string literal."""
+        eg = EGraph()
+        eid = parse_expr('"abc" + "def"', eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "binop:+", f"expected binop:+, got {node.op}"
+
+
+class TestApplySubstitution:
+    def test_basic(self):
+        result = _apply_substitution("$x + $y", {"x": "a", "y": "b"})
+        assert result == "a + b"
+
+    def test_prefix_metavar_not_corrupted(self):
+        """$x must not be replaced inside $x_new."""
+        result = _apply_substitution("$x + $x_new", {"x": "a", "x_new": "b"})
+        assert result == "a + b"
 
 
 class TestLoadRewriteRules:
