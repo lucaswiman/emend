@@ -13,7 +13,7 @@
 | `cli_find.py` | `find` (and hidden aliases `grep`, `search`, `show`, `get`, `lookup`, `ls`) — unified search command. |
 | `cli_edit.py` | `set`, `rm`, `delete`, `add`, `replace`, `cp` (copy-to), `rename`, `mv` (move), `batch`, `saturate`. |
 | `cli_analysis.py` | `refs`, `graph`, `deadcode`, `impact`, `types`, `trace`, `facts`, `cfg`, `dsl-debug`, `dupes`. |
-| `cli_checks.py` | `lint`, `policy`, `check` (the unified runner that calls into `checks.py`). |
+| `cli_checks.py` | `lint`, `policy`, `check` (the unified runner that calls into `checks/engine.py`). |
 | `cli_map.py` | `map add` / `add-module` / `lookup` / `search` / `resolve` / `rm` / `rm-module` / `list-modules` / `update-module`. |
 | `cli_tooling.py` | `index`, `editor-search`, `editor-server`, `mcp`. |
 | `cli_output.py` | Shared output helpers: `format_json(data)` and `emit_json(data)` for consistent JSON serialisation across CLI commands. |
@@ -231,7 +231,7 @@ All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on
 
 ### Cross-Project Operations
 
-Cross-project functions use `visit_project_ts()` in `transform.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
+Cross-project functions use `visit_project_ts()` in `transform/project_iter.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
 
 - `find_references()` — uses `PyScopeResolver.references_in_file()` for scope-aware reference finding
 - `rename_symbol()` — uses scope resolver + byte-range edits via `PyFileTransform`
@@ -245,7 +245,7 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 Lint rules and policies live in a single document: `.emend/rules.yaml`.
 Legacy `.emend/patterns.yaml` and `.emend/policies.yaml` are still
 accepted as fallbacks (loader: `rules_config.load_rules_document`); see
-`ideas/roadmap-modularize/index.md` Phase 4 for planned removal.
+`ideas/old-roadmaps/roadmap-modularize/index.md` Phase 4 for planned removal.
 
 A rules document mixes the following top-level keys:
 
@@ -257,7 +257,7 @@ A rules document mixes the following top-level keys:
 - `policies` — declarative policy checks (flow / structural / type / datalog / custom / sequence / deadcode), each runnable independently.
 - `trace` — `labels`, `sources`, `sinks`, `sanitizers`, `scope_sanitizers`, optional `presets:` list to compose framework rules from `src/emend/presets/*.yaml`.
 
-`checks.py` is the unified entry point that loads the document once and
+`checks/engine.py` is the unified entry point that loads the document once and
 dispatches to lint and policy engines, normalising results into
 `CheckViolation`. Prefer `emend check` in CI; `emend lint` and `emend
 policy` filter to subsets of the kinds.
@@ -281,7 +281,7 @@ populator, and a Datalog rule — no Python control-flow code.
 
 ### Impact analysis
 
-`find_impact()` in `transform.py`:
+`find_impact()` in `transform/impact.py`:
 
 - BFS transitive reverse-caller closure via `find_callers()` over the FactGraph.
 - `_parse_diff_to_selectors()` maps git diff hunks to symbol selectors using line ranges from `SourceLocFact`.
@@ -309,7 +309,7 @@ Two-tier cache: in-memory LRU + SQLite `type_cache` table in
 
 ### Dead code detection
 
-`find_dead_code()` in `transform.py`:
+`find_dead_code()` in `transform/deadcode.py`:
 
 - Single-pass O(files) analysis via `PyScopeResolver`.
 - `_find_source_root()` detects `src/` layout via `pyproject.toml`.
@@ -373,7 +373,7 @@ make test TESTS="-k default"
 
 ## Adding Commands
 
-1. Implement the engine function in `transform.py` (for tree-sitter-based operations) or `ast_commands.py` (for symbol listing). Read-only analysis usually has a counterpart in `fact_graph.py` if it needs Datalog.
+1. Implement the engine function in the appropriate `transform/` submodule (for tree-sitter-based operations) or `ast_commands.py` (for symbol listing). Read-only analysis usually has a counterpart in `fact_graph.py` if it needs Datalog.
 2. Add the Typer command function to the appropriate `cli_*.py` file:
    - Editing operations → `cli_edit.py`.
    - Read-only analysis → `cli_analysis.py`.
@@ -385,9 +385,7 @@ make test TESTS="-k default"
 4. If the command should be exposed to LLM clients, add an MCP tool wrapper in `mcp_server.py`.
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
-> Note: `ideas/roadmap-modularize/phase-3-single-source-cli-registration.md`
-> proposes consolidating step 2/3 so `cli.py` is the only registration
-> site. Until that lands, keep both in sync.
+> Note: Phase 3 of `ideas/old-roadmaps/roadmap-modularize/` (single-source CLI registration) has landed; `cli.py` is now the canonical registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
 
 ## Code Conventions
 
