@@ -186,6 +186,10 @@ def _check_flow_rule(
             func_start=sym.line_start,
             func_end=sym.line_end,
         )
+        # Build a line -> [var_name, ...] lookup for O(1) assignment queries.
+        assignments_lhs: dict[int, list[str]] = {}
+        for assign_line, target, _rhs in assignments:
+            assignments_lhs.setdefault(assign_line, []).append(target)
 
         for src_match in func_sources:
             src_line = src_match.line or 0
@@ -196,14 +200,10 @@ def _check_flow_rule(
                     tainted[name] = src_line
 
             if src_match.matched_text:
-                matched_line_text = all_lines[src_line - 1].strip() if 1 <= src_line <= len(all_lines) else ""
-                # Handle declaration keywords: const/let/var (TS), let/let mut (Rust)
-                assign_match = re.match(
-                    r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',
-                    matched_line_text,
-                )
-                if assign_match:
-                    tainted[assign_match.group(1)] = src_line
+                # If this source line is an assignment, also taint the LHS variable.
+                # Uses tree-sitter CFG defs (already computed above) instead of regex.
+                for lhs_name in assignments_lhs.get(src_line, []):
+                    tainted[lhs_name] = src_line
 
             taint_chain: list[tuple[int, str]] = [
                 (src_line, ', '.join(sorted(tainted.keys())))
@@ -249,15 +249,14 @@ def _check_flow_rule(
                             if san_names & tainted_at_sink:
                                 sanitized = True
                                 break
-                            if 1 <= san_line <= len(all_lines):
-                                san_line_text = all_lines[san_line - 1].strip()
-                                san_assign = re.match(
-                                    r'^(?:(?:const|let|var|let\s+mut)\s+)?([a-zA-Z_]\w*)(?:\s*:\s*[^=]+?)?\s*=\s*',
-                                    san_line_text,
-                                )
-                                if san_assign and san_assign.group(1) in tainted_at_sink:
-                                    sanitized = True
-                                    break
+                            # If the sanitizer line is an assignment, check whether
+                            # the LHS variable is tainted — uses tree-sitter CFG defs.
+                            if any(
+                                lhs_name in tainted_at_sink
+                                for lhs_name in assignments_lhs.get(san_line, [])
+                            ):
+                                sanitized = True
+                                break
 
                 if sanitized:
                     continue

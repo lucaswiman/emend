@@ -767,10 +767,6 @@ def _to_pascal_case(name: str) -> str:
     return "".join(word.capitalize() for word in name.split("_"))
 
 
-# Regex fallback for class definitions: still used by resolve_graphql_links.
-# Replaced for ORM resolution by tree-sitter via emend_core.collect_symbols_from_str().
-_CLASS_DEF_RE = re.compile(r'^class\s+(\w+)\s*[\(:]', re.MULTILINE)
-
 
 def _index_classes_and_tablenames(
     file_path: str,
@@ -1082,37 +1078,35 @@ def resolve_graphql_links(
         except OSError:
             continue
 
-        # Index classes
-        for m in _CLASS_DEF_RE.finditer(source):
-            cls_name = m.group(1)
-            line = source[:m.start()].count('\n') + 1
-            if cls_name not in class_index:
-                class_index[cls_name] = (str(code_file), line)
+        # Index classes, methods, and standalone functions via tree-sitter.
+        from emend import emend_core
+        ext = code_file.suffix.lstrip('.') or 'py'
+        rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
 
-        # Index methods/functions within classes
-        current_class: str | None = None
-        lines = source.split('\n')
-        for i, line_text in enumerate(lines, start=1):
-            class_match = re.match(r'^class\s+(\w+)\s*[\(:]', line_text)
-            if class_match:
-                current_class = class_match.group(1)
-            elif current_class and re.match(r'^\S', line_text) and line_text.strip() and not line_text.startswith('#'):
-                current_class = None
-            if current_class:
-                func_match = re.match(r'\s+(?:async\s+)?def\s+(\w+)\s*\(', line_text)
-                if func_match:
-                    method_name = func_match.group(1)
-                    method_index.setdefault(method_name, []).append(
-                        (str(code_file), i, current_class)
-                    )
+        def _index_symbols(syms: list, parent_class: str | None = None) -> None:
+            for sym in syms:
+                kind = sym.get("kind", "")
+                name = sym.get("name", "")
+                line = sym.get("line", 1)
+                if kind == "class":
+                    if name not in class_index:
+                        class_index[name] = (str(code_file), line)
+                    # Recurse into children with this class as parent
+                    _index_symbols(sym.get("children", []), parent_class=name)
+                elif kind in ("function", "async_function", "method", "async_method"):
+                    if parent_class:
+                        # Method on a class — add to method_index
+                        method_index.setdefault(name, []).append(
+                            (str(code_file), line, parent_class)
+                        )
+                    else:
+                        # Standalone function — add to class_index
+                        if name not in class_index:
+                            class_index[name] = (str(code_file), line)
+                    # Recurse for nested defs (no parent_class change for nesting)
+                    _index_symbols(sym.get("children", []), parent_class=parent_class)
 
-        # Also index standalone functions (for functional resolvers)
-        for m in re.finditer(r'^(?:async\s+)?def\s+(\w+)\s*\(', source, re.MULTILINE):
-            func_name = m.group(1)
-            line = source[:m.start()].count('\n') + 1
-            # Store as class_index entry with function kind
-            if func_name not in class_index:
-                class_index[func_name] = (str(code_file), line)
+        _index_symbols(rust_syms)
 
     for symbol in dsl_symbols:
         if symbol.kind == DslSymbolKind.GRAPHQL_TYPE:
