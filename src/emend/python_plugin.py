@@ -133,8 +133,98 @@ class PythonImportHandler(ImportHandler):
 
         return "".join(lines)
 
-    def remove_import(self, source: str, module: str, name: str) -> str:
-        raise NotImplementedError("remove_import is not yet implemented for Python")
+    def remove_import(self, source: str, module: str, name: str | None) -> str:
+        """Return *source* with the import of *name* from *module* removed.
+
+        If *name* is ``None``, the entire ``import <module>`` or
+        ``from <module> import ...`` statement is removed.
+
+        If *name* is given, only that name is removed from a
+        ``from <module> import <name1>, <name2>`` statement.  When *name*
+        is the only imported name the whole statement is removed.
+
+        Uses tree-sitter structured import data (byte offsets) for all edits —
+        no ``ast.parse`` or hand-rolled regex.
+        """
+        imports = _get_structured_imports(source)
+        if not imports:
+            return source
+
+        encoded = source.encode("utf-8")
+
+        # Collect replacements as (start_byte, end_byte_excl_newline, replacement)
+        # We'll apply them in reverse order to preserve earlier byte offsets.
+        replacements: list[tuple[int, int, str]] = []
+
+        for imp in imports:
+            # Determine whether this import statement matches the requested module.
+            if imp["is_plain"]:
+                # ``import foo`` or ``import foo as bar`` — module name is in names
+                names: list[tuple[str, str | None]] = imp["names"]
+                # For plain imports, ``module`` is the top-level package name.
+                matching = [n for n, _a in names if n == module or n.split(".")[0] == module]
+                if not matching:
+                    continue
+
+                if name is not None:
+                    # Plain ``import X`` statements don't have individual names
+                    # to remove — only remove the whole line when name matches.
+                    if name not in matching:
+                        continue
+                # Remove the entire statement (whole line including newline).
+            else:
+                # ``from foo import bar`` — module is imp["module"]
+                if imp["module"] != module:
+                    continue
+
+                if name is not None:
+                    imp_names: list[tuple[str, str | None]] = imp["names"]
+                    target_names = [n for n, _a in imp_names if n == name]
+                    if not target_names:
+                        continue
+
+                    remaining = [(n, a) for n, a in imp_names if n != name]
+                    if remaining:
+                        # Rebuild the import line with the name removed.
+                        def _alias_str(n: str, a: str | None) -> str:
+                            return f"{n} as {a}" if a else n
+
+                        # Preserve indentation of the original line.
+                        start_line_1idx = imp["start_line"]
+                        lines = source.splitlines(keepends=True)
+                        orig_line = lines[start_line_1idx - 1] if start_line_1idx - 1 < len(lines) else ""
+                        indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
+                        new_stmt = (
+                            f"{indent}from {module} import "
+                            + ", ".join(_alias_str(n, a) for n, a in remaining)
+                        )
+
+                        start_b = imp["start_byte"]
+                        end_b = imp["end_byte"]
+                        # Include trailing newline in the replaced range.
+                        if end_b < len(encoded) and encoded[end_b : end_b + 1] == b"\n":
+                            end_b += 1
+
+                        replacements.append((start_b, end_b, new_stmt + "\n"))
+                        continue
+                    # else: name was the only one — fall through to remove whole line
+
+            # Remove the whole import statement (including trailing newline).
+            start_b = imp["start_byte"]
+            end_b = imp["end_byte"]
+            if end_b < len(encoded) and encoded[end_b : end_b + 1] == b"\n":
+                end_b += 1
+            replacements.append((start_b, end_b, ""))
+
+        if not replacements:
+            return source
+
+        # Apply replacements in reverse byte order to preserve earlier offsets.
+        replacements.sort(key=lambda x: x[0], reverse=True)
+        for start_b, end_b, repl in replacements:
+            encoded = encoded[:start_b] + repl.encode("utf-8") + encoded[end_b:]
+
+        return encoded.decode("utf-8")
 
 
 def _find_docstring_ranges(source: str) -> list[tuple[int, int]]:
