@@ -1128,6 +1128,56 @@ class TestResolveJinjaLinks:
         assert "base" in links[0].target_file
         assert links[0].strategy == "template_block"
 
+    def test_resolve_block_parent_gets_higher_confidence_than_unrelated(self, tmp_path):
+        """Block in the actual parent template should get higher confidence
+        than a block in an unrelated template that happens to share the name.
+
+        The confidence heuristic should check whether the *target* file is
+        the parent of the current file, not merely whether the current file
+        has any extends relationship.
+        """
+        base = tmp_path / "base.html"
+        base.write_text(
+            '<html>\n'
+            '{% block content %}{% endblock %}\n'
+            '</html>\n'
+        )
+        unrelated = tmp_path / "other.html"
+        unrelated.write_text(
+            '<html>\n'
+            '{% block content %}{% endblock %}\n'
+            '</html>\n'
+        )
+        child = tmp_path / "page.html"
+        child.write_text(
+            '{% extends "base.html" %}\n'
+            '{% block content %}\n'
+            '  <p>Page content</p>\n'
+            '{% endblock %}\n'
+        )
+        symbol = DslSymbol(
+            name="content",
+            kind=DslSymbolKind.TEMPLATE_VAR,
+            dsl=DslKind.JINJA,
+            host_file=str(child),
+            host_line=2,
+            host_col=0,
+            link_hints=[
+                LinkHint(strategy="template_block", target_pattern="content", target_kind="block"),
+            ],
+        )
+        links = resolve_jinja_links([symbol], str(tmp_path))
+        assert len(links) == 2, f"expected links to base and other, got {len(links)}"
+        link_by_file = {link.target_file: link for link in links}
+        base_link = link_by_file.get(str(base))
+        other_link = link_by_file.get(str(unrelated))
+        assert base_link is not None, "expected link to parent template base.html"
+        assert other_link is not None, "expected link to unrelated template other.html"
+        assert base_link.confidence > other_link.confidence, (
+            f"parent template block should have higher confidence ({base_link.confidence}) "
+            f"than unrelated template block ({other_link.confidence})"
+        )
+
     def test_resolve_no_match(self, tmp_path):
         """Returns empty when no matching render_template() call found."""
         f = tmp_path / "app.py"

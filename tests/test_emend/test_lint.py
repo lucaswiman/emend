@@ -909,3 +909,50 @@ def test_lint_dict_form_flow_rules_do_not_crash_run_lint(tmp_path):
 
     # The match rule should fire; the flow rule should not crash.
     assert any(v.rule_name == "simple-match" for v in violations)
+
+
+def test_lint_cmd_respects_language_for_file_resolution(tmp_path):
+    """lint_cmd should pass the language setting to resolve_files.
+
+    When the user sets --language, only files of that language should be
+    collected.  Previously lint_cmd passed language=None, collecting
+    files of ALL languages regardless of the --language flag.
+    """
+    from unittest.mock import patch
+    from emend.cli_checks import lint_cmd
+    from emend.cli_base import _state
+
+    # Create a rules.yaml so lint_cmd doesn't abort with "config not found"
+    rules_dir = tmp_path / ".emend"
+    rules_dir.mkdir()
+    (rules_dir / "rules.yaml").write_text("rules: {}\n")
+
+    py_file = tmp_path / "app.py"
+    py_file.write_text("x = 1\n")
+
+    ts_file = tmp_path / "app.ts"
+    ts_file.write_text("const x = 1;\n")
+
+    old_lang = _state["language"]
+    _state["language"] = "typescript"
+    try:
+        captured_language = {}
+
+        original_resolve = __import__("emend.cli_base", fromlist=["resolve_files"]).resolve_files
+
+        def spy_resolve(path, language=None):
+            captured_language["value"] = language
+            return original_resolve(path, language=language)
+
+        with patch("emend.cli_checks.resolve_files", side_effect=spy_resolve):
+            try:
+                lint_cmd(str(tmp_path), config=str(rules_dir / "rules.yaml"))
+            except SystemExit:
+                pass
+
+        assert captured_language.get("value") == "typescript", (
+            f"lint_cmd should pass language=_lang to resolve_files, "
+            f"got language={captured_language.get('value')!r}"
+        )
+    finally:
+        _state["language"] = old_lang

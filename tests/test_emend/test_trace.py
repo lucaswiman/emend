@@ -775,3 +775,55 @@ def test_trace_exclude_paths_filters_files(tmp_path):
     violation_files = {v.file_path for v in violations}
     assert str(app_file) in violation_files
     assert str(migration_file) not in violation_files
+
+
+def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
+    """trace_cmd's print output should end with a newline.
+
+    The CLI uses ``print(output, end=...)`` with a ternary to avoid
+    double-newlines.  A bug had both branches of the ternary producing
+    the same empty string, so output never got a trailing newline.
+
+    This test invokes the CLI implementation directly and captures stdout.
+    """
+    source_file = tmp_path / "app.py"
+    source_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    config_file = config_dir / "rules.yaml"
+    import yaml
+    config_file.write_text(yaml.dump({
+        "trace": {
+            "labels": ["sql-injection"],
+            "sources": [{"pattern": "request.args.get($X)", "label": "sql-injection"}],
+            "sinks": [{"pattern": "cursor.execute($X)", "label": "sql-injection"}],
+        }
+    }))
+
+    from emend.cli_analysis import _trace_cmd_impl
+    from emend.cli_base import _state
+    old_lang = _state["language"]
+    _state["language"] = "python"
+    try:
+        import typer
+        with pytest.raises((SystemExit, typer.Exit)):
+            _trace_cmd_impl(
+                path=str(source_file),
+                config=str(config_file),
+                label=None, trace=False, json_output=False,
+                project=None,
+                interprocedural=False, max_iterations=3,
+                preset=None,
+            )
+    finally:
+        _state["language"] = old_lang
+
+    captured = capsys.readouterr()
+    assert captured.out, "expected non-empty stdout"
+    assert captured.out.endswith("\n"), (
+        f"CLI trace output should end with a newline, got: {captured.out!r}"
+    )
