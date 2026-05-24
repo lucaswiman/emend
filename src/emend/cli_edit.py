@@ -401,7 +401,8 @@ def copy_to_cmd(
         emend cp file.py::MyClass other.py --append --apply
         emend cp file.py::outer.inner other.py --dedent --apply
     """
-    ast_commands.cmd_copy_to(selector, destination, append, dedent, apply, project_path=project)
+    with cli_error_handler():
+        ast_commands.cmd_copy_to(selector, destination, append, dedent, apply, project_path=project)
 
 
 

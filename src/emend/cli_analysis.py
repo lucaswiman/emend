@@ -299,21 +299,21 @@ def refs_cmd(
             reads_only=reads_only,
         )
 
-        if json_output:
-            refs_data = [
-                {
-                    "file_path": ref.file_path,
-                    "line": ref.line,
-                    "column": ref.column,
-                    "offset": ref.offset,
-                    "is_definition": ref.is_definition,
-                    "is_import": ref.is_import,
-                    "is_write": ref.is_write
-                }
-                for ref in references
-            ]
-            emit_json(refs_data)
-        else:
+        references = list(references)
+        refs_data: list[dict] = [
+            {
+                "file_path": ref.file_path,
+                "line": ref.line,
+                "column": ref.column,
+                "offset": ref.offset,
+                "is_definition": ref.is_definition,
+                "is_import": ref.is_import,
+                "is_write": ref.is_write
+            }
+            for ref in references
+        ]
+
+        if not json_output:
             for ref in references:
                 marker = ""
                 if ref.is_definition:
@@ -360,22 +360,21 @@ def refs_cmd(
                     if _sel_name.lower() in lnk.target_qualified_name.lower()
                 ]
                 if _matched:
-                    if json_output:
-                        dsl_refs = [
-                            {
-                                "file_path": lnk.dsl_symbol.host_file,
-                                "line": lnk.dsl_symbol.host_line,
-                                "column": lnk.dsl_symbol.host_col,
-                                "is_definition": False,
-                                "is_import": False,
-                                "is_write": False,
-                            }
-                            for lnk in _matched
-                        ]
-                        emit_json(dsl_refs)
-                    else:
+                    for lnk in _matched:
+                        refs_data.append({
+                            "file_path": lnk.dsl_symbol.host_file,
+                            "line": lnk.dsl_symbol.host_line,
+                            "column": lnk.dsl_symbol.host_col,
+                            "is_definition": False,
+                            "is_import": False,
+                            "is_write": False,
+                        })
+                    if not json_output:
                         for lnk in _matched:
                             print(f"{lnk.dsl_symbol.host_file}:{lnk.dsl_symbol.host_line}", flush=True)
+
+        if json_output:
+            emit_json(refs_data)
 
 
 

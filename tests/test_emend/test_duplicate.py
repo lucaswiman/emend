@@ -506,3 +506,149 @@ class TestProductionHeuristics:
             str(tmp_path), mode="exact", min_lines=1, min_score=999.0,
         )
         assert len(high_clusters) <= len(all_clusters)
+
+
+# ---------------------------------------------------------------------------
+# Bug: symbol_index misinterprets (line, col) as (start_line, end_line)
+# ---------------------------------------------------------------------------
+
+
+DUNDER_BOILERPLATE_DUP = '''\
+class Foo:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.name})"
+
+    def process(self):
+        x = 1
+        y = 2
+        z = 3
+        return x + y + z
+
+class Bar:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.name})"
+
+    def process(self):
+        a = 1
+        b = 2
+        c = 3
+        return a + b + c
+'''
+
+
+class TestSymbolIndexLineRanges:
+    """Regression: symbol_index must use (start_line, end_line) not (start_line, col)."""
+
+    def test_find_containing_symbol_uses_line_ranges(self, tmp_path):
+        """_find_containing_symbol should find symbols for lines deep in a method.
+
+        The bug: _build_qn_at returns def_loc[qn] = (start_line_0idx, col),
+        but the destructuring treats col as end_line. Since col is usually 0-8,
+        lines > col would never match the 'sl <= line <= el' check in
+        _find_containing_symbol. Even when it does match, it matches the
+        wrong symbol (a local variable instead of the enclosing function).
+        """
+        from emend.duplicate import _find_containing_symbol, _preparse_files
+
+        src = '''\
+class MyClass:
+    def method_a(self):
+        x = 1
+        y = 2
+        z = 3
+        w = 4
+        return x + y + z + w
+
+    def method_b(self):
+        a = 10
+        b = 20
+        return a + b
+'''
+        p = tmp_path / "test.py"
+        p.write_text(src)
+
+        _scope, file_data = _preparse_files([str(p)], symbol_scope=None)
+        _content, _tree, _qn_at, _def_loc, symbol_index = file_data[str(p)]
+
+        # symbol_index should only contain class/function definitions with
+        # proper (start_line, end_line) ranges — NOT local variables.
+        # With the bug, symbol_index entries use column numbers as end_line,
+        # and include local variables like x, y, z which pollute the lookup.
+        sym_names = [qn for qn, _sl, _el in symbol_index]
+        # Should contain the class and methods
+        assert any("MyClass" in n and "method" not in n for n in sym_names), (
+            f"Expected MyClass in symbol_index, got {sym_names}"
+        )
+        assert any("method_a" in n for n in sym_names), (
+            f"Expected method_a in symbol_index, got {sym_names}"
+        )
+        # Should NOT contain local variables like x, y, z, w, a, b
+        for qn, _sl, _el in symbol_index:
+            leaf = qn.rsplit(".", 1)[-1]
+            assert leaf not in ("x", "y", "z", "w", "a", "b", "self"), (
+                f"symbol_index should not contain local variable '{qn}', "
+                f"but it does. Full index: {symbol_index}"
+            )
+
+        # Verify line ranges are correct: method_a spans lines 1-6 (0-indexed)
+        method_a_entries = [(qn, sl, el) for qn, sl, el in symbol_index
+                           if "method_a" in qn and "method_b" not in qn]
+        assert len(method_a_entries) >= 1
+        _qn, sl, el = method_a_entries[0]
+        assert el > sl, (
+            f"end_line ({el}) should be > start_line ({sl}) for method_a. "
+            f"If el is a column number, this indicates the bug."
+        )
+        assert el >= 6, (
+            f"method_a's end_line should be >= 6 (0-indexed), got {el}. "
+            f"This looks like a column number, not an end line."
+        )
+
+        # Line 5 (0-indexed) is deep inside method_a.
+        # Should return method_a (or MyClass.method_a), not a local variable.
+        sym = _find_containing_symbol(5, symbol_index)
+        assert sym != "", (
+            f"Expected to find containing symbol for line 5, but got empty string. "
+            f"symbol_index={symbol_index}"
+        )
+        # Should be the method itself, not a local variable
+        leaf = sym.rsplit(".", 1)[-1]
+        assert leaf == "method_a", (
+            f"Expected innermost symbol for line 5 to be 'method_a', "
+            f"got '{sym}' (leaf='{leaf}')"
+        )
+
+    def test_dunder_boilerplate_suppressed_via_symbol_index(self, tmp_path):
+        """Dunder boilerplate suppression needs symbol names from symbol_index.
+
+        When symbol_index is broken, symbol names are wrong (e.g. local
+        variable names instead of the enclosing function), so
+        is_dunder_boilerplate() never fires, leading to false-positive
+        duplicate clusters for trivial __repr__/__eq__ methods.
+        """
+        from emend.duplicate import query_duplicates
+
+        _write_files(tmp_path, {"a.py": DUNDER_BOILERPLATE_DUP})
+
+        clusters = query_duplicates(
+            str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
+        )
+
+        # With a working symbol_index, member.symbol should be the actual
+        # enclosing class/method name, not a local variable.
+        for cluster in clusters:
+            for member in cluster.members:
+                if member.symbol:
+                    leaf = member.symbol.rsplit(".", 1)[-1]
+                    # symbol should never be a local variable or parameter
+                    assert leaf not in ("self", "name", "x", "y", "z", "a", "b", "c"), (
+                        f"member.symbol is '{member.symbol}' which looks like a "
+                        f"local variable, not an enclosing class/method. "
+                        f"This indicates symbol_index is using col as end_line."
+                    )

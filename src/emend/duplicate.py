@@ -182,6 +182,32 @@ def _build_qn_at(file_path: str, scope_resolver) -> tuple[dict[tuple[int, int], 
     return qn_at, def_loc
 
 
+def _build_symbol_index(content: str, ext: str = "py") -> list[tuple[str, int, int]]:
+    """Build ``(qn, start_line_0indexed, end_line_0indexed)`` from Rust symbol collector.
+
+    Only includes class and function/method definitions (not variables or
+    references), which is what ``_find_containing_symbol`` needs.
+    """
+    raw = emend_core.collect_symbols_from_str(content, ext=ext)
+    result: list[tuple[str, int, int]] = []
+
+    def _collect(syms: list[dict], prefix: str = "") -> None:
+        for d in syms:
+            kind = d.get("kind", "")
+            if kind in ("variable", "reference"):
+                continue
+            name = d.get("name", "")
+            qn = f"{prefix}.{name}" if prefix else name
+            # line and end_line are 1-indexed from collect_symbols_from_str
+            sl = d["line"] - 1
+            el = d["end_line"] - 1
+            result.append((qn, sl, el))
+            _collect(d.get("children", []), prefix=qn)
+
+    _collect(raw)
+    return sorted(result, key=lambda t: (t[1], -(t[2] - t[1])))
+
+
 def _is_bound_inside(qn: str, def_loc: dict[str, tuple[int, int]], subtree_start: int, subtree_end: int) -> bool:
     """Check if a qualified name's definition is inside the subtree's line range."""
     loc = def_loc.get(qn)
@@ -640,10 +666,8 @@ def _preparse_files(
             continue
 
         qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
-        symbol_index = sorted(
-            [(qn, sl, el) for qn, (sl, el) in def_loc.items()],
-            key=lambda t: (t[1], -(t[2] - t[1])),
-        )
+        ext = Path(file_path).suffix.lstrip(".") or "py"
+        symbol_index = _build_symbol_index(content, ext=ext)
         file_data[file_path] = (content, tree, qn_at, def_loc, symbol_index)
 
     return scope_resolver, file_data
