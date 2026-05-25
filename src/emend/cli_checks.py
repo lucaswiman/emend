@@ -42,7 +42,7 @@ def lint_cmd(
             raise typer.Exit(2)
 
         _lang = _state["language"]
-        resolved, _ = resolve_files(path, language=None)
+        resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
         violations = run_checks(
@@ -128,7 +128,7 @@ def policy_cmd(
             ]
             output = _json.dumps(data, indent=2)
             if output:
-                print(output, end='' if not output.endswith('\n') else '')
+                print(output, end='\n' if not output.endswith('\n') else '')
         else:
             current_policy = ""
             for v in violations:

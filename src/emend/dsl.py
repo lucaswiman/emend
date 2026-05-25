@@ -1028,8 +1028,12 @@ def resolve_jinja_links(
                         if blk_file == symbol.host_file and blk_line == symbol.host_line:
                             continue
                         # Prefer parent template blocks
-                        is_parent = symbol.host_file in extends_map
-                        confidence = 0.9 if is_parent else 0.7
+                        parent_name = extends_map.get(symbol.host_file)
+                        is_parent_block = parent_name is not None and (
+                            Path(blk_file).name == parent_name
+                            or blk_file.endswith(parent_name)
+                        )
+                        confidence = 0.9 if is_parent_block else 0.7
                         links.append(DslLink(
                             dsl_symbol=symbol,
                             target_qualified_name=f"{Path(blk_file).stem}.block.{block_name}",

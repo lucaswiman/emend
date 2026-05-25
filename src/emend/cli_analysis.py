@@ -102,7 +102,7 @@ def _trace_cmd_impl(
 
         output = format_violations(violations, show_trace=trace, json_output=json_output)
         if output:
-            print(output, end='' if not output.endswith('\n') else '')
+            print(output, end='\n' if not output.endswith('\n') else '')
 
         if violations:
             raise typer.Exit(1)
