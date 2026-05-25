@@ -114,6 +114,66 @@ def test_python_import_handler_add_import_future_only_prepend():
 
 
 # ---------------------------------------------------------------------------
+# PythonImportHandler — remove_import
+# ---------------------------------------------------------------------------
+
+
+def test_remove_import_plain_import():
+    """Remove a plain ``import foo`` statement."""
+    handler = PythonImportHandler()
+    source = "import os\nimport sys\n\nx = 1\n"
+    result = handler.remove_import(source, "os", None)
+    assert "import os" not in result
+    assert "import sys" in result
+    assert "x = 1" in result
+
+
+def test_remove_import_from_import_whole_line():
+    """Remove entire ``from foo import bar`` statement when name is None."""
+    handler = PythonImportHandler()
+    source = "from pathlib import Path\nimport os\n\nx = 1\n"
+    result = handler.remove_import(source, "pathlib", None)
+    assert "from pathlib" not in result
+    assert "import os" in result
+    assert "x = 1" in result
+
+
+def test_remove_import_named_from_multi():
+    """Remove one name from ``from foo import bar, baz`` leaving ``from foo import baz``."""
+    handler = PythonImportHandler()
+    source = "from os.path import join, exists\n\nx = 1\n"
+    result = handler.remove_import(source, "os.path", "join")
+    assert "join" not in result
+    assert "from os.path import exists" in result
+    assert "x = 1" in result
+
+
+def test_remove_import_only_name_removes_line():
+    """Remove the only name from ``from foo import bar`` removes the whole line."""
+    handler = PythonImportHandler()
+    source = "from pathlib import Path\n\nx = 1\n"
+    result = handler.remove_import(source, "pathlib", "Path")
+    assert "from pathlib" not in result
+    assert "x = 1" in result
+
+
+def test_remove_import_noop_when_not_found():
+    """No change when the import doesn't exist."""
+    handler = PythonImportHandler()
+    source = "import os\n\nx = 1\n"
+    result = handler.remove_import(source, "sys", None)
+    assert result == source
+
+
+def test_remove_import_noop_name_not_in_module():
+    """No change when the module matches but the name doesn't."""
+    handler = PythonImportHandler()
+    source = "from os.path import exists\n\nx = 1\n"
+    result = handler.remove_import(source, "os.path", "join")
+    assert result == source
+
+
+# ---------------------------------------------------------------------------
 # PythonCommentHandler — find_noqa_comments
 # ---------------------------------------------------------------------------
 

@@ -411,6 +411,16 @@ def load_trace_config(config_path: str) -> TraceConfig:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# TODO(tree-sitter): Replace these regexes with emend_core tree-sitter parsing.
+# The correct fix is to add a Rust function (e.g. extract_identifiers_from_expr)
+# that parses an expression fragment in the target language and walks the
+# tree-sitter AST to collect identifier, attribute, and subscript nodes —
+# replacing the three regexes below.  The inputs to _extract_identifiers() are
+# always small, already-extracted expression fragments (capture texts from
+# pattern matches, individual RHS expressions), NOT full source files, so the
+# regex approach is less fragile here than it would be over whole files.  But
+# the tree-sitter approach would still be more correct for multi-line
+# expressions, nested parens, and non-Python languages.
 _IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\b")
 # Matches dotted identifiers like "obj.field" or "a.b.c"
 _DOTTED_IDENT_RE = re.compile(

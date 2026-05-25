@@ -13,15 +13,16 @@
 | `cli_find.py` | `find` (and hidden aliases `grep`, `search`, `show`, `get`, `lookup`, `ls`) — unified search command. |
 | `cli_edit.py` | `set`, `rm`, `delete`, `add`, `replace`, `cp` (copy-to), `rename`, `mv` (move), `batch`, `saturate`. |
 | `cli_analysis.py` | `refs`, `graph`, `deadcode`, `impact`, `types`, `trace`, `facts`, `cfg`, `dsl-debug`, `dupes`. |
-| `cli_checks.py` | `lint`, `policy`, `check` (the unified runner that calls into `checks.py`). |
+| `cli_checks.py` | `lint`, `policy`, `check` (the unified runner that calls into `checks/engine.py`). |
 | `cli_map.py` | `map add` / `add-module` / `lookup` / `search` / `resolve` / `rm` / `rm-module` / `list-modules` / `update-module`. |
 | `cli_tooling.py` | `index`, `editor-search`, `editor-server`, `mcp`. |
+| `cli_output.py` | Shared output helpers: `format_json(data)` and `emit_json(data)` for consistent JSON serialisation across CLI commands. |
 
 #### Core engine
 
 | File | Purpose |
 |------|---------|
-| `transform.py` | Core engine: lookup, edit, add, find, replace, rename, move, references, callers, callees, graph, dead-code, impact, semantic-context. **8.5k lines** — see `ideas/roadmap-modularize/phase-1-split-transform.md` for the planned split. |
+| `transform/` | Core engine package (was `transform.py`). Re-exports the full public surface from 12 submodules so existing `from emend.transform import X` imports continue to work. Submodules: `__init__.py` (re-export facade), `cache.py` (SQLite parse.db and CozoDB facts.db management), `components.py` (component access, modification, and diff generation), `deadcode.py` (dead code detection: symbols, blocks, modules, safe deletion), `dispatch.py` (unified command dispatch: lookup, edit, add), `impact.py` (impact analysis: reverse-caller BFS closure, diff-to-selector mapping), `index.py` (symbol index, QN cache, and venv index management), `patterns.py` (pattern matching, find, replace, copy, and symbol source utilities), `project_iter.py` (project file iteration, pattern search, and module utilities), `refs.py` (reference finding, callers, callees, and call graph generation), `rename_move.py` (symbol and module rename/move operations), `venv_index.py` (separate venv symbol cache backed by `parse_venv.db`). |
 | `pattern.py` | Pattern parsing and Rust IR compilation with `$METAVAR` support. |
 | `component_selector.py` | Extended selector parser (`file.py::Sym[component][accessor]`). |
 | `ast_commands.py` | List-symbols and copy-to commands (uses Rust `emend_core` for symbol collection). |
@@ -37,11 +38,11 @@
 | `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class with `update_files()`/`remove_files()`/`build_from_project()`; Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`, `trace_propagation_datalog`, `interprocedural_trace_datalog`, `flow_rule_check_datalog`); JSON serialisation. |
 | `trace.py` | Trace/taint analysis. `TraceConfig`, `TraceSource`, `TraceSink` (optional `effect: writes($X)/reads($X)`), `TraceSanitizer` (`quantifier: all_paths/some_path`), `TraceScopeSanitizer` (scope-bounded kills), `TraceViolation`. Datalog-backed intra- and interprocedural analysis with fixed-point iteration. YAML `presets:` key for auto-loading framework rules. |
 | `trace_presets.py` | Framework preset loader: `get_preset()` reads `src/emend/presets/*.yaml` (Flask, Django, SQLAlchemy, FastAPI, Express, Axum, Diesel, Next.js, React, …); `merge_configs()` composes multiple configs. |
-| `lint.py` | Lint engine: pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml` (legacy `patterns.yaml` fallback). |
-| `policy.py` | Policy engine: `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml` (legacy `policies.yaml` fallback). |
-| `checks.py` | Unified rule runner — dispatches to lint + policy and normalises results into a single `CheckViolation`. CLI `check` and the MCP `check` tool both go through here. |
-| `flow_ir.py` | Shared flow IR (`FlowSpec`, `FlowViolation`, `WitnessStep`) used by `lint._check_flow_rule`, `policy._run_flow_check`, and `fact_graph.flow_rule_check_datalog`. `execute_flow_spec()` is the Datalog-first / Python-fallback bridge. |
-| `rules_config.py` | Shared YAML config loader: `DeadCodeConfig` dataclass, `load_rules_document()`, `LEGACY_PATTERNS_PATH`/`LEGACY_POLICIES_PATH` resolution. |
+| `lint.py` | Lint public API layer (~800 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml` (legacy `patterns.yaml` fallback). Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `policy.py` | Policy public API layer (~680 lines). `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml` (legacy `policies.yaml` fallback). Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `checks/` | Unified rule engine package (was `checks.py`). Public surface: `CheckViolation`, `run_checks` re-exported from `checks/__init__.py`. Submodules: `engine.py` (unified runner — dispatches to lint + policy, normalises results; CLI `check` and MCP `check` tool entry point), `flow.py` (shared flow IR: `FlowSpec`, `FlowViolation`, `WitnessStep`; `execute_flow_spec()` Datalog-first / Python-fallback bridge), `pattern_rules.py` (pattern-based lint rule matching), `rules_config.py` (YAML config loader: `DeadCodeConfig`, `load_rules_document()`), `structural.py` (structural pattern checks), `types.py` (oracle-driven type constraint checks), `custom.py` (custom expert query checks), `datalog.py` (CozoScript Datalog query checks), `deadcode.py` (dead code detection as a policy check wrapper), `duplicates.py` (duplicate code detection), `sequence.py` (temporal sequence / CFG-reachability checks). |
+| `flow_ir.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`FlowSpec`, `FlowViolation`, `WitnessStep`, `execute_flow_spec`, etc.) from `emend.checks.flow`. Import from `emend.checks.flow` directly in new code. |
+| `rules_config.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`DeadCodeConfig`, `load_rules_document()`, etc.) from `emend.checks.rules_config`. Import from `emend.checks.rules_config` directly in new code. |
 | `dsl.py` | Embedded-DSL support: `DslRegion`, `DslSymbol`, `DslLink`, `RegexNamedGroup`. Detects SQL regions (heuristics + magic comments), extracts symbols, resolves ORM links (SQLAlchemy/Django) and regex named-group references, computes DSL impact. |
 | `duplicate.py` | Duplicate-code detection: AST canonicalisation, Merkle hashing, sibling-sequence winnowing. Backs `analyze dupes`, lint, and MCP. |
 | `duplicate_heuristics.py` | Boilerplate-suppression heuristics for `duplicate.py` (abstract stubs, trivial validators, `__init__` self-assignments, dunder boilerplate, …). |
@@ -197,7 +198,7 @@ default is dry-run), `--json` (machine-readable output), `--project`
 ### Active and recent roadmaps
 
 - `ideas/roadmap-simplify-codebase/` — line-level cleanup. Phases A–E done; left as reference for the audit numbers and design decisions (e.g. why `flow_ir.py` and `language_plugins.py` survive).
-- `ideas/roadmap-modularize/` — structural splits and engine consolidation: `transform.py` → package; lint/policy/checks/flow_ir → `checks/` package; single-source CLI registration; legacy YAML cleanup; `editor_search.py` `ast` purge; `mcp_server.py` decomposition. Sequence: 1 → 3 → 2 → 6 → 5 → 4.
+- `ideas/old-roadmaps/roadmap-modularize/` — structural splits and engine consolidation. Phases 1–3 complete: `transform.py` was split into the `transform/` package (phase 1), lint/policy/checks/flow_ir were moved into the `checks/` package (phase 2), and single-source CLI registration was implemented (phase 3). Phases 4–6 pending: legacy YAML cleanup (4), `editor_search.py` `ast` purge (5), `mcp_server.py` decomposition (6). Original planned sequence: 1 → 3 → 2 → 6 → 5 → 4.
 - `ideas/old-roadmaps/roadmap/` — completed Datalog/CFG/trace cutover phases (1–18); referenced by `test_phase*.py` regression suites that pin the new behaviour.
 - Other top-level `ideas/*.md` — exploratory notes (`auto-reindex`, `feature-work`, `mcp-review`, `next-analyses`, `querying-rewrite`, `static-analysis-literature-review`, `symbolic`, `FUTURE_WORK`).
 
@@ -230,7 +231,7 @@ All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on
 
 ### Cross-Project Operations
 
-Cross-project functions use `visit_project_ts()` in `transform.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
+Cross-project functions use `visit_project_ts()` in `transform/project_iter.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
 
 - `find_references()` — uses `PyScopeResolver.references_in_file()` for scope-aware reference finding
 - `rename_symbol()` — uses scope resolver + byte-range edits via `PyFileTransform`
@@ -244,7 +245,7 @@ Cross-project functions use `visit_project_ts()` in `transform.py`, which iterat
 Lint rules and policies live in a single document: `.emend/rules.yaml`.
 Legacy `.emend/patterns.yaml` and `.emend/policies.yaml` are still
 accepted as fallbacks (loader: `rules_config.load_rules_document`); see
-`ideas/roadmap-modularize/index.md` Phase 4 for planned removal.
+`ideas/old-roadmaps/roadmap-modularize/index.md` Phase 4 for planned removal.
 
 A rules document mixes the following top-level keys:
 
@@ -256,7 +257,7 @@ A rules document mixes the following top-level keys:
 - `policies` — declarative policy checks (flow / structural / type / datalog / custom / sequence / deadcode), each runnable independently.
 - `trace` — `labels`, `sources`, `sinks`, `sanitizers`, `scope_sanitizers`, optional `presets:` list to compose framework rules from `src/emend/presets/*.yaml`.
 
-`checks.py` is the unified entry point that loads the document once and
+`checks/engine.py` is the unified entry point that loads the document once and
 dispatches to lint and policy engines, normalising results into
 `CheckViolation`. Prefer `emend check` in CI; `emend lint` and `emend
 policy` filter to subsets of the kinds.
@@ -280,7 +281,7 @@ populator, and a Datalog rule — no Python control-flow code.
 
 ### Impact analysis
 
-`find_impact()` in `transform.py`:
+`find_impact()` in `transform/impact.py`:
 
 - BFS transitive reverse-caller closure via `find_callers()` over the FactGraph.
 - `_parse_diff_to_selectors()` maps git diff hunks to symbol selectors using line ranges from `SourceLocFact`.
@@ -308,7 +309,7 @@ Two-tier cache: in-memory LRU + SQLite `type_cache` table in
 
 ### Dead code detection
 
-`find_dead_code()` in `transform.py`:
+`find_dead_code()` in `transform/deadcode.py`:
 
 - Single-pass O(files) analysis via `PyScopeResolver`.
 - `_find_source_root()` detects `src/` layout via `pyproject.toml`.
@@ -372,7 +373,7 @@ make test TESTS="-k default"
 
 ## Adding Commands
 
-1. Implement the engine function in `transform.py` (for tree-sitter-based operations) or `ast_commands.py` (for symbol listing). Read-only analysis usually has a counterpart in `fact_graph.py` if it needs Datalog.
+1. Implement the engine function in the appropriate `transform/` submodule (for tree-sitter-based operations) or `ast_commands.py` (for symbol listing). Read-only analysis usually has a counterpart in `fact_graph.py` if it needs Datalog.
 2. Add the Typer command function to the appropriate `cli_*.py` file:
    - Editing operations → `cli_edit.py`.
    - Read-only analysis → `cli_analysis.py`.
@@ -384,9 +385,7 @@ make test TESTS="-k default"
 4. If the command should be exposed to LLM clients, add an MCP tool wrapper in `mcp_server.py`.
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
-> Note: `ideas/roadmap-modularize/phase-3-single-source-cli-registration.md`
-> proposes consolidating step 2/3 so `cli.py` is the only registration
-> site. Until that lands, keep both in sync.
+> Note: Phase 3 of `ideas/old-roadmaps/roadmap-modularize/` (single-source CLI registration) has landed; `cli.py` is now the canonical registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
 
 ## Code Conventions
 
