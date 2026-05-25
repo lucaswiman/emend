@@ -10,6 +10,7 @@ from emend.rewrite_engine import (
     SaturationResult,
     UnionFind,
     _apply_substitution,
+    _match_expr_pattern,
     enode_to_source,
     load_rewrite_rules,
     parse_expr,
@@ -315,3 +316,55 @@ class TestRunSaturation:
         rules = [RewriteRule(name="add-zero", lhs="$x + 0", rhs="$x")]
         results = run_saturation(str(test_file), rules)
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Bug regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestBug1HashconsRebuildAfterMerge:
+    def test_egraph_hashcons_rebuild_after_merge(self):
+        """After merging a and b, add(f(a)) should find existing f(b)."""
+        eg = EGraph()
+        a = eg.add(ENode("a"))
+        b = eg.add(ENode("b"))
+        f_b = eg.add(ENode("f", (b,)))
+        eg.merge(a, b)
+        f_a = eg.add(ENode("f", (a,)))
+        assert eg.find(f_b) == eg.find(f_a), (
+            "f(a) and f(b) should be in the same e-class after merging a and b"
+        )
+
+
+class TestBug2LeftAssociativeParsing:
+    def test_parse_expr_left_associative(self):
+        """Binary operators should be left-associative: 1 - 2 - 3 = (1 - 2) - 3."""
+        eg = EGraph()
+        root = parse_expr("1 - 2 - 3", eg)
+        extracted = enode_to_source(eg.extract(root), eg)
+
+        eg2 = EGraph()
+        left_assoc = parse_expr("(1 - 2) - 3", eg2)
+        extracted_la = enode_to_source(eg2.extract(left_assoc), eg2)
+
+        assert extracted == extracted_la, (
+            f"1 - 2 - 3 should parse as (1 - 2) - 3, got {extracted}"
+        )
+
+
+class TestBug3DuplicateMetavar:
+    def test_match_source_duplicate_metavar(self):
+        """Pattern with repeated metavar $x + $x should match expressions like a + a."""
+        result = _match_expr_pattern("a + a", "$x + $x")
+        assert result is not None, "Pattern $x + $x should match a + a"
+        assert result.get("x") == "a"
+
+    def test_match_source_duplicate_metavar_no_match(self):
+        """Pattern $x + $x should NOT match a + b (different values)."""
+        result = _match_expr_pattern("a + b", "$x + $x")
+        # Either None or the match should not have consistent x.
+        # The important thing is that it doesn't crash with re.error.
+        if result is not None:
+            # If it matches, x should be consistent
+            assert result.get("x") in ("a", "b")

@@ -111,7 +111,35 @@ class EGraph:
             if merged not in self._classes:
                 self._classes[merged] = set()
             self._classes[merged] |= self._classes.pop(other)
+        self.rebuild()
         return merged
+
+    def rebuild(self) -> None:
+        """Re-canonicalize all ENodes after merges, updating _hashcons and _classes.
+
+        After merging e-classes, _hashcons may contain entries keyed by
+        old (non-canonical) child IDs. This method re-canonicalizes every
+        ENode so that subsequent add() calls correctly find existing entries.
+        """
+        new_hashcons: dict[ENode, int] = {}
+        new_classes: dict[int, set[ENode]] = {}
+        for eid, nodes in self._classes.items():
+            canonical_eid = self._uf.find(eid)
+            canonicalized_nodes: set[ENode] = set()
+            for node in nodes:
+                canon_node = self._canonical_node(node)
+                canonicalized_nodes.add(canon_node)
+                existing = new_hashcons.get(canon_node)
+                if existing is not None and self._uf.find(existing) != canonical_eid:
+                    # Two previously distinct e-classes now have the same
+                    # canonical ENode — merge them.
+                    canonical_eid = self._uf.union(canonical_eid, self._uf.find(existing))
+                new_hashcons[canon_node] = canonical_eid
+            if canonical_eid not in new_classes:
+                new_classes[canonical_eid] = set()
+            new_classes[canonical_eid] |= canonicalized_nodes
+        self._hashcons = new_hashcons
+        self._classes = new_classes
 
     def find(self, eclass_id: int) -> int:
         """Find the canonical representative of an e-class."""
@@ -318,7 +346,7 @@ def _ast_size_cost(node: ENode, costs: dict[int, int]) -> int:
 # ---------------------------------------------------------------------------
 
 _BINOP_RE = re.compile(
-    r"^(.+?)\s*([+\-*//%@&|^]|<<|>>|==|!=|<=|>=|<|>|\*\*|//|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
+    r"^(.+)\s*([+\-*//%@&|^]|<<|>>|==|!=|<=|>=|<|>|\*\*|//|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
 )
 _UNOP_RE = re.compile(r"^(not|~|-)\s+(.+)$")
 _CALL_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([^)]*)\)$")
@@ -479,11 +507,18 @@ def _match_expr_pattern(
 
     # Fallback: simple regex-based matching
     regex_pattern = re.escape(pattern)
+    seen_vars: set[str] = set()
     for m in re.finditer(r"\\\$([A-Za-z_]\w*)", regex_pattern):
         var_name = m.group(1)
-        regex_pattern = regex_pattern.replace(
-            m.group(0), f"(?P<{var_name}>[^,)]+?)", 1
-        )
+        if var_name in seen_vars:
+            regex_pattern = regex_pattern.replace(
+                m.group(0), f"(?P={var_name})", 1
+            )
+        else:
+            seen_vars.add(var_name)
+            regex_pattern = regex_pattern.replace(
+                m.group(0), f"(?P<{var_name}>[^,)]+?)", 1
+            )
     try:
         m = re.fullmatch(regex_pattern, source_text.strip())
         if m:

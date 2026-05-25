@@ -242,6 +242,28 @@ class TestStructuralCheck:
         assert violations[0].policy_name == "no-print"
         assert violations[0].severity == "warning"
 
+    def test_structural_check_via_run_checks(self, tmp_path):
+        """StructuralCheck policies should not be filtered out in unified checks."""
+        from emend.checks.engine import run_checks
+        config_file = _write_rules(tmp_path, {
+            "policies": [{
+                "name": "no-eval",
+                "severity": "error",
+                "description": "No eval calls",
+                "checks": [{"type": "structural", "pattern": "eval($X)"}],
+            }],
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("result = eval('1+1')\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            mode="policy",
+        )
+        assert len(violations) >= 1
+        assert any(v.rule_name == "no-eval" for v in violations)
+
 
 class TestFormatViolations:
     def test_text_format(self):

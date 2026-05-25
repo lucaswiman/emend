@@ -416,7 +416,7 @@ def trace_analysis(
         }
         return json.dumps(data, indent=2)
 
-    violations = run_trace_analysis(files, trace_config, label_filter=label, engine=engine)
+    violations = run_trace_analysis(files, trace_config, label_filter=label)
     return format_violations(violations, show_trace=trace, json_output=True)
 
 
@@ -578,7 +578,6 @@ def analyze(
             path=path or ".",
             mode=mode if mode not in {"graph", "deadcode", "impact", "semantic_context", "flow", "trace", "duplicates"} else "all",
             file_path=file_path,
-            limit=max_depth,
             min_lines=5,
             min_score=0.0,
             cross_file=True,

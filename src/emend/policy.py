@@ -271,7 +271,7 @@ def _parse_sequence_check(raw: dict[str, Any]) -> SequenceCheck:
         if len(parts) != 2:
             raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
         nt_patterns = []
-        for item in _as_list(path_val.get("not_through", [])):
+        for item in _as_list(yaml_key(path_val, "not_through") or []):
             if isinstance(item, dict):
                 nt_patterns.append(item.get("pattern", ""))
             else:

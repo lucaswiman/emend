@@ -1133,6 +1133,27 @@ class TestReplacePattern:
 
         assert len(matches) == 2
 
+    def test_replace_with_where_parameter(self, tmp_path):
+        """replace_pattern should accept where= without crashing."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "def test_foo():\n"
+            "    print('hello')\n"
+            "\n"
+            "def main():\n"
+            "    print('world')\n"
+        )
+
+        diff, count = replace_pattern(
+            "print($X)", "log($X)", str(test_file),
+            where="def test_*", apply=True,
+        )
+        content = test_file.read_text()
+        assert count >= 1
+        assert "log(" in content
+
 
 class TestImportsComponent:
     """Tests for [imports] component at module level."""

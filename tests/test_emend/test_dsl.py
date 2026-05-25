@@ -537,6 +537,32 @@ class TestRefsDslSymbols:
         ])
         assert result.exit_code == 0
 
+    def test_refs_json_single_valid_json_with_dsl(self, tmp_path):
+        """refs --json should output a single valid JSON array, not two."""
+        model_file = tmp_path / "models.py"
+        model_file.write_text(
+            'class User:\n'
+            '    __tablename__ = "users"\n'
+            '    pass\n'
+        )
+        query_file = tmp_path / "queries.py"
+        query_file.write_text(
+            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
+        )
+        import json
+        from typer.testing import CliRunner
+        from emend.cli import app
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "refs", str(model_file) + "::User",
+            "--json", "--project", str(tmp_path),
+        ])
+        assert result.exit_code == 0
+        output = result.stdout.strip()
+        if output:
+            data = json.loads(output)
+            assert isinstance(data, list), "Output should be a single JSON array"
+
 
 class TestGotoLocalDslFallback:
     """Tests for DSL fallback in goto_definition."""

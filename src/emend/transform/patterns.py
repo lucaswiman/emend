@@ -888,7 +888,7 @@ def replace_pattern(
     # Find all matches using find_pattern (already migrated to tree-sitter fast paths)
     matches = find_pattern(
         pattern_str, file_path, scope=scope,
-        inside=inside, not_inside=not_inside, where=where,
+        inside=inside, not_inside=not_inside,
         type_oracle=type_oracle, language=language,
         source_override=source_code,
     )

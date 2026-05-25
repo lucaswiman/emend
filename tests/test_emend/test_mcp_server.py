@@ -317,6 +317,33 @@ def test_grammar_and_cookbook_all_returns_full_document():
     assert "emend edit replace" in result
 
 
+def test_trace_analysis_intraprocedural_no_crash(tmp_path):
+    """trace_analysis without interprocedural should not crash with TypeError."""
+    p = tmp_path / "example.py"
+    p.write_text(
+        "def handler(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+    result = trace_analysis(
+        path=str(p),
+        from_pattern="request.args.get($X)",
+        to_pattern="cursor.execute($Q)",
+        interprocedural=False,
+    )
+    data = json.loads(result)
+    assert isinstance(data, dict) or isinstance(data, list)
+
+
+def test_analyze_duplicates_uses_correct_limit(tmp_path):
+    """analyze(mode='duplicates') should not use max_depth as the limit."""
+    p = tmp_path / "example.py"
+    p.write_text("def foo():\n    pass\n")
+    result = analyze(mode="duplicates", path=str(tmp_path))
+    data = json.loads(result)
+    assert isinstance(data, dict) or isinstance(data, list)
+
+
 def test_mcp_help():
     """The mcp command --help should work."""
     result = subprocess.run(

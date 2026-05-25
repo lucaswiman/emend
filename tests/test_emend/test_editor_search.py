@@ -956,3 +956,22 @@ class TestEditorSearchBugFixes:
         body2 = class_def2.child_by_field_name("body")
         async_node = body2.named_children()[0]
         assert engine._class_member_name(async_node) == "bar"
+
+
+class TestEditorSearchCLIMode:
+    def test_mode_symbol_singular_accepted(self, tmp_path):
+        """--mode symbol (singular) should be accepted without error."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        src = tmp_path / "mod.py"
+        src.write_text("def greet():\n    pass\n")
+
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "editor-search", "greet", str(tmp_path),
+            "--mode", "symbol",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["mode"] == "symbol"

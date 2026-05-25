@@ -203,7 +203,7 @@ def editor_search_cmd(
             result = engine.search_references(query, limit=limit)
         elif mode == "pattern":
             result = engine.search_pattern(query, limit=limit, file_scope=file_scope)
-        elif mode == "symbols":
+        elif mode in ("symbol", "symbols"):
             result = engine.search_symbols(query, limit=limit, file_scope=file_scope, kind=kind)
         elif mode == "selector":
             result = engine.resolve_selector(query, limit=limit)

@@ -131,7 +131,7 @@ def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[Ch
 # Rule kinds owned by the lint engine (pattern/flow/deadcode rules).
 LINT_KINDS = frozenset({"match", "flow", "deadcode"})
 # Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
-POLICY_KINDS = frozenset({"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
+POLICY_KINDS = frozenset({"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
 # All known kinds.
 ALL_KINDS = LINT_KINDS | POLICY_KINDS
 
@@ -201,7 +201,7 @@ def run_checks(
             )
         )
 
-    policy_kinds = {"structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
+    policy_kinds = {"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
     if run_policy_engine and (kind is None or kind in policy_kinds):
         policies = load_policies(config)
         selected_policies = _filter_policies(
