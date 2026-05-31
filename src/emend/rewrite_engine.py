@@ -345,8 +345,11 @@ def _ast_size_cost(node: ENode, costs: dict[int, int]) -> int:
 # Expression parsing (simplified)
 # ---------------------------------------------------------------------------
 
+_MULTI_CHAR_BINOP_RE = re.compile(
+    r"^(.+?)\s*(\*\*|//|<<|>>)\s+(.+)$"
+)
 _BINOP_RE = re.compile(
-    r"^(.+)\s*([+\-*//%@&|^]|<<|>>|==|!=|<=|>=|<|>|\*\*|//|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
+    r"^(.+)\s*([+\-*/%@&|^]|==|!=|<=|>=|<|>|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
 )
 _UNOP_RE = re.compile(r"^(not|~|-)\s+(.+)$")
 _CALL_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([^)]*)\)$")
@@ -394,7 +397,8 @@ def parse_expr(expr: str, egraph: EGraph) -> int:
         return egraph.add(ENode(op=f"num:{expr}"))
 
     # Binary operations (lowest precedence first)
-    m = _BINOP_RE.match(expr)
+    # Try multi-char operators first to avoid greedy LHS consuming part of the operator
+    m = _MULTI_CHAR_BINOP_RE.match(expr) or _BINOP_RE.match(expr)
     if m:
         left = parse_expr(m.group(1), egraph)
         op = m.group(2).strip()

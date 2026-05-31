@@ -353,6 +353,42 @@ class TestBug2LeftAssociativeParsing:
         )
 
 
+class TestBug_MultiCharOperatorParsing:
+    """Greedy (.+) in _BINOP_RE causes **, //, <<, >> to be misparsed."""
+
+    def test_parse_expr_power_operator(self):
+        """'a ** b' should parse as binop:** with children a and b."""
+        eg = EGraph()
+        root = parse_expr("a ** b", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop:**", f"expected binop:** but got {node.op}"
+
+    def test_parse_expr_floor_division(self):
+        """'a // b' should parse as binop:// with children a and b."""
+        eg = EGraph()
+        root = parse_expr("a // b", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop://", f"expected binop:// but got {node.op}"
+
+    def test_parse_expr_left_shift(self):
+        """'a << b' should parse as binop:<< with children a and b."""
+        eg = EGraph()
+        root = parse_expr("a << b", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop:<<", f"expected binop:<< but got {node.op}"
+
+    def test_parse_expr_right_shift(self):
+        """'a >> b' should parse as binop:>> with children a and b."""
+        eg = EGraph()
+        root = parse_expr("a >> b", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop:>>", f"expected binop:>> but got {node.op}"
+
+
 class TestBug3DuplicateMetavar:
     def test_match_source_duplicate_metavar(self):
         """Pattern with repeated metavar $x + $x should match expressions like a + a."""

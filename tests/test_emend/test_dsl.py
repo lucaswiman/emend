@@ -59,6 +59,17 @@ class TestNamingHelpers:
         assert _singularize("user") == "user"
         assert _singularize("class") == "class"  # ends in ss
 
+    def test_singularize_ches_shes(self):
+        """Words ending in -ches/-shes need 'es' stripped, not just 's'."""
+        assert _singularize("watches") == "watch"
+        assert _singularize("batches") == "batch"
+        assert _singularize("churches") == "church"
+        assert _singularize("dishes") == "dish"
+        assert _singularize("crashes") == "crash"
+        # vowel + ches: singular ends in -che, just strip -s
+        assert _singularize("caches") == "cache"
+        assert _singularize("niches") == "niche"
+
     def test_singularize_already_singular_ending_in_s(self):
         """Words like 'status' are already singular—must not strip the trailing 's'."""
         # 'status' ends in 's' but NOT 'ss', so the naive rule would strip it to 'statu'.

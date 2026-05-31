@@ -958,6 +958,26 @@ class TestEditorSearchBugFixes:
         assert engine._class_member_name(async_node) == "bar"
 
 
+class TestEditorSearchGetKbBug:
+    def test_search_include_map_does_not_raise_name_error(self, tmp_path):
+        """search(include_map=True) must not raise NameError for _get_kb.
+
+        Bug: editor_search.py line 656 calls _get_kb(self) but the function
+        is named _get_store. This causes a NameError at runtime.
+        """
+        from emend.editor_search import EditorSearchEngine
+
+        src = tmp_path / "mod.py"
+        src.write_text("def greet():\n    pass\n")
+
+        engine = EditorSearchEngine(str(tmp_path))
+        try:
+            result = engine.search("greet", include_map=True)
+            assert result is not None
+        finally:
+            engine.close()
+
+
 class TestEditorSearchCLIMode:
     def test_mode_symbol_singular_accepted(self, tmp_path):
         """--mode symbol (singular) should be accepted without error."""
