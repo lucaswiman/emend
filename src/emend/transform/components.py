@@ -444,15 +444,17 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
                 j += 1
             transform.remove_range(start_byte, j)
         else:
-            # Look for preceding comma
+            # Look for preceding comma (skip whitespace AND newlines for
+            # multi-line parameter lists where the comma is on a previous line).
             i = start_byte
-            while i > 0 and source_bytes[i-1:i] in (b' ', b'\t'):
+            while i > 0 and source_bytes[i-1:i] in (b' ', b'\t', b'\n', b'\r'):
                 i -= 1
-            
+
             if i > 0 and source_bytes[i-1:i] == b',':
-                # Remove from preceding comma through the item end
+                # Remove from preceding comma through the item end.
+                # Also strip trailing whitespace before the comma on the
+                # same line so "x: int , y" → "x: int", not "x: int ".
                 j = i - 1
-                # Also remove whitespace before the comma
                 while j > 0 and source_bytes[j-1:j] in (b' ', b'\t'):
                     j -= 1
                 transform.remove_range(j, end_byte)

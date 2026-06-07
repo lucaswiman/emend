@@ -421,3 +421,43 @@ def test_edit_no_operation(tmp_path):
 
     with pytest.raises(ValueError, match="No operation"):
         cmd_edit(selector_str=f"{test_file}::foo[params]")
+
+
+def test_remove_last_param_multiline_no_trailing_comma(tmp_path):
+    """Removing the last parameter in a multi-line list must also remove
+    the preceding comma on the previous line."""
+    test_file = tmp_path / "test.py"
+    test_file.write_text("def func(\n    x: int,\n    y: str\n):\n    pass\n")
+
+    selector = ExtendedSelector(
+        file_path=str(test_file),
+        symbol_path=["func"],
+        component="params",
+        accessor="y",
+    )
+    remove_component(selector, apply=True)
+
+    content = test_file.read_text()
+    assert "y" not in content
+    assert "x: int," not in content, (
+        "Trailing comma left after removing last param in multi-line list"
+    )
+    assert "x: int" in content
+
+
+def test_cli_edit_selector_with_brackets(tmp_path):
+    """Selectors containing brackets (e.g. [params]) must not be
+    misinterpreted as Typer subcommand names (regression for typer._click
+    vs click.UsageError mismatch)."""
+    test_file = tmp_path / "test.py"
+    test_file.write_text("def func(x: int) -> str:\n    return ''\n")
+
+    result = runner.invoke(
+        app,
+        ["edit", f"{test_file}::func[returns]", "int", "--apply"],
+    )
+    assert result.exit_code == 0, (
+        f"exit_code={result.exit_code}\nstdout: {result.stdout}\n"
+        f"stderr: {getattr(result, 'stderr', '')}"
+    )
+    assert "-> int:" in test_file.read_text()
