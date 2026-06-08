@@ -228,10 +228,14 @@ def parse_where_clause(values: list[str]) -> dict:
 class _LegacyEditGroup(typer.core.TyperGroup):
     """Route unknown `edit` forms to `edit set` for legacy compatibility."""
 
+    _usage_error = getattr(
+        typer, "_click", click
+    ).exceptions.UsageError
+
     def resolve_command(self, ctx: click.Context, args: list[str]):
         try:
             return super().resolve_command(ctx, args)
-        except click.UsageError:
+        except (click.UsageError, self._usage_error):
             return super().resolve_command(ctx, ["set", *args])
 
 
