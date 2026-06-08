@@ -70,7 +70,7 @@ def run_duplicate_code_check(
 
     file_path_set = set(file_paths)
     for cluster in clusters:
-        for member in cluster.members[:1]:
+        for member in cluster.members:
             if member.file not in file_path_set:
                 continue
             others = [m for m in cluster.members if m != member]

@@ -755,6 +755,13 @@ def _singularize(name: str) -> str:
     # "ses" (e.g. "buses") → strip "es"
     if name.endswith("ses"):
         return name[:-2]
+    # "shes" (e.g. "dishes", "crashes") → strip "es"
+    if name.endswith("shes"):
+        return name[:-2]
+    # "ches" with a consonant before (e.g. "watches", "batches") → strip "es"
+    # Vowel + ches (e.g. "caches", "niches") falls through to the generic -s rule
+    if name.endswith("ches") and len(name) > 4 and name[-5] not in "aeiou":
+        return name[:-2]
     # Words ending in "us" or "is" are almost always already singular in English
     # (e.g. "status", "nexus", "corpus", "analysis") – do not strip the "s".
     if name.endswith("s") and not name.endswith("ss") and not name.endswith("us") and not name.endswith("is"):

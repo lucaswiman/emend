@@ -653,7 +653,7 @@ class EditorSearchEngine:
         t0 = time.monotonic()
 
         if include_map:
-            kb = _get_kb(self)
+            kb = _get_store(self)
             resolved = kb.resolve_selector(query)
             if resolved and resolved != query:
                 query = resolved

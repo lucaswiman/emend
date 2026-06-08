@@ -652,3 +652,44 @@ class MyClass:
                         f"local variable, not an enclosing class/method. "
                         f"This indicates symbol_index is using col as end_line."
                     )
+
+
+# ---------------------------------------------------------------------------
+# Bug: run_duplicate_code_check only inspects first cluster member
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateCheckFirstMemberBug:
+    """run_duplicate_code_check uses cluster.members[:1], skipping other members."""
+
+    def test_reports_violation_when_first_member_not_in_file_set(self, tmp_path):
+        """If the first cluster member is NOT in the linted file set but a
+        later member IS, the violation should still be reported."""
+        from unittest.mock import patch, MagicMock
+        from emend.checks.duplicates import run_duplicate_code_check, DuplicateCodeConfig
+
+        member_a = MagicMock()
+        member_a.file = str(tmp_path / "not_linted.py")
+        member_a.start_line = 1
+
+        member_b = MagicMock()
+        member_b.file = str(tmp_path / "linted.py")
+        member_b.start_line = 10
+
+        cluster = MagicMock()
+        cluster.members = [member_a, member_b]
+        cluster.explanation = "exact duplicate"
+
+        config = DuplicateCodeConfig(enabled=True, min_lines=1, min_score=0.0)
+
+        with patch("emend.duplicate.query_duplicates", return_value=[cluster]):
+            violations = run_duplicate_code_check(
+                [str(tmp_path / "linted.py")],
+                config,
+                str(tmp_path),
+            )
+
+        assert len(violations) >= 1, (
+            "Expected a violation for linted.py but got none — "
+            "run_duplicate_code_check only checks the first cluster member"
+        )
