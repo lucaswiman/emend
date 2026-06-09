@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["typer", "lark", "pyyaml", "pyrefly"]
+dependencies = ["typer", "click", "lark", "pyyaml", "pyrefly"]
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
