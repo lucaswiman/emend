@@ -693,3 +693,77 @@ class TestDuplicateCheckFirstMemberBug:
             "Expected a violation for linted.py but got none — "
             "run_duplicate_code_check only checks the first cluster member"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug: winnowing emits a fingerprint for sequences shorter than the window
+# ---------------------------------------------------------------------------
+
+
+class TestWinnowFingerprints:
+    """_winnow_fingerprints must follow standard winnowing semantics."""
+
+    def test_short_sequence_emits_no_fingerprints(self):
+        """A sequence shorter than the window produces no fingerprints."""
+        from emend.duplicate import _winnow_fingerprints, WINNOW_W
+
+        for length in range(1, WINNOW_W):
+            hashes = [bytes([i]) * 32 for i in range(length)]
+            assert _winnow_fingerprints(hashes, w=WINNOW_W) == set(), (
+                f"sequence of length {length} (< window {WINNOW_W}) "
+                "should yield no fingerprints"
+            )
+
+    def test_single_hash_emits_no_fingerprint(self):
+        from emend.duplicate import _winnow_fingerprints
+
+        assert _winnow_fingerprints([b"\x01" * 32], w=4) == set()
+
+    def test_full_window_emits_fingerprint(self):
+        """A sequence at least as long as the window produces fingerprints."""
+        from emend.duplicate import _winnow_fingerprints
+
+        hashes = [bytes([i]) * 32 for i in range(4)]
+        assert _winnow_fingerprints(hashes, w=4) == {min(hashes)}
+
+
+# ---------------------------------------------------------------------------
+# Bug: duplicate-code config is never wired through run_checks
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateCodeViaRunChecks:
+    """run_checks must honour the ``duplicate`` section of rules.yaml."""
+
+    def test_duplicate_code_section_produces_violations(self, tmp_path):
+        import yaml
+        from emend.checks.engine import run_checks
+
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir()
+        config_file = config_dir / "rules.yaml"
+        config_file.write_text(yaml.dump({
+            "duplicate": {
+                "enabled": True,
+                "min-lines": 3,
+                "min-score": 0.0,
+                "cross-file-only": True,
+            },
+        }))
+
+        funcs = NON_TRIVIAL_DUP.split("\n\n\n")
+        assert len(funcs) == 2
+        (tmp_path / "a.py").write_text(funcs[0] + "\n")
+        (tmp_path / "b.py").write_text(funcs[1] + "\n")
+
+        violations = run_checks(
+            [str(tmp_path / "a.py"), str(tmp_path / "b.py")],
+            config=str(config_file),
+            project_path=str(tmp_path),
+        )
+        dup = [v for v in violations if v.rule_name == "duplicate-code"]
+        assert len(dup) >= 1, (
+            "Expected duplicate-code violations from run_checks but got none — "
+            "the duplicate section was not wired through"
+        )
+        assert all(v.kind == "duplicate-code" for v in dup)

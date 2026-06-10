@@ -377,8 +377,18 @@ class RegexCommentHandler(CommentHandler):
         for lineno, line in enumerate(source.splitlines(), 1):
             m = self._noqa_tagged_pat.search(line)
             if m:
-                tags = {t.strip() for t in m.group(1).split(",") if t.strip()}
-                result[lineno] = tags
+                # Mirror PythonCommentHandler: only ``emend:``-prefixed tags
+                # affect emend rules, and they are stored stripped of the
+                # prefix.  A foreign-only tag like ``// noqa: E501`` must not
+                # become a suppress-all and must not suppress emend rules, so
+                # the line is simply not registered.
+                tags = set()
+                for t in m.group(1).split(","):
+                    t = t.strip()
+                    if t.startswith("emend:"):
+                        tags.add(t[len("emend:"):])
+                if tags:
+                    result[lineno] = tags
             elif self._noqa_bare_pat.search(line):
                 result[lineno] = None  # bare noqa suppresses all
         return result

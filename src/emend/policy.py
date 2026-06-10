@@ -106,6 +106,12 @@ def _build_unified_policy(
     if isinstance(flow_def, dict):
         flow_from = yaml_key(flow_def, "from", "flows_from")
         flow_to = yaml_key(flow_def, "to", "flows_to")
+        # Unwrap dict-form ``{pattern: ...}`` to the pattern string, mirroring
+        # the lint engine (checks/pattern_rules.py).
+        if isinstance(flow_from, dict):
+            flow_from = flow_from.get("pattern")
+        if isinstance(flow_to, dict):
+            flow_to = flow_to.get("pattern")
         if flow_from and flow_to:
             not_through = expand_not_through(yaml_key(flow_def, "not_through"), macros)
             checks.append(FlowCheck(
@@ -156,16 +162,6 @@ def _build_unified_policy(
             query = datalog_def.get("query") or datalog_def.get("cozoscript")
             if query:
                 checks.append(DatalogCheck(cozoscript=str(query)))
-
-    if isinstance(rule_def.get("flow"), dict) and not checks:
-        flow_def = rule_def["flow"]
-        if flow_def.get("from") and flow_def.get("to"):
-            checks.append(FlowCheck(
-                flows_from=expand_macros(str(flow_def["from"]), macros),
-                flows_to=expand_macros(str(flow_def["to"]), macros),
-                not_through=expand_macros(str(flow_def.get("not-through")), macros) if flow_def.get("not-through") else None,
-                label=flow_def.get("label", name),
-            ))
 
     if not checks:
         return None

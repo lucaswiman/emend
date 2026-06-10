@@ -963,8 +963,10 @@ def _run_trace_datalog(
     scope_kill_lines: list[tuple[str, str, str, int, int]] = []
     sink_metadata: dict[tuple[str, str, str, str, int], tuple[int, str, str]] = {}
 
-    # For intra-block line ordering
-    matched_source_lines: list[tuple[str, str, str, int, int]] = []
+    # For intra-block line ordering.  Includes the source variable so that
+    # multiple same-label sources in one basic block keep distinct witnesses
+    # (the (fp, fq, lbl, bid) key alone collides — see test_trace_line_numbers).
+    matched_source_lines: list[tuple[str, str, str, str, int, int]] = []
     sanitizer_lines: list[tuple[str, str, str, str, int, int]] = []
     sink_lines: list[tuple[str, str, str, int, int]] = []
 
@@ -1011,7 +1013,7 @@ def _run_trace_datalog(
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
                         matched_sources.append((file_path, fq, var, bid, src_def.label))
-                        matched_source_lines.append((file_path, fq, src_def.label, bid, m.line))
+                        matched_source_lines.append((file_path, fq, src_def.label, var, bid, m.line))
             if src_def.type_constraint and matched_sources:
                 matched_sources = _filter_by_receiver_type(
                     matched_sources,
@@ -1162,6 +1164,12 @@ def _run_trace_datalog(
         group_source_lines = [
             sl for sl in matched_source_lines if sl[2] in group_labels
         ]
+        # The Datalog source_in_block rule expects (fp, fq, lbl, bid, line)
+        # tuples; drop the var dimension (used only for Python witness lookup)
+        # and dedupe so block-line ordering relations are unaffected.
+        datalog_source_lines = list({
+            (sl[0], sl[1], sl[2], sl[4], sl[5]) for sl in group_source_lines
+        })
 
         taint_facts.extend(graph.trace_propagation_datalog(
             sources=group_sources,
@@ -1169,7 +1177,7 @@ def _run_trace_datalog(
             sanitizers=group_sanitizers if group_sanitizers else None,
             effect_sinks=group_effect_sinks if group_effect_sinks else None,
             sanitizer_quantifier=san_quantifier,
-            source_lines=group_source_lines if group_source_lines else None,
+            source_lines=datalog_source_lines if datalog_source_lines else None,
             sanitizer_lines=group_sanitizer_lines if group_sanitizer_lines else None,
             sink_lines=group_sink_lines if group_sink_lines else None,
             scope_kills=group_scope_kills if group_scope_kills else None,
@@ -1183,6 +1191,18 @@ def _run_trace_datalog(
         sink_block: int,
         effect_kind: str,
     ) -> int:
+        # DefUseFact.def_line/use_line and MethodCallFact.line are all
+        # 0-indexed (see fact_graph.py: the method-call populator emits
+        # ``line - 1`` and CFG def-use facts use 0-based lines).  Convert to
+        # 1-indexed for display.  ``None`` line fields fall through to the
+        # next candidate; a legitimate 0 (first line of file) must be treated
+        # as present, so we cannot use the ``a or b`` idiom here.
+        def _first_line(*candidates: "int | None") -> int | None:
+            for c in candidates:
+                if c is not None:
+                    return c
+            return None
+
         try:
             if effect_kind == "writes":
                 for du in graph.def_uses(file_path=file_path, func_qn=func_qn):
@@ -1191,16 +1211,18 @@ def _run_trace_datalog(
                     if du.kind not in {"write", "aug_write"}:
                         continue
                     if du.var_name == sink_var or du.var_name.startswith(f"{sink_var}."):
-                        return du.def_line or du.use_line or 0
+                        raw = _first_line(du.def_line, du.use_line)
+                        return raw + 1 if raw is not None else 0
                 for mc in graph.method_calls(file_path=file_path, func_qn=func_qn):
                     if mc.block_id == sink_block and mc.receiver == sink_var:
-                        return mc.line
+                        return mc.line + 1 if mc.line is not None else 0
             elif effect_kind == "reads":
                 for du in graph.def_uses(file_path=file_path, func_qn=func_qn):
                     if du.use_block != sink_block or du.kind != "read":
                         continue
                     if du.var_name == sink_var or du.var_name.startswith(f"{sink_var}."):
-                        return du.use_line or du.def_line or 0
+                        raw = _first_line(du.use_line, du.def_line)
+                        return raw + 1 if raw is not None else 0
         except Exception:
             logger.debug(
                 "Failed to resolve effect sink line for %s:%s %s in block %s",
@@ -1212,11 +1234,14 @@ def _run_trace_datalog(
             )
         return 0
 
-    # Build source line lookup: (fp, fq, label, block_id) -> line number
-    source_line_lookup: dict[tuple[str, str, str, int], int] = {}
+    # Build source line lookup: (fp, fq, label, var, block_id) -> line number.
+    # The var dimension is required: two same-label sources in one basic block
+    # would otherwise collide on (fp, fq, label, bid) and one witness would
+    # overwrite the other (see test_trace_line_numbers).
+    source_line_lookup: dict[tuple[str, str, str, str, int], int] = {}
     for sl in matched_source_lines:
-        key = (sl[0], sl[1], sl[2], sl[3])  # fp, fq, label, bid
-        source_line_lookup[key] = sl[4]  # line
+        key = (sl[0], sl[1], sl[2], sl[3], sl[4])  # fp, fq, label, var, bid
+        source_line_lookup[key] = sl[5]  # line
 
     # Convert TraceFlowFact -> TraceViolation
     violations: list[TraceViolation] = []
@@ -1249,8 +1274,11 @@ def _run_trace_datalog(
 
         # Build trace steps: source → sink
         trace_steps: list[TraceStep] = []
+        # tf.source_line holds the source *block id* (see TraceFlowFact);
+        # include tf.source_var so multiple sources in the same block resolve
+        # to the correct per-variable witness line.
         src_line = source_line_lookup.get(
-            (tf.file_path, tf.func_qn, tf.label, tf.source_line), 0
+            (tf.file_path, tf.func_qn, tf.label, tf.source_var, tf.source_line), 0
         )
         if src_line:
             trace_steps.append(TraceStep(

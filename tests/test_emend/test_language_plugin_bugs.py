@@ -212,6 +212,59 @@ class TestBareNoqaSupport:
 
 
 # ============================================================================
+# Bug 5b: noqa tag filtering must mirror Python (emend:-prefixed only)
+# ============================================================================
+
+class TestNoqaTagFilteringConsistency:
+    """RegexCommentHandler must filter noqa tags to emend:-prefixed ones and
+    store them stripped of the prefix, mirroring PythonCommentHandler.  A
+    foreign-only tag like `// noqa: E501` must NOT become a suppress-all and
+    must NOT suppress emend rules."""
+
+    def test_emend_prefixed_tag_stored_stripped(self):
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: emend:my-rule\n"
+        noqa = handler.find_noqa_comments(source)
+        assert noqa.get(1) == {"my-rule"}
+
+    def test_foreign_only_tag_not_suppress_all(self):
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: E501\n"
+        noqa = handler.find_noqa_comments(source)
+        # Must not be registered at all (a None entry would mean suppress-all).
+        assert 1 not in noqa
+
+    def test_foreign_only_tag_does_not_suppress_emend_rule(self):
+        from emend.checks.pattern_rules import is_noqa_suppressed
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: E501\n"
+        noqa = handler.find_noqa_comments(source)
+        ranges = [(ln, ln, tags) for ln, tags in noqa.items()]
+        assert is_noqa_suppressed(1, "some-rule", ranges) is False
+
+    def test_emend_prefixed_tag_suppresses_matching_rule(self):
+        from emend.checks.pattern_rules import is_noqa_suppressed
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: emend:some-rule\n"
+        noqa = handler.find_noqa_comments(source)
+        ranges = [(ln, ln, tags) for ln, tags in noqa.items()]
+        assert is_noqa_suppressed(1, "some-rule", ranges) is True
+
+    def test_mixed_tags_keep_only_emend(self):
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: E501,emend:keep-me\n"
+        noqa = handler.find_noqa_comments(source)
+        assert noqa.get(1) == {"keep-me"}
+
+    def test_bare_noqa_still_suppress_all(self):
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa\n"
+        noqa = handler.find_noqa_comments(source)
+        assert 1 in noqa
+        assert noqa[1] is None
+
+
+# ============================================================================
 # Bug 6: tsconfig.json JSONC parsing
 # ============================================================================
 

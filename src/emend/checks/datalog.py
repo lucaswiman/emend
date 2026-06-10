@@ -55,16 +55,31 @@ def run_datalog_check(
         except ValueError:
             return None
 
+    # Identify columns by name only.  Positional guessing is unsafe: a query
+    # like ``?[count, name]`` has no file/line columns, and treating column 0
+    # as the file path (or coercing column 1 into an int line) silently
+    # corrupts data or raises.  When a column is absent we use a sentinel and
+    # rely on the witness (below) to preserve the full row.
     _fp = _col_idx("file_path")
-    _f = _col_idx("file")
-    fp_idx = _fp if _fp is not None else _f if _f is not None else 0
-    _ln = _col_idx("line")
-    line_idx = _ln if _ln is not None else (1 if len(headers) > 1 else 0)
+    fp_idx = _fp if _fp is not None else _col_idx("file")
+    line_idx = _col_idx("line")
     msg_idx = _col_idx("message")
 
     for row in rows:
-        file_path = str(row[fp_idx]) if fp_idx is not None and fp_idx < len(row) else "<unknown>"
-        line = int(row[line_idx]) if line_idx is not None and line_idx < len(row) else 0
+        file_path = (
+            str(row[fp_idx])
+            if fp_idx is not None and fp_idx < len(row)
+            else "<project>"
+        )
+        line = 0
+        if line_idx is not None and line_idx < len(row):
+            try:
+                line = int(row[line_idx])
+            except (ValueError, TypeError):
+                # Malformed/non-numeric line value: keep going with line 0 so
+                # one bad row doesn't crash the whole check.  The raw value
+                # remains available in the witness.
+                line = 0
         message = str(row[msg_idx]) if msg_idx is not None and msg_idx < len(row) else policy.description
         witness = [f"{h}={v}" for h, v in zip(headers, row)]
         violations.append(PolicyViolation(

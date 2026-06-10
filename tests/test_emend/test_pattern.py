@@ -75,3 +75,56 @@ class TestCompilePattern:
         assert ir is not None
         assert ir["args"][0] == {"type": "metavar", "name": "X"}
         assert ir["args"][1] == {"type": "ellipsis", "name": "REST"}
+
+    def test_compile_dict_ellipsis_single(self):
+        """A single dict with key:value plus ellipsis metavar compiles."""
+        from emend.pattern import compile_pattern_to_rust_ir
+
+        ir = compile_pattern_to_rust_ir('{"k": 1, $...A}')
+        assert ir is not None
+        assert ir["type"] == "dict"
+
+    def test_compile_repeated_dict_ellipsis(self):
+        """Same ellipsis metavar in two dict literals compiles correctly.
+
+        Regression: the dict-context `: None` fix-up only processed the first
+        occurrence of the placeholder, leaving later occurrences as bare
+        identifiers (invalid dict syntax) so compilation returned None.
+        """
+        from emend.pattern import compile_pattern_to_rust_ir
+
+        ir = compile_pattern_to_rust_ir('f({"k": 1, $...A}, {"k": 2, $...A})')
+        assert ir is not None
+        assert ir["type"] == "call"
+        assert len(ir["args"]) == 2
+        for arg in ir["args"]:
+            assert arg["type"] == "dict"
+            # Each dict should carry the ellipsis capture for A.
+            assert any(
+                el.get("type") == "ellipsis" and el.get("name") == "A"
+                for el in arg["elements"]
+            )
+
+
+class TestOracleTypeConstraint:
+    """Tests for :type[...] / :returns[...] oracle constraints in patterns."""
+
+    def test_returns_single_level_nesting(self):
+        pat = parse_pattern("$X:returns[Dict[str, int]]")
+        assert pat.metavars[0].type_constraint == "returns[Dict[str, int]]"
+
+    def test_returns_double_level_nesting(self):
+        """Regression: two levels of bracket nesting must parse fully."""
+        pat = parse_pattern("$X:returns[Dict[str, List[int]]]")
+        assert pat.metavars[0].type_constraint == "returns[Dict[str, List[int]]]"
+
+    def test_type_double_level_nesting_split(self):
+        """The constraint splits into kind + inner type, preserving nesting."""
+        from emend.pattern import parse_oracle_type_constraint
+
+        pat = parse_pattern("$X:type[Optional[Dict[str, int]]]")
+        tc = pat.metavars[0].type_constraint
+        assert tc == "type[Optional[Dict[str, int]]]"
+        kind, inner = parse_oracle_type_constraint(tc)
+        assert kind == "type"
+        assert inner == "Optional[Dict[str, int]]"

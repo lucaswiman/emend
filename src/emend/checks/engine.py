@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from emend.lint import LintViolation, LintRule
     from emend.policy import PolicyViolation, Policy, FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck, DatalogCheck, CustomCheck, SequenceCheck
     from emend.rules_config import DeadCodeConfig
+    from emend.checks.duplicates import DuplicateCodeConfig
 
 
 @dataclass
@@ -82,11 +83,15 @@ def _lint_violations_to_checks(
     violations: "list[LintViolation]",
     rules_by_name: "dict[str, LintRule]",
     deadcode_config: "DeadCodeConfig | None",
+    duplicate_code_config: "DuplicateCodeConfig | None" = None,
 ) -> list[CheckViolation]:
     normalized: list[CheckViolation] = []
     for violation in violations:
         if deadcode_config is not None and violation.rule_name == deadcode_config.rule_name:
             kind = "deadcode"
+            severity = "warning"
+        elif duplicate_code_config is not None and violation.rule_name == duplicate_code_config.rule_name:
+            kind = "duplicate-code"
             severity = "warning"
         else:
             rule = rules_by_name.get(violation.rule_name)
@@ -128,8 +133,8 @@ def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[Ch
     ]
 
 
-# Rule kinds owned by the lint engine (pattern/flow/deadcode rules).
-LINT_KINDS = frozenset({"match", "flow", "deadcode"})
+# Rule kinds owned by the lint engine (pattern/flow/deadcode/duplicate rules).
+LINT_KINDS = frozenset({"match", "flow", "deadcode", "duplicate-code"})
 # Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
 POLICY_KINDS = frozenset({"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
 # All known kinds.
@@ -161,7 +166,7 @@ def run_checks(
         language: Source language for parsing.
         project_path: Project root for cross-file analysis.
     """
-    from emend.lint import load_rules, run_lint
+    from emend.lint import load_rules, load_duplicate_code_config, run_lint
     from emend.policy import load_policies, run_policy_checks
 
     normalized: list[CheckViolation] = []
@@ -169,27 +174,40 @@ def run_checks(
     run_lint_engine = mode in (None, "lint", "all")
     run_policy_engine = mode in (None, "policy", "all")
 
-    lint_kinds = {"match", "flow", "deadcode"}
+    lint_kinds = {"match", "flow", "deadcode", "duplicate-code"}
     if run_lint_engine and (kind is None or kind in lint_kinds):
         lint_rules, _macros, deadcode_config = load_rules(config)
+        duplicate_code_config = load_duplicate_code_config(config)
         selected_lint_rules = lint_rules
         if rule_name is not None:
             selected_lint_rules = [rule for rule in lint_rules if rule.name == rule_name]
-        if kind is not None and kind != "deadcode":
+        if kind is not None and kind not in ("deadcode", "duplicate-code"):
             selected_lint_rules = [rule for rule in selected_lint_rules if _lint_kind(rule) == kind]
+
+        run_duplicates = (
+            duplicate_code_config is not None
+            and (kind is None or kind == "duplicate-code")
+            and (rule_name is None or rule_name == duplicate_code_config.rule_name)
+        )
+        if not run_duplicates:
+            duplicate_code_config = None
+
         lint_rule_filter = None
-        if rule_name is not None and kind == "deadcode":
+        if rule_name is not None and kind in ("deadcode", "duplicate-code"):
             lint_rule_filter = rule_name
-        elif rule_name is not None and selected_lint_rules:
+        elif rule_name is not None and (selected_lint_rules or run_duplicates):
             lint_rule_filter = rule_name
         elif kind == "deadcode":
             lint_rule_filter = "deadcode"
+        elif kind == "duplicate-code" and duplicate_code_config is not None:
+            lint_rule_filter = duplicate_code_config.rule_name
         lint_violations = run_lint(
             selected_lint_rules,
             paths,
             fix=fix,
             rule_filter=lint_rule_filter,
             deadcode_config=deadcode_config if kind in (None, "deadcode") else None,
+            duplicate_code_config=duplicate_code_config,
             project_path=project_path,
             language=language,
         )
@@ -198,12 +216,23 @@ def run_checks(
                 lint_violations,
                 {rule.name: rule for rule in lint_rules},
                 deadcode_config,
+                duplicate_code_config,
             )
         )
 
     policy_kinds = {"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
     if run_policy_engine and (kind is None or kind in policy_kinds):
-        policies = load_policies(config)
+        # A rules document may legitimately contain no policy-bearing keys
+        # (e.g. only a ``duplicate`` or ``trace`` section); skip the policy
+        # engine then.  Malformed policies must still raise, so only the
+        # missing-key case is treated as empty.
+        from emend.checks.rules_config import load_rules_document
+
+        data, _path = load_rules_document(config)
+        if "policies" in data or "rules" in data:
+            policies = load_policies(config)
+        else:
+            policies = []
         selected_policies = _filter_policies(
             policies,
             rule_name=rule_name,
