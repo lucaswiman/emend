@@ -733,7 +733,44 @@ class TestWinnowFingerprints:
 
 
 class TestDuplicateCodeViaRunChecks:
-    """run_checks must honour the ``duplicate`` section of rules.yaml."""
+    """run_checks must honour the duplicate-code section of rules.yaml.
+
+    The canonical key is ``duplicate-code`` (matching the rule name, the
+    violation kind, and ``--kind duplicate-code``); ``duplicate`` is accepted
+    as a legacy alias.
+    """
+
+    def test_canonical_duplicate_code_key(self, tmp_path):
+        import yaml
+        from emend.lint import load_duplicate_code_config
+
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir()
+        config_file = config_dir / "rules.yaml"
+        config_file.write_text(yaml.dump({
+            "duplicate-code": {"enabled": True, "min-lines": 3},
+        }))
+
+        config = load_duplicate_code_config(str(config_file))
+        assert config is not None
+        assert config.enabled
+        assert config.min_lines == 3
+
+    def test_legacy_duplicate_key_still_accepted(self, tmp_path):
+        import yaml
+        from emend.lint import load_duplicate_code_config
+
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir()
+        config_file = config_dir / "rules.yaml"
+        config_file.write_text(yaml.dump({
+            "duplicate": {"enabled": True, "min-lines": 4},
+        }))
+
+        config = load_duplicate_code_config(str(config_file))
+        assert config is not None
+        assert config.enabled
+        assert config.min_lines == 4
 
     def test_duplicate_code_section_produces_violations(self, tmp_path):
         import yaml

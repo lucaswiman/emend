@@ -253,7 +253,7 @@ A rules document mixes the following top-level keys:
 - `rules` — pattern lint rules: `find` + optional `not-inside` / `message` / `replace`. `--fix` applies `replace`.
 - Flow rules: `flows-from` + `flows-to` + optional `not-through`, executed via `flow_ir.execute_flow_spec` (Datalog-first, falls back to the Python tracker).
 - `deadcode` — `DeadCodeConfig`: `entry-point-decorators`, `entry-point-names`, `exclude-paths` (globs).
-- `duplicate-code` — `DuplicateCodeConfig` for duplicate detection thresholds.
+- `duplicate-code` — `DuplicateCodeConfig` for duplicate detection thresholds (`duplicate` accepted as a legacy alias).
 - `policies` — declarative policy checks (flow / structural / type / datalog / custom / sequence / deadcode), each runnable independently.
 - `trace` — `labels`, `sources`, `sinks`, `sanitizers`, `scope_sanitizers`, optional `presets:` list to compose framework rules from `src/emend/presets/*.yaml`.
 
