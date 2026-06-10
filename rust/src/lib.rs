@@ -240,7 +240,8 @@ fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<V
 
 /// Collect all identifier and attribute positions from Python source.
 ///
-/// Returns a list of (name, line, start_col, end_col) tuples (1-indexed).
+/// Returns a list of (name, line, start_col, end_col) tuples, all 0-indexed
+/// (tree-sitter native rows and byte columns).
 #[pyfunction]
 fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, usize, usize)>> {
     Ok(pattern::collect_identifier_positions(source))
@@ -250,6 +251,10 @@ fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, us
 ///
 /// Returns a list of (start_byte, end_byte, start_line, start_col, end_line, end_col, content)
 /// tuples where content is the unquoted inner text of the string.
+///
+/// Convention exception: lines are **1-indexed**, columns are **0-indexed**.
+/// This matches the `DslRegion` contract (host_start_line 1-based,
+/// host_start_col 0-based) consumed by `dsl.py`.
 ///
 /// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
 /// Defaults to "py" if not provided.
@@ -263,6 +268,9 @@ fn collect_string_literals(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, u
 ///
 /// Returns a list of (start_line, start_col, text) tuples where text is the
 /// full comment text including the leading comment prefix (e.g. `# ...`).
+///
+/// Convention exception: `start_line` is **1-indexed**, `start_col` is
+/// **0-indexed**, matching `collect_string_literals`.
 ///
 /// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
 /// Defaults to "py" if not provided.

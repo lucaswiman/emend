@@ -62,8 +62,8 @@ def _get_structured_imports(source: str) -> list[dict]:
                 "names": [],
                 "start_byte": start_byte,
                 "end_byte": end_byte,
-                "start_line": lineno_0idx + 1,  # 1-indexed
-                "end_line": lineno_0idx + 1,     # 1-indexed
+                "start_line": lineno_0idx,  # 0-indexed, matching StructuredImport
+                "end_line": lineno_0idx,     # 0-indexed, matching StructuredImport
                 "is_plain": False,
             })
 
@@ -108,13 +108,13 @@ class PythonImportHandler(ImportHandler):
         lines = source_code.splitlines(keepends=True)
         import_line = import_str.rstrip("\n") + "\n"
 
-        first_import_line = None  # 1-indexed
-        last_import_line = None  # 1-indexed
-        last_future_line = None  # 1-indexed
+        first_import_line = None  # 0-indexed
+        last_import_line = None  # 0-indexed
+        last_future_line = None  # 0-indexed
 
         for imp in imports:
-            sl = imp["start_line"]  # 1-indexed
-            el = imp["end_line"]  # 1-indexed
+            sl = imp["start_line"]  # 0-indexed
+            el = imp["end_line"]  # 0-indexed
             if first_import_line is None:
                 first_import_line = sl
             last_import_line = el
@@ -122,12 +122,14 @@ class PythonImportHandler(ImportHandler):
             if not imp["is_plain"] and imp.get("module") == "__future__":
                 last_future_line = el
 
+        # ``lines`` is a 0-indexed list; to insert *after* line index N we
+        # insert at list position N + 1.
         if position == 0:
-            insert_at = last_future_line or 0
+            insert_at = (last_future_line + 1) if last_future_line is not None else 0
             lines.insert(insert_at, import_line)
         else:
             if last_import_line is not None:
-                lines.insert(last_import_line, import_line)
+                lines.insert(last_import_line + 1, import_line)
             else:
                 lines.insert(0, import_line)
 
@@ -190,9 +192,9 @@ class PythonImportHandler(ImportHandler):
                             return f"{n} as {a}" if a else n
 
                         # Preserve indentation of the original line.
-                        start_line_1idx = imp["start_line"]
+                        start_line0 = imp["start_line"]  # 0-indexed
                         lines = source.splitlines(keepends=True)
-                        orig_line = lines[start_line_1idx - 1] if start_line_1idx - 1 < len(lines) else ""
+                        orig_line = lines[start_line0] if start_line0 < len(lines) else ""
                         indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
                         new_stmt = (
                             f"{indent}from {module} import "

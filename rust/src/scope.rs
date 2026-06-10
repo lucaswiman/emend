@@ -284,9 +284,9 @@ pub struct StructuredImport {
     pub start_byte: usize,
     /// Byte offset of the end of the import statement node.
     pub end_byte: usize,
-    /// 1-based start line.
+    /// 0-based start line.
     pub start_line: usize,
-    /// 1-based end line.
+    /// 0-based end line.
     pub end_line: usize,
     /// True for plain `import X` statements, false for `from X import Y`.
     pub is_plain: bool,
@@ -2427,8 +2427,8 @@ impl ScopeResolver {
                     let qn = self.compute_qn(&ctx.scopes, &ctx.scope_index, ctx.file_path, scope_id, &name);
                     let loc = Location {
                         file: ctx.file_path.to_path_buf(),
-                        line: n.start_position().row + 1,
-                        column: n.start_position().column + 1,
+                        line: n.start_position().row,
+                        column: n.start_position().column,
                         byte_offset: n.start_byte(),
                     };
                     ctx.definitions.push((qn, loc));
@@ -2696,8 +2696,8 @@ impl ScopeResolver {
                     names,
                     start_byte: node.start_byte(),
                     end_byte: node.end_byte(),
-                    start_line: node.start_position().row + 1,
-                    end_line: node.end_position().row + 1,
+                    start_line: node.start_position().row,
+                    end_line: node.end_position().row,
                     is_plain: false,
                 });
                 return;
@@ -2712,8 +2712,8 @@ impl ScopeResolver {
                     names,
                     start_byte: node.start_byte(),
                     end_byte: node.end_byte(),
-                    start_line: node.start_position().row + 1,
-                    end_line: node.end_position().row + 1,
+                    start_line: node.start_position().row,
+                    end_line: node.end_position().row,
                     is_plain: true,
                 });
                 return;

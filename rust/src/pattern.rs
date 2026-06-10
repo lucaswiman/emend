@@ -500,8 +500,9 @@ const PYTHON_KEYWORDS: &[&str] = &["True", "False", "None"];
 
 /// Collect all identifier and attribute positions from Python source.
 ///
-/// Returns a list of (name, line, start_col_1indexed, end_col_1indexed) tuples.
-/// Used by type_oracle to collect symbol positions from the parse tree.
+/// Returns a list of (name, line, start_col, end_col) tuples, all 0-indexed
+/// (tree-sitter native rows and byte columns).  Used by type_oracle to collect
+/// symbol positions from the parse tree.
 pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, usize)> {
     let tree = match parse_python(source) {
         Some(t) => t,
@@ -518,9 +519,9 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
                 let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                     .unwrap_or("");
                 if !PYTHON_KEYWORDS.contains(&text) {
-                    let line = node.start_position().row + 1;
-                    let start_col = node.start_position().column + 1;
-                    let end_col = node.end_position().column + 1;
+                    let line = node.start_position().row;
+                    let start_col = node.start_position().column;
+                    let end_col = node.end_position().column;
                     results.push((text.to_string(), line, start_col, end_col));
                 }
             }
@@ -528,9 +529,9 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
                 // For `obj.attr`, emit the full dotted name
                 let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                     .unwrap_or("");
-                let line = node.start_position().row + 1;
-                let start_col = node.start_position().column + 1;
-                let end_col = node.end_position().column + 1;
+                let line = node.start_position().row;
+                let start_col = node.start_position().column;
+                let end_col = node.end_position().column;
                 results.push((text.to_string(), line, start_col, end_col));
                 // Don't recurse into children — we've captured the whole attribute
                 return;
@@ -558,6 +559,9 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
 /// Returns a list of `(start_byte, end_byte, start_line, start_col, end_line, end_col, content)`
 /// tuples where `content` is the unquoted string content (inner text only, no surrounding
 /// quote characters).  Both single-quoted and triple-quoted strings are handled correctly.
+///
+/// Convention exception: lines are **1-indexed**, columns are **0-indexed** (matches the
+/// `DslRegion` contract consumed by `dsl.py`).
 ///
 /// The `ext` parameter selects the tree-sitter language (e.g. `"py"`, `"ts"`, `"rs"`).
 pub fn collect_string_literals(source: &str, ext: &str) -> Vec<(u32, u32, u32, u32, u32, u32, String)> {
@@ -664,6 +668,8 @@ fn strip_string_quotes(s: &str) -> &str {
 ///
 /// Returns a list of `(start_line, start_col, text)` tuples where `text` is the
 /// full comment text including the leading comment prefix (e.g. `# ...`).
+///
+/// Convention exception: `start_line` is **1-indexed**, `start_col` is **0-indexed**.
 ///
 /// The `ext` parameter selects the tree-sitter language (e.g. `"py"`, `"ts"`, `"rs"`).
 pub fn collect_comments(source: &str, ext: &str) -> Vec<(u32, u32, String)> {
