@@ -856,3 +856,51 @@ class TestMCPTools:
 
         results = json.loads(map_read(kind="mapping", query="Foo"))
         assert len(results) == 0
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafety:
+    def test_concurrent_writes_lose_nothing(self, store, tmp_path):
+        """Concurrent adds from many threads must all survive, and the YAML
+        on disk must stay parseable.  Cross-process access is unsupported
+        (last writer wins); within one process the store is locked.
+        """
+        import threading
+
+        n_threads, n_each = 8, 25
+        barrier = threading.Barrier(n_threads)
+
+        def add_many(tid: int) -> None:
+            barrier.wait()
+            for i in range(n_each):
+                store.add_mapping(IdentifierMapping(
+                    source_project="svc",
+                    source_identifier=f"sym_{tid}_{i}",
+                    target_project="gw",
+                    target_identifier=f"tgt_{tid}_{i}",
+                ))
+                store.add_module_mapping(ModuleMapping(
+                    module_prefix=f"mod_{tid}_{i}",
+                    repo="org/repo",
+                ))
+
+        threads = [
+            threading.Thread(target=add_many, args=(tid,))
+            for tid in range(n_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(store.list_mappings(limit=10_000)) == n_threads * n_each
+        assert len(store.list_module_mappings()) == n_threads * n_each
+
+        # A fresh store reading the file from disk sees consistent YAML.
+        reloaded = MappingStore(str(tmp_path))
+        assert len(reloaded.list_mappings(limit=10_000)) == n_threads * n_each
+        assert len(reloaded.list_module_mappings()) == n_threads * n_each

@@ -13,5 +13,5 @@ ELLIPSIS: "..."
 UNDERSCORE: "_"
 METAVAR_NAME: /[A-Z][A-Z0-9_]*/
 SIMPLE_TYPE_CONSTRAINT: /:!?(?:expr|stmt|identifier|int|str|float|call|attr|any)/
-ORACLE_TYPE_CONSTRAINT: /:(?:type|returns)\[(?:[^\[\]]*(?:\[[^\[\]]*\])?)*\]/
+ORACLE_TYPE_CONSTRAINT: /:(?:type|returns)\[(?:[^\[\]]*(?:\[(?:[^\[\]]*(?:\[[^\[\]]*\])?)*\])?)*\]/
 code_chunk: /[^$:]+/ | ":"

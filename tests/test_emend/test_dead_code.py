@@ -840,6 +840,79 @@ class TestStringsCountAsReferences:
         # "foo" is only 3 chars — string matching should not protect it
         assert "foo" in dead_names
 
+    def test_comment_mention_does_not_count_as_reference(self, tmp_path):
+        """A name appearing only in a comment must NOT keep the symbol alive."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        main_file = project / "main.py"
+        main_file.write_text(
+            "def process_data():\n"
+            "    return 1\n"
+        )
+        other_file = project / "other.py"
+        other_file.write_text(
+            "# TODO: fix process_data later\n"
+            "x = 1\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project), strings_count_as_references=True,
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        # The only mention is in a comment, so it should still be dead.
+        assert "process_data" in dead_names
+
+    def test_own_docstring_mention_does_not_count_when_in_comment(self, tmp_path):
+        """A name appearing only in a comment in the same file stays dead."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        main_file = project / "main.py"
+        main_file.write_text(
+            "def lonely_function():\n"
+            "    return 1\n"
+            "\n"
+            "# lonely_function is not called anywhere\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project), strings_count_as_references=True,
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "lonely_function" in dead_names
+
+    def test_getattr_string_literal_still_suppresses(self, tmp_path):
+        """A name inside a genuine string literal still suppresses (cross-file)."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        mod_file = project / "mod.py"
+        mod_file.write_text(
+            "def func_name():\n"
+            "    return 1\n"
+        )
+        caller_file = project / "caller.py"
+        caller_file.write_text(
+            "import mod\n"
+            "fn = getattr(mod, \"func_name\")\n"
+        )
+
+        dead = list(find_dead_code(
+            str(project), strings_count_as_references=True,
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "func_name" not in dead_names
+
     def test_cli_no_strings(self, tmp_path, run_emend_cmd):
         """CLI --no-strings disables string-based reference detection."""
         project = tmp_path / "project"

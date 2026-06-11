@@ -40,6 +40,26 @@ def test_detect_language_path_object():
     assert detect_language(Path("foo.ts")) == "typescript"
 
 
+def test_detect_language_uppercase_extension():
+    # Case-insensitive filesystems can yield uppercase suffixes.
+    assert detect_language("SCRIPT.PY") == "python"
+    assert detect_language("app.TS") == "typescript"
+    assert detect_language("Component.TSX") == "typescript"
+    assert detect_language("lib.RS") == "rust"
+    assert detect_language("Mixed.Py") == "python"
+
+
+def test_matches_language_uppercase_extension():
+    assert matches_language("a.PY", "python") is True
+    assert matches_language("a.TS", "typescript") is True
+
+
+def test_is_source_file_uppercase_extension():
+    assert is_source_file("foo.PY") is True
+    assert is_source_file("foo.TS") is True
+    assert is_source_file("README.TXT") is False
+
+
 # ---------------------------------------------------------------------------
 # get_extensions
 # ---------------------------------------------------------------------------

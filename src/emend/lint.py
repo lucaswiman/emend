@@ -59,7 +59,11 @@ class LintViolation:
 def load_duplicate_code_config(
     config_path: str | None = None,
 ) -> DuplicateCodeConfig | None:
-    """Load the ``duplicate`` section from a YAML rules document.
+    """Load the ``duplicate-code`` section from a YAML rules document.
+
+    ``duplicate-code`` is the canonical key (matching the rule name, the
+    violation kind, and ``--kind duplicate-code``); ``duplicate`` is accepted
+    as a legacy alias.
 
     Returns a ``DuplicateCodeConfig`` if the section is present and enabled,
     otherwise ``None``.
@@ -68,7 +72,8 @@ def load_duplicate_code_config(
         config, _path = load_rules_document(config_path)
     except (FileNotFoundError, Exception):
         return None
-    return _parse_duplicate_code_config(config.get("duplicate"))
+    raw = config.get("duplicate-code", config.get("duplicate"))
+    return _parse_duplicate_code_config(raw)
 
 
 # Reuse shared helpers from taint module

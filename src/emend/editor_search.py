@@ -567,7 +567,19 @@ class EditorSearchEngine:
             except sqlite3.Error:
                 sym_count = 0
             if sym_count > 0:
-                rebuild_fts(conn)
+                try:
+                    rebuild_fts(conn)
+                except Exception as exc:
+                    # Fail loudly with an actionable message rather than a raw
+                    # sqlite traceback. Mark FTS ready/unavailable first so a
+                    # broken index raises once instead of on every search.
+                    self._fts_available = False
+                    self._fts_ready = True
+                    raise RuntimeError(
+                        f"FTS index rebuild failed for {self.db_path}: {exc}. "
+                        f"The cache may be corrupt — delete it and re-run "
+                        f"`emend tool index` to rebuild."
+                    ) from exc
 
         self._fts_ready = True
         return True

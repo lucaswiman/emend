@@ -107,6 +107,22 @@ def indexed_project(tmp_path):
 
 
 class TestFTS5:
+    def test_failed_rebuild_raises_clear_error(self, indexed_project, monkeypatch):
+        """A rebuild failure must surface as an actionable RuntimeError naming
+        the cache DB, not a raw sqlite3 traceback (and not silent degradation).
+        """
+        import emend.editor_search as es
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(indexed_project))
+
+        def boom(conn):
+            raise sqlite3.OperationalError("database disk image is malformed")
+
+        monkeypatch.setattr(es, "rebuild_fts", boom)
+        with pytest.raises(RuntimeError, match=r"FTS index rebuild failed.*parse\.db"):
+            engine._ensure_fts()
+
     def test_rebuild_fts_creates_table(self, indexed_project):
         from emend.editor_search import rebuild_fts
 

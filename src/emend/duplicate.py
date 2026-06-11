@@ -818,7 +818,7 @@ def _winnow_fingerprints(hashes: list[bytes], w: int = WINNOW_W) -> set[bytes]:
     if not hashes:
         return set()
     fps: set[bytes] = set()
-    for i in range(max(1, len(hashes) - w + 1)):
+    for i in range(max(0, len(hashes) - w + 1)):
         fps.add(min(hashes[i: i + w]))
     return fps
 

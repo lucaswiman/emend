@@ -194,48 +194,72 @@ def _build_metavar_map_and_replace(pattern: Pattern) -> tuple[str, dict[str, Met
         metavar_map[placeholder] = mv
         temp_code = temp_code.replace(_metavar_pattern_str(mv), placeholder)
 
-    # Fix ellipsis metavars in dict context by appending `: None`
+    # Fix ellipsis metavars in dict context by appending `: None`.
+    #
+    # A single ellipsis metavar may appear multiple times in one pattern
+    # (e.g. `f({"k": 1, $...A}, {"k": 2, $...A})`), and each occurrence was
+    # replaced by the *same* placeholder above. We must therefore process
+    # every occurrence of every ellipsis placeholder, not just the first.
+    # Dedupe the metavars first so each placeholder is handled once, then
+    # walk all occurrences left-to-right. Inserting `: None` shifts later
+    # text, so we advance the search offset past the inserted text.
+    seen_placeholders: set[str] = set()
     for mv in sorted_metavars:
         if not mv.ellipsis:
             continue
         placeholder = f"__META_{mv.name}__"
-        idx = temp_code.find(placeholder)
-        if idx == -1:
+        if placeholder in seen_placeholders:
             continue
+        seen_placeholders.add(placeholder)
 
-        after_placeholder = temp_code[idx + len(placeholder):].lstrip()
-        if after_placeholder.startswith(':'):
-            continue
+        search_from = 0
+        while True:
+            idx = temp_code.find(placeholder, search_from)
+            if idx == -1:
+                break
+            end = idx + len(placeholder)
 
-        brace_depth = 0
-        for i in range(idx - 1, -1, -1):
-            c = temp_code[i]
-            if c == '}':
-                brace_depth += 1
-            elif c == '{':
-                if brace_depth == 0:
-                    found_colon = False
-                    inner_depth = 0
-                    for j in range(i + 1, len(temp_code)):
-                        cj = temp_code[j]
-                        if cj in '{[(':
-                            inner_depth += 1
-                        elif cj in '}])':
-                            if inner_depth == 0:
+            after_placeholder = temp_code[end:].lstrip()
+            if after_placeholder.startswith(':'):
+                # Already a key:value pair (or a type constraint); skip it.
+                search_from = end
+                continue
+
+            inserted = False
+            brace_depth = 0
+            for i in range(idx - 1, -1, -1):
+                c = temp_code[i]
+                if c == '}':
+                    brace_depth += 1
+                elif c == '{':
+                    if brace_depth == 0:
+                        found_colon = False
+                        inner_depth = 0
+                        for j in range(i + 1, len(temp_code)):
+                            cj = temp_code[j]
+                            if cj in '{[(':
+                                inner_depth += 1
+                            elif cj in '}])':
+                                if inner_depth == 0:
+                                    break
+                                inner_depth -= 1
+                            elif cj == ':' and inner_depth == 0:
+                                found_colon = True
                                 break
-                            inner_depth -= 1
-                        elif cj == ':' and inner_depth == 0:
-                            found_colon = True
-                            break
 
-                    if found_colon:
-                        temp_code = (
-                            temp_code[:idx + len(placeholder)]
-                            + ': None'
-                            + temp_code[idx + len(placeholder):]
-                        )
-                    break
-                brace_depth -= 1
+                        if found_colon:
+                            temp_code = (
+                                temp_code[:end]
+                                + ': None'
+                                + temp_code[end:]
+                            )
+                            inserted = True
+                        break
+                    brace_depth -= 1
+
+            # Advance past this occurrence (and any inserted `: None`) so the
+            # next iteration finds the following occurrence.
+            search_from = end + (len(': None') if inserted else 0)
 
     # Replace literal `...` in dict context with `**__EMEND_SPREAD__`
     temp_code = _re.sub(

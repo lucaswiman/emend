@@ -380,7 +380,10 @@ def test_run_trace_datalog_supports_effect_only_sinks(monkeypatch, tmp_path):
 
     assert len(result) == 1
     violation = result[0]
-    assert violation.line == 21
+    # DefUseFact.def_line is 0-indexed (see fact_graph.py / trace.py); the
+    # effect-sink resolver converts to a 1-indexed display line, so def_line=21
+    # surfaces as line 22.
+    assert violation.line == 22
     assert violation.sink_pattern == "writes($OBJ)"
     assert violation.message == "TOCTOU write"
 

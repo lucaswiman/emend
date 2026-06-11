@@ -210,11 +210,20 @@ def _string_literal_filter(
     all_files: bool,
     exclude_references_from: list[str] | None,
 ) -> list["DeadSymbol"]:
-    """Filter out dead code candidates that have string-literal references.
+    """Filter out dead code candidates referenced inside string literals.
 
-    Scans project source files for occurrences of each candidate's name in
-    string literals or other non-reference contexts.  This reduces false
-    positives from dynamic dispatch, serialization, and similar patterns.
+    Scans project source files and suppresses a candidate when its name
+    appears within at least one *string literal* (e.g. ``getattr(mod,
+    "func_name")`` or a registry dict key).  This reduces false positives
+    from dynamic dispatch, serialization, and similar patterns.
+
+    Unlike a raw substring scan, mentions in comments or as substrings of
+    unrelated code identifiers do **not** keep a symbol alive: only string
+    literals (extracted via tree-sitter through
+    ``emend_core.collect_string_literals``) count.  Docstrings are string
+    literals and therefore do count, matching the documented "string
+    literal" semantics; a symbol whose name appears only in a comment is
+    still reported dead.
     """
     from .project_iter import _collect_source_files
     str_names = {d.name for d in candidates if len(d.name) > 3}
@@ -246,7 +255,28 @@ def _string_literal_filter(
             return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
         return False
 
-    file_cache: dict[str, str] = {}
+    def _collect_string_literals(source: str, path: str) -> list[str]:
+        """Return the inner text of every string literal in *source*.
+
+        Uses tree-sitter via ``emend_core.collect_string_literals``.  On any
+        failure (missing extension, unparseable file) returns an empty list
+        so that dead-code analysis never crashes on a bad file; such a file
+        simply contributes no string-literal references.
+        """
+        try:
+            from emend import emend_core as _rust  # type: ignore[attr-defined]
+            ext = Path(path).suffix.lstrip(".") or "py"
+            literals = _rust.collect_string_literals(source, ext)
+        except Exception:
+            return []
+        # Each tuple is
+        # (start_byte, end_byte, start_line, start_col, end_line, end_col, content)
+        return [lit[6] for lit in literals]
+
+    # Cache of resolved-path -> concatenated string-literal text. We only
+    # populate entries for files that contain at least one candidate name as
+    # a raw substring (cheap prefilter) and then extract the string literals.
+    file_str_cache: dict[str, str] = {}
     for _fp in source_files:
         _r = str(Path(_fp).resolve())
         if _is_excluded_ref(_r):
@@ -255,8 +285,12 @@ def _string_literal_filter(
             _content = Path(_fp).read_text(errors="replace")
         except Exception:
             continue
-        if any(n in _content for n in str_names):
-            file_cache[_r] = _content
+        # Cheap prefilter: skip files that don't mention any candidate name.
+        if not any(n in _content for n in str_names):
+            continue
+        literals = _collect_string_literals(_content, _fp)
+        if literals:
+            file_str_cache[_r] = "\n".join(literals)
 
     names_with_str_ref: set[tuple[str, str]] = set()
     for d in candidates:
@@ -264,21 +298,11 @@ def _string_literal_filter(
             continue
         r = str(Path(d.file_path).resolve())
 
-        content = file_cache.get(r)
-        if content and d.name in content:
-            for i, lt in enumerate(content.splitlines(), 1):
-                if i == d.line or d.name not in lt:
-                    continue
-                names_with_str_ref.add((d.file_path, d.name))
-                break
-
-        if (d.file_path, d.name) in names_with_str_ref:
-            continue
-
-        for other_r, other_content in file_cache.items():
-            if other_r == r:
-                continue
-            if d.name in other_content:
+        # A name counts as referenced if it appears inside a string literal
+        # in any scanned file (including its own file — e.g. a registry dict
+        # or the symbol's own docstring mentioning it).
+        for _r, _str_text in file_str_cache.items():
+            if d.name in _str_text:
                 names_with_str_ref.add((d.file_path, d.name))
                 break
 

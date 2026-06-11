@@ -17,9 +17,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field, asdict
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -285,6 +286,15 @@ def _to_snake_case(name: str) -> str:
     return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)).lower()
 
 
+def _locked(method):
+    """Serialise access to ``MappingStore._data`` and saves under the store lock."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class MappingStore:
     """Interface to the mappings YAML file.
 
@@ -294,9 +304,15 @@ class MappingStore:
         store.add_module_mapping(ModuleMapping(...))
         results = store.list_module_mappings()
         store.close()
+
+    Thread-safe within a process: all reads and mutations of the in-memory
+    state (and the save that follows a mutation) hold an internal lock.
+    Concurrent access from multiple *processes* is not supported — the file
+    is rewritten wholesale on save, so the last writer wins.
     """
 
     def __init__(self, project_root: str = ".") -> None:
+        self._lock = threading.RLock()
         self._yaml_path = _mappings_yaml_path(project_root)
 
         # Migrate from old SQLite knowledge.db if it exists and YAML doesn't.
@@ -398,12 +414,14 @@ class MappingStore:
 
     # -- Identifier mappings -------------------------------------------------
 
+    @_locked
     def add_mapping(self, m: IdentifierMapping) -> None:
         """Add an identifier mapping."""
         mappings = self._data.setdefault("identifier_mappings", [])
         mappings.append(_identifier_mapping_to_yaml(m))
         self._save()
 
+    @_locked
     def delete_mapping(
         self,
         source_identifier: str,
@@ -435,6 +453,7 @@ class MappingStore:
             return True
         return False
 
+    @_locked
     def search_mappings(
         self,
         query: str,
@@ -484,6 +503,7 @@ class MappingStore:
             limit=limit,
         )
 
+    @_locked
     def find_mappings_for(
         self,
         identifier: str,
@@ -509,6 +529,7 @@ class MappingStore:
 
     # -- Module mappings -----------------------------------------------------
 
+    @_locked
     def add_module_mapping(self, m: ModuleMapping) -> None:
         """Add a module mapping. Replaces an existing one with the same prefix."""
         modules = self._data.setdefault("module_mappings", [])
@@ -521,6 +542,7 @@ class MappingStore:
         modules.append(_module_mapping_to_yaml(m))
         self._save()
 
+    @_locked
     def get_module_mapping_by_prefix(self, prefix: str) -> ModuleMapping | None:
         """Look up a module mapping by its exact prefix string."""
         for d in self._data.get("module_mappings", []):
@@ -528,6 +550,7 @@ class MappingStore:
                 return _yaml_to_module_mapping(d)
         return None
 
+    @_locked
     def delete_module_mapping_by_prefix(self, prefix: str) -> bool:
         """Delete a module mapping by its prefix string."""
         modules = self._data.get("module_mappings", [])
@@ -538,6 +561,7 @@ class MappingStore:
                 return True
         return False
 
+    @_locked
     def update_module_mapping(self, prefix: str, **kwargs: Any) -> bool:
         """Update fields on an existing module mapping by prefix."""
         modules = self._data.get("module_mappings", [])
@@ -560,6 +584,7 @@ class MappingStore:
             return True
         return False
 
+    @_locked
     def list_module_mappings(self) -> list[ModuleMapping]:
         """List all module mappings ordered by prefix length (longest first)."""
         modules = self._data.get("module_mappings", [])
@@ -569,6 +594,7 @@ class MappingStore:
         )
         return [_yaml_to_module_mapping(d) for d in sorted_modules]
 
+    @_locked
     def resolve_module(self, module_name: str) -> ModuleMapping | None:
         """Find the best (longest-prefix) module mapping for *module_name*.
 

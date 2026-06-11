@@ -524,7 +524,9 @@ function wrapper() { someFunc(); }
         source = "const x = 1; // noqa: emend:deadcode\n"
         noqa = self.handler.find_noqa_comments(source)
         assert 1 in noqa
-        assert "emend:deadcode" in noqa[1]
+        # Tags are stored stripped of the ``emend:`` prefix, mirroring
+        # PythonCommentHandler's semantics.
+        assert "deadcode" in noqa[1]
 
 
 class TestDocCommentHandlerRust:
@@ -562,7 +564,9 @@ fn wrapper() { old_func(); }
         source = "let x = 1; // noqa: emend:deadcode\n"
         noqa = self.handler.find_noqa_comments(source)
         assert 1 in noqa
-        assert "emend:deadcode" in noqa[1]
+        # Tags are stored stripped of the ``emend:`` prefix, mirroring
+        # PythonCommentHandler's semantics.
+        assert "deadcode" in noqa[1]
 
     def test_regular_comments_not_docs(self):
         source = """// This is a regular comment

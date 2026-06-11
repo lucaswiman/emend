@@ -146,7 +146,9 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
                 name, exts = result
                 lang_to_exts[name] = exts
                 for ext in exts:
-                    ext_to_lang.setdefault(ext, name)
+                    # Lookup keys are lowercased so extension matching is
+                    # case-insensitive (e.g. ``SCRIPT.PY`` resolves to python).
+                    ext_to_lang.setdefault(ext.lower(), name)
 
     # Discover languages from installed entry-point plugins.
     # These are loaded AFTER built-in languages so they cannot override them.
@@ -158,14 +160,14 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
             name, exts = result
             lang_to_exts[name] = exts
             for ext in exts:
-                ext_to_lang.setdefault(ext, name)
+                ext_to_lang.setdefault(ext.lower(), name)
 
     # Fill in any gaps from hardcoded builtins
     for lang, exts in _BUILTIN.items():
         if lang not in lang_to_exts:
             lang_to_exts[lang] = list(exts)
         for ext in exts:
-            ext_to_lang.setdefault(ext, lang)
+            ext_to_lang.setdefault(ext.lower(), lang)
 
     return ext_to_lang, lang_to_exts
 
@@ -183,7 +185,7 @@ def detect_language(path: str | Path) -> str | None:
         detect_language("bar.ts")    # "typescript"
         detect_language("baz.txt")   # None
     """
-    ext = Path(path).suffix.lstrip(".")
+    ext = Path(path).suffix.lstrip(".").lower()
     if not ext:
         return None
     ext_to_lang, _ = _registry()

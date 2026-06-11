@@ -187,6 +187,50 @@ class TestLoadPolicies:
         assert by_name["no-sqli"].checks[0].flows_from == "request.args.get($X)"
         assert isinstance(by_name["deadcode-check"].checks[0], DeadCodeCheck)
 
+    def test_load_unified_rules_flow_dict_form_pattern(self, tmp_path):
+        """Dict-form ``from: {pattern: ...}`` / ``to: {pattern: ...}`` must be
+        unwrapped to the pattern string, matching the lint engine
+        (checks/pattern_rules.py)."""
+        config_path = _write_rules(tmp_path, {
+            "rules": {
+                "no-sqli": {
+                    "flow": {
+                        "from": {"pattern": "request.args.get($X)"},
+                        "to": {"pattern": "cursor.execute($Q)"},
+                    },
+                    "message": "No SQL injection",
+                    "severity": "error",
+                },
+            },
+        })
+        policies = load_policies(config_path)
+        check = next(p for p in policies if p.name == "no-sqli").checks[0]
+        assert isinstance(check, FlowCheck)
+        assert check.flows_from == "request.args.get($X)"
+        assert check.flows_to == "cursor.execute($Q)"
+
+    def test_load_unified_rules_flow_list_not_through(self, tmp_path):
+        """List-valued ``not-through`` must be pipe-joined, not stringified."""
+        config_path = _write_rules(tmp_path, {
+            "rules": {
+                "no-sqli": {
+                    "flow": {
+                        "from": "request.args.get($X)",
+                        "to": "cursor.execute($Q)",
+                        "not-through": ["escape($X)", "sanitize($X)"],
+                    },
+                    "message": "No SQL injection",
+                    "severity": "error",
+                },
+            },
+        })
+        policies = load_policies(config_path)
+        check = next(p for p in policies if p.name == "no-sqli").checks[0]
+        assert isinstance(check, FlowCheck)
+        # Must mirror checks/pattern_rules.py expand_not_through(): pipe-joined,
+        # never the python list repr "['escape($X)', 'sanitize($X)']".
+        assert check.not_through == "escape($X) | sanitize($X)"
+
     def test_load_unified_rules_top_level_deadcode(self, tmp_path):
         config_path = _write_rules(tmp_path, {
             "deadcode": {
@@ -386,3 +430,52 @@ class TestDatalogCheckColumnIndexing:
         )
         assert len(violations) == 1
         assert violations[0].file_path == "correct.py"
+
+    def test_no_file_or_line_columns_uses_sentinel(self, monkeypatch):
+        """A query without file/line columns must not misinterpret data.
+
+        e.g. ``?[count, name]`` should not stringify the count as a file path
+        nor try to coerce the name into an int. Instead, a sentinel file path
+        and line 0 are used, and the full row is preserved in the witness.
+        """
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["count", "name"],
+            rows=[[3, "alpha"]],
+        )
+        assert len(violations) == 1
+        v = violations[0]
+        # Must NOT guess column 0 (count=3) as the file path.
+        assert v.file_path == "<project>"
+        # Must NOT attempt int("alpha") from column 1 as the line.
+        assert v.line == 0
+        # The full row stays available in the witness so nothing is lost.
+        assert v.witness == ["count=3", "name=alpha"]
+
+    def test_non_numeric_line_value_does_not_crash(self, monkeypatch):
+        """A named 'line' column with a non-numeric value must not crash."""
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["file_path", "line", "message"],
+            rows=[["app.py", "not-a-number", "boom"]],
+        )
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.file_path == "app.py"
+        # Falls back to 0 rather than raising ValueError on int("not-a-number").
+        assert v.line == 0
+        assert v.message == "boom"
+        assert v.witness == ["file_path=app.py", "line=not-a-number", "message=boom"]
+
+    def test_single_unnamed_column_not_treated_as_file(self, monkeypatch):
+        """A single unnamed column must not be guessed as the file path."""
+        violations = self._run_with_mock_result(
+            monkeypatch,
+            headers=["symbol"],
+            rows=[["my_func"]],
+        )
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.file_path == "<project>"
+        assert v.line == 0
+        assert v.witness == ["symbol=my_func"]
