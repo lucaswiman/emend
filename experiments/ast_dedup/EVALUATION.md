@@ -1,6 +1,6 @@
 # AST dedup experiment — evaluation (2026-04-15)
 
-**Scope of this writeup.** Phases 1–6 of `ideas/roadmap/` are implemented. The
+**Scope of this writeup.** Phases 1–6 of `ideas/old-roadmaps/roadmap-ast-dedup/` are implemented. The
 Phase 6 runner was executed against the `emend` corpus with all five hashing
 strategies enabled; the raw report is pinned at
 `experiments/ast_dedup/reports/emend-20260415T053153Z.{json,md}`. A later

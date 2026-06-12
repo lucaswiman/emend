@@ -1,4 +1,4 @@
-"""Tests for known bugs documented in TODOS.md.
+"""Regression tests for historically reported bugs.
 
 These tests were written TDD-style: added as failing tests first,
 then fixed one at a time.
