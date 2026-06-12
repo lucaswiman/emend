@@ -2,8 +2,8 @@
 
 Goal: reduce surface area of the largest modules and consolidate parallel
 engines, so future changes touch fewer lines and the structure is
-self-explanatory. Companion to `ideas/roadmap-simplify-codebase/` (which is
-done): that one squeezed lines out; this one moves them.
+self-explanatory. Companion to `ideas/old-roadmaps/roadmap-simplify-codebase/`
+(which is done): that one squeezed lines out; this one moves them.
 
 Source state at start (commit on `claude/refactor-and-update-docs-8colR`):
 

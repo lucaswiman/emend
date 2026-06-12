@@ -6,11 +6,11 @@ constraints.
 
 ## Phases
 
-- [x] [Phase 1: Picker Workflow](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-1-picker-workflow.md)
-- [x] [Phase 2: Local Navigation](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-2-local-navigation.md)
-- [x] [Phase 3: Hot Buffer Protocol](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-3-hot-buffer.md)
-- [x] [Phase 4: Analysis-Aware Intelligence](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-phase-4-analysis-aware.md)
-- [ ] [Deferred / Future](/Users/lucaswiman/personal/emend/ideas/roadmap/vim-deferred-future.md)
+- [x] [Phase 1: Picker Workflow](vim-phase-1-picker-workflow.md)
+- [x] [Phase 2: Local Navigation](vim-phase-2-local-navigation.md)
+- [x] [Phase 3: Hot Buffer Protocol](vim-phase-3-hot-buffer.md)
+- [x] [Phase 4: Analysis-Aware Intelligence](vim-phase-4-analysis-aware.md)
+- [ ] [Deferred / Future](vim-deferred-future.md)
 
 ## Scope
 
