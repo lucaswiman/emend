@@ -98,7 +98,7 @@ list. Conventions:
 - `test_<command>.py` — the public CLI behaviour for that command. Start here when changing a command.
 - `test_<module>.py` — direct unit tests for `src/emend/<module>.py`.
 - `test_<command|module>_<lang>.py` (e.g. `test_lint_typescript.py`, `test_cfg_rust.py`) — language-specific variants. Add one of these when extending a feature beyond Python.
-- `test_phaseN*.py` — historical regression suites pinning behaviour from the trace/Datalog/CFG roadmaps in `ideas/old-roadmaps/`. Don't add new tests here; pick a topical name.
+- `test_phaseN*.py` — historical regression suites pinning behaviour from the completed trace/Datalog/CFG roadmaps (the roadmap docs themselves were deleted; see git history). Don't add new tests here; pick a topical name.
 - `test_regressions.py`, `test_bug_report_regressions.py` — catch-all bug-report regressions.
 - `test_cli_surface_consolidation.py` — pins the visible CLI surface (commands, hidden aliases, help text). Touched when CLI structure changes.
 - `test_phase17_remove_legacy_intra.py`, `test_phase12_cutover.py`, … — verify legacy code paths stay deleted; keep them red if a removal regresses.
@@ -198,12 +198,7 @@ default is dry-run), `--json` (machine-readable output), `--project`
 
 ### Roadmaps
 
-There is no active roadmap; completed roadmaps live in `ideas/old-roadmaps/`:
-
-- `ideas/old-roadmaps/roadmap-simplify-codebase/` — line-level cleanup. Phases A–E done; left as reference for the audit numbers and design decisions (e.g. why `flow_ir.py` and `language_plugins.py` survive).
-- `ideas/old-roadmaps/roadmap-modularize/` — structural splits and engine consolidation. All six phases complete: `transform.py` split into the `transform/` package (1), lint/policy/checks/flow_ir unified into the `checks/` package (2), single-source CLI registration (3), legacy `patterns.yaml` / `policies.yaml` fallback removal (4), `editor_search.py` `import ast` purge (5), `mcp_server.py` decomposed into the `mcp/` package (6).
-- `ideas/old-roadmaps/roadmap/` — completed Datalog/CFG/trace cutover phases (1–18); referenced by `test_phase*.py` regression suites that pin the new behaviour.
-- Other top-level `ideas/*.md` — exploratory notes (`auto-reindex`, `feature-work`, `mcp-review`, `next-analyses`, `querying-rewrite`, `static-analysis-literature-review`, `symbolic`, `FUTURE_WORK`).
+There is no active roadmap. Completed roadmaps (simplify-codebase, modularize, the Datalog/CFG/trace cutover, ts-rust-parity, ast-dedup, import-regex, vim-plugin-improvements) were deleted after completion — retrieve them from git history if needed. The `ideas/*.md` files are exploratory notes (`auto-reindex`, `feature-work`, `mcp-review`, `next-analyses`, `querying-rewrite`, `static-analysis-literature-review`, `symbolic`, `FUTURE_WORK`).
 
 ### Design Philosophy: Tree-sitter and Configuration over Language-Specific Logic
 
@@ -268,7 +263,7 @@ policy` filter to subsets of the kinds.
 ### Trace analysis
 
 `trace.py` is Datalog-backed (the Python intraprocedural engine was
-removed in the trace roadmap; see `ideas/old-roadmaps/roadmap/`). The
+removed in the trace roadmap). The
 public surface:
 
 - `run_trace_analysis(files, config)` — intraprocedural; iterates files, collects function defs, analyses each plus module-level code via `_run_trace_datalog()`.
@@ -388,7 +383,7 @@ make test TESTS="-k default"
 4. If the command should be exposed to LLM clients, add an MCP tool wrapper in the matching `mcp/` submodule (`mcp/dispatch.py` holds the `FastMCP` app and registration).
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
-> Note: Phase 3 of `ideas/old-roadmaps/roadmap-modularize/` (single-source CLI registration) has landed; `cli.py` is now the canonical registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
+> Note: `cli.py` is the canonical (single-source) registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
 
 ## Code Conventions
 
@@ -408,7 +403,7 @@ make test TESTS="-k default"
 <layout>
 Projects in progress are put in the ideas/roadmap/ folder with an index.md with `- [ ] TODOs` for each phase and more detailed instructions in linked markdown files also in the roadmap directory.
 
-Completed roadmaps go in ideas/old-roadmaps but should only be moved if the user confirms they should be moved.
+Completed roadmaps are deleted (they remain retrievable from git history), but only after the user confirms the deletion.
 </layout>
 
 <instructions>
