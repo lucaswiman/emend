@@ -282,8 +282,9 @@ def _split_or_retarget_import(
             return name
 
         # Preserve the indentation of the original import statement.
+        # start_line is 0-indexed.
         start_line = imp["start_line"]
-        orig_line = lines[start_line - 1] if start_line - 1 < len(lines) else ""
+        orig_line = lines[start_line] if start_line < len(lines) else ""
         indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
 
         moved_line = (
@@ -300,8 +301,8 @@ def _split_or_retarget_import(
         else:
             replacement = moved_line
 
-        stmt_start = line_offsets[imp["start_line"] - 1]
-        stmt_end = line_offsets[imp["end_line"]]
+        stmt_start = line_offsets[imp["start_line"]]
+        stmt_end = line_offsets[imp["end_line"] + 1]
         replacements.append((stmt_start, stmt_end, replacement + "\n"))
 
     if not replacements:

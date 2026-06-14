@@ -74,6 +74,8 @@ impl PyScopeResolver {
         Ok(())
     }
 
+    /// Returns (name, line, column) for each definition.  ``line`` and
+    /// ``column`` are **0-indexed** (matching ``scopes_in_file``).
     fn definitions_in_file(&self, path: &str) -> Vec<(String, usize, usize)> {
         let path = PathBuf::from(path);
         self.inner
@@ -165,7 +167,8 @@ impl PyScopeResolver {
     /// Returns structured import statements in a file.
     ///
     /// Each entry is a dict with keys: module, level, names, start_byte,
-    /// end_byte, start_line, end_line, is_plain.  ``names`` is a list of
+    /// end_byte, start_line, end_line, is_plain.  ``start_line``/``end_line``
+    /// are **0-indexed** (matching ``scopes_in_file``).  ``names`` is a list of
     /// (name, alias) tuples where alias may be None.  ``is_plain`` is true
     /// for plain ``import X`` statements, false for ``from X import Y``.
     fn structured_imports_in_file(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {

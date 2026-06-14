@@ -544,7 +544,7 @@ def build_statement_seqs_for_cache(
         defs = scope_resolver.definitions_in_file(file_path)
         for item in defs:
             qn_d, line_d = item[0], item[1]
-            def_line_to_qn[line_d - 1] = qn_d  # 1-indexed → 0-indexed
+            def_line_to_qn[line_d] = qn_d  # definitions_in_file lines are 0-indexed
     except Exception:
         pass
 

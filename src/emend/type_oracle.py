@@ -223,7 +223,8 @@ def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
     """Collect all identifiers and their positions in the source.
 
     Uses the Rust tree-sitter extension for fast parsing.
-    Returns (name, line, start_col_1indexed, end_col_1indexed) tuples.
+    Returns (name, line, start_col, end_col) tuples, all 0-indexed
+    (tree-sitter native rows and byte columns).
     """
     from emend import emend_core
     return emend_core.collect_identifier_positions(source)
@@ -1294,7 +1295,12 @@ class _LSPTypeOracle(TypeOracle):
             symbols = _collect_symbols(source)
             ft = FileTypes(path=str(path))
 
-            for name, line, col_start, col_end in symbols:
+            for name, line0, col_start0, col_end0 in symbols:
+                # collect_identifier_positions is 0-indexed; TypeBinding and
+                # lsp.hover use the codebase-wide 1-indexed convention.
+                line = line0 + 1
+                col_start = col_start0 + 1
+                col_end = col_end0 + 1
                 hover_text = lsp.hover(path, line, col_start)
                 if not hover_text:
                     continue

@@ -3482,7 +3482,9 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
             _extract_imports_python._resolver = resolver  # type: ignore[attr-defined]
         structured = resolver.collect_structured_imports_from_source(content, ext="py")
         for imp in structured:
-            line: int = imp["start_line"]
+            # StructuredImport start_line is 0-indexed; ImportFact.line is
+            # 1-indexed like every other fact kind.
+            line: int = imp["start_line"] + 1
             if imp["is_plain"]:
                 # ``import X`` or ``import X as Y`` — module is in names
                 for name, alias in imp["names"]:
