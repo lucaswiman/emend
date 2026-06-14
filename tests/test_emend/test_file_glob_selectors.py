@@ -4,7 +4,7 @@ import json
 import pytest
 from pathlib import Path
 from emend.component_selector import parse_extended_selector, ExtendedSelector
-from emend.transform import cmd_lookup, cmd_edit, cmd_add
+from emend.transform import cmd_lookup, cmd_edit, cmd_add, _apply_matching_filter
 
 
 # ============================================================================
@@ -363,3 +363,30 @@ class TestResolveFiles:
         files, is_multi = resolve_files(str(tmp_path / "a.py"))
         assert not is_multi
         assert len(files) == 1
+
+
+class TestMatchingFilterExcludesUnparseable:
+    def test_unparseable_selector_excluded_from_matching_results(self, tmp_path):
+        """Selectors that raise ValueError during source retrieval must not
+        appear in the filtered output."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "def has_print():\n    print('hello')\n\n"
+            "def no_print():\n    return 42\n"
+        )
+
+        valid_selector = f"{test_file}::has_print"
+        bogus_selector = f"{test_file}::nonexistent_symbol"
+
+        lookup_result = f"{valid_selector}\n{bogus_selector}"
+
+        sel = parse_extended_selector(f"{test_file}::has_print")
+        result = _apply_matching_filter(
+            lookup_result,
+            matching_pattern="print($X)",
+            selector=sel,
+            files=[str(test_file)],
+        )
+
+        assert valid_selector in result
+        assert "nonexistent_symbol" not in result

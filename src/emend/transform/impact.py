@@ -184,6 +184,7 @@ def _find_impact_via_fact_graph(
         if not sel.symbol_path:
             continue
         name = sel.symbol_path[-1]
+        qn = ".".join(sel.symbol_path)
         # Try both the raw file_path and a relative version.
         for fp in (sel.file_path, _try_relative(sel.file_path, proj_root)):
             if fp is None:
@@ -324,6 +325,7 @@ def _find_impact_via_fact_graph(
     except Exception:
         pass
 
+    test_edges: list[ImpactEdge] = []
     for sel_str in all_impacted:
         file_part = sel_str.split('::', 1)[0] if '::' in sel_str else sel_str
         if _is_test_file(file_part) or _is_test_symbol(sel_str) or sel_str in test_decorated_sels:
@@ -331,12 +333,13 @@ def _find_impact_via_fact_graph(
                 impacted_tests.append(sel_str)
                 for edge in all_edges:
                     if edge.target == sel_str:
-                        all_edges.append(ImpactEdge(
+                        test_edges.append(ImpactEdge(
                             source=edge.source,
                             target=sel_str,
                             kind="test",
                         ))
                         break
+    all_edges.extend(test_edges)
 
     return ImpactResult(
         changed_symbols=changed_selectors,

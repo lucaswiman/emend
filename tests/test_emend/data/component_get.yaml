@@ -131,3 +131,10 @@
         pass
   selector: "func[params]"
   expected: "a, *, b='default', c: int = 5"
+
+- name: returns_negative_literal_no_space
+  source: |
+    def func() ->-1:
+        pass
+  selector: "func[returns]"
+  expected: "-1"

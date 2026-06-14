@@ -36,8 +36,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
         symbol = find_symbol_by_line(symbols, selector.line_start, selector.line_end)
 
         if symbol is None:
-            print(f"No symbol found at line {selector.line_start}")
-            raise SystemExit(1)
+            raise ValueError(f"No symbol found at line {selector.line_start}")
 
         selector = ExtendedSelector(
             file_path=selector.file_path,
@@ -398,7 +397,7 @@ def _apply_matching_filter(
                 if matches:
                     filtered_parts.append(part)
             except (ValueError, FileNotFoundError):
-                filtered_parts.append(part)
+                continue
         else:
             # For source code output, check the whole result against the pattern
             for fpath in files:

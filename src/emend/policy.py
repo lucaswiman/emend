@@ -261,7 +261,7 @@ def _parse_sequence_check(raw: dict[str, Any]) -> SequenceCheck:
             type_constraint=yaml_key(step_raw, "type_constraint"),
         ))
     path_constraints = []
-    raw_path = raw.get("path", {})
+    raw_path = raw.get("path") or {}
     for path_key, path_val in raw_path.items():
         parts = [p.strip() for p in path_key.split("->")]
         if len(parts) != 2:
@@ -324,7 +324,7 @@ def load_policies(config_path: str | Path | None = None) -> list[Policy]:
 
     policies: list[Policy] = []
     if "policies" in data:
-        for raw_policy in data["policies"]:
+        for raw_policy in (data["policies"] or []):
             checks = [_parse_check(c) for c in raw_policy.get("checks", [])]
             policies.append(Policy(
                 name=raw_policy["name"],

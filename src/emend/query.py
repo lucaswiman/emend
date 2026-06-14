@@ -148,9 +148,9 @@ def _match_pattern(
         # Don't transform if it's a regex or contains wildcards
         if not (pattern.startswith("/") and pattern.endswith("/")) and "*" not in pattern and "?" not in pattern:
             smart_pattern = _smart_case_pattern(pattern)
-            # Smart pattern is already a regex, don't parse it
+            # Smart pattern is already a regex; anchor it for full-match semantics
             flags = re.IGNORECASE
-            return bool(re.search(smart_pattern, value, flags))
+            return bool(re.search(f"^{smart_pattern}$", value, flags))
         # If it's a regex or wildcard, still use case-insensitive
         case_insensitive = True
 

@@ -246,6 +246,35 @@ class TestLoadPolicies:
         assert "deadcode" in names
 
 
+    def test_load_policies_null_value(self, tmp_path):
+        """YAML with `policies:` (null value) should not crash."""
+        config_path = _write_rules(tmp_path, {"policies": None})
+        policies = load_policies(config_path)
+        assert policies == []
+
+    def test_load_sequence_null_path(self, tmp_path):
+        """Sequence check with `path:` (null value) should not crash."""
+        config_path = _write_policies(tmp_path, {
+            "policies": [{
+                "name": "test-seq",
+                "severity": "error",
+                "description": "test",
+                "checks": [{
+                    "type": "sequence",
+                    "name": "my-seq",
+                    "message": "seq violation",
+                    "sequence": [
+                        {"bind": "a", "pattern": "$X = input()"},
+                        {"bind": "b", "pattern": "eval($X)"},
+                    ],
+                    "path": None,
+                }],
+            }],
+        })
+        policies = load_policies(config_path)
+        assert len(policies) == 1
+
+
 class TestValidatePolicies:
     def test_valid_policy(self):
         p = Policy("test", "desc", "error", [StructuralCheck("print($X)")])

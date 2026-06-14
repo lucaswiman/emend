@@ -132,7 +132,8 @@ def find_references(
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
-    target_qn = f"{target_module}.{symbol_name}"
+    symbol_qn = ".".join(selector.symbol_path)
+    target_qn = f"{target_module}.{symbol_qn}" if target_module else symbol_qn
 
     from emend.fact_graph import FactGraph
 
@@ -202,7 +203,8 @@ def find_callers(
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
-    target_qn = f"{target_module}.{symbol_name}"
+    symbol_qn = ".".join(selector.symbol_path)
+    target_qn = f"{target_module}.{symbol_qn}" if target_module else symbol_qn
 
     graph = _get_or_build_fact_graph(scan_root)
 
@@ -248,7 +250,8 @@ def find_callees(
     scan_root = project_path if project_path else _find_project_root(file_path)
     module_root = _find_project_root(file_path)
     target_module = _normalize_module_qn(_file_to_module(file_path, module_root))
-    target_qn = f"{target_module}.{symbol_name}"
+    symbol_qn = ".".join(selector.symbol_path)
+    target_qn = f"{target_module}.{symbol_qn}" if target_module else symbol_qn
 
     graph = _get_or_build_fact_graph(scan_root)
 

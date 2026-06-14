@@ -458,7 +458,12 @@ def _resolve_relative_import_qn(
         dot_count = max(1, dot_count - 1)
 
     module = _file_to_module(file_path, project_root)
-    package = module.rsplit(".", 1)[0] if "." in module else None
+    # For __init__.py files, the module IS the package (e.g. "pkg"),
+    # so relative imports resolve against it directly, not its parent.
+    if Path(file_path).stem == "__init__":
+        package = module
+    else:
+        package = module.rsplit(".", 1)[0] if "." in module else None
     parts = package.split(sep) if package else []
 
     levels_up = dot_count - 1

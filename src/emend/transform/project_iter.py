@@ -509,8 +509,12 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
 
     # Rust: ``mod.rs`` represents the module named after its parent directory.
     # E.g.  src/foo/mod.rs → module "foo".
+    # Python: ``__init__.py`` represents the package (parent directory).
+    # E.g.  pkg/__init__.py → module "pkg", not "pkg.__init__".
     if language == "rust" and stem == "mod" and dir_parts:
         module_parts = dir_parts  # drop the "mod" stem, use parent dir as name
+    elif stem == "__init__" and dir_parts:
+        module_parts = dir_parts  # drop __init__, package is the directory
     else:
         module_parts = dir_parts + [stem]
 

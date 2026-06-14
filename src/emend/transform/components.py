@@ -101,8 +101,10 @@ def get_component(selector: ExtendedSelector) -> str:
     result = source_code.encode('utf-8')[start_byte:end_byte].decode('utf-8')
 
     if selector.component == "returns":
-        # Robustly remove -> and whitespace
-        return result.strip().lstrip("->").strip()
+        s = result.strip()
+        if s.startswith("->"):
+            s = s[2:]
+        return s.strip()
     elif selector.component == "body":
         return result.strip('\n').rstrip()
     

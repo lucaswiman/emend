@@ -650,3 +650,23 @@ def PROCESS():
     assert "process" in symbol_names
     assert "Process" in symbol_names
     assert "PROCESS" in symbol_names
+
+
+def test_query_smart_case_does_not_substring_match(tmp_path):
+    """Smart-case should do full-match, not substring match."""
+    filepath = tmp_path / "sample.py"
+    filepath.write_text(
+        "def process_request(): pass\n"
+        "def handle_process_request_async(): pass\n"
+    )
+    result = runner.invoke(app, [
+        "search", str(filepath),
+        "--name", "process_request",
+        "--smart-case",
+        "--output", "selector",
+    ])
+    assert result.exit_code == 0, result.stdout
+    lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+    symbol_names = [line.split("::")[-1] if "::" in line else line.strip() for line in lines]
+    assert "process_request" in symbol_names
+    assert "handle_process_request_async" not in symbol_names

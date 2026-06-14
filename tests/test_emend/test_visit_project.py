@@ -242,3 +242,43 @@ class TestVisitProjectHelper:
             project_path=str(project),
         ))
         assert len(results) == 0
+
+
+class TestFileToModule:
+    """Tests for _file_to_module helper."""
+
+    def test_init_py_maps_to_package_name(self, tmp_path):
+        """__init__.py should map to the package name, not pkg.__init__."""
+        from emend.transform.project_iter import _file_to_module
+        project = tmp_path / "project"
+        pkg = project / "mypkg"
+        pkg.mkdir(parents=True)
+        init_file = pkg / "__init__.py"
+        init_file.write_text("# package init\n")
+
+        result = _file_to_module(str(init_file), str(project))
+        assert result == "mypkg", f"Expected 'mypkg', got '{result}'"
+
+    def test_init_py_nested_package(self, tmp_path):
+        """Nested __init__.py should map to dotted package name."""
+        from emend.transform.project_iter import _file_to_module
+        project = tmp_path / "project"
+        pkg = project / "mypkg" / "sub"
+        pkg.mkdir(parents=True)
+        init_file = pkg / "__init__.py"
+        init_file.write_text("# sub package init\n")
+
+        result = _file_to_module(str(init_file), str(project))
+        assert result == "mypkg.sub", f"Expected 'mypkg.sub', got '{result}'"
+
+    def test_regular_module_unchanged(self, tmp_path):
+        """Regular .py files should still work normally."""
+        from emend.transform.project_iter import _file_to_module
+        project = tmp_path / "project"
+        pkg = project / "mypkg"
+        pkg.mkdir(parents=True)
+        mod_file = pkg / "utils.py"
+        mod_file.write_text("# utils\n")
+
+        result = _file_to_module(str(mod_file), str(project))
+        assert result == "mypkg.utils"
