@@ -820,10 +820,10 @@ def _substitute_metavars(
         return None
 
     # Second pass: substitute regular metavar references ($NAME, $...NAME).
-    for name, code in captures.items():
-        # Replace $...NAME with the captured text (already a string from Rust)
+    # Sort by name length descending so that $XY is replaced before $X,
+    # preventing $X from partially matching inside $XY.
+    for name, code in sorted(captures.items(), key=lambda kv: len(kv[0]), reverse=True):
         replacement_code = replacement_code.replace(f"$...{name}", code)
-        # Replace $NAME with the captured text
         replacement_code = replacement_code.replace(f"${name}", code)
 
     # Clean up comma artifacts from empty ellipsis substitutions

@@ -185,6 +185,24 @@ def foo():
         # The two branches must resolve to different blocks
         assert loc_true.block_id != loc_else.block_id
 
+    def test_from_source_uses_source_not_disk(self, tmp_path):
+        """from_source() must use the provided `source` parameter for function
+        range extraction, not read from disk."""
+        p = tmp_path / "test.py"
+        p.write_text("x = 1\n")
+
+        source = """\
+def greet():
+    return "hello"
+"""
+        resolver = LocationResolver.from_source(str(p), source)
+        loc = resolver.resolve(str(p), 2)
+        assert not loc.is_module_level, (
+            "from_source() read function ranges from disk instead of using "
+            "the provided source parameter"
+        )
+        assert "greet" in loc.func_qn
+
     def test_block_func_qn_for_non_first_function(self, tmp_path):
         """The func_qn on block ranges built by from_source must match the
         enclosing function.  Regression: 0-based func_start_line was passed

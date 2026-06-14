@@ -703,10 +703,11 @@ def types_cmd(
             print(f"Error: {resolved_engine} is not installed or not available on PATH.", file=sys.stderr)
             raise typer.Exit(2)
 
+        _lang = _state["language"]
         if is_glob:
-            files, _ = resolve_files(path)
+            files, _ = resolve_files(path, language=_lang)
         elif target.is_dir():
-            files, _ = resolve_files(path)
+            files, _ = resolve_files(path, language=_lang)
         else:
             files = [target]
 

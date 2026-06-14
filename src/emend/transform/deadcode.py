@@ -966,7 +966,7 @@ def find_dead_code(
 
     def _reference_file_is_excluded(file_path: str) -> bool:
         if _is_test_file(file_path):
-            return exclude_references_from is not None
+            return bool(exclude_references_from)
         if not exclude_references_from:
             return False
         import fnmatch

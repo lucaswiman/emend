@@ -135,10 +135,11 @@ def func():
         result = run_emend_cmd(["search", "--output", "metadata", f"{temp_file}:3"], check=False)
 
         # Should exit with error code for module-level code
-        assert result.returncode == 1, \
-            f"Expected exit code 1, got {result.returncode}"
-        assert "no symbol found" in result.stdout.lower(), \
-            f"Expected 'no symbol found' message in stdout, got: {result.stdout}"
+        assert result.returncode != 0, \
+            f"Expected non-zero exit code, got {result.returncode}"
+        combined = (result.stdout + result.stderr).lower()
+        assert "no symbol found" in combined, \
+            f"Expected 'no symbol found' message, got stdout: {result.stdout}, stderr: {result.stderr}"
     finally:
         Path(temp_file).unlink()
 

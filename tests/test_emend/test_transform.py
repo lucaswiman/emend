@@ -60,6 +60,13 @@ class TestReplacePattern:
         assert "assert y == 10" in diff
         assert count == 2
 
+    def test_replace_prefix_metavar_not_corrupted(self, tmp_path):
+        """$X must not be replaced inside $XY when $X is a prefix of $XY."""
+        from emend.transform import _substitute_metavars
+
+        result = _substitute_metavars("$X + $XY", {"X": "a", "XY": "b"})
+        assert result == "a + b", f"Expected 'a + b', got '{result}'"
+
     def test_replace_no_matches(self, tmp_path):
         """Replace pattern that doesn't match returns empty diff."""
         from emend.transform import replace_pattern

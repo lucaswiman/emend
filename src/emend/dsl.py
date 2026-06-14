@@ -1000,7 +1000,7 @@ def resolve_jinja_links(
                 tpl_basename = Path(symbol.host_file).name
                 for tpl_name, contexts in template_contexts.items():
                     # Match if template name matches the file name or ends with it
-                    if tpl_basename == tpl_name or tpl_basename.endswith(tpl_name):
+                    if tpl_basename == tpl_name or tpl_name.endswith(tpl_basename):
                         for ctx_file, ctx_line, ctx_vars in contexts:
                             if symbol.name in ctx_vars:
                                 links.append(DslLink(

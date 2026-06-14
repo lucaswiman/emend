@@ -166,8 +166,8 @@ class LocationResolver:
     def from_source(cls, file_path: str, source: str) -> "LocationResolver":
         """Build a resolver by analysing *source* on-the-fly.
 
-        Uses :func:`~emend.ast_utils.find_nested_definitions` for function
-        ranges and :func:`~emend.cfg.build_cfgs_for_source` for block ranges.
+        Uses ``emend_core.collect_symbols_from_str`` for function ranges and
+        :func:`~emend.cfg.build_cfgs_for_source` for block ranges.
 
         Args:
             file_path: Path used as the file identifier in resolved locations.
@@ -178,12 +178,12 @@ class LocationResolver:
         # -- Function ranges via tree-sitter symbol collector --
         func_ranges: list[_FuncRange] = []
         try:
-            from emend.ast_utils import find_nested_definitions
-            syms = find_nested_definitions(file_path)
-            _collect_func_ranges(syms, func_ranges)
+            from emend import emend_core
+            raw_syms = emend_core.collect_symbols_from_str(source, ext=ext)
+            _collect_func_ranges_from_raw(raw_syms, func_ranges)
         except Exception:
             logger.debug(
-                "find_nested_definitions failed for %s; skipping function index",
+                "collect_symbols_from_str failed for %s; skipping function index",
                 file_path,
                 exc_info=True,
             )
@@ -279,3 +279,26 @@ def _collect_func_ranges(
         # Always recurse to pick up nested functions inside classes, etc.
         if sym.children:
             _collect_func_ranges(sym.children, out, qn)
+
+
+def _collect_func_ranges_from_raw(
+    raw_syms: list[dict],
+    out: list[_FuncRange],
+    prefix: str = "",
+) -> None:
+    """Collect function ranges from raw dicts returned by
+    ``emend_core.collect_symbols_from_str()``.
+    """
+    _FUNC_KINDS = {"function", "async_function", "method", "async_method"}
+    for d in raw_syms:
+        kind = d.get("kind", "")
+        if kind in ("variable", "reference"):
+            continue
+        path = d.get("path", [])
+        name = d.get("name", "")
+        qn = ".".join(path) if path else name
+        if kind in _FUNC_KINDS:
+            out.append((qn, d["line"], d["end_line"]))
+        children = d.get("children", [])
+        if children:
+            _collect_func_ranges_from_raw(children, out, qn)
