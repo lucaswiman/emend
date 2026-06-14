@@ -38,8 +38,8 @@
 | `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class with `update_files()`/`remove_files()`/`build_from_project()`; Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`, `trace_propagation_datalog`, `interprocedural_trace_datalog`, `flow_rule_check_datalog`); JSON serialisation. |
 | `trace.py` | Trace/taint analysis. `TraceConfig`, `TraceSource`, `TraceSink` (optional `effect: writes($X)/reads($X)`), `TraceSanitizer` (`quantifier: all_paths/some_path`), `TraceScopeSanitizer` (scope-bounded kills), `TraceViolation`. Datalog-backed intra- and interprocedural analysis with fixed-point iteration. YAML `presets:` key for auto-loading framework rules. |
 | `trace_presets.py` | Framework preset loader: `get_preset()` reads `src/emend/presets/*.yaml` (Flask, Django, SQLAlchemy, FastAPI, Express, Axum, Diesel, Next.js, React, …); `merge_configs()` composes multiple configs. |
-| `lint.py` | Lint public API layer (~800 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml` (legacy `patterns.yaml` fallback). Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
-| `policy.py` | Policy public API layer (~680 lines). `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml` (legacy `policies.yaml` fallback). Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `lint.py` | Lint public API layer (~800 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `policy.py` | Policy public API layer (~680 lines). `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
 | `checks/` | Unified rule engine package (was `checks.py`). Public surface: `CheckViolation`, `run_checks` re-exported from `checks/__init__.py`. Submodules: `engine.py` (unified runner — dispatches to lint + policy, normalises results; CLI `check` and MCP `check` tool entry point), `flow.py` (shared flow IR: `FlowSpec`, `FlowViolation`, `WitnessStep`; `execute_flow_spec()` Datalog-first / Python-fallback bridge), `pattern_rules.py` (pattern-based lint rule matching), `rules_config.py` (YAML config loader: `DeadCodeConfig`, `load_rules_document()`), `structural.py` (structural pattern checks), `types.py` (oracle-driven type constraint checks), `custom.py` (custom expert query checks), `datalog.py` (CozoScript Datalog query checks), `deadcode.py` (dead code detection as a policy check wrapper), `duplicates.py` (duplicate code detection), `sequence.py` (temporal sequence / CFG-reachability checks). |
 | `flow_ir.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`FlowSpec`, `FlowViolation`, `WitnessStep`, `execute_flow_spec`, etc.) from `emend.checks.flow`. Import from `emend.checks.flow` directly in new code. |
 | `rules_config.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`DeadCodeConfig`, `load_rules_document()`, etc.) from `emend.checks.rules_config`. Import from `emend.checks.rules_config` directly in new code. |
@@ -65,8 +65,9 @@
 
 | File | Purpose |
 |------|---------|
-| `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial-pattern normalisation. **3.2k lines**, with several inline `import ast` sites earmarked for Phase 5 cleanup. |
-| `mcp_server.py` | MCP (Model Context Protocol) server. Exposes emend's commands as MCP tools over stdio or SSE; uses `FastMCP`. Optional `mcp` extra. |
+| `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial-pattern normalisation. **3.2k lines.** |
+| `mcp/` | MCP (Model Context Protocol) server package. Exposes emend's commands as MCP tools over stdio or SSE; uses `FastMCP`. Optional `mcp` extra. Submodules: `dispatch.py` (`FastMCP` app, profile/schema/run infrastructure), `find.py` (`search` tool), `edit.py` (`transform` tool), `analyze.py` (`references` + `analyze` tools), `checks.py` (`check` tool), `tooling.py` (`facts_query` + `mappings` + `grammar_and_cookbook` tools). |
+| `mcp_server.py` | Backward-compat shim (~50 lines) re-exporting from the `mcp/` package. Import from `emend.mcp` directly in new code. |
 | `knowledge.py` | Identifier and module mapping store: `MappingStore` (YAML-backed at `.emend/mappings.yaml`), repo checkout helpers, MCP/RPC integration. |
 
 #### Grammars
@@ -97,7 +98,7 @@ list. Conventions:
 - `test_<command>.py` — the public CLI behaviour for that command. Start here when changing a command.
 - `test_<module>.py` — direct unit tests for `src/emend/<module>.py`.
 - `test_<command|module>_<lang>.py` (e.g. `test_lint_typescript.py`, `test_cfg_rust.py`) — language-specific variants. Add one of these when extending a feature beyond Python.
-- `test_phaseN*.py` — historical regression suites pinning behaviour from the trace/Datalog/CFG roadmaps in `ideas/old-roadmaps/`. Don't add new tests here; pick a topical name.
+- `test_phaseN*.py` — historical regression suites pinning behaviour from the completed trace/Datalog/CFG roadmaps (the roadmap docs themselves were deleted; see git history). Don't add new tests here; pick a topical name.
 - `test_regressions.py`, `test_bug_report_regressions.py` — catch-all bug-report regressions.
 - `test_cli_surface_consolidation.py` — pins the visible CLI surface (commands, hidden aliases, help text). Touched when CLI structure changes.
 - `test_phase17_remove_legacy_intra.py`, `test_phase12_cutover.py`, … — verify legacy code paths stay deleted; keep them red if a removal regresses.
@@ -170,8 +171,8 @@ Read-only analysis.
 
 | Command | Description |
 |---|---|
-| `lint` | Pattern + flow + deadcode + duplicate-code rules from `.emend/rules.yaml` (legacy `patterns.yaml` fallback). `--fix` auto-applies attached `replace` patterns. |
-| `policy` | Declarative policies from `.emend/rules.yaml` (legacy `policies.yaml` fallback): flow, structural, type, deadcode, datalog, custom, sequence checks. |
+| `lint` | Pattern + flow + deadcode + duplicate-code rules from `.emend/rules.yaml`. `--fix` auto-applies attached `replace` patterns. |
+| `policy` | Declarative policies from `.emend/rules.yaml`: flow, structural, type, deadcode, datalog, custom, sequence checks. |
 | `check` | Unified runner that dispatches to both. Preferred for CI. |
 
 ### `emend map <command>`
@@ -195,12 +196,9 @@ default is dry-run), `--json` (machine-readable output), `--project`
 
 ## Architecture
 
-### Active and recent roadmaps
+### Roadmaps
 
-- `ideas/roadmap-simplify-codebase/` — line-level cleanup. Phases A–E done; left as reference for the audit numbers and design decisions (e.g. why `flow_ir.py` and `language_plugins.py` survive).
-- `ideas/old-roadmaps/roadmap-modularize/` — structural splits and engine consolidation. Phases 1–3 complete: `transform.py` was split into the `transform/` package (phase 1), lint/policy/checks/flow_ir were moved into the `checks/` package (phase 2), and single-source CLI registration was implemented (phase 3). Phases 4–6 pending: legacy YAML cleanup (4), `editor_search.py` `ast` purge (5), `mcp_server.py` decomposition (6). Original planned sequence: 1 → 3 → 2 → 6 → 5 → 4.
-- `ideas/old-roadmaps/roadmap/` — completed Datalog/CFG/trace cutover phases (1–18); referenced by `test_phase*.py` regression suites that pin the new behaviour.
-- Other top-level `ideas/*.md` — exploratory notes (`auto-reindex`, `feature-work`, `mcp-review`, `next-analyses`, `querying-rewrite`, `static-analysis-literature-review`, `symbolic`, `FUTURE_WORK`).
+There is no active roadmap. Completed roadmaps (simplify-codebase, modularize, the Datalog/CFG/trace cutover, ts-rust-parity, ast-dedup, import-regex, vim-plugin-improvements) were deleted after completion — retrieve them from git history if needed. The `ideas/*.md` files are exploratory notes (`auto-reindex`, `feature-work`, `mcp-review`, `next-analyses`, `querying-rewrite`, `static-analysis-literature-review`, `symbolic`, `FUTURE_WORK`).
 
 ### Design Philosophy: Tree-sitter and Configuration over Language-Specific Logic
 
@@ -242,10 +240,10 @@ Cross-project functions use `visit_project_ts()` in `transform/project_iter.py`,
 
 ### Rules and policies
 
-Lint rules and policies live in a single document: `.emend/rules.yaml`.
-Legacy `.emend/patterns.yaml` and `.emend/policies.yaml` are still
-accepted as fallbacks (loader: `rules_config.load_rules_document`); see
-`ideas/old-roadmaps/roadmap-modularize/index.md` Phase 4 for planned removal.
+Lint rules and policies live in a single document: `.emend/rules.yaml`
+(loader: `checks/rules_config.load_rules_document`). The legacy
+`.emend/patterns.yaml` and `.emend/policies.yaml` fallbacks were removed
+in roadmap-modularize Phase 4; only `rules.yaml` is accepted.
 
 A rules document mixes the following top-level keys:
 
@@ -265,7 +263,7 @@ policy` filter to subsets of the kinds.
 ### Trace analysis
 
 `trace.py` is Datalog-backed (the Python intraprocedural engine was
-removed in the trace roadmap; see `ideas/old-roadmaps/roadmap/`). The
+removed in the trace roadmap). The
 public surface:
 
 - `run_trace_analysis(files, config)` — intraprocedural; iterates files, collects function defs, analyses each plus module-level code via `_run_trace_datalog()`.
@@ -382,10 +380,10 @@ make test TESTS="-k default"
    - Search/lookup → `cli_find.py`.
    - Map operations → `cli_map.py`.
 3. Wire it into `cli.py` under the right subapp (`edit_app`, `analyze_app`, `tool_app`, `map_app`) and add any hidden top-level aliases there.
-4. If the command should be exposed to LLM clients, add an MCP tool wrapper in `mcp_server.py`.
+4. If the command should be exposed to LLM clients, add an MCP tool wrapper in the matching `mcp/` submodule (`mcp/dispatch.py` holds the `FastMCP` app and registration).
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
-> Note: Phase 3 of `ideas/old-roadmaps/roadmap-modularize/` (single-source CLI registration) has landed; `cli.py` is now the canonical registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
+> Note: `cli.py` is the canonical (single-source) registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
 
 ## Code Conventions
 
@@ -405,7 +403,7 @@ make test TESTS="-k default"
 <layout>
 Projects in progress are put in the ideas/roadmap/ folder with an index.md with `- [ ] TODOs` for each phase and more detailed instructions in linked markdown files also in the roadmap directory.
 
-Completed roadmaps go in ideas/old-roadmaps but should only be moved if the user confirms they should be moved.
+Completed roadmaps are deleted (they remain retrievable from git history), but only after the user confirms the deletion.
 </layout>
 
 <instructions>

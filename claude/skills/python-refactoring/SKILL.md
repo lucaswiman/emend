@@ -1,6 +1,6 @@
 ---
 name: python-refactor
-description: Python code refactoring using the emend tool. Use this skill for mechanical Python refactoring operations like renaming symbols (classes, functions, variables), moving functions/classes between modules, and organizing imports. emend automatically updates all references across the codebase using LibCST. Trigger on requests to rename, move, or reorganize Python code elements.
+description: Python code refactoring using the emend tool. Use this skill for mechanical Python refactoring operations like renaming symbols (classes, functions, variables), moving functions/classes between modules, and organizing imports. emend automatically updates all references across the codebase using tree-sitter (via the Rust emend_core engine). Trigger on requests to rename, move, or reorganize Python code elements.
 allowed-tools: Bash(emend *)
 ---
 
