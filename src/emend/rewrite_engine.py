@@ -345,12 +345,6 @@ def _ast_size_cost(node: ENode, costs: dict[int, int]) -> int:
 # Expression parsing (simplified)
 # ---------------------------------------------------------------------------
 
-_MULTI_CHAR_BINOP_RE = re.compile(
-    r"^(.+?)\s*(\*\*|//|<<|>>)\s+(.+)$"
-)
-_BINOP_RE = re.compile(
-    r"^(.+)\s*([+\-*/%@&|^]|==|!=|<=|>=|<|>|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
-)
 _UNOP_RE = re.compile(r"^(not|~|-)\s+(.+)$")
 _CALL_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([^)]*)\)$")
 _ATTR_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\.\s*([A-Za-z_]\w*)$")
@@ -358,6 +352,16 @@ _METAVAR_RE = re.compile(r"^\$[A-Za-z_]\w*$")
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 _NUMBER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _STRING_RE = re.compile(r'''^(?:"[^"]*"|'[^']*')$''')
+
+_BINOP_LEVELS: list[re.Pattern[str]] = [
+    re.compile(r"^(.+)\s+(or)\s+(.+)$"),
+    re.compile(r"^(.+)\s+(and)\s+(.+)$"),
+    re.compile(r"^(.+)\s+(not\s+in|is\s+not|in|is|==|!=|<=|>=|<|>)\s+(.+)$"),
+    re.compile(r"^(.+)\s+([+\-])\s+(.+)$"),
+    re.compile(r"^(.+?)\s*(\*\*|//|<<|>>)\s+(.+)$"),
+    re.compile(r"^(.+)\s+([*/%@])\s+(.+)$"),
+    re.compile(r"^(.+)\s*([&|^])\s+(.+)$"),
+]
 
 
 def parse_expr(expr: str, egraph: EGraph) -> int:
@@ -396,14 +400,15 @@ def parse_expr(expr: str, egraph: EGraph) -> int:
     if _NUMBER_RE.match(expr):
         return egraph.add(ENode(op=f"num:{expr}"))
 
-    # Binary operations (lowest precedence first)
-    # Try multi-char operators first to avoid greedy LHS consuming part of the operator
-    m = _MULTI_CHAR_BINOP_RE.match(expr) or _BINOP_RE.match(expr)
-    if m:
-        left = parse_expr(m.group(1), egraph)
-        op = m.group(2).strip()
-        right = parse_expr(m.group(3), egraph)
-        return egraph.add(ENode(op=f"binop:{op}", children=(left, right)))
+    # Binary operations — try lowest precedence first so the rightmost
+    # low-precedence operator becomes the root (correct parse tree).
+    for level_re in _BINOP_LEVELS:
+        m = level_re.match(expr)
+        if m:
+            left = parse_expr(m.group(1), egraph)
+            op = m.group(2).strip()
+            right = parse_expr(m.group(3), egraph)
+            return egraph.add(ENode(op=f"binop:{op}", children=(left, right)))
 
     # Unary operations
     m = _UNOP_RE.match(expr)

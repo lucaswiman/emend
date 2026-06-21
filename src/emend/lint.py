@@ -534,7 +534,9 @@ def run_lint(
                 if match.matched_text is not None:
                     match_text = match.matched_text.strip()
                 elif (match.line and match.col is not None
-                      and match.end_line and match.end_col is not None):
+                      and match.end_line and match.end_col is not None
+                      and match.line - 1 < len(line_starts)
+                      and match.end_line - 1 < len(line_starts)):
                     start = line_starts[match.line - 1] + match.col
                     end = line_starts[match.end_line - 1] + match.end_col
                     match_text = source[start:end].strip()

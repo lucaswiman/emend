@@ -337,6 +337,36 @@ class TestBug1HashconsRebuildAfterMerge:
         )
 
 
+class TestBugParseExprPrecedence:
+    def test_mul_binds_tighter_than_add(self):
+        """a + b * c should parse as a + (b * c), not (a + b) * c."""
+        eg = EGraph()
+        root = parse_expr("a + b * c", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop:+", (
+            f"Root should be + (addition has lower precedence), got {node.op}"
+        )
+        left = eg.extract(node.children[0])
+        right = eg.extract(node.children[1])
+        assert left is not None and left.op == "name:a", (
+            f"Left of + should be 'a', got {left}"
+        )
+        assert right is not None and right.op == "binop:*", (
+            f"Right of + should be * (multiplication), got {right}"
+        )
+
+    def test_sub_binds_same_as_add(self):
+        """a - b + c should parse as (a - b) + c (left-associative)."""
+        eg = EGraph()
+        root = parse_expr("a - b + c", eg)
+        node = eg.extract(root)
+        assert node is not None
+        assert node.op == "binop:+", (
+            f"Root should be + (rightmost same-precedence op), got {node.op}"
+        )
+
+
 class TestBug2LeftAssociativeParsing:
     def test_parse_expr_left_associative(self):
         """Binary operators should be left-associative: 1 - 2 - 3 = (1 - 2) - 3."""

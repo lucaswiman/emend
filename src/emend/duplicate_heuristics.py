@@ -154,10 +154,6 @@ def is_init_self_assignment(
     if any(k in branching_kinds for k in kind_seq):
         return 0.0
 
-    # Allow super() calls but penalise if the only calls are self-assignments
-    call_tokens = [t for t in token_seq if t == "call"]
-    # If kind_seq has calls but no branching, it's likely super() + assignments
-    # Use a generous threshold: if >80% of kinds are assignments, it's boilerplate
     assignment_count = kind_seq.count("assignment") + kind_seq.count("augmented_assignment")
     total_kinds = len(kind_seq)
     if total_kinds > 0 and assignment_count / total_kinds >= 0.6:

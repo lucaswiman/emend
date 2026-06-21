@@ -80,6 +80,23 @@ class TestProjectConfig:
         assert cfg["environment_lookup"]["enabled"] is True
         assert cfg["environment_lookup"]["paths"] == ["env"]
 
+    def test_string_paths_treated_as_single_element(self, tmp_path):
+        """A bare string 'paths' value should become a single-element list, not a character list."""
+        from emend.project_config import get_environment_lookup_config, load_project_config
+
+        emend_dir = tmp_path / ".emend"
+        emend_dir.mkdir()
+        (emend_dir / "config.toml").write_text(textwrap.dedent("""\
+            [environment_lookup]
+            paths = "my_venv"
+        """))
+
+        load_project_config.cache_clear()
+        cfg = get_environment_lookup_config(str(tmp_path))
+        assert cfg.paths == ["my_venv"], (
+            f"String paths value should become ['my_venv'], got {cfg.paths}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # resolve_venv_site_packages tests

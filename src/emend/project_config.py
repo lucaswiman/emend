@@ -97,9 +97,12 @@ def get_environment_lookup_config(project_root: str, language: str = "python") -
     """Return the resolved EnvironmentLookupConfig for a project."""
     config = load_project_config(project_root, language)
     env_section = config.get("environment_lookup", {})
+    paths_val = env_section.get("paths", [".venv", "venv"])
+    if isinstance(paths_val, str):
+        paths_val = [paths_val]
     return EnvironmentLookupConfig(
         enabled=env_section.get("enabled", True),
-        paths=list(env_section.get("paths", [".venv", "venv"])),
+        paths=list(paths_val),
     )
 
 

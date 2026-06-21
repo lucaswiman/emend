@@ -30,7 +30,12 @@ def check(
 
     resolved, _ = resolve_file_scopes(paths or ["."], language="python")
     file_paths = [str(f) for f in resolved]
-    project_path = paths[0] if paths else "."
+    from pathlib import Path as _Path
+    if paths:
+        p = _Path(paths[0])
+        project_path = str(p if p.is_dir() else p.parent)
+    else:
+        project_path = "."
     violations = run_checks(
         file_paths,
         config=config,
