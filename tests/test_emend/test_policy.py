@@ -337,6 +337,29 @@ class TestStructuralCheck:
         assert len(violations) >= 1
         assert any(v.rule_name == "no-eval" for v in violations)
 
+    def test_structural_check_kind_filter(self, tmp_path):
+        """kind='structural' must not filter out StructuralCheck policies."""
+        from emend.checks.engine import run_checks
+        config_file = _write_rules(tmp_path, {
+            "policies": [{
+                "name": "no-eval",
+                "severity": "error",
+                "description": "No eval calls",
+                "checks": [{"type": "structural", "pattern": "eval($X)"}],
+            }],
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("result = eval('1+1')\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            kind="structural",
+        )
+        assert len(violations) >= 1, (
+            "kind='structural' should return structural check violations"
+        )
+
 
 class TestFormatViolations:
     def test_text_format(self):

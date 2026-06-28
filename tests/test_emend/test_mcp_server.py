@@ -317,6 +317,23 @@ def test_grammar_and_cookbook_all_returns_full_document():
     assert "emend edit replace" in result
 
 
+def test_grammar_and_cookbook_facts_section():
+    """section='facts' must return the Fact graph section, not 'Unknown section'."""
+    result = grammar_and_cookbook(section="facts")
+    assert "Unknown section" not in result
+    assert "facts_query" in result.lower() or "fact graph" in result.lower()
+
+
+def test_trace_analysis_unknown_preset_returns_json_error(tmp_path):
+    """Unknown preset should return a JSON error, not raise ValueError."""
+    p = tmp_path / "example.py"
+    p.write_text("x = 1\n")
+    result = trace_analysis(path=str(p), preset="nonexistent_preset_xyz")
+    data = json.loads(result)
+    assert "error" in data
+    assert "nonexistent_preset_xyz" in data["error"].lower() or "unknown" in data["error"].lower()
+
+
 def test_trace_analysis_intraprocedural_no_crash(tmp_path):
     """trace_analysis without interprocedural should not crash with TypeError."""
     p = tmp_path / "example.py"

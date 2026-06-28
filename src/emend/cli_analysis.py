@@ -73,7 +73,7 @@ def _trace_cmd_impl(
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        _proj_root = project or str(Path(path).resolve())
+        _proj_root = project or str(Path(path).resolve() if Path(path).is_dir() else Path(path).resolve().parent)
 
         if interprocedural:
             from emend.trace import run_interprocedural_trace
@@ -812,7 +812,7 @@ def facts_cmd(
                 print("Error: --symbol required for reference queries", file=sys.stderr)
                 raise typer.Exit(2)
             results = graph.references_to(symbol)
-        elif fact_type == "trace_flows":
+        elif fact_type in ("trace_flows", "taint_flows"):
             results = graph.trace_flows(label=label, file_path=file)
         elif fact_type == "types":
             if not symbol:

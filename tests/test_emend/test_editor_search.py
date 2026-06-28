@@ -952,6 +952,36 @@ class TestEditorSearchBugFixes:
         finally:
             engine.close()
 
+    def test_complete_via_mapping_handles_nested_symbol_dataclass(self, tmp_path):
+        """_complete_via_mapping must use attribute access on NestedSymbol, not .get()."""
+        from unittest.mock import patch, MagicMock
+        from emend.editor_search import EditorSearchEngine
+        from emend.component_selector import NestedSymbol
+
+        src = tmp_path / "mod.py"
+        src.write_text("class Foo:\n    def bar(self): pass\n")
+
+        engine = EditorSearchEngine(str(tmp_path))
+        try:
+            symbols = [
+                NestedSymbol(
+                    name="bar", kind="method",
+                    line_start=2, line_end=2, col_offset=4,
+                    path=["Foo", "bar"],
+                ),
+            ]
+            with patch("emend.ast_utils.find_nested_definitions", return_value=symbols):
+                mock_store = MagicMock()
+                mock_store.resolve_selector.return_value = f"{src}::Foo"
+                with patch("emend.knowledge.MappingStore", return_value=mock_store):
+                    items = engine._complete_via_mapping(
+                        "Foo", member_prefix="", limit=10, seen=set(),
+                    )
+            assert len(items) >= 1
+            assert items[0]["word"] == "bar"
+        finally:
+            engine.close()
+
     def test_class_member_name_uses_tree_sitter(self):
         """_class_member_name extracts member names via tree-sitter PyNode."""
         import emend.emend_core as _ec

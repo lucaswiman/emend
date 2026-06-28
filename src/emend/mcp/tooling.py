@@ -240,7 +240,7 @@ def _parse_rst_sections(text: str) -> dict[str, str]:
         "pattern_syntax": "patterns",
         "commands": "commands",
         "cookbook_recipes": "recipes",
-        "fact_graph_relations": "facts",
+        "fact_graph_(``facts_query``)": "facts",
     }
 
     lines = text.split("\n")

@@ -2726,11 +2726,10 @@ class EditorSearchEngine:
         items: list[dict] = []
         target_prefix = f"{sym_part}." if sym_part else ""
         for sym in symbols:
-            qn = sym.get("qualified_name", sym.get("name", ""))
-            name = sym.get("name", "")
+            qn = ".".join(sym.path) if sym.path else sym.name
+            name = sym.name
             if target_prefix and not qn.startswith(target_prefix):
                 continue
-            # Only direct children (one level deep)
             remainder = qn[len(target_prefix):]
             if "." in remainder:
                 continue
@@ -2740,7 +2739,7 @@ class EditorSearchEngine:
                 seen.add(name)
                 items.append({
                     "word": name,
-                    "kind": sym.get("kind", "variable"),
+                    "kind": sym.kind,
                     "menu": f"[{qn}]",
                 })
             if len(items) >= limit:

@@ -39,7 +39,7 @@ def _policy_check_kind(check: Any) -> str:
     if isinstance(check, FlowCheck):
         return "flow"
     if isinstance(check, StructuralCheck):
-        return "match"
+        return "structural"
     if isinstance(check, TypeCheck):
         return "type"
     if isinstance(check, DeadCodeCheck):

@@ -777,6 +777,63 @@ def test_trace_exclude_paths_filters_files(tmp_path):
     assert str(migration_file) not in violation_files
 
 
+def test_trace_cmd_file_path_resolves_to_parent_dir(tmp_path, capsys):
+    """When given a file path, _trace_cmd_impl should use the parent dir as project_path."""
+    import yaml
+    source_file = tmp_path / "app.py"
+    source_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    config_file = config_dir / "rules.yaml"
+    config_file.write_text(yaml.dump({
+        "trace": {
+            "labels": ["sql-injection"],
+            "sources": [{"pattern": "request.args.get($X)", "label": "sql-injection"}],
+            "sinks": [{"pattern": "cursor.execute($X)", "label": "sql-injection"}],
+        }
+    }))
+
+    from unittest.mock import patch
+    from emend.cli_analysis import _trace_cmd_impl
+    from emend.cli_base import _state
+    old_lang = _state["language"]
+    _state["language"] = "python"
+    captured_project_path = []
+
+    orig_run_trace = None
+    try:
+        from emend import trace as _trace_mod
+        orig_run_trace = _trace_mod.run_trace_analysis
+
+        def mock_run_trace(*args, **kwargs):
+            captured_project_path.append(kwargs.get("project_path"))
+            return orig_run_trace(*args, **kwargs)
+
+        with patch.object(_trace_mod, "run_trace_analysis", side_effect=mock_run_trace):
+            import typer
+            with pytest.raises((SystemExit, typer.Exit)):
+                _trace_cmd_impl(
+                    path=str(source_file),
+                    config=str(config_file),
+                    label=None, trace=False, json_output=False,
+                    project=None,
+                    interprocedural=False, max_iterations=3,
+                    preset=None,
+                )
+    finally:
+        _state["language"] = old_lang
+
+    assert captured_project_path, "run_trace_analysis was not called"
+    pp = captured_project_path[0]
+    assert not pp.endswith(".py"), (
+        f"project_path should be a directory, not a file: {pp}"
+    )
+
+
 def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
     """trace_cmd's print output should end with a newline.
 

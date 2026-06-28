@@ -368,13 +368,17 @@ def trace_analysis(
         )
         if preset:
             from emend.trace_presets import get_preset, merge_configs
-            preset_config = get_preset(preset)
+            try:
+                preset_config = get_preset(preset)
+            except ValueError:
+                return json.dumps({"error": f"Unknown preset: {preset}"})
             if preset_config:
                 trace_config = merge_configs(trace_config, preset_config)
     elif preset:
         from emend.trace_presets import get_preset
-        trace_config = get_preset(preset)
-        if not trace_config:
+        try:
+            trace_config = get_preset(preset)
+        except ValueError:
             return json.dumps({"error": f"Unknown preset: {preset}"})
     else:
         config_path = resolve_rules_path(config)
