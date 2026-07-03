@@ -894,6 +894,64 @@ class TestPatternPrefilter:
             engine.close()
 
 
+class TestGrepSearch:
+    """Regex (``/pattern/``) grep search via rg / grep."""
+
+    def test_grep_search_single_file_scope(self, multi_file_project):
+        """Regex search scoped to a single file must return matches.
+
+        Regression: when rg searches exactly one file it omits the
+        filename prefix, so the parser (which expected
+        ``file:line:text``) silently dropped every match.
+        """
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2  # two print() calls in a.py
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+    def test_grep_search_multi_file_scope(self, multi_file_project):
+        """Regex search across the project should still find matches."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2
+        finally:
+            engine.close()
+
+    def test_grep_search_single_file_via_search(self, multi_file_project):
+        """The ``/regex/`` dispatch path must work with a single-file scope."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search(
+                "/print/",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+
 # ---------------------------------------------------------------------------
 # Bug fixes: wrong arguments and method names
 # ---------------------------------------------------------------------------

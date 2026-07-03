@@ -1135,6 +1135,10 @@ class EditorSearchEngine:
         if rg:
             cmd = [
                 rg, "--pcre2", "--no-heading", "--line-number",
+                # --with-filename forces the ``file:line:text`` prefix even
+                # when exactly one file is searched; without it rg omits the
+                # path and the parser below drops every match.
+                "--with-filename",
                 "--color", "never", "--max-count", str(limit * 2),
                 pattern, scope,
             ]
