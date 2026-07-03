@@ -75,13 +75,21 @@ def rename_symbol(
         transform = _rust.PyFileTransform(content)
         changed = False
 
+        # offset/end_offset from the resolver are BYTE offsets and
+        # PyFileTransform.replace_range indexes bytes, so all comparisons and
+        # slicing must be done against the utf-8 encoded content.  Slicing the
+        # str with byte offsets is wrong once multi-byte characters precede a
+        # reference.
+        content_bytes = content.encode('utf-8')
+        symbol_name_bytes = symbol_name.encode('utf-8')
+
         for qn, line, col, offset, end_offset, kind, _ann in references:
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
                 # Now using end_offset for better precision!
-                if content[offset:end_offset].endswith(symbol_name):
-                    transform.replace_range(end_offset - len(symbol_name), end_offset, new_name)
+                if content_bytes[offset:end_offset].endswith(symbol_name_bytes):
+                    transform.replace_range(end_offset - len(symbol_name_bytes), end_offset, new_name)
                     changed = True
 
         if not changed:
@@ -370,6 +378,10 @@ def _update_imports_for_move(
 
             references = resolver.references_in_file(py_file)
 
+            # offset/end_offset are BYTE offsets; slice/index the encoded bytes.
+            content_bytes = content.encode('utf-8')
+            source_module_bytes = source_module.encode('utf-8')
+
             for i, (qn, line, col, offset, end_offset, kind, _ann) in enumerate(references):
                 if kind != "import":
                     continue
@@ -377,9 +389,9 @@ def _update_imports_for_move(
                 if qn == target_qn:
                     # Only handle 'import source_module.symbol_name' (dotted)
                     # style; 'from source_module import ...' is handled above.
-                    if content[offset : offset + len(source_module)] == source_module:
+                    if content_bytes[offset : offset + len(source_module_bytes)] == source_module_bytes:
                         transform.replace_range(
-                            offset, offset + len(source_module), dest_module
+                            offset, offset + len(source_module_bytes), dest_module
                         )
                         changed = True
 
@@ -517,12 +529,20 @@ def _replace_module_in_strings(
 
     lines = content.splitlines(keepends=True)
 
-    # Collect (char_start, char_end, replacement) tuples.
+    # start_col/end_col from find_pattern_in_files are BYTE columns, so build a
+    # byte-based cumulative line-offset table and slice the encoded content.
+    # Mixing byte columns with character line lengths corrupts positions when
+    # multi-byte characters precede the match.
+    line_byte_offsets = [0]
+    for line in lines:
+        line_byte_offsets.append(line_byte_offsets[-1] + len(line.encode('utf-8')))
+
+    # Collect (byte_start, byte_end, replacement) tuples.
     replacements: list[tuple[int, int, str]] = []
 
     for _file, start_line, start_col, end_line, end_col, text, _caps in matches:
-        char_start = sum(len(lines[i]) for i in range(start_line - 1)) + start_col
-        char_end = sum(len(lines[i]) for i in range(end_line - 1)) + end_col
+        char_start = line_byte_offsets[start_line - 1] + start_col
+        char_end = line_byte_offsets[end_line - 1] + end_col
 
         # Determine the string's inner content (without surrounding quotes).
         if text[:3] in ('"""', "'''"):
@@ -551,12 +571,14 @@ def _replace_module_in_strings(
     if not replacements:
         return content
 
-    # Apply in reverse order to preserve earlier offsets.
+    # Apply in reverse order to preserve earlier offsets.  Offsets are byte
+    # positions, so splice on the encoded buffer and decode back at the end.
+    content_bytes = content.encode('utf-8')
     replacements.sort(key=lambda x: x[0], reverse=True)
     for start, end, repl in replacements:
-        content = content[:start] + repl + content[end:]
+        content_bytes = content_bytes[:start] + repl.encode('utf-8') + content_bytes[end:]
 
-    return content
+    return content_bytes.decode('utf-8')
 
 
 def _rename_module_references(
@@ -589,11 +611,17 @@ def _rename_module_references(
         old_bare_mod = old_module.rsplit(sep, 1)[-1]
         new_bare_mod = new_module.rsplit(sep, 1)[-1]
 
+        # offset/end_offset are BYTE offsets; slice/index the encoded bytes so
+        # that non-ASCII text earlier in the file does not shift positions.
+        content_bytes = content.encode('utf-8')
+        old_module_bytes = old_module.encode('utf-8')
+        old_bare_mod_bytes = old_bare_mod.encode('utf-8')
+
         for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(py_file):
             # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
             # the comparison against old_module works correctly.
             resolved_qn = qn
-            src_text = content[offset:end_offset]
+            src_text = content_bytes[offset:end_offset].decode('utf-8')
             if qn.startswith("."):
                 resolved = _resolve_relative_import_qn(qn, py_file, project_root, sep, src_text=src_text)
                 if resolved is not None:
@@ -618,8 +646,8 @@ def _rename_module_references(
                     changed = True
                 # Prefix match: import old_module.sub or from old_module.sub import ...
                 elif resolved_qn.startswith(old_module + sep):
-                    prefix_len = len(old_module)
-                    if content[offset : offset + prefix_len] == old_module:
+                    prefix_len = len(old_module_bytes)
+                    if content_bytes[offset : offset + prefix_len] == old_module_bytes:
                         transform.replace_range(offset, offset + prefix_len, new_module)
                         changed = True
                     elif qn.startswith(".") and resolved_qn != qn:
@@ -627,8 +655,8 @@ def _rename_module_references(
                         dot_count = len(qn) - len(qn.lstrip("."))
                         relative_module_part = qn[dot_count:]
                         if relative_module_part == old_bare_mod or relative_module_part.startswith(old_bare_mod + sep):
-                            if content[offset : offset + len(old_bare_mod)] == old_bare_mod:
-                                transform.replace_range(offset, offset + len(old_bare_mod), new_bare_mod)
+                            if content_bytes[offset : offset + len(old_bare_mod_bytes)] == old_bare_mod_bytes:
+                                transform.replace_range(offset, offset + len(old_bare_mod_bytes), new_bare_mod)
                                 changed = True
 
             elif kind in ("read", "write"):
