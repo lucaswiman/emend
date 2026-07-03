@@ -47,6 +47,7 @@ def run_sequence_check(
 ) -> "list[PolicyViolation]":
     """Run a temporal sequence check against the project's fact graph."""
     from emend.fact_graph import FactGraph, compile_sequence_rule
+    from emend.checks.flow import WitnessStep, format_witness as _fmt_witness
     from emend.policy import PolicyViolation
 
     violations: list[PolicyViolation] = []
@@ -81,41 +82,6 @@ def run_sequence_check(
     headers = query_result.get("headers", [])
     rows = query_result.get("rows", [])
 
-    violations.extend(
-        _sequence_rows_to_violations(headers, rows, check, policy)
-    )
-    return violations
-
-
-def _safe_int(value: object) -> int:
-    """Coerce a Datalog row value to int, defaulting to 0 on bad data.
-
-    Datalog rows can contain non-numeric or missing values; a single
-    malformed row must not crash the whole check run.  Mirrors the guard
-    pattern in ``emend.checks.datalog``.
-    """
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (ValueError, TypeError):
-        return 0
-
-
-def _sequence_rows_to_violations(
-    headers: "list[str]",
-    rows: "list[list]",
-    check: SequenceCheck,
-    policy: "Policy",
-) -> "list[PolicyViolation]":
-    """Turn Datalog query rows into ``PolicyViolation`` records.
-
-    Factored out of :func:`run_sequence_check` so the row-coercion logic
-    (which must tolerate malformed/non-numeric line values) is unit-testable
-    without a live CozoDB.
-    """
-    from emend.checks.flow import WitnessStep, format_witness as _fmt_witness
-    from emend.policy import PolicyViolation
-
-    violations: list[PolicyViolation] = []
     for row in rows:
         row_dict = dict(zip(headers, row))
         fp = row_dict.get("fp", "<unknown>")
@@ -137,7 +103,7 @@ def _sequence_rows_to_violations(
                     file_path=str(fp),
                     func_qn=str(fq),
                     block_id=0,
-                    line=_safe_int(v),
+                    line=int(v),
                     var_name=step_name,
                     kind="step",
                 ))
@@ -147,7 +113,7 @@ def _sequence_rows_to_violations(
                     file_path=str(fp),
                     func_qn=str(fq),
                     block_id=0,
-                    line=_safe_int(v),
+                    line=int(v),
                     kind=kind,
                 ))
 
@@ -157,7 +123,7 @@ def _sequence_rows_to_violations(
 
         violations.append(PolicyViolation(
             file_path=str(fp),
-            line=_safe_int(first_line),
+            line=int(first_line),
             col=0,
             policy_name=policy.name,
             check_name=f"sequence:{check.name}",
