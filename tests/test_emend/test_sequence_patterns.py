@@ -1023,3 +1023,61 @@ class TestRunSequenceCheckIntegration:
             assert v.policy_name == "toctou-check"
             assert "sequence:toctou" in v.check_name
             assert v.severity == "error"
+
+
+class TestSequenceRowCoercion:
+    """Malformed Datalog row values must not crash sequence checks.
+
+    Directly exercises ``_sequence_rows_to_violations`` (the row->violation
+    coercion factored out of ``run_sequence_check``) to confirm that
+    non-numeric / missing line values are tolerated, mirroring the guard in
+    ``emend.checks.datalog``.
+    """
+
+    def _make_policy_and_check(self):
+        check = SequenceCheck(
+            name="toctou",
+            message="TOCTOU detected",
+            sequence=[
+                SequenceStep(bind="load", pattern="$OBJ = session.query($MODEL)"),
+                SequenceStep(bind="mutate", effect="writes($OBJ)"),
+            ],
+        )
+        policy = Policy(
+            name="toctou-check",
+            description="",
+            severity="error",
+            checks=[check],
+        )
+        return policy, check
+
+    def test_malformed_line_values_do_not_raise(self):
+        from emend.checks.sequence import _sequence_rows_to_violations
+
+        policy, check = self._make_policy_and_check()
+        headers = ["fp", "fq", "first_line", "line_0", "line_1"]
+        # first_line non-numeric, line_1 is None -> naked int() would raise.
+        rows = [
+            ["a.py", "mod.f", "not-a-number", 10, None],
+        ]
+
+        violations = _sequence_rows_to_violations(headers, rows, check, policy)
+
+        assert len(violations) == 1
+        v = violations[0]
+        assert isinstance(v, PolicyViolation)
+        # Malformed values coerced to 0 rather than crashing.
+        assert v.line == 0
+        assert v.file_path == "a.py"
+
+    def test_wellformed_line_values_preserved(self):
+        from emend.checks.sequence import _sequence_rows_to_violations
+
+        policy, check = self._make_policy_and_check()
+        headers = ["fp", "fq", "first_line", "line_0", "line_1"]
+        rows = [["a.py", "mod.f", 5, 7, 9]]
+
+        violations = _sequence_rows_to_violations(headers, rows, check, policy)
+
+        assert len(violations) == 1
+        assert violations[0].line == 5

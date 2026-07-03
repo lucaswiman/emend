@@ -4,6 +4,25 @@ import pytest
 from emend.transform import cmd_lookup
 
 
+class TestDispatchAnnotations:
+    """Runtime-evaluation of module annotations (guards against missing imports)."""
+
+    def test_single_fn_annotation_resolves(self):
+        """`_dispatch_with_returns_filter`'s `single_fn` param is annotated
+        `Callable[[ExtendedSelector], str]`. With `from __future__ import
+        annotations` the annotation is stored as a string and only fails when
+        evaluated. Evaluating it against the module namespace raises NameError
+        if `Callable` was never imported into the module.
+        """
+        from emend.transform import dispatch
+
+        ann = dispatch._dispatch_with_returns_filter.__annotations__["single_fn"]
+        # Stored as a string due to `from __future__ import annotations`.
+        assert isinstance(ann, str)
+        # Evaluating against the module globals must not raise NameError.
+        eval(ann, vars(dispatch))  # noqa: S307
+
+
 class TestCmdLookupLineBasedMetadata:
     """Tests for cmd_lookup with line-based selectors and metadata=True."""
 
