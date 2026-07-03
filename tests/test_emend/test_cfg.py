@@ -670,3 +670,79 @@ class TestFactGraphIntegration:
         graph2 = FactGraph.from_json(json_str)
         assert len(graph2.cfg_edges()) == 1
         assert len(graph2.def_uses()) == 1
+
+
+class TestCliUnreachable:
+    """CLI `analyze cfg --unreachable` line-number reporting (Datalog path)."""
+
+    def test_unreachable_reports_real_line_numbers(self, tmp_path):
+        """The Datalog path must report real block line spans, not 0-0.
+
+        Regression: the Datalog branch hardcoded start_line/end_line to 0,
+        producing bogus ``:1`` locations and ``lines 0-0`` text.
+        """
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(textwrap.dedent("""\
+            def f(x):
+                if x:
+                    return 1
+                else:
+                    return 2
+                print("dead")
+                y = 3
+                return y
+        """))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["analyze", "cfg", str(project), "--unreachable"]
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "unreachable code" in out, out
+        # Must not contain the bogus placeholder span.
+        assert "lines 0-0" not in out, out
+        assert ":1:" not in out, out
+        # The dead statements live on source lines 6-8; the block covering
+        # them must be reported with a real (non-zero) start line.
+        import re
+        spans = re.findall(r"lines (\d+)-(\d+)", out)
+        assert spans, out
+        assert any(int(s) > 0 and int(e) > 0 for s, e in spans), out
+        # And at least one reported location line must be > 1.
+        locs = re.findall(r"mod\.py:(\d+):", out)
+        assert any(int(l) > 1 for l in locs), out
+
+    def test_unreachable_json_has_real_line_numbers(self, tmp_path):
+        """JSON output from the Datalog path must carry real line spans."""
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(textwrap.dedent("""\
+            def f(x):
+                if x:
+                    return 1
+                else:
+                    return 2
+                print("dead")
+                y = 3
+                return y
+        """))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["analyze", "cfg", str(project), "--unreachable", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        blocks = [b for r in data for b in r["unreachable_blocks"]]
+        assert blocks, result.output
+        assert any(
+            b["start_line"] > 0 or b["end_line"] > 0 for b in blocks
+        ), result.output
