@@ -31,16 +31,19 @@ def check(
     resolved, _ = resolve_file_scopes(paths or ["."], language="python")
     file_paths = [str(f) for f in resolved]
     project_path = paths[0] if paths else "."
-    violations = run_checks(
-        file_paths,
-        config=config,
-        rule_name=rule,
-        kind=kind,
-        mode=mode,
-        fix=fix,
-        language="python",
-        project_path=project_path,
-    )
+    try:
+        violations = run_checks(
+            file_paths,
+            config=config,
+            rule_name=rule,
+            kind=kind,
+            mode=mode,
+            fix=fix,
+            language="python",
+            project_path=project_path,
+        )
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
     return json.dumps([
         {
             "rule": violation.rule_name,

@@ -265,6 +265,19 @@ def test_check_unified_rules(tmp_path):
     assert data[0]["rule"] == "no-print"
 
 
+def test_check_missing_rules_returns_json_error(monkeypatch, tmp_path):
+    # No .emend/rules.yaml exists: the tool must return a clean JSON error
+    # instead of letting FileNotFoundError propagate to the MCP client.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "example.py"
+    p.write_text("print('x')\n")
+
+    result = check(paths=[str(tmp_path)], config=None)
+    data = json.loads(result)
+    assert isinstance(data, dict)
+    assert "error" in data
+
+
 def test_facts_query_guided_symbols(tmp_path):
     configure_profile(profile="expert")
     p = tmp_path / "example.py"
