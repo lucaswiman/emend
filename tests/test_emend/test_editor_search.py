@@ -934,6 +934,37 @@ class TestGrepSearch:
         finally:
             engine.close()
 
+    def test_grep_search_single_file_scope_grep_fallback(
+        self, multi_file_project, monkeypatch
+    ):
+        """The plain-grep fallback (no rg installed) omits the filename
+        prefix for a single file operand just like rg did, and must also
+        return matches (this is the code path CI takes)."""
+        import shutil as _shutil
+        from emend.editor_search import EditorSearchEngine
+
+        real_which = _shutil.which
+
+        def _no_rg(cmd, *args, **kwargs):
+            if cmd == "rg":
+                return None
+            return real_which(cmd, *args, **kwargs)
+
+        monkeypatch.setattr("emend.editor_search.shutil.which", _no_rg)
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2  # two print() calls in a.py
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
     def test_grep_search_single_file_via_search(self, multi_file_project):
         """The ``/regex/`` dispatch path must work with a single-file scope."""
         from emend.editor_search import EditorSearchEngine

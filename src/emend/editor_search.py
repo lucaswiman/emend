@@ -1150,8 +1150,11 @@ class EditorSearchEngine:
                 # git grep supports PCRE with -P
                 cmd = [git, "-C", scope, "grep", "-Pn", "--no-color", pattern]
             else:
+                # -H forces the ``file:line:text`` prefix even when exactly
+                # one file is searched; without it grep omits the path and
+                # the parser below drops every match.
                 cmd = [
-                    grep, "-rPn", "--color=never",
+                    grep, "-rHPn", "--color=never",
                     "--exclude-dir=.git", "--exclude-dir=.venv",
                     "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
                     pattern, scope,
