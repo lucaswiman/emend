@@ -1231,6 +1231,61 @@ class TestMatchesEdgeCases:
         )
         assert not td.matches(constraint)
 
+    def test_callable_wildcard_return_matches_unknown_return(self):
+        """A wildcard (unknown) return constraint matches a callable whose
+        return type is not known (return_type is None)."""
+        td = TypeDescriptor(
+            kind="callable",
+            params=(TypeDescriptor.named("int"),),
+            return_type=None,
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.unknown(),
+        )
+        assert td.matches(constraint)
+
+    def test_callable_wildcard_return_matches_known_return(self):
+        """A wildcard return constraint matches a callable with a concrete
+        return type too."""
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.unknown(),
+        )
+        assert td.matches(constraint)
+
+    def test_callable_concrete_return_constraint_rejects_unknown_return(self):
+        """A concrete return constraint must NOT match a callable whose return
+        type is unknown (return_type is None)."""
+        td = TypeDescriptor(
+            kind="callable",
+            params=(TypeDescriptor.named("int"),),
+            return_type=None,
+        )
+        constraint = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        assert not td.matches(constraint)
+
+    def test_callable_no_return_constraint_matches_any_return(self):
+        """A constraint with no return type (None) does not constrain the
+        return type and matches any callable."""
+        td = TypeDescriptor.callable_(
+            (TypeDescriptor.named("int"),),
+            TypeDescriptor.named("str"),
+        )
+        constraint = TypeDescriptor(
+            kind="callable",
+            params=(TypeDescriptor.named("int"),),
+            return_type=None,
+        )
+        assert td.matches(constraint)
+
     def test_callable_arity_mismatch(self):
         td = TypeDescriptor.callable_(
             (TypeDescriptor.named("int"), TypeDescriptor.named("str")),
