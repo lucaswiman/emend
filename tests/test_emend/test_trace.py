@@ -884,3 +884,35 @@ def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
     assert captured.out.endswith("\n"), (
         f"CLI trace output should end with a newline, got: {captured.out!r}"
     )
+
+
+def test_trace_relative_path_matches_absolute_path(tmp_path, monkeypatch):
+    """Relative file paths must yield the same violations as absolute paths.
+
+    Regression: FactGraph stores facts keyed by the resolved (absolute) path,
+    but ``_run_trace_datalog`` used the raw ``paths`` strings for the Datalog
+    source/sink relations.  When the CLI passed a relative path (e.g.
+    ``emend trace app.py``), the cross-variable propagation join
+    (``trace_source.fp == def_use.fp``) failed silently and zero violations
+    were reported.  An intermediate assignment (``query = ... + name``) is
+    required to exercise the ``*def_use`` join; a direct same-variable flow
+    only touches the inline relations and would mask the bug.
+    """
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle_request(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    query = 'SELECT * FROM t WHERE n = ' + name\n"
+        "    cursor.execute(query)\n"
+    )
+
+    config = _make_sql_injection_config()
+
+    abs_violations = run_trace_analysis([str(test_file)], config)
+    assert len(abs_violations) >= 1
+
+    monkeypatch.chdir(tmp_path)
+    rel_violations = run_trace_analysis(["app.py"], config)
+
+    assert len(rel_violations) == len(abs_violations)
+    assert any("SQL injection" in v.message for v in rel_violations)
