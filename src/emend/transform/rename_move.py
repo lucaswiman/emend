@@ -515,14 +515,23 @@ def _replace_module_in_strings(
     old_bare = old_module.rsplit(".", 1)[-1]
     new_bare = new_module.rsplit(".", 1)[-1]
 
-    lines = content.splitlines(keepends=True)
+    # Work in bytes: match columns from ``find_pattern_in_files`` are byte
+    # offsets, so line-prefix lengths and the final slicing must be byte-based
+    # too.  Mixing character-length line prefixes with byte columns (and then
+    # slicing the str) mis-positions the edit whenever a line contains
+    # multi-byte UTF-8 characters before the target literal.
+    content_bytes = content.encode("utf-8")
+    line_byte_starts = [0]
+    for i, b in enumerate(content_bytes):
+        if b == 0x0A:  # b'\n'
+            line_byte_starts.append(i + 1)
 
-    # Collect (char_start, char_end, replacement) tuples.
-    replacements: list[tuple[int, int, str]] = []
+    # Collect (byte_start, byte_end, replacement_bytes) tuples.
+    replacements: list[tuple[int, int, bytes]] = []
 
     for _file, start_line, start_col, end_line, end_col, text, _caps in matches:
-        char_start = sum(len(lines[i]) for i in range(start_line - 1)) + start_col
-        char_end = sum(len(lines[i]) for i in range(end_line - 1)) + end_col
+        byte_start = line_byte_starts[start_line - 1] + start_col
+        byte_end = line_byte_starts[end_line - 1] + end_col
 
         # Determine the string's inner content (without surrounding quotes).
         if text[:3] in ('"""', "'''"):
@@ -546,7 +555,7 @@ def _replace_module_in_strings(
                 new_text = text[0] + new_bare + text[-1]
 
         if new_text != text:
-            replacements.append((char_start, char_end, new_text))
+            replacements.append((byte_start, byte_end, new_text.encode("utf-8")))
 
     if not replacements:
         return content
@@ -554,9 +563,9 @@ def _replace_module_in_strings(
     # Apply in reverse order to preserve earlier offsets.
     replacements.sort(key=lambda x: x[0], reverse=True)
     for start, end, repl in replacements:
-        content = content[:start] + repl + content[end:]
+        content_bytes = content_bytes[:start] + repl + content_bytes[end:]
 
-    return content
+    return content_bytes.decode("utf-8")
 
 
 def _rename_module_references(

@@ -256,6 +256,21 @@ class TestNoqaTagFilteringConsistency:
         noqa = handler.find_noqa_comments(source)
         assert noqa.get(1) == {"keep-me"}
 
+    def test_space_separated_tags_all_captured(self):
+        # Regression: the tag capture group was ``(\S+)``, which stopped at
+        # the first space, silently dropping every tag after a
+        # comma-and-space.  Python's handler captures the full remainder.
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: emend:a, emend:b\n"
+        noqa = handler.find_noqa_comments(source)
+        assert noqa.get(1) == {"a", "b"}
+
+    def test_space_separated_mixed_tags(self):
+        handler = RegexCommentHandler("//")
+        source = "let x = 1; // noqa: E501, emend:keep-me\n"
+        noqa = handler.find_noqa_comments(source)
+        assert noqa.get(1) == {"keep-me"}
+
     def test_bare_noqa_still_suppress_all(self):
         handler = RegexCommentHandler("//")
         source = "let x = 1; // noqa\n"

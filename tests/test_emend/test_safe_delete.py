@@ -257,3 +257,32 @@ class TestSafeDeleteCascade:
         assert isinstance(plan.diffs, dict)
         assert plan.deletions[0]["name"] == "remove_me"
         assert plan.deletions[0]["kind"] == "function"
+
+
+class TestSafeDeleteNestedSymbol:
+    """Deleting a nested symbol (e.g. a method) must not crash while
+    re-parsing the internally-built selector.  The selector was assembled by
+    joining the symbol path with ``::`` instead of ``.``, producing an
+    unparseable string like ``mod.py::Foo::method_a`` that raised
+    ``UnexpectedToken`` in phase 2.
+    """
+
+    def test_delete_method(self, tmp_path):
+        from emend.transform import safe_delete
+
+        src = tmp_path / "mod.py"
+        src.write_text(
+            "class Foo:\n"
+            "    def keep(self):\n"
+            "        return 1\n"
+            "    def method_a(self):\n"
+            "        return 2\n"
+        )
+
+        sel = parse_extended_selector(f"{src}::Foo.method_a")
+        plan = safe_delete(sel, cascade=False, apply=True)
+
+        assert plan.deletions[0]["name"] == "method_a"
+        content = src.read_text()
+        assert "method_a" not in content
+        assert "def keep" in content

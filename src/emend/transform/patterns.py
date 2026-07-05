@@ -896,10 +896,15 @@ def replace_pattern(
     if not matches:
         return "", 0
 
-    # Build a newline offset table for the source
+    # Build a newline offset table for the source, in BYTES.  ``PyFileTransform``
+    # replaces on byte ranges and match columns from the Rust matcher are byte
+    # offsets, so line starts and match lengths must be byte-based too —
+    # otherwise any earlier line containing multi-byte UTF-8 characters shifts
+    # the replacement to the wrong position and corrupts the file.
+    source_bytes = source_code.encode("utf-8")
     line_starts = [0]
-    for i, ch in enumerate(source_code):
-        if ch == '\n':
+    for i, b in enumerate(source_bytes):
+        if b == 0x0A:  # b'\n'
             line_starts.append(i + 1)
 
     # Use Rust transformation engine for byte-range replacements
@@ -916,8 +921,8 @@ def replace_pattern(
         
         if match.matched_text is not None:
             # If we have the exact matched text from Rust (potentially adjusted range),
-            # use its length to determine the end offset.
-            end_offset = start_offset + len(match.matched_text)
+            # use its byte length to determine the end offset.
+            end_offset = start_offset + len(match.matched_text.encode("utf-8"))
         else:
             end_offset = line_starts[match.end_line - 1] + match.end_col
 

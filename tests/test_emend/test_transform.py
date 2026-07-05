@@ -106,6 +106,38 @@ class TestReplacePattern:
         assert "logger.info" in diff
         assert count == 2
 
+    def test_replace_apply_with_multibyte_chars(self, tmp_path):
+        """Replacement offsets must be byte-based.  When an earlier line
+        contains multi-byte UTF-8 characters (e.g. emoji in a comment), the
+        char-vs-byte offset mismatch previously mangled the file."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "# comment \U0001F389\U0001F389\U0001F389\n"
+            'print("hello")\n'
+        )
+
+        diff, count = replace_pattern('print($X)', 'log($X)', str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert content == "# comment \U0001F389\U0001F389\U0001F389\n" 'log("hello")\n'
+        assert count == 1
+
+    def test_replace_apply_multibyte_same_line(self, tmp_path):
+        """A multi-byte character before the match on the same line must not
+        offset the replacement."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x = "\U0001F389"; print("hi")\n')
+
+        diff, count = replace_pattern('print($X)', 'log($X)', str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert content == 'x = "\U0001F389"; log("hi")\n'
+        assert count == 1
+
     def test_replace_scoped_to_function(self, tmp_path):
         """Replace pattern only within a specific function scope."""
         from emend.transform import replace_pattern

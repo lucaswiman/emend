@@ -81,3 +81,26 @@ def test():
     # New file should not exist
     new_file = tmp_path / "new.py"
     assert not new_file.exists()
+
+
+class TestReplaceModuleInStrings:
+    """``_replace_module_in_strings`` rewrites module references inside string
+    literals.  Its offset math must be byte-based: when a line contains
+    multi-byte UTF-8 characters before the target literal, char-vs-byte offset
+    confusion previously left the original string intact and spliced the
+    replacement in at the wrong location.
+    """
+
+    def test_multibyte_before_target_literal(self):
+        from emend.transform.rename_move import _replace_module_in_strings
+
+        content = 'x = "\U0001F389\U0001F389\U0001F389"; y = "models"\n'
+        out = _replace_module_in_strings(content, "models", "schemas")
+        assert out == 'x = "\U0001F389\U0001F389\U0001F389"; y = "schemas"\n'
+
+    def test_ascii_only_unchanged_behaviour(self):
+        from emend.transform.rename_move import _replace_module_in_strings
+
+        content = 'y = "models"\n'
+        out = _replace_module_in_strings(content, "models", "schemas")
+        assert out == 'y = "schemas"\n'

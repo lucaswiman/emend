@@ -114,6 +114,25 @@ class TestParseTypeString:
         assert td.kind == "union"
         assert len(td.params) == 3
 
+    def test_union_with_trailing_array_member(self):
+        # Regression: a union whose last member is a TS array shorthand
+        # (``A | B[]``) must parse as ``union(A, Array[B])`` — the ``[]`` binds
+        # tighter than ``|``.  Previously the array-shorthand check ran before
+        # the union split, producing the wrong ``Array[A | B]``.
+        td = parse_type_string("str | int[]")
+        assert td.kind == "union"
+        assert len(td.params) == 2
+        assert td.params[0].name == "str"
+        assert td.params[1].kind == "parameterized"
+        assert td.params[1].name == "Array"
+        assert td.params[1].params[0].name == "int"
+
+    def test_union_with_trailing_array_member_ts(self):
+        td = parse_type_string("string | number[]")
+        assert td.kind == "union"
+        assert td.params[1].name == "Array"
+        assert td.params[1].params[0].name == "number"
+
     def test_callable_simple(self):
         td = parse_type_string("() -> Pool")
         assert td.kind == "callable"

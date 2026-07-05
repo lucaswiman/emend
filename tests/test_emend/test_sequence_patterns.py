@@ -1023,3 +1023,52 @@ class TestRunSequenceCheckIntegration:
             assert v.policy_name == "toctou-check"
             assert "sequence:toctou" in v.check_name
             assert v.severity == "error"
+
+
+# ---------------------------------------------------------------------------
+# Bug: sequence step resolution drops steps inside `async def` methods
+# ---------------------------------------------------------------------------
+
+
+class TestSequenceRuleAsyncMethod:
+    """``compile_sequence_rule`` must resolve steps inside ``async def``
+    methods.  The enclosing-function lookup previously omitted the
+    ``async_method`` symbol kind, so every step matched inside an async
+    method of a class was silently discarded and the rule reported nothing.
+    """
+
+    _CHECK = SequenceCheck(
+        name="use-after-close",
+        message="Use after close",
+        sequence=[
+            SequenceStep(bind="close", pattern="$FD.close()"),
+            SequenceStep(bind="use", pattern="$FD.read()"),
+        ],
+    )
+
+    def _resolve(self, tmp_path, method_def: str):
+        from emend.fact_graph import compile_sequence_rule
+
+        src = (
+            "class Service:\n"
+            f"    {method_def}\n"
+            "        fd = open_conn()\n"
+            "        fd.close()\n"
+            "        fd.read()\n"
+        )
+        (tmp_path / "svc.py").write_text(src)
+        g = FactGraph.build_from_project(str(tmp_path))
+        return compile_sequence_rule(g, self._CHECK, project_path=str(tmp_path))
+
+    def test_async_method_steps_resolved(self, tmp_path):
+        result = self._resolve(tmp_path, "async def handler(self):")
+        assert result is not None, (
+            "sequence steps inside an async method were not resolved — "
+            "the async_method symbol kind is missing from the enclosing "
+            "function lookup"
+        )
+
+    def test_sync_method_steps_resolved(self, tmp_path):
+        # Control: the identical sequence in a plain method already resolves.
+        result = self._resolve(tmp_path, "def handler(self):")
+        assert result is not None

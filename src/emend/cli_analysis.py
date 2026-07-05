@@ -812,7 +812,7 @@ def facts_cmd(
                 print("Error: --symbol required for reference queries", file=sys.stderr)
                 raise typer.Exit(2)
             results = graph.references_to(symbol)
-        elif fact_type == "trace_flows":
+        elif fact_type in ("trace_flows", "taint_flows"):
             results = graph.trace_flows(label=label, file_path=file)
         elif fact_type == "types":
             if not symbol:

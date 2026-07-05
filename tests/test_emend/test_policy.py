@@ -338,6 +338,61 @@ class TestStructuralCheck:
         assert any(v.rule_name == "no-eval" for v in violations)
 
 
+class TestRunChecksRulesOnlyDoc:
+    """A rules-only document (``rules:`` key, no ``policies:`` key) must not be
+    double-reported by the unified ``check`` runner: the lint engine already
+    processes each ``rules:`` entry, so the policy engine must not re-emit the
+    same rule as a synthesised structural/flow policy.
+    """
+
+    def test_pattern_rule_reported_once(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {
+                "no-print": {"find": "print($X)", "message": "No print"},
+            },
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("print(1)\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            project_path=str(tmp_path),
+        )
+        no_print = [v for v in violations if v.rule_name == "no-print"]
+        assert len(no_print) == 1, (
+            f"expected the pattern rule to be reported once, got "
+            f"{[(v.kind, v.rule_name) for v in no_print]}"
+        )
+
+    def test_kind_structural_selects_structural_policy(self, tmp_path):
+        """``--kind structural`` must select structural policies.  The
+        resulting violation is labelled ``kind='structural'``, so filtering by
+        that kind must return it rather than silently dropping it."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "policies": [{
+                "name": "no-eval",
+                "severity": "error",
+                "checks": [{"type": "structural", "pattern": "eval($X)"}],
+            }],
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("eval('1+1')\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            kind="structural",
+            project_path=str(tmp_path),
+        )
+        assert [v.rule_name for v in violations] == ["no-eval"]
+        assert violations[0].kind == "structural"
+
+
 class TestFormatViolations:
     def test_text_format(self):
         violations = [

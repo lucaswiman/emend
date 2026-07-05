@@ -39,7 +39,7 @@ def _policy_check_kind(check: Any) -> str:
     if isinstance(check, FlowCheck):
         return "flow"
     if isinstance(check, StructuralCheck):
-        return "match"
+        return "structural"
     if isinstance(check, TypeCheck):
         return "type"
     if isinstance(check, DeadCodeCheck):
@@ -229,7 +229,16 @@ def run_checks(
         from emend.checks.rules_config import load_rules_document
 
         data, _path = load_rules_document(config)
-        if "policies" in data or "rules" in data:
+        # In combined mode (``None``/``"all"``) the lint engine already
+        # processed every ``rules:`` entry, so the policy engine must only
+        # handle the ``policies:`` key — otherwise ``load_policies`` would
+        # synthesise a duplicate structural/flow/deadcode policy from each
+        # ``rules:`` entry and every rule would be reported twice.  The
+        # ``rules:`` fallback is only for a standalone ``mode == "policy"`` run
+        # where the lint engine did not run.
+        if "policies" in data:
+            policies = load_policies(config)
+        elif mode == "policy" and "rules" in data:
             policies = load_policies(config)
         else:
             policies = []

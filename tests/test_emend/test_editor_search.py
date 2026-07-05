@@ -1011,3 +1011,75 @@ class TestEditorSearchCLIMode:
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["mode"] == "symbol"
+
+
+# ---------------------------------------------------------------------------
+# Bug: _extract_import_names mis-binds plain dotted imports (import a.b.c)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractImportNames:
+    """``import a.b.c`` binds the top-level package name ``a`` locally — not
+    the last component.  Mapping the last component (``c``) is wrong and lets
+    a submodule leaf shadow a real local name."""
+
+    def test_plain_dotted_import_binds_top_level(self, tmp_path):
+        from emend.editor_search import EditorSearchEngine
+
+        proj = _build_index(tmp_path)
+        f = proj / "uses.py"
+        f.write_text("import os.path\n")
+
+        engine = EditorSearchEngine(str(proj))
+        names = engine._extract_import_names(str(f))
+
+        assert "os" in names
+        assert "path" not in names
+
+    def test_aliased_import_still_binds_alias(self, tmp_path):
+        from emend.editor_search import EditorSearchEngine
+
+        proj = _build_index(tmp_path)
+        f = proj / "uses.py"
+        f.write_text("import a.b as c\n")
+
+        engine = EditorSearchEngine(str(proj))
+        names = engine._extract_import_names(str(f))
+
+        assert "c" in names
+        assert names["c"] == "a.b"
+
+
+# ---------------------------------------------------------------------------
+# Bug: _search_literals leaks SQL LIKE wildcards for identifiers with '_'
+# ---------------------------------------------------------------------------
+
+
+class TestSearchLiteralsWildcards:
+    """The literal is interpolated into a ``LIKE`` pattern; ``_`` must be
+    treated as a literal underscore, not a single-character wildcard."""
+
+    def test_underscore_not_treated_as_wildcard(self, tmp_path):
+        from emend.editor_search import EditorSearchEngine
+
+        proj = _build_index(tmp_path)
+        engine = EditorSearchEngine(str(proj))
+        conn = engine._get_conn()
+        conn.execute(
+            "INSERT INTO reference_index "
+            "(content_hash, target_qn, file_path, line, col, ref_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (b"h", "abc", "f.py", 1, 0, "read"),
+        )
+        conn.execute(
+            "INSERT INTO reference_index "
+            "(content_hash, target_qn, file_path, line, col, ref_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (b"h", "a_c", "f.py", 2, 0, "read"),
+        )
+        conn.commit()
+
+        result = engine._search_literals(["a_c"])
+        qns = {item["target_qn"] for item in result.items}
+        assert "a_c" in qns
+        assert "abc" not in qns

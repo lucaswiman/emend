@@ -173,8 +173,27 @@ def _extract_params_from_signature(signature: str | None) -> list[str]:
         sig = sig[1:-1]
     if not sig.strip():
         return []
-    # Split on commas (simple split — no nested parens handling needed for param names)
-    return [p.strip() for p in sig.split(",") if p.strip()]
+    # Split on top-level commas only — a comma inside brackets/parens (e.g. in
+    # ``b: Dict[str, int]`` or a default like ``x=(1, 2)``) is part of a single
+    # parameter and must not split it.
+    params: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in sig:
+        if ch in "([{":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            params.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        params.append("".join(current))
+    return [p.strip() for p in params if p.strip()]
 
 
 def _rust_dict_to_symbol_info_list(
@@ -252,7 +271,11 @@ def _collect_symbols(
     are near-instant.
     """
     import hashlib
-    key = hashlib.md5(source.encode(), usedforsecurity=False).digest()
+    # Key on (extension, content-hash): two files with identical content but
+    # different languages parse to different symbol sets, so the extension must
+    # be part of the cache key to avoid cross-language collisions.
+    ext = Path(filepath).suffix.lstrip('.') or 'py'
+    key = (ext, hashlib.md5(source.encode(), usedforsecurity=False).digest())
     cached = _symbol_cache.get(key)
     if cached is not None:
         cached_path, cached_symbols = cached
@@ -280,7 +303,6 @@ def _collect_symbols(
         return remapped
 
     from emend import emend_core
-    ext = Path(filepath).suffix.lstrip('.') or 'py'
     rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
     symbols = _rust_dict_to_symbol_info_list(rust_syms, str(filepath))
 
