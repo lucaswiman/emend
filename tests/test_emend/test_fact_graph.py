@@ -4,6 +4,12 @@ import json
 
 import pytest
 
+
+def test_normalize_qn_collapses_relative_separators():
+    from emend.fact_graph import _normalize_qn
+
+    assert _normalize_qn("'../pkg'::Thing/method") == "pkg.Thing.method"
+
 from emend.fact_graph import (
     CallFact,
     CfgBlockFact,

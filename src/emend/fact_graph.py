@@ -3410,8 +3410,10 @@ def _normalize_qn(qn: str) -> str:
     """
     qn = qn.replace("'", "").replace('"', "")
     qn = qn.replace("::", ".").replace("/", ".")
-    # Collapse runs of dots (from relative paths like ../utils) into single dots
-    qn = re.sub(r"\.{2,}", ".", qn)
+    # Most QNs contain no repeated dots. Avoid paying for a regex on every
+    # reference in large indexes; relative paths are the uncommon slow path.
+    while ".." in qn:
+        qn = qn.replace("..", ".")
     qn = qn.lstrip(".")
     return qn
 
