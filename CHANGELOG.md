@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+## 0.4.0 (2026-07-09)
+
+### Highlights
+
+- **TypeScript and Rust analysis parity.** References, callers, callees, call
+  graphs, dead-code detection, lint and flow rules, impact analysis, and both
+  intra- and interprocedural trace analysis now share the tree-sitter/Rust and
+  FactGraph pipelines across Python, TypeScript, and Rust.
+- **Datalog-backed trace analysis.** Trace, flow, policy, and sequence checks now
+  run on a unified FactGraph engine, with path-sensitive sanitizers,
+  scope-bounded sanitizers, field/subscript tracking, effect predicates such as
+  `writes($X)` and `reads($X)`, type-conditioned filtering, and temporal
+  sequence rules. Framework presets are available for Django, Flask, FastAPI,
+  SQLAlchemy, Express, Next.js, React, Axum, Actix Web, Diesel, sqlx, and Node
+  SQL libraries.
+- **Duplicate-code detection.** The new `emend analyze dupes` command finds
+  structural duplicate clusters using AST canonicalization, Merkle hashing,
+  and sibling-sequence winnowing, with configurable boilerplate suppression.
+  Duplicate detection is also available from lint, policy, and MCP checks.
+- **Incremental project facts and faster indexing.** `facts.db` can now update or
+  remove individual files instead of rebuilding the project. Index extraction
+  is parallelized, common graph queries have optimized access paths, and cached
+  status reports include the indexed Git revision and timestamp.
+- **Richer Vim integration.** The editor plugin adds incremental background
+  indexing, unsaved-buffer snapshots, local outline and impact navigation,
+  semantic hotkeys, result provenance, query history, CFG-informed completion
+  ranking, module-map management, and improved goto-definition behavior.
+
+### Analysis and automation
+
+- Added cross-language type-oracle support for Python, TypeScript, and Rust,
+  including type and return constraints in patterns.
+- Added unreachable-block reporting through the indexed FactGraph and improved
+  CFG precision for exception handling and control-flow terminators.
+- Added transitive parameter-to-sink propagation for multi-hop call chains.
+- Added incremental editor search with file-path fallback and support for live,
+  unsaved buffer contents.
+- Expanded MCP tools for search, transforms, references, analysis, checks,
+  fact queries, mappings, and grammar/cookbook discovery.
+
+### Architecture and compatibility
+
+- Split the CLI, transform engine, checks engine, and MCP server into focused
+  packages while preserving their public import facades and command aliases.
+- Replaced hand-written source import parsing with tree-sitter extraction and
+  standardized Rust/Python source positions on zero-based indexing.
+- Consolidated lint and policy configuration in `.emend/rules.yaml` and added a
+  unified `emend check` entry point for CI.
+- Added explicit `click` compatibility for free-threaded Python 3.14 builds.
+
+### Reliability
+
+- Improved Unicode-safe byte-range editing, nested-call rewrite parsing,
+  module rename/move import updates, file-cache invalidation, single-file
+  search, goto-definition, CFG locations, trace path identity, and structured
+  MCP/CLI error handling.
+
 ### Removed
 
 - **Legacy `.emend/patterns.yaml` and `.emend/policies.yaml` fallback paths.**
