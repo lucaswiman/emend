@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field
@@ -30,7 +32,9 @@ def check(
 
     resolved, _ = resolve_file_scopes(paths or ["."], language="python")
     file_paths = [str(f) for f in resolved]
-    project_path = paths[0] if paths else "."
+    scopes = [Path(path).resolve() for path in (paths or ["."])]
+    scope_roots = [path if path.is_dir() else path.parent for path in scopes]
+    project_path = os.path.commonpath(scope_roots)
     try:
         violations = run_checks(
             file_paths,

@@ -278,6 +278,25 @@ def test_check_missing_rules_returns_json_error(monkeypatch, tmp_path):
     assert "error" in data
 
 
+def test_check_file_scopes_use_common_parent_as_project(monkeypatch, tmp_path):
+    import emend.checks
+
+    left = tmp_path / "pkg" / "left.py"
+    right = tmp_path / "pkg" / "nested" / "right.py"
+    right.parent.mkdir(parents=True)
+    left.write_text("x = 1\n")
+    right.write_text("y = 2\n")
+    captured = {}
+
+    def fake_run_checks(file_paths, **kwargs):
+        captured["project_path"] = kwargs["project_path"]
+        return []
+
+    monkeypatch.setattr(emend.checks, "run_checks", fake_run_checks)
+    assert json.loads(check(paths=[str(left), str(right)])) == []
+    assert captured["project_path"] == str(left.parent)
+
+
 def test_facts_query_guided_symbols(tmp_path):
     configure_profile(profile="expert")
     p = tmp_path / "example.py"
