@@ -16,6 +16,64 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
+    """The progress display must not go silent during post-parse phases."""
+    from typer.testing import CliRunner
+    from emend.cli import app
+
+    (tmp_path / "a.py").write_text(SOURCE)
+
+    def fake_warm_caches(path, *, jobs, callback, type_engine):
+        callback("index", str(tmp_path / "a.py"))
+        callback("phase", "Type analysis (pyrefly)")
+        callback("phase", "Full-text search index")
+        callback("phase", "Facts database")
+        callback("phase", "Duplicate analysis")
+        return {
+            "files": 1, "indexed": 1, "qn_cached": 1, "skipped": 0,
+            "sym_cached": 1, "ref_cached": 0, "type_cached": 1,
+            "type_engine": "pyrefly",
+        }
+
+    monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
+    result = CliRunner().invoke(
+        app, ["tool", "index", str(tmp_path), "--type-engine", "pyrefly"]
+    )
+
+    assert result.exit_code == 0, result.output
+    for label in (
+        "Type analysis (pyrefly)",
+        "Full-text search index",
+        "Facts database",
+        "Duplicate analysis",
+    ):
+        assert label in result.output
+
+
+def test_index_cli_defaults_to_pyrefly(monkeypatch, tmp_path):
+    """Repository config must not override the index command's default engine."""
+    from typer.testing import CliRunner
+    from emend.cli import app
+
+    (tmp_path / "a.py").write_text(SOURCE)
+    (tmp_path / "pyrightconfig.json").write_text("{}")
+    selected = []
+
+    def fake_warm_caches(path, *, jobs, callback, type_engine):
+        selected.append(type_engine)
+        return {
+            "files": 1, "indexed": 1, "qn_cached": 1, "skipped": 0,
+            "sym_cached": 1, "ref_cached": 0, "type_cached": 1,
+            "type_engine": "pyrefly",
+        }
+
+    monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
+    result = CliRunner().invoke(app, ["tool", "index", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert selected == ["pyrefly"]
+
+
 def _db_row_count(db_path: Path, table: str) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -148,6 +206,50 @@ class TestWarmCachesSkipped:
 
         # Even for 2 files, warm run should be well under 5 seconds.
         assert warm_elapsed < 5.0
+
+    def test_warm_run_does_not_rebuild_facts(self, tmp_path, monkeypatch):
+        """An unchanged parse index implies the persisted facts are current."""
+        from emend.transform import warm_caches
+        from emend.transform import cache as cache_module
+
+        proj = self._make_project(tmp_path)
+        calls = 0
+        real_build = cache_module._build_facts_db
+
+        def counting_build(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(cache_module, "_build_facts_db", counting_build)
+        warm_caches(str(proj), type_engine=None)
+        assert calls == 1
+
+        warm_caches(str(proj), type_engine=None)
+        assert calls == 1
+
+
+def test_duplicate_cache_hit_does_not_build_scope_resolver(tmp_path, monkeypatch):
+    """Fully cached duplicate payloads should return before project indexing."""
+    from emend.transform import _compute_duplicate_payloads
+    from emend.transform import index as index_module
+    from emend.transform.cache import _init_cache_schema
+
+    source = str(tmp_path / "a.py")
+    file_contents = [(source, SOURCE)]
+    db_path = tmp_path / "parse.db"
+    conn = sqlite3.connect(db_path)
+    _init_cache_schema(conn)
+    conn.close()
+
+    _compute_duplicate_payloads(str(db_path), str(tmp_path), file_contents)
+
+    class UnexpectedResolver:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("scope resolver constructed for a full cache hit")
+
+    monkeypatch.setattr(index_module._rust, "PyScopeResolver", UnexpectedResolver)
+    _compute_duplicate_payloads(str(db_path), str(tmp_path), file_contents)
 
 
 # ---------------------------------------------------------------------------

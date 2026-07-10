@@ -26,12 +26,13 @@ def index_cmd(
             "--type-engine",
             help=(
                 "Type inference engine for the type-cache phase. "
-                "'auto' (default) detects from project config and PATH. "
+                "'pyrefly' is the default. "
+                "'auto' detects from project config and PATH. "
                 "'none' skips type indexing. "
                 "Explicit choices: pyrefly, pyright, ty."
             ),
         ),
-    ] = "auto",
+    ] = "pyrefly",
     status: Annotated[
         bool,
         typer.Option("--status", help="Show index freshness status and exit")
@@ -57,6 +58,7 @@ def index_cmd(
         emend index -v                    # show each file being indexed
         emend index -vv                   # debug-level logging
         emend index --type-engine none    # skip type indexing
+        emend index --type-engine auto    # detect from repo config
         emend index --type-engine pyright # force pyright
     """
     if status:
@@ -94,6 +96,14 @@ def index_cmd(
 
     def _progress(phase: str, file_path: str) -> None:
         nonlocal n_done
+        if phase == "phase":
+            # File progress cannot represent batch type inference or the
+            # project-wide indexes built afterward.  Announce those phases so
+            # a completed file counter is not mistaken for a completed run.
+            if not verbose and sys.stderr.isatty():
+                print("", file=sys.stderr)
+            print(f"  {file_path}...", file=sys.stderr)
+            return
         n_done += 1
         if verbose >= 1:
             print(f"  {file_path}", file=sys.stderr)
@@ -314,4 +324,3 @@ def mcp_cmd(
         raise typer.Exit(2)
 
     run_server(transport=transport, port=port, profile=profile, tools=tools_list)
-

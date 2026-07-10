@@ -827,8 +827,13 @@ def _extract_file_facts(
     # Pre-compute definition-site locations to exclude class/fn name
     # references at their own definition line from ref_by_block.
     _sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts_for_file}
+    _block_for_line: dict[int, tuple[str, int]] = {}
     for tqn, line, col, kind in file_refs:
-        fq, bid = _find_containing_block(content_block_ranges, line)
+        block = _block_for_line.get(line)
+        if block is None:
+            block = _find_containing_block(content_block_ranges, line)
+            _block_for_line[line] = block
+        fq, bid = block
         result["fg_refs"].append([tqn, rel_path, line, col, kind, fq, bid])
         # ref_by_block: only for refs with real block data, excluding
         # definition-site "references" to avoid inflating live_ref.
@@ -1193,4 +1198,3 @@ def _build_facts_db(
 # After the first cross-project operation populates this cache, subsequent
 # operations can skip MetadataWrapper for files whose QN set doesn't overlap
 # with the target.  Content-hash keyed, persisted in the same SQLite DB.
-

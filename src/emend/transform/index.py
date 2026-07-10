@@ -1188,7 +1188,8 @@ def warm_caches(
         jobs: Max parallelism (defaults to CPU count).
         callback: Called with ``(phase, file_path)`` for progress reporting.
         type_engine: Type inference engine for the type-cache phase.
-            ``"auto"`` (default) auto-detects from project config and PATH.
+            Defaults to ``"pyrefly"``. ``"auto"`` detects from project config
+            and PATH.
             ``"none"`` or ``None`` skips type indexing entirely.
             Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
 
@@ -1363,6 +1364,8 @@ def warm_caches(
         all_paths = [Path(f) for f, _ in file_contents]
         project_root_path = Path(project_root)
 
+        if callback:
+            callback("phase", f"Type analysis ({engine_name})")
         t_type = time.monotonic()
         results = oracle.infer_batch(all_paths, project_root=project_root_path)
         stats["type_cached"] = len(results)
@@ -1376,6 +1379,8 @@ def warm_caches(
         )
 
     # Phase 4: rebuild FTS5 trigram index for fast symbol search.
+    if callback:
+        callback("phase", "Full-text search index")
     try:
         import sqlite3 as _sqlite3
         from emend.editor_search import rebuild_fts as _rebuild_fts
@@ -1399,52 +1404,65 @@ def warm_caches(
     # Read pre-computed references from parse.db (written by _index_batch
     # in Phase 2) so _build_facts_db can skip the expensive scope resolver
     # indexing entirely (~34s saved on Django-sized projects).
-    try:
-        t_facts = time.monotonic()
-        precomputed_refs: dict[str, list[tuple]] = {}
+    facts_path = cache_dir / "facts.db"
+    facts_are_current = (
+        bool(file_contents)
+        and stats["skipped"] == len(file_contents)
+        and facts_path.exists()
+    )
+    if facts_are_current:
+        logger.info("warm_caches: facts db unchanged; skipping rebuild")
+    else:
+        if callback:
+            callback("phase", "Facts database")
         try:
-            import sqlite3 as _sqlite3
-            _ref_conn = _sqlite3.connect(db_path, timeout=30)
-            _ref_conn.execute("PRAGMA journal_mode=WAL")
-            for row in _ref_conn.execute(
-                "SELECT file_path, target_qn, line, col, ref_kind "
-                "FROM reference_index"
-            ):
-                fp, tqn, line, col, kind = row
-                precomputed_refs.setdefault(fp, []).append((tqn, line, col, kind))
-            _ref_conn.close()
-            logger.info(
-                "warm_caches: loaded %d pre-computed refs for %d files",
-                sum(len(v) for v in precomputed_refs.values()),
-                len(precomputed_refs),
-            )
-        except Exception:
-            precomputed_refs = {}
+            t_facts = time.monotonic()
+            precomputed_refs: dict[str, list[tuple]] = {}
+            try:
+                import sqlite3 as _sqlite3
+                _ref_conn = _sqlite3.connect(db_path, timeout=30)
+                _ref_conn.execute("PRAGMA journal_mode=WAL")
+                for row in _ref_conn.execute(
+                    "SELECT file_path, target_qn, line, col, ref_kind "
+                    "FROM reference_index"
+                ):
+                    fp, tqn, line, col, kind = row
+                    precomputed_refs.setdefault(fp, []).append((tqn, line, col, kind))
+                _ref_conn.close()
+                logger.info(
+                    "warm_caches: loaded %d pre-computed refs for %d files",
+                    sum(len(v) for v in precomputed_refs.values()),
+                    len(precomputed_refs),
+                )
+            except Exception:
+                precomputed_refs = {}
 
-        if precomputed_refs:
-            _build_facts_db(
-                project_root, precomputed_refs=precomputed_refs,
+            if precomputed_refs:
+                _build_facts_db(
+                    project_root, precomputed_refs=precomputed_refs,
+                )
+            else:
+                # Fallback: build scope resolver from scratch
+                scope_resolver = _rust.PyScopeResolver(
+                    str(Path(project_root).resolve()),
+                )
+                for py_file, content in file_contents:
+                    try:
+                        scope_resolver.index_file(py_file, content)
+                    except Exception:
+                        pass
+                _build_facts_db(project_root, scope_resolver=scope_resolver)
+            logger.info(
+                "warm_caches: facts db built in %.3fs",
+                time.monotonic() - t_facts,
             )
-        else:
-            # Fallback: build scope resolver from scratch
-            scope_resolver = _rust.PyScopeResolver(
-                str(Path(project_root).resolve()),
-            )
-            for py_file, content in file_contents:
-                try:
-                    scope_resolver.index_file(py_file, content)
-                except Exception:
-                    pass
-            _build_facts_db(project_root, scope_resolver=scope_resolver)
-        logger.info(
-            "warm_caches: facts db built in %.3fs",
-            time.monotonic() - t_facts,
-        )
-    except BaseException:
-        logger.debug("warm_caches: facts db build failed", exc_info=True)
+        except BaseException:
+            logger.debug("warm_caches: facts db build failed", exc_info=True)
 
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
     # then materialize queryable facts into facts.db.
+    if callback:
+        callback("phase", "Duplicate analysis")
     try:
         t_dup = time.monotonic()
         _compute_duplicate_payloads(db_path, project_root, file_contents)
@@ -1520,6 +1538,13 @@ def _compute_duplicate_payloads(
             content.encode(), usedforsecurity=False
         ).hexdigest()
         py_files.append((file_path, content, content_hash))
+
+    # The payload cache is content-addressed, so if every current Python file
+    # is present there is no need to rebuild a project-wide scope resolver.
+    # On large repositories constructing that resolver dominates warm runs.
+    if all(content_hash in cached_hashes for _, _, content_hash in py_files):
+        conn.close()
+        return
 
     # Build a scope resolver and index all Python files up front so that
     # canonicalize_file_for_cache / build_statement_seqs_for_cache get
