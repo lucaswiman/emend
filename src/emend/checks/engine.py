@@ -39,7 +39,7 @@ def _policy_check_kind(check: Any) -> str:
     if isinstance(check, FlowCheck):
         return "flow"
     if isinstance(check, StructuralCheck):
-        return "match"
+        return "structural"
     if isinstance(check, TypeCheck):
         return "type"
     if isinstance(check, DeadCodeCheck):
@@ -133,6 +133,26 @@ def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[Ch
     ]
 
 
+# Kinds that name the same logical rule across the two engines. The lint
+# engine emits pattern matches as ``match``; the policy engine emits the same
+# rule (built from ``rules:`` via ``_build_unified_policy``) as ``structural``.
+_KIND_ALIASES = {"structural": "match"}
+
+
+def _dedup_key(violation: CheckViolation) -> tuple[str, int, str, str]:
+    """Cross-engine identity for a violation.
+
+    Column is deliberately excluded: the two engines report different columns
+    for the same logical match (lint anchors at the statement/line start, the
+    policy structural check anchors at the matched node), so a col-sensitive
+    key would fail to dedup. Multiplicity within a single engine is preserved
+    by only filtering the policy engine's output against lint's keys, never
+    lint against itself.
+    """
+    norm_kind = _KIND_ALIASES.get(violation.kind, violation.kind)
+    return (violation.file_path, violation.line, violation.rule_name, norm_kind)
+
+
 # Rule kinds owned by the lint engine (pattern/flow/deadcode/duplicate rules).
 LINT_KINDS = frozenset({"match", "flow", "deadcode", "duplicate-code"})
 # Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
@@ -169,7 +189,13 @@ def run_checks(
     from emend.lint import load_rules, load_duplicate_code_config, run_lint
     from emend.policy import load_policies, run_policy_checks
 
+    if mode not in (None, "lint", "policy", "all"):
+        raise ValueError(
+            f"Unknown mode {mode!r}; expected one of None, 'lint', 'policy', 'all'"
+        )
+
     normalized: list[CheckViolation] = []
+    lint_checks: list[CheckViolation] = []
 
     run_lint_engine = mode in (None, "lint", "all")
     run_policy_engine = mode in (None, "policy", "all")
@@ -211,14 +237,13 @@ def run_checks(
             project_path=project_path,
             language=language,
         )
-        normalized.extend(
-            _lint_violations_to_checks(
-                lint_violations,
-                {rule.name: rule for rule in lint_rules},
-                deadcode_config,
-                duplicate_code_config,
-            )
+        lint_checks = _lint_violations_to_checks(
+            lint_violations,
+            {rule.name: rule for rule in lint_rules},
+            deadcode_config,
+            duplicate_code_config,
         )
+        normalized.extend(lint_checks)
 
     policy_kinds = {"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
     if run_policy_engine and (kind is None or kind in policy_kinds):
@@ -229,7 +254,16 @@ def run_checks(
         from emend.checks.rules_config import load_rules_document
 
         data, _path = load_rules_document(config)
-        if "policies" in data or "rules" in data:
+        # In combined mode (``None``/``"all"``) the lint engine already
+        # processed every ``rules:`` entry, so the policy engine must only
+        # handle the ``policies:`` key — otherwise ``load_policies`` would
+        # synthesise a duplicate structural/flow/deadcode policy from each
+        # ``rules:`` entry and every rule would be reported twice.  The
+        # ``rules:`` fallback is only for a standalone ``mode == "policy"`` run
+        # where the lint engine did not run.
+        if "policies" in data:
+            policies = load_policies(config)
+        elif mode == "policy" and "rules" in data:
             policies = load_policies(config)
         else:
             policies = []
@@ -246,7 +280,16 @@ def run_checks(
                 language=language,
                 project_path=project_path,
             )
-            normalized.extend(_policy_violations_to_checks(policy_violations))
+            policy_checks = _policy_violations_to_checks(policy_violations)
+            # When both engines run, ``rules:`` entries are processed by lint
+            # AND re-derived into unified policies, so the same match surfaces
+            # from both. Drop the policy copies that lint already reported.
+            if run_lint_engine:
+                lint_keys = {_dedup_key(v) for v in lint_checks}
+                policy_checks = [
+                    v for v in policy_checks if _dedup_key(v) not in lint_keys
+                ]
+            normalized.extend(policy_checks)
 
     normalized.sort(key=lambda violation: (violation.file_path, violation.line, violation.col, violation.rule_name))
     return normalized

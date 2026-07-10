@@ -285,6 +285,36 @@ class TestModuleMappings:
         saved = store.get_module_mapping_by_prefix("x")
         assert saved.repo == "org/new-repo"
 
+    def test_update_none_leaves_field_unchanged(self, store):
+        """Passing None for a field means 'leave unchanged', not 'delete'."""
+        store.add_module_mapping(
+            ModuleMapping(module_prefix="x", repo="org/r", branch="v2")
+        )
+        ok = store.update_module_mapping("x", repo="org/new", branch=None)
+        assert ok is True
+        saved = store.get_module_mapping_by_prefix("x")
+        assert saved.repo == "org/new"
+        # branch was not passed as an explicit value; it must be preserved.
+        assert saved.branch == "v2"
+
+    def test_update_empty_string_sets_field(self, store):
+        """Passing an explicit falsy value ('') sets it rather than deleting."""
+        store.add_module_mapping(
+            ModuleMapping(module_prefix="x", repo="org/r", branch="v2")
+        )
+        ok = store.update_module_mapping("x", branch="")
+        assert ok is True
+        saved = store.get_module_mapping_by_prefix("x")
+        assert saved.branch == ""
+        # The explicit empty value must be persisted, not dropped as a key.
+        import yaml as _yaml
+        with open(store.yaml_path) as f:
+            raw = _yaml.safe_load(f)
+        entry = next(
+            m for m in raw["module_mappings"] if m["module_prefix"] == "x"
+        )
+        assert entry["branch"] == ""
+
     def test_module_mapping_to_dict(self, store):
         m = ModuleMapping(
             module_prefix="test", repo="org/test",

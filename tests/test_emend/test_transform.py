@@ -106,6 +106,38 @@ class TestReplacePattern:
         assert "logger.info" in diff
         assert count == 2
 
+    def test_replace_apply_with_multibyte_chars(self, tmp_path):
+        """Replacement offsets must be byte-based.  When an earlier line
+        contains multi-byte UTF-8 characters (e.g. emoji in a comment), the
+        char-vs-byte offset mismatch previously mangled the file."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text(
+            "# comment \U0001F389\U0001F389\U0001F389\n"
+            'print("hello")\n'
+        )
+
+        diff, count = replace_pattern('print($X)', 'log($X)', str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert content == "# comment \U0001F389\U0001F389\U0001F389\n" 'log("hello")\n'
+        assert count == 1
+
+    def test_replace_apply_multibyte_same_line(self, tmp_path):
+        """A multi-byte character before the match on the same line must not
+        offset the replacement."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('x = "\U0001F389"; print("hi")\n')
+
+        diff, count = replace_pattern('print($X)', 'log($X)', str(test_file), apply=True)
+
+        content = test_file.read_text()
+        assert content == 'x = "\U0001F389"; log("hi")\n'
+        assert count == 1
+
     def test_replace_scoped_to_function(self, tmp_path):
         """Replace pattern only within a specific function scope."""
         from emend.transform import replace_pattern
@@ -1161,6 +1193,29 @@ class TestReplacePattern:
         assert count >= 1
         assert "log(" in content
 
+    def test_replace_with_non_ascii_before_match(self, tmp_path):
+        """Multi-byte chars before a match must not corrupt byte offsets.
+
+        Regression: line_starts/end_offset were computed in character units,
+        but PyFileTransform.replace_range indexes bytes, so a non-ASCII
+        comment before the match caused a Rust char-boundary panic.
+        """
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('# café ☕\nprint("hello")\n')
+
+        diff, count = replace_pattern(
+            'print($X)', 'logging.info($X)', str(test_file), apply=True,
+        )
+
+        assert count == 1
+        content = test_file.read_text()
+        assert 'logging.info("hello")' in content
+        assert 'print("hello")' not in content
+        # The non-ASCII comment must be preserved intact.
+        assert '# café ☕' in content
+
 
 class TestImportsComponent:
     """Tests for [imports] component at module level."""
@@ -2078,6 +2133,48 @@ class TestRenameSymbol:
         assert str(main_file) in diffs
         assert "old_name" in diffs[str(main_file)]
         assert "new_name" in diffs[str(main_file)]
+
+    def test_rename_with_non_ascii_before_reference(self, tmp_path):
+        """Multi-byte chars before a reference must not shift byte offsets.
+
+        Regression: references_in_file() returns byte offsets, but the
+        endswith check / replace_range slicing used character indices. A
+        non-ASCII comment before a reference caused that reference to be
+        missed (or renamed at the wrong position).
+        """
+        from emend.transform import rename_symbol
+        from emend.component_selector import ExtendedSelector
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text('[project]\nname = "x"\n')
+
+        main_file = project_dir / "main.py"
+        main_file.write_text(
+            "# café ☕ ☕ ☕ comment\n"
+            "def old_name():\n"
+            "    pass\n"
+            "\n"
+            "old_name()\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(main_file),
+            symbol_path=["old_name"],
+            component=None,
+            accessor=None,
+        )
+
+        diffs = rename_symbol(selector, "new_name", project_path=str(project_dir), apply=True)
+
+        content = main_file.read_text()
+        assert "def new_name():" in content
+        # The call reference after the multi-byte comment must also be renamed.
+        assert "new_name()" in content
+        assert "old_name" not in content
+        # The non-ASCII comment must be preserved intact.
+        assert "# café ☕ ☕ ☕ comment" in content
+        assert str(main_file) in diffs
 
 
 class TestMoveSymbol:

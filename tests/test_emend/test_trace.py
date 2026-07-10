@@ -777,6 +777,63 @@ def test_trace_exclude_paths_filters_files(tmp_path):
     assert str(migration_file) not in violation_files
 
 
+def test_trace_cmd_file_path_resolves_to_parent_dir(tmp_path, capsys):
+    """When given a file path, _trace_cmd_impl should use the parent dir as project_path."""
+    import yaml
+    source_file = tmp_path / "app.py"
+    source_file.write_text(
+        "def handle(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+    config_dir = tmp_path / ".emend"
+    config_dir.mkdir()
+    config_file = config_dir / "rules.yaml"
+    config_file.write_text(yaml.dump({
+        "trace": {
+            "labels": ["sql-injection"],
+            "sources": [{"pattern": "request.args.get($X)", "label": "sql-injection"}],
+            "sinks": [{"pattern": "cursor.execute($X)", "label": "sql-injection"}],
+        }
+    }))
+
+    from unittest.mock import patch
+    from emend.cli_analysis import _trace_cmd_impl
+    from emend.cli_base import _state
+    old_lang = _state["language"]
+    _state["language"] = "python"
+    captured_project_path = []
+
+    orig_run_trace = None
+    try:
+        from emend import trace as _trace_mod
+        orig_run_trace = _trace_mod.run_trace_analysis
+
+        def mock_run_trace(*args, **kwargs):
+            captured_project_path.append(kwargs.get("project_path"))
+            return orig_run_trace(*args, **kwargs)
+
+        with patch.object(_trace_mod, "run_trace_analysis", side_effect=mock_run_trace):
+            import typer
+            with pytest.raises((SystemExit, typer.Exit)):
+                _trace_cmd_impl(
+                    path=str(source_file),
+                    config=str(config_file),
+                    label=None, trace=False, json_output=False,
+                    project=None,
+                    interprocedural=False, max_iterations=3,
+                    preset=None,
+                )
+    finally:
+        _state["language"] = old_lang
+
+    assert captured_project_path, "run_trace_analysis was not called"
+    pp = captured_project_path[0]
+    assert not pp.endswith(".py"), (
+        f"project_path should be a directory, not a file: {pp}"
+    )
+
+
 def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
     """trace_cmd's print output should end with a newline.
 
@@ -827,3 +884,35 @@ def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
     assert captured.out.endswith("\n"), (
         f"CLI trace output should end with a newline, got: {captured.out!r}"
     )
+
+
+def test_trace_relative_path_matches_absolute_path(tmp_path, monkeypatch):
+    """Relative file paths must yield the same violations as absolute paths.
+
+    Regression: FactGraph stores facts keyed by the resolved (absolute) path,
+    but ``_run_trace_datalog`` used the raw ``paths`` strings for the Datalog
+    source/sink relations.  When the CLI passed a relative path (e.g.
+    ``emend trace app.py``), the cross-variable propagation join
+    (``trace_source.fp == def_use.fp``) failed silently and zero violations
+    were reported.  An intermediate assignment (``query = ... + name``) is
+    required to exercise the ``*def_use`` join; a direct same-variable flow
+    only touches the inline relations and would mask the bug.
+    """
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def handle_request(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    query = 'SELECT * FROM t WHERE n = ' + name\n"
+        "    cursor.execute(query)\n"
+    )
+
+    config = _make_sql_injection_config()
+
+    abs_violations = run_trace_analysis([str(test_file)], config)
+    assert len(abs_violations) >= 1
+
+    monkeypatch.chdir(tmp_path)
+    rel_violations = run_trace_analysis(["app.py"], config)
+
+    assert len(rel_violations) == len(abs_violations)
+    assert any("SQL injection" in v.message for v in rel_violations)

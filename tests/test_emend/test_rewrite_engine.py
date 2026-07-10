@@ -227,6 +227,60 @@ class TestParseExpr:
         assert node is not None
         assert node.op == "binop:+", f"expected binop:+, got {node.op}"
 
+    def test_simple_call(self):
+        """A plain call must parse as a 'call' node, not opaque."""
+        eg = EGraph()
+        eid = parse_expr("foo(x)", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "call", f"expected call, got {node.op}"
+
+    def test_nested_call(self):
+        """foo(bar(x)) must parse as a call whose arg is itself a call."""
+        eg = EGraph()
+        eid = parse_expr("foo(bar(x))", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "call", f"expected call, got {node.op}"
+        # children[0] is the function name; children[1] is the single arg.
+        assert len(node.children) == 2, f"expected func + 1 arg, got {node.children}"
+        arg = eg.extract(node.children[1])
+        assert arg is not None and arg.op == "call", (
+            f"nested arg should be a call, got {arg}"
+        )
+        assert enode_to_source(node, eg) == "foo(bar(x))"
+
+    def test_multiple_args_with_nested_calls(self):
+        """f(g(x), h(y, z)) must split top-level args correctly."""
+        eg = EGraph()
+        eid = parse_expr("f(g(x), h(y, z))", eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "call", f"expected call, got {node.op}"
+        # func + 2 top-level args (the inner commas must NOT split).
+        assert len(node.children) == 3, f"expected func + 2 args, got {node.children}"
+        arg0 = eg.extract(node.children[1])
+        arg1 = eg.extract(node.children[2])
+        assert arg0 is not None and arg0.op == "call"
+        assert arg1 is not None and arg1.op == "call"
+        assert enode_to_source(node, eg) == "f(g(x), h(y, z))"
+
+    def test_call_with_string_arg_containing_comma_and_paren(self):
+        """Commas and parens inside string args must not split arguments."""
+        eg = EGraph()
+        eid = parse_expr('foo("a, b)", x)', eg)
+        node = eg.extract(eid)
+        assert node is not None
+        assert node.op == "call", f"expected call, got {node.op}"
+        # func + 2 args: the string literal and x.
+        assert len(node.children) == 3, f"expected func + 2 args, got {node.children}"
+        arg0 = eg.extract(node.children[1])
+        assert arg0 is not None and arg0.op.startswith("str:"), (
+            f"first arg should be a string literal, got {arg0}"
+        )
+        arg1 = eg.extract(node.children[2])
+        assert arg1 is not None and arg1.op == "name:x"
+
 
 class TestApplySubstitution:
     def test_basic(self):

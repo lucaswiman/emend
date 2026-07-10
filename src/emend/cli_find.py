@@ -27,48 +27,6 @@ _ANSI_CYAN = "\033[36m"
 _ANSI_RED_BOLD = "\033[1;31m"
 
 
-def _extract_dsl_symbols_from_region(region):
-    """Extract DSL symbols from a single region based on its DSL type."""
-    from emend.dsl import DslKind, extract_graphql_symbols, extract_jinja_symbols, extract_sql_symbols
-    if region.dsl == DslKind.SQL:
-        return extract_sql_symbols(region)
-    elif region.dsl == DslKind.JINJA:
-        return extract_jinja_symbols(region)
-    elif region.dsl == DslKind.GRAPHQL:
-        return extract_graphql_symbols(region)
-    return []
-
-
-def _emit_dsl_overlay(
-    explicit_files: list | None,
-    language: str,
-    fallback_path: str,
-    *,
-    search_term: str | None = None,
-) -> None:
-    """Print DSL symbols found in the resolved file set.
-
-    When *search_term* is given, only symbols whose name overlaps with
-    the term are printed (used in lookup mode).
-    """
-    from emend.dsl import detect_dsl_regions
-
-    if explicit_files:
-        dsl_files, _ = resolve_file_scopes(explicit_files, language=language)
-    else:
-        dsl_files, _ = resolve_files(fallback_path, language=language)
-    for f in dsl_files:
-        for region in detect_dsl_regions(str(f)):
-            for sym in _extract_dsl_symbols_from_region(region):
-                if search_term and not (search_term in sym.name or sym.name in search_term):
-                    continue
-                print(
-                    f"{sym.host_file}:{sym.host_line}:{sym.host_col}  "
-                    f"[{sym.dsl.value}:{sym.kind.value}]  {sym.name}",
-                    flush=True,
-                )
-
-
 def _print_pattern_match_code(
     file_path_str: str,
     match,
@@ -645,13 +603,20 @@ def search(
                 for pm in project_matches:
                     yield (pm.file_path, pm.match)
 
+            def _limited_matches():
+                it = _iter_matches()
+                if limit is not None:
+                    import itertools
+                    it = itertools.islice(it, limit)
+                return it
+
             if count_output:
-                n_total = sum(1 for _ in _iter_matches())
+                n_total = sum(1 for _ in _limited_matches())
                 print(n_total)
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
             elif json_output:
                 import json
-                all_matches = list(_iter_matches())
+                all_matches = list(_limited_matches())
                 serialized_matches = []
                 for file_path_str, match in all_matches:
                     code_str = (match.matched_text or "").strip()
@@ -669,7 +634,7 @@ def search(
                     from emend.ast_utils import find_nested_definitions, find_symbol_by_line
                     _defs_cache: dict[str, list] = {}
                     seen: set[str] = set()
-                    for file_path_str, match in _iter_matches():
+                    for file_path_str, match in _limited_matches():
                         n_total += 1
                         if file_path_str not in _defs_cache:
                             _defs_cache[file_path_str] = find_nested_definitions(file_path_str)
@@ -685,7 +650,7 @@ def search(
                         else:
                             print(f"{file_path_str}:?", flush=True)
                 elif effective_output in ("location", "summary"):
-                    for file_path_str, match in _iter_matches():
+                    for file_path_str, match in _limited_matches():
                         n_total += 1
                         if match.line is not None:
                             print(f"{file_path_str}:{match.line}", flush=True)
@@ -695,17 +660,13 @@ def search(
                     # Default code display: header + matched source lines
                     _file_lines_cache: dict[str, list[str]] = {}
                     is_tty = sys.stdout.isatty()
-                    for file_path_str, match in _iter_matches():
+                    for file_path_str, match in _limited_matches():
                         n_total += 1
                         _print_pattern_match_code(
                             file_path_str, match, _file_lines_cache,
                             is_tty=is_tty,
                         )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
-
-            # Only show DSL symbols when --dsl flag is explicitly provided.
-            if dsl is not None:
-                _emit_dsl_overlay(explicit_files, _state["language"], path or ".")
 
             return
 
@@ -749,9 +710,4 @@ def search(
         )
         if result:
             print(result, end='')
-
-        # Only show DSL symbols when --dsl flag is explicitly provided.
-        if dsl is not None:
-            _search_term = (selector_str or query).split("::")[-1].strip().lower() if (selector_str or query) else ""
-            _emit_dsl_overlay(explicit_files, _state["language"], path or file_or_pattern or ".", search_term=_search_term)
 

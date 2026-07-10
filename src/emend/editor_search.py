@@ -1087,16 +1087,21 @@ class EditorSearchEngine:
         conn = self._get_conn()
         items: list[dict] = []
 
+        def _escape_like(s: str) -> str:
+            # Escape LIKE metacharacters so ``_`` and ``%`` (common in
+            # identifiers) are matched literally rather than as wildcards.
+            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
         for lit in literals:
             try:
                 sql = (
                     "SELECT target_qn, file_path, line, col, ref_kind "
-                    "FROM reference_index WHERE target_qn LIKE ?"
+                    "FROM reference_index WHERE target_qn LIKE ? ESCAPE '\\'"
                 )
-                params: list[Any] = ["%" + lit + "%"]
+                params: list[Any] = ["%" + _escape_like(lit) + "%"]
                 if file_scope:
-                    sql += " AND file_path LIKE ?"
-                    params.append("%" + file_scope + "%")
+                    sql += " AND file_path LIKE ? ESCAPE '\\'"
+                    params.append("%" + _escape_like(file_scope) + "%")
                 sql += " ORDER BY file_path, line LIMIT ?"
                 params.append(limit)
 
@@ -1135,6 +1140,10 @@ class EditorSearchEngine:
         if rg:
             cmd = [
                 rg, "--pcre2", "--no-heading", "--line-number",
+                # --with-filename forces the ``file:line:text`` prefix even
+                # when exactly one file is searched; without it rg omits the
+                # path and the parser below drops every match.
+                "--with-filename",
                 "--color", "never", "--max-count", str(limit * 2),
                 pattern, scope,
             ]
@@ -1146,8 +1155,11 @@ class EditorSearchEngine:
                 # git grep supports PCRE with -P
                 cmd = [git, "-C", scope, "grep", "-Pn", "--no-color", pattern]
             else:
+                # -H forces the ``file:line:text`` prefix even when exactly
+                # one file is searched; without it grep omits the path and
+                # the parser below drops every match.
                 cmd = [
-                    grep, "-rPn", "--color=never",
+                    grep, "-rHPn", "--color=never",
                     "--exclude-dir=.git", "--exclude-dir=.venv",
                     "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
                     pattern, scope,
@@ -2660,8 +2672,11 @@ class EditorSearchEngine:
                 for child in node.named_children():
                     if child.kind == "dotted_name":
                         full = child.text()
-                        local = full.split(".")[-1]
-                        names[local] = full
+                        # ``import a.b.c`` binds the top-level package name
+                        # ``a`` locally (not the leaf ``c``); the bound name
+                        # refers to that top-level package.
+                        local = full.split(".")[0]
+                        names[local] = local
                     elif child.kind == "aliased_import":
                         # aliased_import has dotted_name + identifier(alias)
                         aliased_children = child.named_children()
@@ -2726,11 +2741,10 @@ class EditorSearchEngine:
         items: list[dict] = []
         target_prefix = f"{sym_part}." if sym_part else ""
         for sym in symbols:
-            qn = sym.get("qualified_name", sym.get("name", ""))
-            name = sym.get("name", "")
+            qn = ".".join(sym.path) if sym.path else sym.name
+            name = sym.name
             if target_prefix and not qn.startswith(target_prefix):
                 continue
-            # Only direct children (one level deep)
             remainder = qn[len(target_prefix):]
             if "." in remainder:
                 continue
@@ -2740,7 +2754,7 @@ class EditorSearchEngine:
                 seen.add(name)
                 items.append({
                     "word": name,
-                    "kind": sym.get("kind", "variable"),
+                    "kind": sym.kind,
                     "menu": f"[{qn}]",
                 })
             if len(items) >= limit:

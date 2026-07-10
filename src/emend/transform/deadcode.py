@@ -965,8 +965,12 @@ def find_dead_code(
         return False
 
     def _reference_file_is_excluded(file_path: str) -> bool:
-        if _is_test_file(file_path):
-            return bool(exclude_references_from)
+        # A reference file is excluded only when it actually matches one of
+        # the configured exclude patterns. Test files are not special-cased:
+        # excluding an unrelated directory (e.g. legacy/) must not silently
+        # drop test-file imports and produce false-positive "unused module"
+        # reports. To ignore test references, target the tests directory
+        # explicitly (e.g. --exclude-references-from tests/).
         if not exclude_references_from:
             return False
         import fnmatch
@@ -1147,7 +1151,7 @@ def safe_delete(
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_name = selector.symbol_path[-1]
     target_qn = f"{target_module}.{target_name}" if target_module else target_name
-    selector_str = f"{selector.file_path}::{'::'.join(selector.symbol_path)}"
+    selector_str = f"{selector.file_path}::{'.'.join(selector.symbol_path)}"
 
     delete_set.append({
         "selector": selector_str,

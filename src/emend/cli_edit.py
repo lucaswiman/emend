@@ -609,6 +609,12 @@ def batch_cmd(
             op_type = list(op.keys())[0]
             op_args = op[op_type]
 
+            if not isinstance(op_args, dict):
+                raise ValueError(
+                    f"Operation #{i+1} ({op_type}): missing configuration; "
+                    "expected a mapping of settings (e.g. 'selector', 'value')"
+                )
+
             if op_type == "edit":
                 selector_str = op_args.get("selector")
                 value = op_args.get("value")

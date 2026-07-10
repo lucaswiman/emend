@@ -20,6 +20,7 @@ from emend.checks.rules_config import (  # noqa: E402
     yaml_key,
     as_list,
     expand_macros,
+    expand_pattern_macros,
     expand_not_through,
 )
 
@@ -223,8 +224,8 @@ def load_rules(
             name=name,
             find=find_pattern_str,
             message=rule_def.get("message", ""),
-            not_inside=yaml_key(rule_def, "not_within", "not_inside"),
-            replace=rule_def.get("fix", rule_def.get("replace")),
+            not_inside=expand_pattern_macros(yaml_key(rule_def, "not_within", "not_inside"), macros),
+            replace=expand_pattern_macros(rule_def.get("fix", rule_def.get("replace")), macros),
             flows_from=flows_from if flows_from else None,
             flows_to=flows_to if flows_to else None,
             not_through=not_through if not_through else None,

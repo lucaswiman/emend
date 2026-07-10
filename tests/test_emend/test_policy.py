@@ -337,6 +337,84 @@ class TestStructuralCheck:
         assert len(violations) >= 1
         assert any(v.rule_name == "no-eval" for v in violations)
 
+    def test_structural_check_kind_filter(self, tmp_path):
+        """kind='structural' must not filter out StructuralCheck policies."""
+        from emend.checks.engine import run_checks
+        config_file = _write_rules(tmp_path, {
+            "policies": [{
+                "name": "no-eval",
+                "severity": "error",
+                "description": "No eval calls",
+                "checks": [{"type": "structural", "pattern": "eval($X)"}],
+            }],
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("result = eval('1+1')\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            kind="structural",
+        )
+        assert len(violations) >= 1, (
+            "kind='structural' should return structural check violations"
+        )
+
+
+class TestRunChecksRulesOnlyDoc:
+    """A rules-only document (``rules:`` key, no ``policies:`` key) must not be
+    double-reported by the unified ``check`` runner: the lint engine already
+    processes each ``rules:`` entry, so the policy engine must not re-emit the
+    same rule as a synthesised structural/flow policy.
+    """
+
+    def test_pattern_rule_reported_once(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {
+                "no-print": {"find": "print($X)", "message": "No print"},
+            },
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("print(1)\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            project_path=str(tmp_path),
+        )
+        no_print = [v for v in violations if v.rule_name == "no-print"]
+        assert len(no_print) == 1, (
+            f"expected the pattern rule to be reported once, got "
+            f"{[(v.kind, v.rule_name) for v in no_print]}"
+        )
+
+    def test_kind_structural_selects_structural_policy(self, tmp_path):
+        """``--kind structural`` must select structural policies.  The
+        resulting violation is labelled ``kind='structural'``, so filtering by
+        that kind must return it rather than silently dropping it."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "policies": [{
+                "name": "no-eval",
+                "severity": "error",
+                "checks": [{"type": "structural", "pattern": "eval($X)"}],
+            }],
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("eval('1+1')\n")
+
+        violations = run_checks(
+            [str(test_file)],
+            config=config_file,
+            kind="structural",
+            project_path=str(tmp_path),
+        )
+        assert [v.rule_name for v in violations] == ["no-eval"]
+        assert violations[0].kind == "structural"
+
 
 class TestFormatViolations:
     def test_text_format(self):
@@ -508,3 +586,82 @@ class TestDatalogCheckColumnIndexing:
         assert v.file_path == "<project>"
         assert v.line == 0
         assert v.witness == ["symbol=my_func"]
+
+
+class TestRunChecksEngine:
+    """Engine-level behaviour of run_checks (checks/engine.py)."""
+
+    def test_unified_rule_not_double_reported(self, tmp_path):
+        """A single ``rules:`` pattern entry must be reported once, not twice.
+
+        In the default (both-engines) mode the lint engine parses ``rules:``
+        into pattern rules and the policy engine ALSO builds unified policies
+        from ``rules:``; both find the same match. The runner must dedup.
+        """
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("def f():\n    eval('code')\n")
+
+        violations = run_checks([str(test_file)], config=config_file)
+        no_eval = [v for v in violations if v.rule_name == "no-eval"]
+        assert len(no_eval) == 1, [
+            (v.rule_name, v.kind, v.line, v.col) for v in violations
+        ]
+
+    def test_standalone_policy_still_reports_unified_rule(self, tmp_path):
+        """``mode='policy'`` alone must still surface ``rules:``-derived matches."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("def f():\n    eval('code')\n")
+
+        violations = run_checks([str(test_file)], config=config_file, mode="policy")
+        assert any(v.rule_name == "no-eval" for v in violations)
+
+    def test_standalone_lint_still_reports_unified_rule(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("def f():\n    eval('code')\n")
+
+        violations = run_checks([str(test_file)], config=config_file, mode="lint")
+        assert any(v.rule_name == "no-eval" for v in violations)
+
+    def test_multiple_matches_same_line_preserved(self, tmp_path):
+        """Dedup must not collapse genuinely distinct matches on one line."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("x = eval('a'); y = eval('b')\n")
+
+        violations = run_checks([str(test_file)], config=config_file)
+        no_eval = [v for v in violations if v.rule_name == "no-eval"]
+        assert len(no_eval) == 2, [
+            (v.rule_name, v.kind, v.line, v.col) for v in violations
+        ]
+
+    def test_invalid_mode_raises(self, tmp_path):
+        """An unrecognised mode must error, not silently return []."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("def f():\n    eval('code')\n")
+
+        with pytest.raises(ValueError):
+            run_checks([str(test_file)], config=config_file, mode="bogus")

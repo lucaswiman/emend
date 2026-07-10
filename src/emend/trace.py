@@ -952,6 +952,16 @@ def _run_trace_datalog(
     """
     graph = _build_trace_fact_graph(paths, language, project_path)
 
+    # FactGraph.update_files() keys every fact by the *resolved* (absolute)
+    # path (``str(Path(fp).resolve())``).  Normalise the analysis paths to the
+    # same identity so the Datalog joins that reference stored facts
+    # (``trace_source.fp == def_use.fp`` / ``cfg_block.fp``) line up.  Without
+    # this, a relative path from the CLI (e.g. ``emend trace app.py``) would
+    # silently propagate no taint across variables/blocks and report zero
+    # violations.  Direct same-variable/same-block flows happen to survive
+    # because they only touch the raw-path inline relations.
+    paths = [str(Path(p).resolve()) for p in paths]
+
     # Create type oracle for Python-side type constraint filtering
     type_oracle = _maybe_create_type_oracle(config)
 

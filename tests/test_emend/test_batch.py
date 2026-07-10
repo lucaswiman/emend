@@ -204,6 +204,27 @@ class TestBatchJSON:
 
         assert result.exit_code != 0
 
+    def test_batch_null_operation_value(self, tmp_path):
+        """A null operation value produces a clear error, not a raw AttributeError.
+
+        Regression: ``{"edit": None}`` used to crash with
+        ``AttributeError: 'NoneType' object has no attribute 'get'`` surfaced
+        as an ugly generic ``Error: AttributeError(...)`` (exit 1).
+        """
+        ops_file = tmp_path / "ops.yaml"
+        ops_file.write_text(
+            "operations:\n"
+            "  - edit:\n"
+        )
+
+        result = runner.invoke(app, ["batch", str(ops_file)])
+
+        # ValueError -> exit 2 (clean validation error), not exit 1 (AttributeError).
+        assert result.exit_code == 2
+        assert "AttributeError" not in result.output
+        assert "Operation #1" in result.output
+        assert "edit" in result.output
+
 
 class TestBatchYAML:
     """Tests for batch command with YAML input."""

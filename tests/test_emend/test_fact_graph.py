@@ -298,6 +298,17 @@ class TestGenericQuery:
         assert len(results) == 1
         assert results[0].name == "MyClass"
 
+    def test_query_finds_method_call_facts(self):
+        """query() must include MethodCallFact entries."""
+        g = FactGraph()
+        g.add_method_call(MethodCallFact(
+            file_path="test.py", func_qn="foo", receiver="obj",
+            method="bar", block_id=0, line=1,
+        ))
+        results = g.query(lambda f: isinstance(f, MethodCallFact))
+        assert len(results) == 1
+        assert results[0].method == "bar"
+
 
 class TestPredicateHelpers:
     def test_flows_from(self):
@@ -318,6 +329,63 @@ class TestPredicateHelpers:
         results = g.query(pred)
         assert len(results) == 1
         assert results[0].symbol_qn == "app.main"
+
+
+class TestRstSectionParser:
+    def test_facts_section_key_resolves(self):
+        """The RST key_map must resolve the Fact graph heading to 'facts'."""
+        import re as _re
+        from pathlib import Path
+
+        key_map = {
+            "selector_syntax": "selectors",
+            "pattern_syntax": "patterns",
+            "commands": "commands",
+            "cookbook_recipes": "recipes",
+            "fact_graph_(``facts_query``)": "facts",
+        }
+
+        rst_path = Path(__file__).resolve().parents[2] / "src" / "emend" / "grammar_and_cookbook.rst"
+        text = rst_path.read_text()
+        lines = text.split("\n")
+        section_keys = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if (
+                i > 0
+                and stripped
+                and all(c == "-" for c in stripped)
+                and len(stripped) >= 3
+            ):
+                heading = lines[i - 1].strip()
+                if heading:
+                    raw_key = _re.sub(r"\s+", "_", heading.lower())
+                    key = key_map.get(raw_key, raw_key)
+                    section_keys.append(key)
+
+        assert "facts" in section_keys, (
+            f"'facts' section not found. Derived keys: {section_keys}"
+        )
+
+
+class TestFactsCmdTaintFlowsAlias:
+    def test_taint_flows_alias_accepted(self, tmp_path):
+        """facts_cmd should accept 'taint_flows' as an alias for 'trace_flows'."""
+        from typer.testing import CliRunner
+        from emend.cli import app as cli_app
+
+        test_file = tmp_path / "app.py"
+        test_file.write_text("x = 1\n")
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, [
+            "analyze", "facts", str(tmp_path),
+            "--type", "taint_flows",
+        ])
+        assert "unknown fact type" not in (result.output or "").lower(), (
+            f"'taint_flows' should be accepted as alias for 'trace_flows', "
+            f"but got: {result.output}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1397,3 +1465,26 @@ class TestTypescriptImportExtraction:
         facts = self._imports("/tmp/app.ts", source)
         # May be empty — just verify no exception is raised.
         assert isinstance(facts, list)
+
+
+class TestFactsCliTaintFlowsAlias:
+    """``emend analyze facts --type taint_flows`` is documented as an alias of
+    ``trace_flows`` in the ``--type`` help text; it must not error out."""
+
+    def _run(self, tmp_path, fact_type):
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
+        runner = CliRunner()
+        return runner.invoke(
+            app, ["analyze", "facts", str(tmp_path), "--type", fact_type]
+        )
+
+    def test_taint_flows_alias_accepted(self, tmp_path):
+        result = self._run(tmp_path, "taint_flows")
+        assert result.exit_code == 0, result.stdout
+
+    def test_trace_flows_still_accepted(self, tmp_path):
+        result = self._run(tmp_path, "trace_flows")
+        assert result.exit_code == 0, result.stdout

@@ -265,6 +265,38 @@ def test_check_unified_rules(tmp_path):
     assert data[0]["rule"] == "no-print"
 
 
+def test_check_missing_rules_returns_json_error(monkeypatch, tmp_path):
+    # No .emend/rules.yaml exists: the tool must return a clean JSON error
+    # instead of letting FileNotFoundError propagate to the MCP client.
+    monkeypatch.chdir(tmp_path)
+    p = tmp_path / "example.py"
+    p.write_text("print('x')\n")
+
+    result = check(paths=[str(tmp_path)], config=None)
+    data = json.loads(result)
+    assert isinstance(data, dict)
+    assert "error" in data
+
+
+def test_check_file_scopes_use_common_parent_as_project(monkeypatch, tmp_path):
+    import emend.checks
+
+    left = tmp_path / "pkg" / "left.py"
+    right = tmp_path / "pkg" / "nested" / "right.py"
+    right.parent.mkdir(parents=True)
+    left.write_text("x = 1\n")
+    right.write_text("y = 2\n")
+    captured = {}
+
+    def fake_run_checks(file_paths, **kwargs):
+        captured["project_path"] = kwargs["project_path"]
+        return []
+
+    monkeypatch.setattr(emend.checks, "run_checks", fake_run_checks)
+    assert json.loads(check(paths=[str(left), str(right)])) == []
+    assert captured["project_path"] == str(left.parent)
+
+
 def test_facts_query_guided_symbols(tmp_path):
     configure_profile(profile="expert")
     p = tmp_path / "example.py"
@@ -315,6 +347,23 @@ def test_grammar_and_cookbook_all_returns_full_document():
     assert "Cookbook recipes" in result
     assert "emend find" in result
     assert "emend edit replace" in result
+
+
+def test_grammar_and_cookbook_facts_section():
+    """section='facts' must return the Fact graph section, not 'Unknown section'."""
+    result = grammar_and_cookbook(section="facts")
+    assert "Unknown section" not in result
+    assert "facts_query" in result.lower() or "fact graph" in result.lower()
+
+
+def test_trace_analysis_unknown_preset_returns_json_error(tmp_path):
+    """Unknown preset should return a JSON error, not raise ValueError."""
+    p = tmp_path / "example.py"
+    p.write_text("x = 1\n")
+    result = trace_analysis(path=str(p), preset="nonexistent_preset_xyz")
+    data = json.loads(result)
+    assert "error" in data
+    assert "nonexistent_preset_xyz" in data["error"].lower() or "unknown" in data["error"].lower()
 
 
 def test_trace_analysis_intraprocedural_no_crash(tmp_path):

@@ -968,3 +968,61 @@ class TestRustEdgeCases:
         matches = find_pattern("$X + $Y", str(f))
         # a + b and (a + b) + c - at least 1, possibly 2
         assert len(matches) >= 1
+
+
+class TestProjectBatchFastPath:
+    """Regression tests for the Stage-3 Rust batch fast-path in
+    ``find_pattern_in_project`` (transform/project_iter.py).
+
+    The Rust ``find_pattern_in_files`` returns 7-tuples
+    ``(file, line, col, end_line, end_col, text, captures)``. A previous
+    version unpacked only 6 values, so the batch path always raised
+    ``ValueError`` and silently fell through to the slower Python
+    Stage-4 fallback (and captures were hardcoded to ``{}``). These tests
+    sabotage the Stage-4 fallback so they only pass when Stage 3 works.
+    """
+
+    def _sabotage_fallback(self, monkeypatch):
+        import emend.transform.patterns as patterns
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("Stage-4 fallback should not be reached")
+
+        # find_pattern_in_project does `from .patterns import find_pattern`
+        # inside the function body, so patching the module attribute works.
+        monkeypatch.setattr(patterns, "find_pattern", _boom)
+
+    def test_batch_fast_path_returns_matches(self, tmp_path, monkeypatch):
+        from emend.transform import find_pattern_in_project
+
+        a = tmp_path / "a.py"
+        b = tmp_path / "b.py"
+        a.write_text('print("hello")\n')
+        b.write_text('print("world")\n')
+
+        self._sabotage_fallback(monkeypatch)
+
+        results = find_pattern_in_project(
+            'print($MSG)', [str(a), str(b)],
+        )
+        # If the batch path worked, we get both matches without ever
+        # touching the sabotaged fallback.
+        assert len(results) == 2
+        assert {r.file_path for r in results} == {str(a), str(b)}
+
+    def test_batch_fast_path_populates_captures(self, tmp_path, monkeypatch):
+        from emend.transform import find_pattern_in_project
+
+        a = tmp_path / "a.py"
+        b = tmp_path / "b.py"
+        a.write_text('print("hello")\n')
+        b.write_text('print("world")\n')
+
+        self._sabotage_fallback(monkeypatch)
+
+        results = find_pattern_in_project(
+            'print($MSG)', [str(a), str(b)],
+        )
+        by_file = {r.file_path: r.match for r in results}
+        assert by_file[str(a)].captures.get("MSG") == '"hello"'
+        assert by_file[str(b)].captures.get("MSG") == '"world"'

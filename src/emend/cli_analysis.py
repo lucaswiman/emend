@@ -73,7 +73,7 @@ def _trace_cmd_impl(
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
 
-        _proj_root = project or str(Path(path).resolve())
+        _proj_root = project or str(Path(path).resolve() if Path(path).is_dir() else Path(path).resolve().parent)
 
         if interprocedural:
             from emend.trace import run_interprocedural_trace
@@ -812,7 +812,7 @@ def facts_cmd(
                 print("Error: --symbol required for reference queries", file=sys.stderr)
                 raise typer.Exit(2)
             results = graph.references_to(symbol)
-        elif fact_type == "trace_flows":
+        elif fact_type in ("trace_flows", "taint_flows"):
             results = graph.trace_flows(label=label, file_path=file)
         elif fact_type == "types":
             if not symbol:
@@ -931,19 +931,41 @@ def cfg_cmd(
                 func_filter = function if function else None
                 unr_blocks = graph.unreachable_blocks_datalog(func_qn=func_filter)
                 datalog_used = True
+                # The Datalog facts identify unreachable blocks by id but do
+                # not carry line spans.  Resolve real spans from the freshly
+                # built CFGs (block ids are consistent between fact population
+                # and a plain build_cfgs pass, both come from cfg.get_blocks()).
+                import os
+                span_lookup: dict[tuple[str, str, int], tuple[int, int]] = {}
+                for i, cfg in enumerate(all_cfgs):
+                    base = os.path.basename(cfg_files[i])
+                    for block in cfg.get_blocks():
+                        span_lookup[(base, cfg.func_name, block["id"])] = (
+                            block["start_line"],
+                            block["end_line"],
+                        )
                 # Group by (file_path, func_qn)
                 from collections import defaultdict
                 grouped: dict[tuple[str, str], list] = defaultdict(list)
                 for blk in unr_blocks:
                     grouped[(blk.file_path, blk.func_qn)].append(blk)
                 for (fp, fq), blks in grouped.items():
+                    short_name = fq.rsplit(".", 1)[-1] if "." in fq else fq
+                    base = os.path.basename(fp)
+                    entries = []
+                    for b in blks:
+                        start_line, end_line = span_lookup.get(
+                            (base, short_name, b.block_id), (0, 0)
+                        )
+                        entries.append({
+                            "id": b.block_id,
+                            "start_line": start_line,
+                            "end_line": end_line,
+                        })
                     results.append({
                         "file": fp,
-                        "function": fq.rsplit(".", 1)[-1] if "." in fq else fq,
-                        "unreachable_blocks": [
-                            {"id": b.block_id, "start_line": 0, "end_line": 0}
-                            for b in blks
-                        ],
+                        "function": short_name,
+                        "unreachable_blocks": entries,
                     })
             except Exception:
                 logger.debug("Datalog unreachable query failed, falling back", exc_info=True)

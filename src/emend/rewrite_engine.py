@@ -352,12 +352,105 @@ _BINOP_RE = re.compile(
     r"^(.+)\s*([+\-*/%@&|^]|==|!=|<=|>=|<|>|and|or|is|in|not\s+in|is\s+not)\s+(.+)$"
 )
 _UNOP_RE = re.compile(r"^(not|~|-)\s+(.+)$")
-_CALL_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(([^)]*)\)$")
+# Leading dotted-identifier (the callee) of a call expression. The argument
+# list is scanned by hand (see _match_call) so that nested parentheses and
+# string literals are handled correctly — a `[^)]*` regex cannot do that.
+_CALL_HEAD_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(")
 _ATTR_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\.\s*([A-Za-z_]\w*)$")
 _METAVAR_RE = re.compile(r"^\$[A-Za-z_]\w*$")
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 _NUMBER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _STRING_RE = re.compile(r'''^(?:"[^"]*"|'[^']*')$''')
+
+
+def _split_top_level_args(args_str: str) -> list[str]:
+    """Split a call's argument string on top-level commas.
+
+    Commas nested inside parentheses/brackets/braces or inside string
+    literals are ignored, so ``g(x), h(y, z)`` splits into two arguments
+    and ``"a, b"`` stays a single argument. Returns an empty list for an
+    empty (whitespace-only) argument string.
+    """
+    args: list[str] = []
+    depth = 0
+    quote: str | None = None
+    current: list[str] = []
+    i = 0
+    while i < len(args_str):
+        ch = args_str[i]
+        if quote is not None:
+            current.append(ch)
+            if ch == "\\":
+                # Preserve an escaped character verbatim.
+                if i + 1 < len(args_str):
+                    current.append(args_str[i + 1])
+                    i += 2
+                    continue
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+        elif ch in "([{":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    tail = "".join(current).strip()
+    if tail or args:
+        args.append(tail)
+    return args
+
+
+def _match_call(expr: str) -> tuple[str, str] | None:
+    """Match ``func(...args...)`` spanning the whole expression.
+
+    Returns ``(func_name, args_str)`` if *expr* is a single call whose
+    argument list runs to the final character, else ``None``. Unlike a
+    ``[^)]*`` regex, the matching close paren is found by depth-tracking
+    scanner so nested calls and string literals are handled correctly.
+    """
+    head = _CALL_HEAD_RE.match(expr)
+    if not head:
+        return None
+    func_name = head.group(1)
+    open_idx = head.end() - 1  # index of the '('
+    depth = 0
+    quote: str | None = None
+    i = open_idx
+    while i < len(expr):
+        ch = expr[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                # The close paren must be the last non-space character for
+                # this to be a whole-expression call (e.g. reject "f(x) + 1").
+                if expr[i + 1:].strip():
+                    return None
+                return func_name, expr[open_idx + 1:i]
+        i += 1
+    return None
 
 
 def parse_expr(expr: str, egraph: EGraph) -> int:
@@ -413,14 +506,12 @@ def parse_expr(expr: str, egraph: EGraph) -> int:
         return egraph.add(ENode(op=f"unop:{op}", children=(operand,)))
 
     # Function call
-    m = _CALL_RE.match(expr)
-    if m:
-        func_name = m.group(1)
-        args_str = m.group(2).strip()
-        children = []
-        if args_str:
-            for arg in args_str.split(","):
-                children.append(parse_expr(arg.strip(), egraph))
+    call = _match_call(expr)
+    if call:
+        func_name, args_str = call
+        children = [
+            parse_expr(arg, egraph) for arg in _split_top_level_args(args_str)
+        ]
         func_id = egraph.add(ENode(op=f"name:{func_name}"))
         return egraph.add(ENode(op="call", children=(func_id, *children)))
 

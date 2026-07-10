@@ -346,9 +346,12 @@ class TypeDescriptor:
                 return False
             if not all(a.matches(b) for a, b in zip(self.params, constraint.params)):
                 return False
-            if constraint.return_type and self.return_type:
+            if constraint.return_type is None:
+                return True  # constraint does not constrain the return type
+            if self.return_type is not None:
                 return self.return_type.matches(constraint.return_type)
-            return constraint.return_type is None
+            # self's return type is unknown; only a wildcard constraint matches.
+            return constraint.return_type.kind == "unknown"
         return False
 
 
@@ -492,19 +495,21 @@ def parse_type_string(raw: str) -> TypeDescriptor:
             inner = inner[4:]
         return TypeDescriptor.parameterized("&", (parse_type_string(inner),))
 
+    # Handle union: "str | None", "string | null"
+    # But we need to be careful not to split inside brackets.  This must come
+    # BEFORE the array-shorthand check: ``[]`` binds tighter than ``|``, so
+    # ``A | B[]`` is ``union(A, Array[B])``, not ``Array[A | B]``.
+    if " | " in raw and not raw.startswith("("):
+        parts = _split_union(raw)
+        if len(parts) > 1:
+            return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
+
     # TypeScript array shorthand: string[] -> Array[string]
     # Don't match callable returns like (x: T) => U[] — skip if starts with (
     if raw.endswith("[]") and not raw.startswith("("):
         inner = raw[:-2]
         if inner:
             return TypeDescriptor.parameterized("Array", (parse_type_string(inner),))
-
-    # Handle union: "str | None", "string | null"
-    # But we need to be careful not to split inside brackets
-    if " | " in raw and not raw.startswith("("):
-        parts = _split_union(raw)
-        if len(parts) > 1:
-            return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
 
     # Handle callable: "(args...) -> ReturnType" (Python/Rust)
     if raw.startswith("(") and " -> " in raw:
