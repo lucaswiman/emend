@@ -129,6 +129,34 @@ def test_lint_macro_in_rules(tmp_path):
     assert violations[0].rule_name == "no-print"
 
 
+def test_lint_macro_expansion_in_not_inside_and_replace(tmp_path):
+    """Macros in not-inside and replace fields must be expanded."""
+    config = {
+        "macros": {
+            "try_block": "try:",
+            "log_call": "logger.info($...ARGS)",
+        },
+        "rules": {
+            "no-print": {
+                "find": "print($...ARGS)",
+                "not-inside": "{try_block}",
+                "replace": "{log_call}",
+                "message": "Use logger instead of print",
+            },
+        },
+    }
+
+    config_file = _write_rules_config(tmp_path, config)
+    rules, macros, _ = load_rules(str(config_file))
+    assert len(rules) == 1
+    assert rules[0].not_inside == "try:", (
+        f"not_inside macro not expanded: got {rules[0].not_inside!r}"
+    )
+    assert rules[0].replace == "logger.info($...ARGS)", (
+        f"replace macro not expanded: got {rules[0].replace!r}"
+    )
+
+
 def test_load_rules_unified_rules_yaml_match_and_fix(tmp_path):
     test_file = tmp_path / "example.py"
     test_file.write_text("print('debug')\n")

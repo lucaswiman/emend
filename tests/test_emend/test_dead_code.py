@@ -782,6 +782,89 @@ class TestExcludeReferencesFrom:
         ])
         assert "only_tested" in result.stdout
 
+    def test_unrelated_exclude_keeps_test_module_references(self, tmp_path):
+        """Excluding an unrelated path must not drop test-file references
+        in the unused-modules analysis.
+
+        A module imported only from a test file should still count as
+        referenced when ``--exclude-references-from`` targets an unrelated
+        directory (e.g. ``legacy/``), not the tests directory.
+        """
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[project]\nname = 'x'\nversion = '0'\n"
+        )
+
+        # helper.py is imported ONLY from a test file.
+        (project / "helper.py").write_text("def do_it():\n    return 1\n")
+
+        legacy = project / "legacy"
+        legacy.mkdir()
+        (legacy / "old.py").write_text("X = 1\n")
+
+        tests_dir = project / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_helper.py").write_text(
+            "from helper import do_it\n"
+            "\n"
+            "def test_it():\n"
+            "    assert do_it() == 1\n"
+        )
+
+        # Excluding an unrelated directory (legacy/, not tests/) must leave
+        # the test-file import intact, so helper is NOT an unused module.
+        modules = {
+            m.module_name
+            for m in find_dead_code(
+                str(project),
+                show_last_reference=False,
+                unused_modules=True,
+                exclude_references_from=[str(legacy)],
+            )
+            if getattr(m, "kind", None) == "module" or m.__class__.__name__ == "DeadModule"
+        }
+        assert "helper" not in modules
+
+    def test_exclude_tests_reports_test_only_module(self, tmp_path):
+        """Excluding the tests directory *should* report a test-only module.
+
+        Complements the unrelated-exclude case: when the exclude pattern
+        actually matches the test file, its import stops counting and the
+        module is surfaced as unused.
+        """
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[project]\nname = 'x'\nversion = '0'\n"
+        )
+        (project / "helper.py").write_text("def do_it():\n    return 1\n")
+
+        tests_dir = project / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_helper.py").write_text(
+            "from helper import do_it\n"
+            "\n"
+            "def test_it():\n"
+            "    assert do_it() == 1\n"
+        )
+
+        modules = {
+            m.module_name
+            for m in find_dead_code(
+                str(project),
+                show_last_reference=False,
+                unused_modules=True,
+                exclude_references_from=[str(tests_dir)],
+            )
+            if m.__class__.__name__ == "DeadModule"
+        }
+        assert "helper" in modules
+
 
 class TestStringsCountAsReferences:
     """Tests for --strings-count-as-references / --no-strings."""

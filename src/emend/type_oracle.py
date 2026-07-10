@@ -346,9 +346,12 @@ class TypeDescriptor:
                 return False
             if not all(a.matches(b) for a, b in zip(self.params, constraint.params)):
                 return False
-            if constraint.return_type and self.return_type:
+            if constraint.return_type is None:
+                return True  # constraint does not constrain the return type
+            if self.return_type is not None:
                 return self.return_type.matches(constraint.return_type)
-            return constraint.return_type is None
+            # self's return type is unknown; only a wildcard constraint matches.
+            return constraint.return_type.kind == "unknown"
         return False
 
 

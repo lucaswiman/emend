@@ -320,3 +320,52 @@ class TestSearchFileScopePattern:
         assert result.exit_code == 0
         assert "a.py" in result.stdout
         assert "b.py" not in result.stdout
+
+
+class TestPatternModeLimit:
+    """--limit must truncate results in pattern-search mode (count / json / text)."""
+
+    def _make_file(self, tmp_path):
+        f = tmp_path / "many.py"
+        f.write_text("".join(f"print({i})\n" for i in range(6)))
+        return f
+
+    def test_limit_count_mode(self, tmp_path):
+        f = self._make_file(tmp_path)
+        result = runner.invoke(
+            app, ["find", "print($X)", str(f), "--limit", "2", "--output", "count"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "2"
+
+    def test_limit_text_mode(self, tmp_path):
+        f = self._make_file(tmp_path)
+        result = runner.invoke(
+            app, ["find", "print($X)", str(f), "--limit", "2", "--output", "location"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 2
+
+    def test_limit_json_mode(self, tmp_path):
+        import json
+        f = self._make_file(tmp_path)
+        result = runner.invoke(
+            app, ["find", "print($X)", str(f), "--limit", "3", "--output", "json"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["count"] == 3
+        assert len(payload["matches"]) == 3
+
+    def test_no_limit_returns_all(self, tmp_path):
+        f = self._make_file(tmp_path)
+        result = runner.invoke(
+            app, ["find", "print($X)", str(f), "--output", "count"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "6"

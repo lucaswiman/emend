@@ -14,8 +14,63 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache: (project_root, language) → (root_mtime_ns, file_list)
-_file_list_cache: dict[tuple[str, str], tuple[int, list[str]]] = {}
+# Module-level cache: (project_root, language) → (dir_signature, file_list).
+# The signature maps each directory that contains (or leads to) a collected
+# source file to its ``st_mtime_ns``.  Keying on the root directory alone is
+# insufficient: on Linux a directory's mtime only changes when entries are
+# added/removed *directly* inside it, so creating ``pkg/new_module.py`` never
+# touches the project root's mtime.  A long-running process (editor / MCP
+# server) would then keep serving a stale list.  Validating the per-directory
+# signature costs only O(#dirs) ``stat`` calls on a cache hit — no re-walk.
+_file_list_cache: dict[tuple[str, str], tuple[dict[str, int], list[str]]] = {}
+
+
+def _dir_signature(files: list[str], resolved: str) -> dict[str, int]:
+    """Map every directory containing/leading to a collected file to its mtime.
+
+    Includes each file's parent directory and all ancestors up to (and
+    including) *resolved*.  Adding or removing a source file bumps its parent
+    directory's mtime; creating a new package directory bumps its parent's
+    mtime — both are ancestors of existing files (or the root), so the change
+    is detected without walking the whole tree again.
+    """
+    import os
+
+    root = Path(resolved)
+    dirs: set[str] = {resolved}
+    for f in files:
+        p = Path(f).parent
+        while True:
+            s = str(p)
+            if s in dirs:
+                break
+            dirs.add(s)
+            if p == root or root not in p.parents:
+                break
+            p = p.parent
+
+    sig: dict[str, int] = {}
+    for d in dirs:
+        try:
+            sig[d] = os.stat(d).st_mtime_ns
+        except OSError:
+            # Directory vanished between scan and signature build; skip it.
+            # A missing tracked directory is detected as invalid on next check.
+            pass
+    return sig
+
+
+def _signature_valid(sig: dict[str, int]) -> bool:
+    """True iff every recorded directory still has its recorded mtime."""
+    import os
+
+    for d, mtime in sig.items():
+        try:
+            if os.stat(d).st_mtime_ns != mtime:
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def collect_source_files_scandir(root_path: str, language: str = "python") -> list[str]:
@@ -144,7 +199,9 @@ def collect_source_files(
     """Collect all source files for *language* in project, with caching.
 
     Uses the Rust backend for speed.  Caches the file list per project root,
-    invalidated when the root directory's mtime changes.
+    invalidated when any directory containing (or leading to) a source file
+    changes its mtime — so a file added inside a subdirectory is picked up even
+    within a single long-running process.
 
     If *git_tracked_only* is True, uses ``git ls-files`` to only return
     files tracked by git.  Falls back to directory scan if not in a
@@ -159,22 +216,11 @@ def collect_source_files(
             )
             return tracked
 
-    import os
     resolved = str(Path(project_root).resolve())
-    try:
-        root_mtime = os.stat(resolved).st_mtime_ns
-    except OSError:
-        t0 = time.monotonic()
-        files = collect_source_files_scandir(resolved, language=language)
-        logger.info(
-            "collect_source_files: %d files in %.3fs (scandir, %s)",
-            len(files), time.monotonic() - t0, resolved,
-        )
-        return files
 
     cache_key = (resolved, language)
     cached = _file_list_cache.get(cache_key)
-    if cached is not None and cached[0] == root_mtime:
+    if cached is not None and _signature_valid(cached[0]):
         logger.debug(
             "collect_source_files: %d files (cached, %s)",
             len(cached[1]), resolved,
@@ -187,5 +233,5 @@ def collect_source_files(
         "collect_source_files: %d files in %.3fs (%s)",
         len(files), time.monotonic() - t0, resolved,
     )
-    _file_list_cache[cache_key] = (root_mtime, files)
+    _file_list_cache[cache_key] = (_dir_signature(files, resolved), files)
     return files

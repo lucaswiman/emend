@@ -170,13 +170,17 @@ def find_pattern_in_project(
                         ProjectPatternMatch(
                             file_path=fp,
                             match=PatternMatch(
-                                node_text=text, captures={},
+                                node_text=text,
+                                captures={
+                                    k: v for k, v in captures.items()
+                                    if k != "_"
+                                },
                                 line=line, end_line=end_line,
                                 col=col, end_col=end_col,
                                 matched_text=text,
                             ),
                         )
-                        for fp, line, col, end_line, end_col, text in raw
+                        for fp, line, col, end_line, end_col, text, captures in raw
                     ]
                     if limit is not None:
                         results = results[:limit]

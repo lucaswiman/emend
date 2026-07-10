@@ -569,17 +569,14 @@ class MappingStore:
             if d.get("module_prefix") != prefix:
                 continue
             for key, value in kwargs.items():
+                # ``None`` is the "leave unchanged" sentinel; any other value
+                # (including falsy-but-meaningful ones like "") is set verbatim.
+                if value is None:
+                    continue
                 if key == "local_path":
                     d["path"] = value
-                elif key == "metadata":
-                    if value:
-                        d["metadata"] = value
-                    else:
-                        d.pop("metadata", None)
-                elif value:
-                    d[key] = value
                 else:
-                    d.pop(key, None)
+                    d[key] = value
             self._save()
             return True
         return False

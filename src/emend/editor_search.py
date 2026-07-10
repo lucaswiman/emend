@@ -1135,6 +1135,10 @@ class EditorSearchEngine:
         if rg:
             cmd = [
                 rg, "--pcre2", "--no-heading", "--line-number",
+                # --with-filename forces the ``file:line:text`` prefix even
+                # when exactly one file is searched; without it rg omits the
+                # path and the parser below drops every match.
+                "--with-filename",
                 "--color", "never", "--max-count", str(limit * 2),
                 pattern, scope,
             ]
@@ -1146,8 +1150,11 @@ class EditorSearchEngine:
                 # git grep supports PCRE with -P
                 cmd = [git, "-C", scope, "grep", "-Pn", "--no-color", pattern]
             else:
+                # -H forces the ``file:line:text`` prefix even when exactly
+                # one file is searched; without it grep omits the path and
+                # the parser below drops every match.
                 cmd = [
-                    grep, "-rPn", "--color=never",
+                    grep, "-rHPn", "--color=never",
                     "--exclude-dir=.git", "--exclude-dir=.venv",
                     "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
                     pattern, scope,
@@ -2726,11 +2733,10 @@ class EditorSearchEngine:
         items: list[dict] = []
         target_prefix = f"{sym_part}." if sym_part else ""
         for sym in symbols:
-            qn = sym.get("qualified_name", sym.get("name", ""))
-            name = sym.get("name", "")
+            qn = ".".join(sym.path) if sym.path else sym.name
+            name = sym.name
             if target_prefix and not qn.startswith(target_prefix):
                 continue
-            # Only direct children (one level deep)
             remainder = qn[len(target_prefix):]
             if "." in remainder:
                 continue
@@ -2740,7 +2746,7 @@ class EditorSearchEngine:
                 seen.add(name)
                 items.append({
                     "word": name,
-                    "kind": sym.get("kind", "variable"),
+                    "kind": sym.kind,
                     "menu": f"[{qn}]",
                 })
             if len(items) >= limit:

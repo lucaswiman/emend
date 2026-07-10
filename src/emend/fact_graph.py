@@ -2502,6 +2502,9 @@ class FactGraph:
         for fact in self._all_def_uses():
             if predicate(fact):
                 results.append(fact)
+        for fact in self._all_method_calls():
+            if predicate(fact):
+                results.append(fact)
         for fact in self._all_cfg_blocks():
             if predicate(fact):
                 results.append(fact)

@@ -894,6 +894,95 @@ class TestPatternPrefilter:
             engine.close()
 
 
+class TestGrepSearch:
+    """Regex (``/pattern/``) grep search via rg / grep."""
+
+    def test_grep_search_single_file_scope(self, multi_file_project):
+        """Regex search scoped to a single file must return matches.
+
+        Regression: when rg searches exactly one file it omits the
+        filename prefix, so the parser (which expected
+        ``file:line:text``) silently dropped every match.
+        """
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2  # two print() calls in a.py
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+    def test_grep_search_multi_file_scope(self, multi_file_project):
+        """Regex search across the project should still find matches."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2
+        finally:
+            engine.close()
+
+    def test_grep_search_single_file_scope_grep_fallback(
+        self, multi_file_project, monkeypatch
+    ):
+        """The plain-grep fallback (no rg installed) omits the filename
+        prefix for a single file operand just like rg did, and must also
+        return matches (this is the code path CI takes)."""
+        import shutil as _shutil
+        from emend.editor_search import EditorSearchEngine
+
+        real_which = _shutil.which
+
+        def _no_rg(cmd, *args, **kwargs):
+            if cmd == "rg":
+                return None
+            return real_which(cmd, *args, **kwargs)
+
+        monkeypatch.setattr("emend.editor_search.shutil.which", _no_rg)
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine._search_grep(
+                "print",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2  # two print() calls in a.py
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+    def test_grep_search_single_file_via_search(self, multi_file_project):
+        """The ``/regex/`` dispatch path must work with a single-file scope."""
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(multi_file_project))
+        try:
+            result = engine.search(
+                "/print/",
+                file_scope=str(multi_file_project / "a.py"),
+            )
+            assert result.mode == "grep"
+            assert len(result.items) >= 2
+            for item in result.items:
+                assert "a.py" in item["file_path"]
+        finally:
+            engine.close()
+
+
 # ---------------------------------------------------------------------------
 # Bug fixes: wrong arguments and method names
 # ---------------------------------------------------------------------------
@@ -949,6 +1038,36 @@ class TestEditorSearchBugFixes:
                 not mock_oracle.get_file_types.called, \
                 "Should call infer_file(), not get_file_types()"
             mock_oracle.infer_file.assert_called_once()
+        finally:
+            engine.close()
+
+    def test_complete_via_mapping_handles_nested_symbol_dataclass(self, tmp_path):
+        """_complete_via_mapping must use attribute access on NestedSymbol, not .get()."""
+        from unittest.mock import patch, MagicMock
+        from emend.editor_search import EditorSearchEngine
+        from emend.component_selector import NestedSymbol
+
+        src = tmp_path / "mod.py"
+        src.write_text("class Foo:\n    def bar(self): pass\n")
+
+        engine = EditorSearchEngine(str(tmp_path))
+        try:
+            symbols = [
+                NestedSymbol(
+                    name="bar", kind="method",
+                    line_start=2, line_end=2, col_offset=4,
+                    path=["Foo", "bar"],
+                ),
+            ]
+            with patch("emend.ast_utils.find_nested_definitions", return_value=symbols):
+                mock_store = MagicMock()
+                mock_store.resolve_selector.return_value = f"{src}::Foo"
+                with patch("emend.knowledge.MappingStore", return_value=mock_store):
+                    items = engine._complete_via_mapping(
+                        "Foo", member_prefix="", limit=10, seen=set(),
+                    )
+            assert len(items) >= 1
+            assert items[0]["word"] == "bar"
         finally:
             engine.close()
 
