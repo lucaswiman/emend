@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.4.1 (2026-07-09)
+
+### Performance
+
+- Reduced fully cached `emend index` runs from tens of seconds to roughly one
+  second on large projects by skipping redundant FactGraph reconstruction and
+  whole-project duplicate-analysis setup.
+- Reduced cold facts-index CPU work by fast-pathing qualified-name
+  normalization and memoizing CFG block lookup per source line.
+- Added phase-aware progress output for type analysis, full-text indexing,
+  FactGraph construction, and duplicate analysis.
+
+### Type inference
+
+- Changed `emend index` to use Pyrefly by default. Repository-based type-engine
+  detection remains available with `--type-engine auto`.
+
 ## 0.4.0 (2026-07-09)
 
 ### Highlights
