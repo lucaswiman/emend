@@ -670,3 +670,75 @@ def test_query_smart_case_does_not_substring_match(tmp_path):
     symbol_names = [line.split("::")[-1] if "::" in line else line.strip() for line in lines]
     assert "process_request" in symbol_names
     assert "handle_process_request_async" not in symbol_names
+
+
+# ---------------------------------------------------------------------------
+# Bug: _extract_params_from_signature splits on commas inside brackets/parens
+# ---------------------------------------------------------------------------
+
+def test_extract_params_bracketed_annotation():
+    """A parameter whose annotation contains a comma inside ``[]`` must stay
+    intact (e.g. ``b: Dict[str, int]``), not be split on the inner comma."""
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature("(a: int, b: Dict[str, int]) -> None")
+    assert params == ["a: int", "b: Dict[str, int]"]
+
+
+def test_extract_params_paren_default():
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature("(x=(1, 2), y=3)")
+    assert params == ["x=(1, 2)", "y=3"]
+
+
+def test_extract_params_nested_callable():
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature("(cb: Callable[[int], str])")
+    assert params == ["cb: Callable[[int], str]"]
+
+
+def test_query_has_param_with_bracketed_type(tmp_path):
+    """--has-param filtering must match a parameter whose type contains a comma."""
+    filepath = tmp_path / "sample.py"
+    filepath.write_text(
+        "from typing import Dict\n"
+        "def f(a: int, b: Dict[str, int]) -> None: pass\n"
+    )
+    result = runner.invoke(app, [
+        "search", str(filepath),
+        "--name", "f",
+        "--output", "json",
+    ])
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(result.stdout)
+    syms = data if isinstance(data, list) else data.get("results", data.get("symbols", []))
+    f_syms = [s for s in syms if s.get("name") == "f"]
+    assert f_syms, data
+    assert f_syms[0]["parameters"] == ["a: int", "b: Dict[str, int]"]
+
+
+# ---------------------------------------------------------------------------
+# Bug: _collect_symbols cache key ignores file extension/language
+# ---------------------------------------------------------------------------
+
+def test_collect_symbols_cache_key_includes_language(tmp_path):
+    """Two files with identical byte content but different languages must not
+    collide in the symbol cache — the ``.ts`` file must be parsed as
+    TypeScript, not returned from the cached Python result."""
+    from emend.query import _collect_symbols
+
+    # Valid Python, but NOT valid TypeScript (no ``def`` keyword in TS).
+    content = "def foo():\n    pass\n"
+    py = tmp_path / "a.py"
+    ts = tmp_path / "b.ts"
+    py.write_text(content)
+    ts.write_text(content)
+
+    py_syms = _collect_symbols(py, content)
+    ts_syms = _collect_symbols(ts, content)
+
+    assert [s.name for s in py_syms] == ["foo"]
+    # Parsed as TypeScript, ``def foo(): pass`` yields no function symbol.
+    assert [s.name for s in ts_syms] == []

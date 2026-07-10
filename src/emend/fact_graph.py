@@ -4264,7 +4264,7 @@ def compile_sequence_rule(
     )
     for r in sym_all["rows"]:
         fp, qn, kind, line, end_line = r
-        if kind in ("function", "method", "async_function"):
+        if kind in ("function", "method", "async_function", "async_method"):
             if fp not in func_ranges:
                 func_ranges[fp] = []
             func_ranges[fp].append((fp, qn, line, end_line))

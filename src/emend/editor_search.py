@@ -1087,16 +1087,21 @@ class EditorSearchEngine:
         conn = self._get_conn()
         items: list[dict] = []
 
+        def _escape_like(s: str) -> str:
+            # Escape LIKE metacharacters so ``_`` and ``%`` (common in
+            # identifiers) are matched literally rather than as wildcards.
+            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
         for lit in literals:
             try:
                 sql = (
                     "SELECT target_qn, file_path, line, col, ref_kind "
-                    "FROM reference_index WHERE target_qn LIKE ?"
+                    "FROM reference_index WHERE target_qn LIKE ? ESCAPE '\\'"
                 )
-                params: list[Any] = ["%" + lit + "%"]
+                params: list[Any] = ["%" + _escape_like(lit) + "%"]
                 if file_scope:
-                    sql += " AND file_path LIKE ?"
-                    params.append("%" + file_scope + "%")
+                    sql += " AND file_path LIKE ? ESCAPE '\\'"
+                    params.append("%" + _escape_like(file_scope) + "%")
                 sql += " ORDER BY file_path, line LIMIT ?"
                 params.append(limit)
 
@@ -2667,8 +2672,11 @@ class EditorSearchEngine:
                 for child in node.named_children():
                     if child.kind == "dotted_name":
                         full = child.text()
-                        local = full.split(".")[-1]
-                        names[local] = full
+                        # ``import a.b.c`` binds the top-level package name
+                        # ``a`` locally (not the leaf ``c``); the bound name
+                        # refers to that top-level package.
+                        local = full.split(".")[0]
+                        names[local] = local
                     elif child.kind == "aliased_import":
                         # aliased_import has dotted_name + identifier(alias)
                         aliased_children = child.named_children()

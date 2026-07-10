@@ -1465,3 +1465,26 @@ class TestTypescriptImportExtraction:
         facts = self._imports("/tmp/app.ts", source)
         # May be empty — just verify no exception is raised.
         assert isinstance(facts, list)
+
+
+class TestFactsCliTaintFlowsAlias:
+    """``emend analyze facts --type taint_flows`` is documented as an alias of
+    ``trace_flows`` in the ``--type`` help text; it must not error out."""
+
+    def _run(self, tmp_path, fact_type):
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
+        runner = CliRunner()
+        return runner.invoke(
+            app, ["analyze", "facts", str(tmp_path), "--type", fact_type]
+        )
+
+    def test_taint_flows_alias_accepted(self, tmp_path):
+        result = self._run(tmp_path, "taint_flows")
+        assert result.exit_code == 0, result.stdout
+
+    def test_trace_flows_still_accepted(self, tmp_path):
+        result = self._run(tmp_path, "trace_flows")
+        assert result.exit_code == 0, result.stdout

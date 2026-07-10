@@ -1151,7 +1151,7 @@ def safe_delete(
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_name = selector.symbol_path[-1]
     target_qn = f"{target_module}.{target_name}" if target_module else target_name
-    selector_str = f"{selector.file_path}::{'::'.join(selector.symbol_path)}"
+    selector_str = f"{selector.file_path}::{'.'.join(selector.symbol_path)}"
 
     delete_set.append({
         "selector": selector_str,

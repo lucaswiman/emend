@@ -495,19 +495,21 @@ def parse_type_string(raw: str) -> TypeDescriptor:
             inner = inner[4:]
         return TypeDescriptor.parameterized("&", (parse_type_string(inner),))
 
+    # Handle union: "str | None", "string | null"
+    # But we need to be careful not to split inside brackets.  This must come
+    # BEFORE the array-shorthand check: ``[]`` binds tighter than ``|``, so
+    # ``A | B[]`` is ``union(A, Array[B])``, not ``Array[A | B]``.
+    if " | " in raw and not raw.startswith("("):
+        parts = _split_union(raw)
+        if len(parts) > 1:
+            return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
+
     # TypeScript array shorthand: string[] -> Array[string]
     # Don't match callable returns like (x: T) => U[] — skip if starts with (
     if raw.endswith("[]") and not raw.startswith("("):
         inner = raw[:-2]
         if inner:
             return TypeDescriptor.parameterized("Array", (parse_type_string(inner),))
-
-    # Handle union: "str | None", "string | null"
-    # But we need to be careful not to split inside brackets
-    if " | " in raw and not raw.startswith("("):
-        parts = _split_union(raw)
-        if len(parts) > 1:
-            return TypeDescriptor.union(tuple(parse_type_string(p) for p in parts))
 
     # Handle callable: "(args...) -> ReturnType" (Python/Rust)
     if raw.startswith("(") and " -> " in raw:

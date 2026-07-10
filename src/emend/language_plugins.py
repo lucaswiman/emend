@@ -354,9 +354,12 @@ class RegexCommentHandler(CommentHandler):
             prefix = _get_comment_prefix(language or "")
         self._prefix = prefix
         escaped = re.escape(prefix)
-        # Match "noqa: tag1,tag2" with tags
+        # Match "noqa: tag1, tag2" with tags.  Capture the full remainder of
+        # the line (``(.*)``) rather than a single non-whitespace run so that
+        # space-separated tags (e.g. ``noqa: emend:a, emend:b``) are all kept,
+        # mirroring PythonCommentHandler's canonical NOQA_PATTERN.
         self._noqa_tagged_pat = re.compile(
-            escaped + r"\s*noqa:\s*(\S+)"
+            escaped + r"\s*noqa:\s*(.*)"
         )
         # Match bare "noqa" (no colon, no tags) to suppress all checks
         self._noqa_bare_pat = re.compile(
