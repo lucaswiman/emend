@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -311,8 +313,10 @@ def normalize_partial_pattern(raw: str) -> tuple[str | None, list[str]]:
         from emend.pattern import parse_pattern
         parse_pattern(normalized)
         return normalized, literals
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug("Normalized pattern %r did not parse", normalized, exc_info=True)
 
     return None, literals
 
@@ -331,7 +335,7 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
         )
         conn.execute("DROP TABLE IF EXISTS _fts5_probe")
         return True
-    except Exception:
+    except sqlite3.Error:
         return False
 
 
@@ -446,8 +450,10 @@ class EditorSearchEngine:
         if hasattr(self, "_kb"):
             try:
                 self._kb.close()  # type: ignore[attr-defined]
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
-                pass
+                logger.debug("MappingStore close failed", exc_info=True)
             delattr(self, "_kb")
 
     def _set_result_sources(self, result: SearchResult, *sources: str) -> SearchResult:
@@ -487,7 +493,7 @@ class EditorSearchEngine:
                     ).split("\0")
                     if rel_path
                 ]
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             logger.debug("git ls-files fallback failed", exc_info=True)
 
         if not files:
@@ -540,7 +546,7 @@ class EditorSearchEngine:
             file_fts_count = conn.execute(
                 "SELECT COUNT(*) FROM file_fts"
             ).fetchone()[0]
-        except Exception:
+        except sqlite3.Error:
             fts_count = 0
             file_fts_count = 0
 
@@ -554,6 +560,8 @@ class EditorSearchEngine:
             if sym_count > 0:
                 try:
                     rebuild_fts(conn)
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception as exc:
                     # Fail loudly with an actionable message rather than a raw
                     # sqlite traceback. Mark FTS ready/unavailable first so a
@@ -607,6 +615,8 @@ class EditorSearchEngine:
             from emend.transform import _ensure_index_fresh
 
             _ensure_index_fresh(self.project_root)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Background reindex failed", exc_info=True)
         finally:
@@ -776,8 +786,8 @@ class EditorSearchEngine:
                     rid = row[0]
                     if rid not in candidates:
                         candidates[rid] = _row_to_symbol_dict(row)
-            except Exception:
-                pass
+            except sqlite3.Error:
+                logger.debug("Symbol search strategy failed", exc_info=True)
 
         # Strategy 1: exact name (uses idx_sym_name)
         _add(f"{base} WHERE name = ? LIMIT ?", (query, per_strategy_limit))
@@ -840,8 +850,9 @@ class EditorSearchEngine:
 
         # Venv fallback: if no candidates from the project index, try venv
         if not items and not file_scope:
+            from emend.transform import lookup_venv_symbol
+            venv_results: list[dict] = []
             try:
-                from emend.transform import lookup_venv_symbol
                 venv_results = lookup_venv_symbol(
                     self.project_root,
                     name_pattern=query if "*" in query or "?" in query else None,
@@ -855,12 +866,14 @@ class EditorSearchEngine:
                         name_pattern=query,
                         limit=limit,
                     )
-                for vr in venv_results:
-                    qn = vr.get("qualified_name", vr["name"])
-                    score = round(_score_symbol(vr["name"], qn, query), 1)
-                    items.append({**vr, "score": score})
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Venv symbol lookup failed", exc_info=True)
+            for vr in venv_results:
+                qn = vr.get("qualified_name", vr["name"])
+                score = round(_score_symbol(vr["name"], qn, query), 1)
+                items.append({**vr, "score": score})
 
         has_symbol_results = bool(items)
 
@@ -1098,8 +1111,8 @@ class EditorSearchEngine:
                         "col": row[3],
                         "ref_kind": row[4],
                     })
-            except Exception:
-                pass
+            except sqlite3.Error:
+                logger.debug("Literal reference search failed", exc_info=True)
 
         return SearchResult(
             items=items[:limit],
@@ -1264,7 +1277,7 @@ class EditorSearchEngine:
                 d = _row_to_symbol_dict(row)
                 d["score"] = 1000.0
                 items.append(d)
-        except Exception as exc:
+        except sqlite3.Error as exc:
             logger.debug("Selector query failed: %s", exc)
 
         return SearchResult(
@@ -1307,7 +1320,7 @@ class EditorSearchEngine:
                     "col": row[3],
                     "ref_kind": row[4],
                 })
-        except Exception as exc:
+        except sqlite3.Error as exc:
             logger.debug("Reference query failed: %s", exc)
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
@@ -1346,8 +1359,10 @@ class EditorSearchEngine:
                                 "qualified_name": lnk.target_qualified_name,
                             })
                     break
+        except BUG_EXCEPTIONS:
+            raise
         except Exception as e:
-            logger.warning("_goto_dsl_fallback error: %s", e)
+            logger.warning("_goto_dsl_fallback error: %s", e, exc_info=True)
 
         return SearchResult(items=items, elapsed_ms=0, mode="symbol")
 
@@ -1362,26 +1377,27 @@ class EditorSearchEngine:
         items: list[dict] = []
         try:
             raw_symbols = _rust.collect_symbols_from_str(source, ext=ext)
-            for sym in raw_symbols:
-                if sym.get("kind") in ("variable", "reference"):
-                    continue
-                item = {
-                    "name": sym.get("name", ""),
-                    "qualified_name": sym.get("qualified_name", sym.get("name", "")),
-                    "kind": sym.get("kind", ""),
-                    "file_path": file_path,
-                    "line": sym.get("line", 0),
-                    "end_line": sym.get("end_line", sym.get("line", 0)),
-                    "signature": sym.get("signature", ""),
-                    "returns": sym.get("returns"),
-                    "depth": sym.get("depth", 0),
-                    "parent": sym.get("parent"),
-                }
-                items.append(item)
-                if len(items) >= limit:
-                    break
         except Exception as exc:
-            logger.debug("_symbols_from_source failed: %s", exc)
+            logger.debug("_symbols_from_source failed: %s", exc, exc_info=True)
+            return items
+        for sym in raw_symbols:
+            if sym.get("kind") in ("variable", "reference"):
+                continue
+            item = {
+                "name": sym.get("name", ""),
+                "qualified_name": sym.get("qualified_name", sym.get("name", "")),
+                "kind": sym.get("kind", ""),
+                "file_path": file_path,
+                "line": sym.get("line", 0),
+                "end_line": sym.get("end_line", sym.get("line", 0)),
+                "signature": sym.get("signature", ""),
+                "returns": sym.get("returns"),
+                "depth": sym.get("depth", 0),
+                "parent": sym.get("parent"),
+            }
+            items.append(item)
+            if len(items) >= limit:
+                break
         return items
 
     def file_symbols(
@@ -1411,7 +1427,7 @@ class EditorSearchEngine:
                     (resolved,),
                 ):
                     items.append(_row_to_symbol_dict(row, has_rowid=False))
-            except Exception as exc:
+            except sqlite3.Error as exc:
                 logger.debug("File symbols query failed: %s", exc)
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
@@ -1449,9 +1465,9 @@ class EditorSearchEngine:
                 info["fts_count"] = conn.execute(
                     "SELECT COUNT(*) FROM symbol_fts"
                 ).fetchone()[0]
-            except Exception:
+            except sqlite3.Error:
                 info["fts_count"] = 0
-        except Exception as exc:
+        except sqlite3.Error as exc:
             info["available"] = False
             info["error"] = str(exc)
 
@@ -1571,16 +1587,19 @@ class EditorSearchEngine:
             bindings = []
             try:
                 scopes = resolver.scopes_in_file(str(file_path))
-                for scope_kind, scope_start, scope_end, scope_bindings in scopes:
-                    for b_name, b_kind, b_line, b_col in scope_bindings:
-                        # scopes_in_file returns 0-based line numbers, convert to 1-based
-                        binding_line_1based = b_line + 1
-                        bindings.append((f"{b_name}", binding_line_1based, b_col, b_kind))
-                logger.debug("goto_definition: found %d bindings in scopes", len(bindings))
             except Exception as e:
-                logger.debug("goto_definition: error getting bindings: %s", e)
+                logger.debug("goto_definition: error getting bindings: %s", e, exc_info=True)
+                scopes = []
+            for scope_kind, scope_start, scope_end, scope_bindings in scopes:
+                for b_name, b_kind, b_line, b_col in scope_bindings:
+                    # scopes_in_file returns 0-based line numbers, convert to 1-based
+                    binding_line_1based = b_line + 1
+                    bindings.append((f"{b_name}", binding_line_1based, b_col, b_kind))
+            logger.debug("goto_definition: found %d bindings in scopes", len(bindings))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception as exc:
-            logger.debug("Scope resolver failed: %s", exc)
+            logger.debug("Scope resolver failed: %s", exc, exc_info=True)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # Find the reference at (line, col) by extracting the word at cursor position
@@ -1783,7 +1802,12 @@ class EditorSearchEngine:
                         find_nested_definitions(str(candidate)),
                         symbol_path,
                     )
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception:
+                    logger.debug(
+                        "Symbol lookup failed in %s", candidate, exc_info=True
+                    )
                     continue
                 if symbol is None:
                     continue
@@ -1864,7 +1888,10 @@ class EditorSearchEngine:
                 )
                 if count > 0:
                     items.append({"file_path": fp, "diff": diff, "count": count})
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug("Pattern replace failed in %s", fp, exc_info=True)
                 continue
         mode = "replace_apply" if apply else "replace_preview"
         elapsed = round((time.monotonic() - t0) * 1000, 2)
@@ -2077,9 +2104,10 @@ class EditorSearchEngine:
                                 "line": b.line,
                                 "file_path": file,
                             })
-        except Exception as e:
-            import logging
-            logging.getLogger("emend.editor").debug(f"types_at_cursor failed: {e}")
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("types_at_cursor failed", exc_info=True)
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(items=items, elapsed_ms=elapsed, mode="types", query=f"types at {file}:{line}")
@@ -2171,8 +2199,10 @@ class EditorSearchEngine:
                     cfg_elapsed = (time.monotonic() - cfg_t0) * 1000
                     if cfg_elapsed > 50:
                         logger.debug("CFG analysis took %.1fms (slow)", cfg_elapsed)
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception as exc:
-                    logger.debug("CFG-informed completion failed: %s", exc)
+                    logger.debug("CFG-informed completion failed: %s", exc, exc_info=True)
 
                 for _, bindings in enclosing_scopes:
                     for b_name, b_kind, b_line, b_col in bindings:
@@ -2214,8 +2244,10 @@ class EditorSearchEngine:
                                 "menu": menu,
                                 "score": score,
                             })
+            except BUG_EXCEPTIONS:
+                raise
             except Exception as exc:
-                logger.debug("Local completion failed: %s", exc)
+                logger.debug("Local completion failed: %s", exc, exc_info=True)
 
         # Collect imported names from the current file for local completions.
         import_names: dict[str, str] = {}  # local_name -> qualified source
@@ -2313,7 +2345,7 @@ class EditorSearchEngine:
                                     "menu": f"[ref:{target_qn}]",
                                     "score": 800,
                                 })
-                except Exception as exc:
+                except sqlite3.Error as exc:
                     logger.debug("Reference-based completion failed: %s", exc)
 
             # Fallback: resolve through KB module mappings for cross-project symbols
@@ -2370,11 +2402,11 @@ class EditorSearchEngine:
         """Return attribute completions seen on a local receiver plus inferred type targets."""
         import emend.emend_core as _ec
 
+        normalized_source = self._normalize_completion_source(source, line, parent)
         try:
-            ts_tree = _ec.parse_source(
-                self._normalize_completion_source(source, line, parent), "py"
-            )
+            ts_tree = _ec.parse_source(normalized_source, "py")
         except Exception:
+            logger.debug("parse_source failed for attribute completion", exc_info=True)
             return [], []
         if ts_tree is None:
             return [], []
@@ -2449,6 +2481,7 @@ class EditorSearchEngine:
         try:
             ts_tree = _ec.parse_source(source, "py")
         except Exception:
+            logger.debug("parse_source failed for member completion", exc_info=True)
             return []
         if ts_tree is None:
             return []
@@ -2642,8 +2675,13 @@ class EditorSearchEngine:
             source = self._read_file_or_hot(file)
             if source is None:
                 source = Path(file).read_text()
+        except (OSError, UnicodeDecodeError):
+            logger.debug("Could not read %s for import extraction", file, exc_info=True)
+            return {}
+        try:
             ts_tree = _ec.parse_source(source, "py")
         except Exception:
+            logger.debug("parse_source failed for import extraction", exc_info=True)
             return {}
         if ts_tree is None:
             return {}
@@ -2700,7 +2738,8 @@ class EditorSearchEngine:
         """
         try:
             from emend.knowledge import MappingStore
-        except Exception:
+        except ImportError:
+            logger.debug("MappingStore unavailable", exc_info=True)
             return []
 
         store = MappingStore(self.project_root)
@@ -2717,7 +2756,12 @@ class EditorSearchEngine:
         try:
             from emend.ast_utils import find_nested_definitions
             symbols = find_nested_definitions(file_part)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug(
+                "find_nested_definitions failed for %s", file_part, exc_info=True
+            )
             return []
 
         # Find the target symbol and return its children
@@ -2961,13 +3005,19 @@ def _resolve_selector_to_goto_item(engine: EditorSearchEngine, selector: str) ->
         resolved_file, line = res
         # If it was a nested path, we need to find the actual line for the nested part
         if len(parts) > 1:
+            symbol = None
             try:
                 definitions = find_nested_definitions(resolved_file)
                 symbol = find_symbol_by_path(definitions, parts)
-                if symbol:
-                    line = symbol.line_start
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
-                pass
+                logger.debug(
+                    "Nested symbol resolution failed for %s", resolved_file,
+                    exc_info=True,
+                )
+            if symbol:
+                line = symbol.line_start
 
         return {
             "name": parts[-1],
@@ -3234,6 +3284,12 @@ def run_editor_server(project_path: str = ".") -> None:
                 result = _dispatch(engine, method, params)
                 _write_json({"jsonrpc": "2.0", "id": req_id, "result": result})
             except Exception as exc:
+                # Server request boundary: convert every failure (including
+                # bug-class exceptions) into an error response so one bad
+                # request doesn't kill the server, but log it loudly.
+                logger.warning(
+                    "editor-server request %r failed", method, exc_info=True
+                )
                 _write_json({
                     "jsonrpc": "2.0",
                     "id": req_id,
