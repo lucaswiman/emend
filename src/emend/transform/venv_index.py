@@ -10,6 +10,8 @@ from pathlib import Path
 import hashlib
 import logging
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +53,8 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         conn = _sql3.connect(str(db_path), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
+    except _sql3.Error:
+        logger.debug("could not open parse_venv.db", exc_info=True)
         return None
 
     try:
@@ -74,10 +77,11 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
                 return db_path
 
         conn.close()
-    except Exception:
+    except _sql3.Error:
+        logger.debug("venv index freshness check failed; rebuilding", exc_info=True)
         try:
             conn.close()
-        except Exception:
+        except _sql3.Error:
             pass
 
     # (Re)build the venv index
@@ -133,14 +137,19 @@ def _build_venv_index(
     for fpath in py_files:
         try:
             content = fpath.read_text(errors="replace")
-        except Exception:
+        except OSError:
+            # Unreadable file (permissions, dangling symlink) — skip it.
             continue
 
         content_hash = hashlib.md5(content.encode(), usedforsecurity=False).digest()
 
         try:
             symbols = _collect_symbols(fpath, content)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            # Unparseable library file; expected in site-packages scans.
+            logger.debug("symbol collection failed for %s", fpath, exc_info=True)
             continue
 
         # Compute module_qn from path relative to site-packages
@@ -227,7 +236,8 @@ def lookup_venv_symbol(
     try:
         conn = _sql3.connect(str(db_path), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
+    except _sql3.Error:
+        logger.debug("could not open parse_venv.db for lookup", exc_info=True)
         return []
 
     try:
@@ -281,9 +291,10 @@ def lookup_venv_symbol(
             })
         conn.close()
         return results
-    except Exception:
+    except _sql3.Error:
+        logger.debug("venv symbol lookup query failed", exc_info=True)
         try:
             conn.close()
-        except Exception:
+        except _sql3.Error:
             pass
         return []
