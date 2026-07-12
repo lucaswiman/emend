@@ -5,18 +5,13 @@ Each language plugin composes three handlers:
 - ``CommentHandler``: find docstrings and noqa-style comments
 - ``PatternCompiler``: compile pattern strings to the Rust IR
 
-Phase 2a defines the ABCs and the ``LanguagePlugin`` dataclass.
-Phase 2b provides ``NoOpImportHandler`` and ``RegexCommentHandler`` as generic
-stubs used for languages that do not yet have a dedicated plugin.
+Generic stubs (``NoOpImportHandler``, ``RegexCommentHandler``) serve languages
+without a dedicated plugin; Python-specific handlers live in
+``python_plugin.py``.
 
-Phase 2c extracts Python-specific code into ``PythonImportHandler``,
-``PythonCommentHandler``, and ``PythonPatternCompiler`` in ``python_plugin.py``.
-Phase 2d rewires the original call sites in ``transform.py`` and ``lint.py``
-to delegate through the plugin system.
-
-Phase 6 (noqa consolidation): ``NOQA_PATTERN`` is the canonical core regex for
-noqa suppression comments.  Importers should build their own ``re.compile``
-using this string rather than duplicating the pattern.
+``NOQA_PATTERN`` is the canonical core regex for noqa suppression comments.
+Importers should build their own ``re.compile`` using this string rather than
+duplicating the pattern.
 """
 from __future__ import annotations
 
@@ -25,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
-# Canonical noqa pattern core (Phase 6)
+# Canonical noqa pattern core
 # ---------------------------------------------------------------------------
 
 #: Core regex fragment that matches ``noqa`` followed by an optional tag list.
@@ -123,7 +118,7 @@ class LanguagePlugin:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2b: stub implementations
+# Stub implementations
 # ---------------------------------------------------------------------------
 
 class NoOpImportHandler(ImportHandler):
@@ -199,7 +194,7 @@ class TreeSitterImportHandler(ImportHandler):
         lines = source.splitlines(keepends=True)
         import_line_indices: set[int] = set()
 
-        # --- Phase 1: try the scope resolver for precision ---------------
+        # --- Step 1: try the scope resolver for precision ----------------
         try:
             from emend import emend_core
             ext = self._ext()
@@ -235,7 +230,7 @@ class TreeSitterImportHandler(ImportHandler):
                             import_line_indices.add(i)
                             break
 
-        # --- Phase 2: keyword fallback -----------------------------------
+        # --- Step 2: keyword fallback ------------------------------------
         if not import_line_indices:
             for i, line in enumerate(lines):
                 stripped = line.strip()
@@ -247,7 +242,7 @@ class TreeSitterImportHandler(ImportHandler):
         if not import_line_indices:
             return ""
 
-        # --- Phase 3: expand multi-line imports --------------------------
+        # --- Step 3: expand multi-line imports ---------------------------
         expanded: set[int] = set()
         for idx in sorted(import_line_indices):
             expanded.add(idx)

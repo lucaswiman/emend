@@ -104,16 +104,12 @@ def resolve_files(path: str, language: str | None = "python") -> tuple[list[Path
     return [path_obj], False
 
 
-def resolve_many_files(
+def resolve_file_scopes(
     paths: list[str] | tuple[str, ...] | None,
-    *,
     language: str = "python",
-    default: str | None = None,
 ) -> tuple[list[Path], bool]:
     """Resolve multiple file/path arguments into a deduplicated file list."""
     raw_paths = list(paths or [])
-    if not raw_paths and default is not None:
-        raw_paths = [default]
 
     resolved: list[Path] = []
     seen: set[str] = set()
@@ -130,12 +126,58 @@ def resolve_many_files(
     return resolved, is_multi_file
 
 
-def resolve_file_scopes(
-    paths: list[str] | None,
-    language: str = "python",
-) -> tuple[list[Path], bool]:
-    """Backward-compatible alias for multiple file scope resolution."""
-    return resolve_many_files(paths, language=language)
+def print_symbol_rename_move(diffs: dict[str, str], *, apply: bool) -> None:
+    """Print CLI output for a symbol rename/move given the per-file diffs."""
+    if not diffs:
+        print("No changes needed.")
+        return
+    for _file_path, diff in diffs.items():
+        if diff:
+            print(diff, end='')
+    if not apply:
+        print("\nRun with --apply to write changes.")
+
+
+def print_module_rename_move(
+    diffs: dict[str, str], *, apply: bool, success_msg: str
+) -> None:
+    """Print CLI output for a module rename/move given the resulting diffs."""
+    if apply:
+        print(success_msg)
+        return
+    if "__description__" in diffs:
+        print("\n" + "=" * 60)
+        print("CHANGES PREVIEW")
+        print("=" * 60)
+        print(diffs["__description__"])
+        print("=" * 60 + "\n")
+    else:
+        for _file_path, diff in diffs.items():
+            if diff:
+                print(diff)
+    print("\nRun with --apply to apply these changes.")
+
+
+def format_symbol_rename_move(diffs: dict[str, str], *, apply: bool) -> str:
+    """Return MCP output text for a symbol rename/move given the per-file diffs."""
+    if not diffs:
+        return "No changes needed."
+    result = "".join(d for d in diffs.values() if d)
+    if not apply:
+        result += "\nDry-run. Set apply=True to write changes."
+    return result
+
+
+def format_module_rename_move(
+    diffs: dict[str, str], *, apply: bool, success_msg: str
+) -> str:
+    """Return MCP output text for a module rename/move given the resulting diffs."""
+    if apply:
+        return success_msg
+    if "__description__" in diffs:
+        return diffs["__description__"] + "\nDry-run. Set apply=True to write changes."
+    parts = [d for d in diffs.values() if d]
+    return "".join(parts) + "\nDry-run. Set apply=True to write changes."
 
 
 _state: dict[str, str] = {"language": "python"}
@@ -322,9 +364,12 @@ __all__ = [
     "cli_error_handler",
     "detect_query_shape",
     "edit_app",
+    "format_module_rename_move",
+    "format_symbol_rename_move",
     "parse_where_clause",
+    "print_module_rename_move",
+    "print_symbol_rename_move",
     "resolve_file_scopes",
     "resolve_files",
-    "resolve_many_files",
     "tool_app",
 ]

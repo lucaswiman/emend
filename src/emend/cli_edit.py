@@ -14,6 +14,8 @@ from emend.cli_base import (
     _state,
     cli_error_handler,
     parse_where_clause,
+    print_module_rename_move,
+    print_symbol_rename_move,
     resolve_file_scopes,
     resolve_files,
 )
@@ -356,15 +358,12 @@ def replace_cmd(
             else:
                 _logger.info("pattern could not compile to Rust IR, skipping structural pre-filter")
                 file_strs = [fp for fp, _ in file_contents]
-        else:
-            file_strs = [str(f) for f in files]
 
-        # Collect diffs and count across all files
+        # Collect diffs across all files
         all_diffs = []
-        total_count = 0
         for file_path_str in file_strs:
             try:
-                diff, cnt = replace_pattern(
+                diff, _cnt = replace_pattern(
                     pattern, replacement, file_path_str,
                     scope=scope, apply=apply,
                     inside=inside, not_inside=not_inside,
@@ -373,7 +372,6 @@ def replace_cmd(
                 )
                 if diff:  # Only include files with changes
                     all_diffs.append(diff)
-                total_count += cnt
             except FileNotFoundError:
                 # For multi-file operations, skip missing files silently
                 # For single file, let the exception propagate
@@ -439,32 +437,13 @@ def rename_cmd(
                 unsure=unsure,
                 apply=apply,
             )
-
-            if not diffs:
-                print("No changes needed.")
-            else:
-                for file_path, diff in diffs.items():
-                    print(diff, end='')
-
-                if not apply:
-                    print("\nRun with --apply to write changes.")
+            print_symbol_rename_move(diffs, apply=apply)
         else:
             # Module rename mode
             diffs = rename_module(selector, new_name, project, apply)
-            if apply:
-                print("Module renamed successfully.")
-            else:
-                if "__description__" in diffs:
-                    print("\n" + "=" * 60)
-                    print("CHANGES PREVIEW")
-                    print("=" * 60)
-                    print(diffs["__description__"])
-                    print("=" * 60 + "\n")
-                else:
-                    for file_path, diff in diffs.items():
-                        if diff:
-                            print(diff)
-                print("\nRun with --apply to apply these changes.")
+            print_module_rename_move(
+                diffs, apply=apply, success_msg="Module renamed successfully."
+            )
 
 
 
@@ -506,33 +485,13 @@ def move_cmd(
                 project_path=project,
                 apply=apply,
             )
-
-            if not diffs:
-                print("No changes needed.")
-            else:
-                for file_path, diff in diffs.items():
-                    if diff:  # Only print non-empty diffs
-                        print(diff, end='')
-
-                if not apply:
-                    print("\nRun with --apply to write changes.")
+            print_symbol_rename_move(diffs, apply=apply)
         else:
             # Module move mode
             diffs = move_module(selector, destination, project, apply)
-            if apply:
-                print("Module moved successfully.")
-            else:
-                if "__description__" in diffs:
-                    print("\n" + "=" * 60)
-                    print("CHANGES PREVIEW")
-                    print("=" * 60)
-                    print(diffs["__description__"])
-                    print("=" * 60 + "\n")
-                else:
-                    for file_path, diff in diffs.items():
-                        if diff:
-                            print(diff)
-                print("\nRun with --apply to apply these changes.")
+            print_module_rename_move(
+                diffs, apply=apply, success_msg="Module moved successfully."
+            )
 
 
 

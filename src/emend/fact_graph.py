@@ -1683,7 +1683,7 @@ class FactGraph:
             facts = [f for f in facts if f.kind in kinds]
         return facts
 
-    # -- Phase 3: Direct relation queries via Datalog --------------------
+    # -- Direct relation queries via Datalog --------------------
 
     def refs_datalog(
         self,
@@ -1782,7 +1782,7 @@ class FactGraph:
             )
         return [(r[0], r[1]) for r in result["rows"]]
 
-    # -- Phase 5: Trace (data-flow) analysis via Datalog --------------------------------
+    # -- Trace (data-flow) analysis via Datalog --------------------------------
 
     @staticmethod
     def _cozo_quote(v: str | int) -> str:
@@ -1898,7 +1898,7 @@ class FactGraph:
         scope_kill_line_rule = _ir("scope_kill_in_block", _5line,
                                    scope_kill_lines or [])
 
-        # -- Phase 4: type-conditioned filtering --
+        # -- type-conditioned filtering --
         if scalar_types:
             type_filter_rules = (
                 _ir("scalar_type", ["t"], [(t,) for t in scalar_types])
@@ -2470,6 +2470,31 @@ class FactGraph:
 
     # -- Generic query (predicate-based, for backwards compat) -----------
 
+    def _fact_accessors(self) -> list[Callable[[], list[Fact]]]:
+        """Ordered accessors covering every fact relation.
+
+        Single source of truth for ``query`` and ``to_json`` — the order fixes
+        the serialised JSON layout (pinned by tests), so append new relations
+        at the end.
+        """
+        return [
+            self.symbols,
+            self._all_calls,
+            self._all_references,
+            self.trace_flows,
+            self._all_types,
+            self._all_imports,
+            self._all_cfg_edges,
+            self._all_def_uses,
+            self._all_method_calls,
+            self._all_cfg_blocks,
+            self._all_decorator_on,
+            self._all_source_locs,
+            self._all_func_summaries,
+            self._all_entry_point_decorators,
+            self._all_entry_point_names,
+        ]
+
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
         """Return all facts matching *predicate*.
 
@@ -2478,51 +2503,8 @@ class FactGraph:
         CozoScript instead.
         """
         results: list[Fact] = []
-        for fact in self.symbols():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_calls():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_references():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self.trace_flows():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_types():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_imports():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_cfg_edges():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_def_uses():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_method_calls():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_cfg_blocks():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_decorator_on():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_source_locs():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_func_summaries():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_entry_point_decorators():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_entry_point_names():
-            if predicate(fact):
-                results.append(fact)
+        for accessor in self._fact_accessors():
+            results.extend(fact for fact in accessor() if predicate(fact))
         return results
 
     def _query_all(
@@ -2650,36 +2632,8 @@ class FactGraph:
             return d
 
         data: list[dict[str, Any]] = []
-        for fact in self.symbols():
-            data.append(_tag(fact))
-        for fact in self._all_calls():
-            data.append(_tag(fact))
-        for fact in self._all_references():
-            data.append(_tag(fact))
-        for fact in self.trace_flows():
-            data.append(_tag(fact))
-        for fact in self._all_types():
-            data.append(_tag(fact))
-        for fact in self._all_imports():
-            data.append(_tag(fact))
-        for fact in self._all_cfg_edges():
-            data.append(_tag(fact))
-        for fact in self._all_def_uses():
-            data.append(_tag(fact))
-        for fact in self._all_method_calls():
-            data.append(_tag(fact))
-        for fact in self._all_cfg_blocks():
-            data.append(_tag(fact))
-        for fact in self._all_decorator_on():
-            data.append(_tag(fact))
-        for fact in self._all_source_locs():
-            data.append(_tag(fact))
-        for fact in self._all_func_summaries():
-            data.append(_tag(fact))
-        for fact in self._all_entry_point_decorators():
-            data.append(_tag(fact))
-        for fact in self._all_entry_point_names():
-            data.append(_tag(fact))
+        for accessor in self._fact_accessors():
+            data.extend(_tag(fact) for fact in accessor())
         return json.dumps(data, indent=2)
 
     @classmethod
@@ -3237,19 +3191,7 @@ class FactGraph:
             for fp, fq, fb, tb in edge_result["rows"]:
                 adj.setdefault((fp, fq, fb), []).append(tb)
 
-            reachable_rows: list[list] = []
-            for (fp, fq), entry_set in entries_by_func.items():
-                visited: set[int] = set()
-                stack = list(entry_set)
-                while stack:
-                    bid = stack.pop()
-                    if bid in visited:
-                        continue
-                    visited.add(bid)
-                    reachable_rows.append([fp, fq, bid])
-                    for nb in adj.get((fp, fq, bid), []):
-                        if nb not in visited:
-                            stack.append(nb)
+            reachable_rows = _bfs_reachable_blocks(entries_by_func, adj)
 
             if reachable_rows:
                 graph._client.run(
@@ -3561,17 +3503,21 @@ import re as _re
 from bisect import bisect_right as _bisect_right
 
 
-def _offset_to_line(content: str, offset: int, _newline_cache: dict[int, list[int]] = {}) -> int:
+def _offset_to_line(
+    content: str, offset: int, _newline_cache: dict[tuple[int, int], list[int]] = {}
+) -> int:
     """Return 1-based line number for a character *offset* in *content*.
 
-    Uses a cached newline-position index keyed by ``id(content)`` so that
-    repeated calls on the same string are O(log n) instead of O(n).
+    Uses a cached newline-position index keyed by ``(hash(content),
+    len(content))`` so that repeated calls on the same string are O(log n)
+    instead of O(n). Content identity is used (not ``id(content)``, whose value
+    can be reused for a different string after garbage collection).
     """
-    cid = id(content)
-    positions = _newline_cache.get(cid)
+    key = (hash(content), len(content))
+    positions = _newline_cache.get(key)
     if positions is None:
         positions = [i for i, ch in enumerate(content) if ch == "\n"]
-        _newline_cache[cid] = positions
+        _newline_cache[key] = positions
         # Keep cache bounded — evict oldest if too large.
         if len(_newline_cache) > 64:
             oldest = next(iter(_newline_cache))
@@ -3666,6 +3612,56 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
         return _extract_imports_python(file_path, content)
 
 
+def _resolve_cfg_func_qn(
+    cfg: Any,
+    sym_facts: list[SymbolFact],
+    rel_path: str,
+    module_name: str,
+) -> str:
+    """Resolve the qualified name of a CFG's function.
+
+    Matches ``cfg.func_name`` against *sym_facts* first by name and line range
+    (disambiguating same-named methods across classes; CFG lines are
+    0-indexed, symbol lines 1-indexed), then by name only, and finally falls
+    back to ``module_name.func_name``.
+    """
+    func_name = cfg.func_name
+    cfg_start = cfg.func_start_line + 1
+    for sf in sym_facts:
+        if sf.name == func_name and sf.file_path == rel_path:
+            if sf.line <= cfg_start <= (sf.end_line or sf.line):
+                return sf.qualified_name
+    for sf in sym_facts:
+        if sf.name == func_name and sf.file_path == rel_path:
+            return sf.qualified_name
+    return f"{module_name}.{func_name}"
+
+
+def _bfs_reachable_blocks(
+    entries_by_func: dict[tuple[str, str], set[int]],
+    adj: dict[tuple[str, str, int], list[int]],
+) -> list[list]:
+    """Return ``[file_path, func_qn, block_id]`` rows reachable from entry blocks.
+
+    Runs a per-function traversal over the CFG adjacency map *adj*, seeded by
+    the entry block ids in *entries_by_func*.
+    """
+    reachable_rows: list[list] = []
+    for (fp, fq), entry_set in entries_by_func.items():
+        visited: set[int] = set()
+        stack = list(entry_set)
+        while stack:
+            bid = stack.pop()
+            if bid in visited:
+                continue
+            visited.add(bid)
+            reachable_rows.append([fp, fq, bid])
+            for nb in adj.get((fp, fq, bid), []):
+                if nb not in visited:
+                    stack.append(nb)
+    return reachable_rows
+
+
 def _build_cfg_facts(
     cfgs: list[Any],
     sym_facts: list[SymbolFact],
@@ -3687,25 +3683,7 @@ def _build_cfg_facts(
     cfg_edge_facts: list[CfgEdgeFact] = []
 
     for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        # Match by name AND line range to disambiguate methods with the
-        # same name in different classes (e.g. two classes both having
-        # "method").  CFG lines are 0-indexed, symbol lines are 1-indexed.
-        cfg_start = cfg.func_start_line + 1
-        for sf in sym_facts:
-            if sf.name == func_name and sf.file_path == rel_path:
-                if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                    func_qn = sf.qualified_name
-                    break
-        # Fallback: match by name only if line-range match failed
-        if not func_qn:
-            for sf in sym_facts:
-                if sf.name == func_name and sf.file_path == rel_path:
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
+        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
 
         for block in cfg.get_blocks():
             bid = block["id"]
@@ -3763,21 +3741,7 @@ def build_def_use_facts(
     def_use_facts: list[DefUseFact] = []
 
     for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        cfg_start = cfg.func_start_line + 1
-        for sf in sym_facts:
-            if sf.name == func_name and sf.file_path == rel_path:
-                if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            for sf in sym_facts:
-                if sf.name == func_name and sf.file_path == rel_path:
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
+        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
 
         defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
         for block in cfg.get_blocks():

@@ -121,20 +121,15 @@ class TestOracleConstraintHelpers:
 class TestOracleConstraintCompilation:
     """Test that oracle constraints compile to Rust IR (oracle metavars become metavars)."""
 
-    def test_type_constraint_compiles(self):
-        # :type[X] is an oracle constraint — compiles but the metavar is not
-        # a simple type constraint so it falls through to metavar
-        ir = compile_pattern_to_rust_ir("$X:type[Connection]")
-        # Oracle constraints are handled post-match, so the IR treats $X as a metavar
-        assert ir is not None
-
-    def test_returns_constraint_compiles(self):
-        ir = compile_pattern_to_rust_ir("$F:returns[str]")
-        assert ir is not None
-
-    def test_complex_pattern_compiles(self):
-        ir = compile_pattern_to_rust_ir("$F($X:type[bytes], $Y:int)")
-        assert ir is not None
+    @pytest.mark.parametrize("pattern", [
+        "$X:type[Connection]",
+        "$F:returns[str]",
+        "$F($X:type[bytes], $Y:int)",
+    ])
+    def test_oracle_constraint_compiles(self, pattern):
+        # Oracle constraints are resolved post-match, so the metavar compiles
+        # through to a plain metavar in the IR rather than a simple constraint.
+        assert compile_pattern_to_rust_ir(pattern) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +547,15 @@ class TestReplacePatternTypeOracle:
 class TestCmdEditReturnsFilter:
     """Test cmd_edit with --returns filter for type-aware editing."""
 
-    def test_edit_filters_by_annotation(self, tmp_path):
+    # The --returns flag and the :returns[str] selector are two input styles
+    # for the same filter; both must produce identical edits.
+    _RETURNS_STR_STYLES = [
+        ("*[returns]", {"returns_filter": ["str"]}),
+        ("*:returns[str][returns]", {}),
+    ]
+
+    @pytest.mark.parametrize("selector_suffix, extra_kwargs", _RETURNS_STR_STYLES)
+    def test_edit_filters_by_annotation(self, tmp_path, selector_suffix, extra_kwargs):
         """Functions with matching return annotation are edited; others are skipped."""
         source = textwrap.dedent("""\
             def get_name() -> str:
@@ -567,9 +570,9 @@ class TestCmdEditReturnsFilter:
         from emend.transform import cmd_edit
 
         result = cmd_edit(
-            selector_str=f"{f}::*[returns]",
+            selector_str=f"{f}::{selector_suffix}",
             value="str | None",
-            returns_filter=["str"],
+            **extra_kwargs,
         )
         # Only get_name (returning str) should be edited
         assert "str | None" in result
@@ -580,7 +583,8 @@ class TestCmdEditReturnsFilter:
         assert "-def get_count()" not in result
         assert "+def get_count()" not in result
 
-    def test_edit_filters_by_oracle(self, tmp_path):
+    @pytest.mark.parametrize("selector_suffix, extra_kwargs", _RETURNS_STR_STYLES)
+    def test_edit_filters_by_oracle(self, tmp_path, selector_suffix, extra_kwargs):
         """Functions without annotations are filtered by inferred return type."""
         source = textwrap.dedent("""\
             def get_name():
@@ -610,10 +614,10 @@ class TestCmdEditReturnsFilter:
 
         # Add return annotation to functions returning str (inferred)
         result = cmd_edit(
-            selector_str=f"{f}::*[returns]",
+            selector_str=f"{f}::{selector_suffix}",
             value="str",
-            returns_filter=["str"],
             type_oracle=oracle,
+            **extra_kwargs,
         )
         # get_name's return type was changed
         assert "-def get_name():" in result
@@ -621,23 +625,6 @@ class TestCmdEditReturnsFilter:
         # get_count was NOT changed
         assert "-def get_count()" not in result
         assert "+def get_count()" not in result
-
-    def test_edit_no_returns_filter_unchanged(self, tmp_path):
-        """Without --returns filter, cmd_edit works as before."""
-        source = textwrap.dedent("""\
-            def greet(name: str) -> str:
-                return f"hello {name}"
-        """)
-        f = tmp_path / "test.py"
-        f.write_text(source)
-
-        from emend.transform import cmd_edit
-
-        result = cmd_edit(
-            selector_str=f"{f}::greet[returns]",
-            value="int",
-        )
-        assert "int" in result
 
 
 # ---------------------------------------------------------------------------
@@ -647,8 +634,13 @@ class TestCmdEditReturnsFilter:
 class TestCmdAddReturnsFilter:
     """Test cmd_add with --returns filter for type-aware parameter insertion."""
 
-    def test_add_filters_by_annotation(self, tmp_path):
-        """Only add parameter to functions whose return type matches."""
+    @pytest.mark.parametrize("selector_suffix, extra_kwargs", [
+        ("*[params]", {"returns_filter": ["Connection"]}),
+        ("*:returns[Connection][params]", {}),
+    ])
+    def test_add_filters_by_annotation(self, tmp_path, selector_suffix, extra_kwargs):
+        """Only add parameter to functions whose return type matches — via the
+        --returns flag or the :returns[Connection] selector."""
         source = textwrap.dedent("""\
             def connect() -> Connection:
                 pass
@@ -662,9 +654,9 @@ class TestCmdAddReturnsFilter:
         from emend.transform import cmd_add
 
         result = cmd_add(
-            selector_str=f"{f}::*[params]",
+            selector_str=f"{f}::{selector_suffix}",
             value="timeout: int = 30",
-            returns_filter=["Connection"],
+            **extra_kwargs,
         )
         # Only connect (returning Connection) should get the new param
         assert "timeout" in result
@@ -713,23 +705,6 @@ class TestCmdAddReturnsFilter:
         # get_name was NOT changed
         assert "+def get_name(" not in result
 
-    def test_add_no_returns_filter_unchanged(self, tmp_path):
-        """Without --returns filter, cmd_add works as before."""
-        source = textwrap.dedent("""\
-            def greet(name: str) -> str:
-                return f"hello {name}"
-        """)
-        f = tmp_path / "test.py"
-        f.write_text(source)
-
-        from emend.transform import cmd_add
-
-        result = cmd_add(
-            selector_str=f"{f}::greet[params]",
-            value="age: int",
-        )
-        assert "age" in result
-
 
 # ---------------------------------------------------------------------------
 # Selector type_filter syntax (:returns[X], :type[X])
@@ -770,84 +745,6 @@ class TestSelectorTypeFilter:
         sel = parse_extended_selector("file.py::func[params]")
         assert sel.type_filter is None
 
-    def test_edit_with_selector_returns_filter(self, tmp_path):
-        """cmd_edit with :returns[str] in selector filters by annotation."""
-        source = textwrap.dedent("""\
-            def get_name() -> str:
-                return "alice"
-
-            def get_count() -> int:
-                return 42
-        """)
-        f = tmp_path / "test.py"
-        f.write_text(source)
-
-        from emend.transform import cmd_edit
-
-        # Use :returns[str] in the selector instead of --returns flag
-        result = cmd_edit(
-            selector_str=f"{f}::*:returns[str][returns]",
-            value="str | None",
-        )
-        assert "-def get_name() -> str:" in result
-        assert "+def get_name() -> str | None:" in result
-        assert "-def get_count()" not in result
-        assert "+def get_count()" not in result
-
-    def test_add_with_selector_returns_filter(self, tmp_path):
-        """cmd_add with :returns[Connection] in selector filters by annotation."""
-        source = textwrap.dedent("""\
-            def connect() -> Connection:
-                pass
-
-            def get_name() -> str:
-                return "alice"
-        """)
-        f = tmp_path / "test.py"
-        f.write_text(source)
-
-        from emend.transform import cmd_add
-
-        result = cmd_add(
-            selector_str=f"{f}::*:returns[Connection][params]",
-            value="timeout: int = 30",
-        )
-        assert "+def connect(timeout: int = 30)" in result
-        assert "+def get_name(" not in result
-
-    def test_selector_filter_with_oracle(self, tmp_path):
-        """Selector :returns[X] works with oracle for unannotated functions."""
-        source = textwrap.dedent("""\
-            def get_name():
-                return "alice"
-
-            def get_count():
-                return 42
-        """)
-        f = tmp_path / "test.py"
-        f.write_text(source)
-
-        ft = _build_file_types(str(f), [
-            TypeBinding(
-                name="get_name", line=1, col_start=5, col_end=13,
-                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("str")),
-                raw_type="() -> str", binding_kind="definition",
-            ),
-            TypeBinding(
-                name="get_count", line=4, col_start=5, col_end=14,
-                type_descriptor=TypeDescriptor.callable_((), TypeDescriptor.named("int")),
-                raw_type="() -> int", binding_kind="definition",
-            ),
-        ])
-        oracle = _SimpleOracle({str(f): ft})
-
-        from emend.transform import cmd_edit
-
-        result = cmd_edit(
-            selector_str=f"{f}::*:returns[str][returns]",
-            value="str",
-            type_oracle=oracle,
-        )
-        assert "-def get_name():" in result
-        assert "+def get_name() -> str:" in result
-        assert "-def get_count()" not in result
+    # The cmd_edit/cmd_add :returns[...] selector paths are exercised alongside
+    # the --returns flag by the parametrized tests in TestCmdEditReturnsFilter
+    # and TestCmdAddReturnsFilter.

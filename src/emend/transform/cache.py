@@ -86,20 +86,16 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     """Create all cache tables and indexes if they don't exist (idempotent).
 
     Called from ``_get_disk_cache()`` (lazy init) and ``warm_caches()``
-    (pre-create before spawning workers).  Keeping the DDL in one place
+    (pre-create before spawning workers). Keeping the DDL in one place
     prevents the two call-sites from drifting out of sync.
 
-    **parse.db role** (Phase 4):  parse.db is limited to data that SQLite
-    handles best: full-text / editor search (FTS5 trigram), freshness
-    metadata (file_manifest, index_meta), QN pre-filter cache, type cache,
-    and DSL symbols.  Structured analysis facts (symbols, references,
-    imports, CFG, def-use, calls) are owned by CozoDB facts.db and built
-    directly from source files by ``_build_facts_db()``.
-
-    The ``symbol_index`` and ``reference_index`` tables remain because they
-    serve editor search and search-optimization queries.  ``import_graph``
-    is retained for compatibility but is no longer read by the facts.db
-    build path.
+    parse.db holds data SQLite handles best: full-text / editor search
+    (FTS5 trigram), freshness metadata (file_manifest, index_meta), the QN
+    pre-filter cache, type cache, and DSL symbols. Structured analysis facts
+    (symbols, references, imports, CFG, def-use, calls) are owned by CozoDB
+    facts.db. ``symbol_index`` and ``reference_index`` remain for editor
+    search; ``import_graph`` is retained for compatibility but is no longer
+    read by the facts.db build path.
     """
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -250,7 +246,7 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_dsl_link_hash "
         "ON dsl_links(content_hash)"
     )
-    # Duplicate analysis payload cache (Phase 8): one row per unique file
+    # Duplicate analysis payload cache: one row per unique file
     # content (keyed by MD5 hash). ``data`` is zlib-compressed pickle of the
     # per-file subtree/sequence payload. ``version`` allows cache invalidation
     # when the payload schema changes.
@@ -664,7 +660,7 @@ def _extract_file_facts(
             tuples from parse.db's reference_index.  When provided, skips
             the expensive scope_resolver.references_in_file() call.
     """
-    from emend.fact_graph import _normalize_qn
+    from emend.fact_graph import _normalize_qn, _resolve_cfg_func_qn
 
     result: dict[str, list] = {
         "fact_sym": [], "fact_ref": [], "fact_imp": [], "fg_sym": [],
@@ -767,23 +763,7 @@ def _extract_file_facts(
 
     block_ranges: list[tuple[str, int, int, int, bool]] = []
     for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        # Match by name AND line range to disambiguate methods with the
-        # same name in different classes (CFG lines 0-indexed, sym 1-indexed).
-        cfg_start = cfg.func_start_line + 1
-        for sf in sym_facts_for_file:
-            if sf.name == func_name and sf.file_path == rel_path:
-                if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            for sf in sym_facts_for_file:
-                if sf.name == func_name and sf.file_path == rel_path:
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
+        func_qn = _resolve_cfg_func_qn(cfg, sym_facts_for_file, rel_path, module_name)
 
         for block in cfg.get_blocks():
             bid = block["id"]
@@ -909,6 +889,8 @@ def _build_facts_db(
         _extract_imports,
         _build_symbol_line_index,
         _normalize_qn,
+        _resolve_cfg_func_qn,
+        _bfs_reachable_blocks,
         _walk_symbols,
         SymbolFact,
         DecoratorOnFact,
@@ -1043,19 +1025,7 @@ def _build_facts_db(
             fp, fq, fb, tb = row[0], row[1], row[2], row[3]
             adj.setdefault((fp, fq, fb), []).append(tb)
 
-        all_reachable: list[list] = []
-        for (fp, fq), entry_set in entries_by_func.items():
-            visited: set[int] = set()
-            stack = list(entry_set)
-            while stack:
-                bid = stack.pop()
-                if bid in visited:
-                    continue
-                visited.add(bid)
-                all_reachable.append([fp, fq, bid])
-                for nb in adj.get((fp, fq, bid), []):
-                    if nb not in visited:
-                        stack.append(nb)
+        all_reachable = _bfs_reachable_blocks(entries_by_func, adj)
 
         # -- Batch CozoDB writes using :replace for atomic swap
         fdb.run(

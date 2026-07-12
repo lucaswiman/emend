@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from emend.transform import find_pattern, PatternMatch
-from emend.rules_config import (
+from emend.checks.rules_config import (
     as_list,
     expand_macros,
     load_rules_document,
@@ -721,7 +721,7 @@ def run_trace_analysis(
         if not paths:
             return []
 
-    _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
+    _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
     logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
     result = _run_trace_datalog(
         paths, config,
@@ -938,19 +938,51 @@ def _build_trace_fact_graph(
         return _get_or_build_fact_graph(project_path)
 
 
+def _cached_find_pattern(
+    cache: dict[tuple[str, str], list] | None,
+    pattern: str,
+    file_path: str,
+    source: str,
+    language: str,
+) -> list:
+    """Return ``find_pattern`` matches for *pattern* in *file_path*.
+
+    When *cache* is provided, results are memoised by ``(file_path, pattern)``;
+    a failed compile/parse (``ValueError``/``RuntimeError``) is cached as an
+    empty list. Pass ``cache=None`` to skip memoisation.
+    """
+    if cache is not None:
+        key = (file_path, pattern)
+        if key in cache:
+            return cache[key]
+    try:
+        result = find_pattern(
+            pattern, file_path, source_override=source, language=language,
+        )
+    except (ValueError, RuntimeError):
+        result = []
+    if cache is not None:
+        cache[(file_path, pattern)] = result
+    return result
+
+
 def _run_trace_datalog(
     paths: list[str],
     config: TraceConfig,
     label_filter: str | None,
     language: str,
     project_path: str,
+    graph: "FactGraph | None" = None,
 ) -> list[TraceViolation] | None:
     """Datalog-based taint: pattern-match sources/sinks, propagate via FactGraph.
 
     Returns None if the FactGraph is unavailable or the Datalog query fails,
-    signalling the caller to fall back to Python simulation.
+    signalling the caller to fall back to Python simulation. *graph* lets a
+    caller that already built a FactGraph for *paths* reuse it and avoid a
+    second full parse+build.
     """
-    graph = _build_trace_fact_graph(paths, language, project_path)
+    if graph is None:
+        graph = _build_trace_fact_graph(paths, language, project_path)
 
     # FactGraph.update_files() keys every fact by the *resolved* (absolute)
     # path (``str(Path(fp).resolve())``).  Normalise the analysis paths to the
@@ -1332,19 +1364,6 @@ def _deduplicate_violations(violations: list[TraceViolation]) -> list[TraceViola
     return unique
 
 
-def _collect_functions(
-    symbols: list,
-) -> list[tuple[str, int, int]]:
-    """Recursively collect (name, start_line, end_line) for all functions."""
-    result: list[tuple[str, int, int]] = []
-    for sym in symbols:
-        if sym.kind in ("function", "async_function", "method", "async_method"):
-            result.append((sym.name, sym.line_start, sym.line_end))
-        if hasattr(sym, "children") and sym.children:
-            result.extend(_collect_functions(sym.children))
-    return result
-
-
 def _collect_function_descriptors(
     symbols: list,
 ) -> list[tuple[tuple[str, ...], int, int, str]]:
@@ -1497,7 +1516,7 @@ def format_violations(
 
 
 # ---------------------------------------------------------------------------
-# Interprocedural taint analysis (Phase 5)
+# Interprocedural taint analysis
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -1647,26 +1666,9 @@ def _compute_function_summary(
     )
 
     returns_by_line: dict[int, set[str]] = {}
-    _ret_pattern = "return $X"
-    if pattern_cache is not None:
-        _ret_key = (file_path, _ret_pattern)
-        if _ret_key not in pattern_cache:
-            try:
-                pattern_cache[_ret_key] = find_pattern(
-                    _ret_pattern, file_path,
-                    source_override=source, language=language,
-                )
-            except (ValueError, RuntimeError):
-                pattern_cache[_ret_key] = []
-        return_matches = pattern_cache[_ret_key]
-    else:
-        try:
-            return_matches = find_pattern(
-                _ret_pattern, file_path,
-                source_override=source, language=language,
-            )
-        except (ValueError, RuntimeError):
-            return_matches = []
+    return_matches = _cached_find_pattern(
+        pattern_cache, "return $X", file_path, source, language,
+    )
     for match in return_matches:
         match_line = match.line or 0
         if not (func_start <= match_line <= func_end):
@@ -1681,27 +1683,9 @@ def _compute_function_summary(
 
     sinks_by_line: dict[int, list[tuple[TraceSink, set[str]]]] = {}
     for sink_def in config.sinks:
-        if pattern_cache is not None:
-            _cache_key = (file_path, sink_def.pattern)
-            if _cache_key not in pattern_cache:
-                try:
-                    pattern_cache[_cache_key] = find_pattern(
-                        sink_def.pattern, file_path,
-                        source_override=source,
-                        language=language,
-                    )
-                except (ValueError, RuntimeError):
-                    pattern_cache[_cache_key] = []
-            matches = pattern_cache[_cache_key]
-        else:
-            try:
-                matches = find_pattern(
-                    sink_def.pattern, file_path,
-                    source_override=source,
-                    language=language,
-                )
-            except (ValueError, RuntimeError):
-                continue
+        matches = _cached_find_pattern(
+            pattern_cache, sink_def.pattern, file_path, source, language,
+        )
 
         for match in matches:
             match_line = match.line or 1
@@ -1783,13 +1767,9 @@ def _compute_return_reachable_vars(
 
     # Find return statements via tree-sitter pattern matching.
     returns_by_line: dict[int, set[str]] = {}
-    try:
-        return_matches = find_pattern(
-            "return $X", file_path,
-            source_override=source, language=language,
-        )
-    except (ValueError, RuntimeError):
-        return_matches = []
+    return_matches = _cached_find_pattern(
+        None, "return $X", file_path, source, language,
+    )
     for match in return_matches:
         match_line = match.line or 0
         if not (func_start <= match_line <= func_end):
@@ -2193,7 +2173,7 @@ def _run_interprocedural_trace_datalog(
 
     # Build a fact graph so interprocedural helpers can use tree-sitter
     # backed def-use facts instead of regex-based assignment parsing.
-    _proj = project_path or str(Path(paths[0]).resolve().parent) if paths else ""
+    _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
     graph = _build_trace_fact_graph(paths, language, _proj)
 
     direct_summaries: dict[str, FunctionSummary] = {}
@@ -2270,12 +2250,14 @@ def _run_interprocedural_trace_datalog(
     )
     violations: list[TraceViolation] = []
 
-    # Collect intraprocedural violations via the Datalog engine.
+    # Collect intraprocedural violations via the Datalog engine, reusing the
+    # FactGraph already built above to avoid a second full parse+build.
     intra_result = _run_trace_datalog(
         paths, config,
         label_filter=label_filter,
         language=language,
         project_path=project_path,
+        graph=graph,
     )
     if intra_result:
         violations.extend(intra_result)
@@ -2294,17 +2276,9 @@ def _run_interprocedural_trace_datalog(
         for src_def in config.sources:
             if label_filter and src_def.label != label_filter:
                 continue
-            _cache_key = (fp, src_def.pattern)
-            if _cache_key not in _pattern_cache:
-                try:
-                    _pattern_cache[_cache_key] = find_pattern(
-                        src_def.pattern, fp,
-                        source_override=src,
-                        language=language,
-                    )
-                except (ValueError, RuntimeError):
-                    _pattern_cache[_cache_key] = []
-            matches = _pattern_cache[_cache_key]
+            matches = _cached_find_pattern(
+                _pattern_cache, src_def.pattern, fp, src, language,
+            )
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0
@@ -2328,17 +2302,9 @@ def _run_interprocedural_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            _cache_key = (fp, san_def.pattern)
-            if _cache_key not in _pattern_cache:
-                try:
-                    _pattern_cache[_cache_key] = find_pattern(
-                        san_def.pattern, fp,
-                        source_override=src,
-                        language=language,
-                    )
-                except (ValueError, RuntimeError):
-                    _pattern_cache[_cache_key] = []
-            matches = _pattern_cache[_cache_key]
+            matches = _cached_find_pattern(
+                _pattern_cache, san_def.pattern, fp, src, language,
+            )
             for match in matches:
                 match_line = match.line or 1
                 if not (fs <= match_line <= fe):
@@ -2359,17 +2325,9 @@ def _run_interprocedural_trace_datalog(
         for sink_def in config.sinks:
             if label_filter and sink_def.label != label_filter:
                 continue
-            _cache_key = (fp, sink_def.pattern)
-            if _cache_key not in _pattern_cache:
-                try:
-                    _pattern_cache[_cache_key] = find_pattern(
-                        sink_def.pattern, fp,
-                        source_override=src,
-                        language=language,
-                    )
-                except (ValueError, RuntimeError):
-                    _pattern_cache[_cache_key] = []
-            matches = _pattern_cache[_cache_key]
+            matches = _cached_find_pattern(
+                _pattern_cache, sink_def.pattern, fp, src, language,
+            )
             for match in matches:
                 match_line = match.line or 1
                 match_col = match.col or 0

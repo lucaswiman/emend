@@ -4,7 +4,7 @@ from typing import Annotated, Optional
 import typer
 
 from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
-from emend.rules_config import resolve_rules_path
+from emend.checks.rules_config import resolve_rules_path
 from emend.cli_output import emit_json
 
 def lint_cmd(

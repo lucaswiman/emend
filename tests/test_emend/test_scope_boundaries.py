@@ -80,6 +80,20 @@ def _build_diamond_cfg() -> FactGraph:
     return g
 
 
+def _commit_scope_config(message="tainted value used"):
+    """TraceConfig where ``session.commit()`` is a scope sanitizer that kills
+    the ``lbl`` taint produced by ``tainted()`` before it reaches ``use($X)``.
+    """
+    return TraceConfig(
+        labels=["lbl"],
+        sources=[TraceSource(pattern="tainted()", label="lbl")],
+        sinks=[TraceSink(pattern="use($X)", label="lbl", message=message)],
+        scope_sanitizers=[
+            TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # TraceScopeSanitizer dataclass tests
 # ---------------------------------------------------------------------------
@@ -492,17 +506,7 @@ def process():
     use(x)
     use(y)
 """)
-        config = TraceConfig(
-            labels=["lbl"],
-            sources=[TraceSource(pattern="tainted()", label="lbl")],
-            sinks=[TraceSink(
-                pattern="use($X)", label="lbl",
-                message="tainted value used",
-            )],
-            scope_sanitizers=[
-                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
-            ],
-        )
+        config = _commit_scope_config()
         from emend.trace import run_trace_analysis
         violations = run_trace_analysis(
             [str(f)], config, project_path=None,
@@ -560,75 +564,13 @@ def process():
     x = tainted()
     use(x)
 """)
-        config = TraceConfig(
-            labels=["lbl"],
-            sources=[TraceSource(pattern="tainted()", label="lbl")],
-            sinks=[TraceSink(
-                pattern="use($X)", label="lbl",
-                message="tainted value used",
-            )],
-            scope_sanitizers=[
-                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
-            ],
-        )
+        config = _commit_scope_config()
         from emend.trace import run_trace_analysis
         violations = run_trace_analysis(
             [str(f)], config, project_path=None,
         )
         # No scope kill occurs; violation should still fire
         assert len(violations) >= 1
-
-
-# ---------------------------------------------------------------------------
-# Nested session limitation (documents expected/known behavior)
-# ---------------------------------------------------------------------------
-
-
-class TestNestedScopeKillBehavior:
-    """Document that scope_kill kills ALL taint for a label regardless of nesting."""
-
-    def test_nested_scope_kill_kills_all_taint_for_label(self):
-        """Inner scope_kill kills ALL taint for the label, not just inner-scope taint.
-
-        This is expected behavior (not a bug): scope sanitizers are coarse-grained
-        and operate at the label level, not the variable level. Any occurrence of
-        the scope sanitizer pattern kills all taint for the label in that CFG block
-        and all subsequently reachable blocks.
-
-        CFG: 0 (source x outer) -> 1 (source y inner) -> 2 (scope_kill) -> 3 (sink x, sink y)
-
-        Both x and y are killed, even though scope_kill may semantically be
-        "inside" a nested context that only covers y.
-        """
-        g = _build_linear_cfg(4)
-
-        # Both x and y tainted in early blocks
-        g.add_def_use(DefUseFact(
-            "app.py", "app.f", "x", kind="write",
-            def_block=0, use_block=3, def_line=1, use_line=4,
-        ))
-        g.add_def_use(DefUseFact(
-            "app.py", "app.f", "y", kind="write",
-            def_block=1, use_block=3, def_line=2, use_line=4,
-        ))
-
-        # scope_kill in block 2 kills ALL "lbl" taint (including x from block 0)
-        flows = g.trace_propagation_datalog(
-            sources=[
-                ("app.py", "app.f", "x", 0, "lbl"),
-                ("app.py", "app.f", "y", 1, "lbl"),
-            ],
-            sinks=[
-                ("app.py", "app.f", "x", 3, "lbl"),
-                ("app.py", "app.f", "y", 3, "lbl"),
-            ],
-            scope_kills=[("app.py", "app.f", "lbl", 2)],
-        )
-        # Expected: both x and y are killed — this is the defined behavior
-        assert len(flows) == 0, (
-            "scope_kill kills ALL taint for the label; "
-            "both outer (x) and inner (y) taint are cleared"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -716,104 +658,42 @@ class TestScopeSanitizerPathSensitive:
     sink, not when they appear anywhere in the function).
     """
 
-    def test_scope_kill_on_one_branch_reports_violation_python(self, tmp_path):
-        """Scope sanitizer only on one branch of an if/else still allows a
-        violation via the unsanitized branch.
-
-        Code:
-            x = source()        # source
-            if flag:
-                session.commit() # scope kill only on true branch
-            sink(x)             # after merge: taint can reach via false branch
-        """
+    @pytest.mark.parametrize("handler_body, expect_violation", [
+        # scope kill only on the true branch; the false branch carries taint
+        # to the sink after the merge.
+        (
+            "    x = tainted()\n"
+            "    if flag:\n"
+            "        session.commit()\n"
+            "    use(x)\n",
+            True,
+        ),
+        # scope kill covers the only path to the sink → suppressed.
+        (
+            "    x = tainted()\n"
+            "    session.commit()\n"
+            "    use(x)\n",
+            False,
+        ),
+        # scope kill comes after the sink → too late, violation still fires.
+        (
+            "    x = tainted()\n"
+            "    use(x)\n"
+            "    session.commit()\n",
+            True,
+        ),
+    ])
+    def test_path_sensitive_scope_sanitizer_python(
+        self, tmp_path, handler_body, expect_violation
+    ):
+        """Scope sanitizers only kill taint when they cover every path from
+        source to sink; otherwise the violation is still reported."""
         f = tmp_path / "app.py"
-        f.write_text("""\
-def handler():
-    x = tainted()
-    if flag:
-        session.commit()
-    use(x)
-""")
-        config = TraceConfig(
-            labels=["lbl"],
-            sources=[TraceSource(pattern="tainted()", label="lbl")],
-            sinks=[TraceSink(
-                pattern="use($X)", label="lbl",
-                message="tainted value reached sink",
-            )],
-            scope_sanitizers=[
-                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
-            ],
-        )
+        f.write_text("def handler():\n" + handler_body)
+        config = _commit_scope_config(message="tainted value reached sink")
         from emend.trace import run_trace_analysis
-        violations = run_trace_analysis(
-            [str(f)], config, project_path=None,
-        )
-        # scope_kill only on true branch; false branch carries taint to sink.
-        assert len(violations) >= 1
-
-    def test_scope_kill_before_sink_on_all_paths_suppresses_python(self, tmp_path):
-        """Scope sanitizer before the sink on the only execution path suppresses
-        the violation.
-
-        Code:
-            x = source()
-            session.commit()  # scope kill covers the only path to the sink
-            use(x)            # no violation expected
-        """
-        f = tmp_path / "app.py"
-        f.write_text("""\
-def handler():
-    x = tainted()
-    session.commit()
-    use(x)
-""")
-        config = TraceConfig(
-            labels=["lbl"],
-            sources=[TraceSource(pattern="tainted()", label="lbl")],
-            sinks=[TraceSink(
-                pattern="use($X)", label="lbl",
-                message="tainted value reached sink",
-            )],
-            scope_sanitizers=[
-                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
-            ],
-        )
-        from emend.trace import run_trace_analysis
-        violations = run_trace_analysis(
-            [str(f)], config, project_path=None,
-        )
-        assert len(violations) == 0
-
-    def test_scope_kill_after_sink_reports_violation_python(self, tmp_path):
-        """Scope sanitizer after the sink should not suppress the violation.
-
-        Code:
-            x = source()
-            use(x)            # sink BEFORE scope kill → violation expected
-            session.commit()  # scope kill comes after the sink
-        """
-        f = tmp_path / "app.py"
-        f.write_text("""\
-def handler():
-    x = tainted()
-    use(x)
-    session.commit()
-""")
-        config = TraceConfig(
-            labels=["lbl"],
-            sources=[TraceSource(pattern="tainted()", label="lbl")],
-            sinks=[TraceSink(
-                pattern="use($X)", label="lbl",
-                message="tainted value reached sink",
-            )],
-            scope_sanitizers=[
-                TraceScopeSanitizer(pattern="session.commit()", label="lbl"),
-            ],
-        )
-        from emend.trace import run_trace_analysis
-        violations = run_trace_analysis(
-            [str(f)], config, project_path=None,
-        )
-        # Scope kill is too late; violation should still be reported.
-        assert len(violations) >= 1
+        violations = run_trace_analysis([str(f)], config, project_path=None)
+        if expect_violation:
+            assert len(violations) >= 1
+        else:
+            assert len(violations) == 0

@@ -100,24 +100,14 @@ def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
     try:
         if sys.version_info >= (3, 11):
-            import tomllib  # stdlib ≥ 3.11
-            with open(path, "rb") as fh:
-                data = tomllib.load(fh)
+            import tomllib
         else:
-            # Python 3.10: parse just the two fields we need with regex
-            import re
-            text = path.read_text()
-            name_m = re.search(r'^name\s*=\s*"([^"]+)"', text, re.MULTILINE)
-            exts_m = re.search(r'^file_extensions\s*=\s*\[([^\]]+)\]', text, re.MULTILINE)
-            if not name_m or not exts_m:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
                 return None
-            name = name_m.group(1)
-            exts = [
-                e.strip().strip('"')
-                for e in exts_m.group(1).split(",")
-                if e.strip().strip('"')
-            ]
-            return name, exts
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
 
         lang = data.get("language", {})
         name = lang.get("name")
@@ -232,8 +222,8 @@ def get_module_separator(language: str) -> str:
 def get_comment_prefix(language: str) -> str:
     """Return the line-comment prefix for *language* (e.g. ``"#"`` or ``"//"``)."""
     config = load_config(language)
-    # Prefer the dedicated [comments] section (Phase 6); fall back to the
-    # legacy [language].comment_prefix key for backward compatibility.
+    # Prefer the dedicated [comments] section; fall back to the legacy
+    # [language].comment_prefix key.
     comments_section = config.get("comments", {})
     if "line_prefix" in comments_section:
         return comments_section["line_prefix"]

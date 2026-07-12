@@ -221,8 +221,8 @@ findings back to the model.
      }
    }
 
-The equivalent MCP tool ``check_duplicates(file_path=..., project=...)``
-can be invoked by the model directly without a shell hook.
+The equivalent MCP tool ``analyze(mode="duplicates", ...)`` can be
+invoked by the model directly without a shell hook.
 
 
 tool

@@ -38,7 +38,6 @@ from emend.mcp import (  # noqa: F401
     semantic_context,
     trace_analysis,
     duplicates_analysis,
-    check_duplicates,
     check,
     facts_query,
     mappings,

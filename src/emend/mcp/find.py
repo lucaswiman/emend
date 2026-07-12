@@ -187,7 +187,7 @@ def search(
                 )
                 for match in file_matches:
                     all_matches.append((file_path_str, match))
-            except (FileNotFoundError, Exception):
+            except (FileNotFoundError, UnicodeDecodeError):
                 if not is_multi_file:
                     raise
                 continue

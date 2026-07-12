@@ -258,7 +258,7 @@ def search(
             limit=limit or 20,
         )
         if results is None:
-            # Index not available — fall through to normal search
+            # Index not available — emit an empty result set.
             typer.echo("[]")
             return
         import json as _json

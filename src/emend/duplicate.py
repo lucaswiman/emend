@@ -34,7 +34,6 @@ from emend.duplicate_heuristics import (
 # ---------------------------------------------------------------------------
 
 DUP_CACHE_VERSION = "1"
-_SUPPRESSION_THRESHOLD = 500.0
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -49,12 +48,7 @@ import keyword as _keyword_mod
 _PYTHON_KEYWORDS: frozenset[str] = frozenset(_keyword_mod.kwlist) | {"self", "cls"}
 
 # Winnowing parameters
-WINNOW_K = 5   # k-gram size
 WINNOW_W = 4   # window size
-
-# Minimum thresholds for candidates
-MIN_CANDIDATE_NODES = 8
-MIN_CANDIDATE_DEPTH = 3
 
 
 # ---------------------------------------------------------------------------
@@ -221,14 +215,6 @@ def _node_depth(node) -> int:
     if node.named_child_count == 0:
         return 1
     return 1 + max(_node_depth(c) for c in node.named_children())
-
-
-def _node_count(node) -> int:
-    """Count named nodes in subtree."""
-    count = 1
-    for c in node.named_children():
-        count += _node_count(c)
-    return count
 
 
 def canonicalize_subtree(

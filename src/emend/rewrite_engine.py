@@ -3,7 +3,7 @@
 Provides an e-graph data structure and rewrite rule engine for
 multi-step expression rewrites using equality saturation.
 
-This is Phase 7 of the roadmap — explicitly experimental.
+Explicitly experimental.
 """
 
 from __future__ import annotations

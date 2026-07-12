@@ -1,13 +1,8 @@
 """Shared IR and witness model for flow/path checking.
 
-Unifies the data model used by:
-- lint.py ``_check_flow_rule()`` (Python regex taint tracker)
-- policy.py ``_run_flow_check()`` (thin wrapper over lint)
-- fact_graph.py ``flow_rule_check_datalog()`` (Datalog def-use reachability)
-
-Every flow check is first normalised to a :class:`FlowSpec`, executed via
-:func:`execute_flow_spec`, and results returned as :class:`FlowViolation`
-with a shared :class:`WitnessStep` witness model.
+Every flow check is normalised to a :class:`FlowSpec`, executed via
+:func:`execute_flow_spec`, and returned as :class:`FlowViolation` with a
+shared :class:`WitnessStep` witness model.
 """
 
 from __future__ import annotations

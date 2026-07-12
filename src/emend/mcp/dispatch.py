@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import json
 import sys
-from contextlib import redirect_stdout
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -30,14 +28,6 @@ Prefer the discriminated tools:
 - mappings(operation=read|write)
 """,
 )
-
-
-def _capture_output(func: Any, *args: Any, **kwargs: Any) -> str:
-    """Call *func* and return whatever it printed to stdout."""
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        func(*args, **kwargs)
-    return buf.getvalue()
 
 
 def _warm_caches_background() -> None:

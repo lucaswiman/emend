@@ -887,79 +887,37 @@ class TestCompileSequenceRule:
         result = compile_sequence_rule(g, check)
         assert result is None
 
-    def test_returns_tuple_when_matches_found(self):
-        """When step locations are found, returns (query_str, step_data) tuple."""
+    def test_returns_query_and_step_data_tuple(self, tmp_path):
+        """When step patterns resolve against real source, returns a
+        ``(query_str, step_data)`` tuple whose query runs against the graph."""
         from emend.fact_graph import compile_sequence_rule
 
-        g = _build_linear_graph()
-        fp, fq = "app.py", "app.process"
-
-        g.add_def_use(DefUseFact(fp, fq, "obj", "write",
-                                 def_block=0, use_block=0, def_line=5))
-        g.add_def_use(DefUseFact(fp, fq, "obj", "write",
-                                 def_block=0, use_block=1, def_line=5, use_line=6))
-        g.add_def_use(DefUseFact(fp, fq, "obj.name", "write",
-                                 def_block=1, use_block=1, def_line=6))
-
+        (tmp_path / "svc.py").write_text(
+            "def handler():\n"
+            "    fd = open_conn()\n"
+            "    fd.close()\n"
+            "    fd.read()\n"
+        )
         check = SequenceCheck(
-            name="toctou",
-            message="TOCTOU",
+            name="use-after-close",
+            message="Use after close",
             sequence=[
-                SequenceStep(bind="load", pattern="$OBJ = query()"),
-                SequenceStep(bind="mutate", effect="writes($OBJ)"),
+                SequenceStep(bind="close", pattern="$FD.close()"),
+                SequenceStep(bind="use", pattern="$FD.read()"),
             ],
         )
+        g = FactGraph.build_from_project(str(tmp_path))
+        result = compile_sequence_rule(g, check, project_path=str(tmp_path))
 
-        # compile_sequence_rule needs pre-populated step locations to work
-        # without actual source files; we use the pre-resolved path via
-        # an optional step_locations kwarg if supported, or test just the
-        # return-type contract.
-        # Since the function may need source files for pattern matching,
-        # we test via the graph's pre-populated step_locations mechanism.
-        # The function must not crash and must return a tuple or None.
-        result = compile_sequence_rule(g, check)
-        # We can't guarantee matches without source files, but we can verify
-        # the return type contract.
-        assert result is None or (
-            isinstance(result, tuple)
-            and len(result) == 2
-            and isinstance(result[0], str)
-            and isinstance(result[1], dict)
-        )
-
-    def test_result_query_is_runnable(self):
-        """If a (query, step_data) tuple is returned, the query runs against the graph."""
-        from emend.fact_graph import compile_sequence_rule, _compile_sequence_query
-
-        g = _build_linear_graph()
-        fp, fq = "app.py", "app.process"
-
-        g.add_def_use(DefUseFact(fp, fq, "obj", "write",
-                                 def_block=0, use_block=0, def_line=5))
-        g.add_def_use(DefUseFact(fp, fq, "obj", "write",
-                                 def_block=0, use_block=1, def_line=5, use_line=6))
-        g.add_def_use(DefUseFact(fp, fq, "obj.name", "write",
-                                 def_block=1, use_block=1, def_line=6))
-
-        check = SequenceCheck(
-            name="toctou",
-            message="TOCTOU",
-            sequence=[
-                SequenceStep(bind="load", pattern="$OBJ = query()"),
-                SequenceStep(bind="mutate", effect="writes($OBJ)"),
-            ],
-        )
-
-        # Test via _compile_sequence_query with pre-resolved step locations
-        step_locations = {
-            "load": [("app.py", "app.process", 0, 5, {"OBJ": "obj"})],
-            "mutate": [],
-        }
-        query = _compile_sequence_query(check, step_locations)
-        assert query is not None
-        result = g.run_query(query)
-        assert "headers" in result
-        assert "rows" in result
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        query, step_data = result
+        assert isinstance(query, str)
+        assert isinstance(step_data, dict)
+        # The compiled query is runnable and yields the standard result shape.
+        run = g.run_query(query)
+        assert "headers" in run
+        assert "rows" in run
 
 
 # ---------------------------------------------------------------------------

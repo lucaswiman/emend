@@ -290,31 +290,6 @@ def _check_flow_rule(
     return violations
 
 
-def _compile_dsl_pattern(pattern: str) -> re.Pattern[str]:
-    """Compile a DSL lint pattern to a regex.
-
-    Supports ``$METAVAR`` placeholders that match identifiers, and
-    ``$...METAVAR`` for capturing multiple tokens.  Other text is
-    matched literally (case-insensitive for SQL).  Whitespace in the
-    pattern matches any whitespace including newlines.
-    """
-    parts = re.split(r'(\$\.\.\.?\w+|\$\w+)', pattern)
-    regex_parts: list[str] = []
-    for part in parts:
-        if part.startswith("$..."):
-            regex_parts.append(r'(.+?)')
-        elif part.startswith("$"):
-            regex_parts.append(r'(\w+(?:\.\w+)*(?:\s*,\s*\w+(?:\.\w+)*)*)')
-        else:
-            escaped = re.escape(part)
-            # Replace whitespace runs with \s+ for cross-line matching
-            escaped = re.sub(r'(\\ )+', r'\\s+', escaped)
-            regex_parts.append(escaped)
-    return re.compile(''.join(regex_parts), re.IGNORECASE | re.DOTALL)
-
-
-
-
 def run_lint(
     rules: list[LintRule],
     paths: list[str],
@@ -702,7 +677,12 @@ def run_lint(
 
     # --- DSL-aware lint rules ---
     if dsl_rules:
-        from emend.dsl import detect_dsl_regions, extract_sql_symbols, DslKind
+        from emend.dsl import (
+            detect_dsl_regions,
+            extract_sql_symbols,
+            DslKind,
+            _compile_dsl_find_pattern,
+        )
 
         for file_path in paths:
             source = all_file_contents.get(file_path)
@@ -729,7 +709,7 @@ def run_lint(
                 if not _path_matches_rule_globs(file_path, rule.files):
                     continue
                 rule_dsl = rule.dsl.lower() if rule.dsl else ""
-                find_re = _compile_dsl_pattern(rule.find)
+                find_re = _compile_dsl_find_pattern(rule.find)
 
                 for region in regions:
                     if region.dsl.value != rule_dsl:

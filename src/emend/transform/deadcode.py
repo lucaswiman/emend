@@ -292,21 +292,16 @@ def _string_literal_filter(
         if literals:
             file_str_cache[_r] = "\n".join(literals)
 
-    names_with_str_ref: set[tuple[str, str]] = set()
-    for d in candidates:
-        if len(d.name) <= 3:
-            continue
-        r = str(Path(d.file_path).resolve())
+    # Concatenate all collected literal text into one project-wide blob and
+    # scan it once per unique candidate name. Joining on "\n" prevents a name
+    # from matching across a file boundary (identifiers contain no newline), so
+    # this preserves the per-file substring semantics exactly. A name counts as
+    # referenced if it appears inside a string literal in any scanned file
+    # (including its own — e.g. a registry dict key or its own docstring).
+    project_str_blob = "\n".join(file_str_cache.values())
+    referenced_names = {n for n in str_names if n in project_str_blob}
 
-        # A name counts as referenced if it appears inside a string literal
-        # in any scanned file (including its own file — e.g. a registry dict
-        # or the symbol's own docstring mentioning it).
-        for _r, _str_text in file_str_cache.items():
-            if d.name in _str_text:
-                names_with_str_ref.add((d.file_path, d.name))
-                break
-
-    return [d for d in candidates if (d.file_path, d.name) not in names_with_str_ref]
+    return [d for d in candidates if d.name not in referenced_names]
 
 
 import re as _re
@@ -991,6 +986,24 @@ def find_dead_code(
                     return True
         return False
 
+    # Batch all block line-range lookups into a single source_loc query
+    # instead of running one query per unreachable block.
+    needed_loc_keys = {
+        (ub.file_path, f"{ub.func_qn}:{ub.block_id}") for ub in raw_unreachable
+    }
+    block_loc_index: dict[tuple[str, str], tuple[int, int]] = {}
+    if needed_loc_keys:
+        try:
+            loc_result = graph._client.run(
+                '?[fp, loc_id, line, end_line] := '
+                '*source_loc[fp, "block", loc_id, line, _, end_line, _]'
+            )
+            for fp, loc_id, line, end_line in loc_result["rows"]:
+                if (fp, loc_id) in needed_loc_keys:
+                    block_loc_index.setdefault((fp, loc_id), (line, end_line))
+        except Exception:
+            block_loc_index = {}
+
     # Yield unreachable blocks first
     for ub in raw_unreachable:
         abs_fp = (
@@ -998,19 +1011,10 @@ def find_dead_code(
             if not Path(ub.file_path).is_absolute()
             else ub.file_path
         )
-        # Look up block line range from source_loc
-        try:
-            loc_result = graph._client.run(
-                '?[line, end_line] := *source_loc[$fp, "block", $loc_id, line, _, end_line, _]',
-                {"fp": ub.file_path, "loc_id": f"{ub.func_qn}:{ub.block_id}"},
-            )
-            if loc_result["rows"]:
-                start_line = loc_result["rows"][0][0]
-                end_line = loc_result["rows"][0][1]
-            else:
-                continue  # Skip blocks without line info
-        except Exception:
-            continue
+        loc = block_loc_index.get((ub.file_path, f"{ub.func_qn}:{ub.block_id}"))
+        if loc is None:
+            continue  # Skip blocks without line info
+        start_line, end_line = loc
 
         # Skip blocks with no real lines
         if start_line <= 0:

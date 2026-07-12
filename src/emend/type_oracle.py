@@ -254,9 +254,8 @@ def type_name_matches(constraint_name: str, type_name: str) -> bool:
 class TypeDescriptor:
     """A structured representation of a Python type.
 
-    This mirrors the proposal's TypeDescriptor enum but as a tagged union
-    via the ``kind`` field.  The tree structure enables structural pattern
-    matching against type constraints (e.g. ``List[$T]``).
+    A tagged union keyed by the ``kind`` field.  The tree structure enables
+    structural pattern matching against type constraints (e.g. ``List[$T]``).
     """
     kind: Literal["named", "parameterized", "union", "callable", "unknown"]
     name: str = ""
@@ -624,8 +623,15 @@ def _split_params(raw: str) -> list[str]:
     return _split_balanced(raw, ",")
 
 
-def _parse_callable(raw: str) -> TypeDescriptor:
-    """Parse a callable type like '(self: Self@Foo, x: int) -> str'."""
+def _parse_callable_signature(
+    raw: str, arrow: str, default_ret: str
+) -> TypeDescriptor:
+    """Parse a callable type ``(params) <arrow> ReturnType``.
+
+    Shared by :func:`_parse_callable` (Python/Rust ``->``, default return
+    ``None``) and :func:`_parse_callable_arrow` (TypeScript ``=>``, default
+    return ``void``).
+    """
     # Find the matching close paren
     depth = 0
     close_paren = -1
@@ -642,12 +648,10 @@ def _parse_callable(raw: str) -> TypeDescriptor:
 
     params_str = raw[1:close_paren]
     rest = raw[close_paren + 1:].strip()
-    if rest.startswith("-> "):
-        ret_str = rest[3:].strip()
-    elif rest.startswith("->"):
-        ret_str = rest[2:].strip()
+    if rest.startswith(arrow):
+        ret_str = rest[len(arrow):].strip()
     else:
-        ret_str = "None"
+        ret_str = default_ret
 
     # Parse parameter types (skip names, extract types after ':')
     param_types: list[TypeDescriptor] = []
@@ -656,7 +660,7 @@ def _parse_callable(raw: str) -> TypeDescriptor:
             param = param.strip()
             if not param:
                 continue
-            # "self: Self@Foo" or "host: str" or just "str" (positional-only with /)
+            # Skip Python positional-only "/" and keyword-only "*" markers
             if param in ("/", "*"):
                 continue
             if ": " in param:
@@ -668,43 +672,14 @@ def _parse_callable(raw: str) -> TypeDescriptor:
     return TypeDescriptor.callable_(tuple(param_types), parse_type_string(ret_str))
 
 
+def _parse_callable(raw: str) -> TypeDescriptor:
+    """Parse a callable type like '(self: Self@Foo, x: int) -> str'."""
+    return _parse_callable_signature(raw, "->", "None")
+
+
 def _parse_callable_arrow(raw: str) -> TypeDescriptor:
     """Parse a TypeScript arrow function type like '(a: string, b: number) => string'."""
-    depth = 0
-    close_paren = -1
-    for i, ch in enumerate(raw):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                close_paren = i
-                break
-    if close_paren == -1:
-        return TypeDescriptor.named(raw)
-
-    params_str = raw[1:close_paren]
-    rest = raw[close_paren + 1:].strip()
-    if rest.startswith("=> "):
-        ret_str = rest[3:].strip()
-    elif rest.startswith("=>"):
-        ret_str = rest[2:].strip()
-    else:
-        ret_str = "void"
-
-    param_types: list[TypeDescriptor] = []
-    if params_str.strip():
-        for param in _split_params(params_str):
-            param = param.strip()
-            if not param:
-                continue
-            if ": " in param:
-                type_part = param.split(": ", 1)[1]
-                param_types.append(parse_type_string(type_part))
-            else:
-                param_types.append(parse_type_string(param))
-
-    return TypeDescriptor.callable_(tuple(param_types), parse_type_string(ret_str))
+    return _parse_callable_signature(raw, "=>", "void")
 
 
 def _parse_rust_fn_signature(sig: str) -> str | None:
@@ -1046,9 +1021,6 @@ class PyreflyAdapter(TypeOracle):
     Shells out to ``pyrefly check --debug-info`` and parses the JSON output
     to extract type bindings.  Results are cached per-file (keyed on content
     hash) to avoid re-running the type checker for unchanged files.
-
-    This is the Phase 1 (CLI/subprocess) approach from the proposal.
-    It can be replaced by a direct Rust crate integration in Phase 2.
     """
 
     def __init__(

@@ -19,22 +19,10 @@ Architecture overview
 
 Why *not* a Rust SQLite extension
 ---------------------------------
-We evaluated a custom Rust extension for fuzzy matching / custom
-tokenizers and concluded it's unnecessary at this stage:
-
-- FTS5 trigram (built into SQLite ≥ 3.34) already handles substring
-  matching well enough for interactive typeahead.
-- The result set from SQL is small (<200 rows) so Python-side scoring
-  is <1ms.
-- The real latency bottleneck is Python startup (~200ms), solved by
-  the long-running server — not SQL query time (~2ms).
-- A Rust extension would add deployment complexity (.so distribution,
-  SQLite version compatibility) for marginal gain.
-
-If profiling later reveals that trigram matching is insufficient (e.g.
-camelCase-aware tokenization or Levenshtein distance scoring), a Rust
-extension can be added to the existing ``emend-core`` crate without
-changing the public API.
+FTS5 trigram (SQLite ≥ 3.34) handles substring matching well enough for
+interactive typeahead, and the SQL result set is small (<200 rows) so
+Python-side scoring is negligible. The real latency bottleneck is Python
+startup, solved by the long-running server rather than a native extension.
 """
 
 from __future__ import annotations
@@ -141,9 +129,6 @@ _SYM_FIELDS_WITH_ROWID = (
     "name", "qualified_name", "kind", "file_path",
     "line", "end_line", "signature", "returns", "depth", "parent",
 )
-
-# Column names when rowid is not in the SELECT (e.g. file_symbols)
-_SYM_FIELDS_NO_ROWID = _SYM_FIELDS_WITH_ROWID
 
 
 def _row_to_symbol_dict(row: tuple, *, has_rowid: bool = True) -> dict:
@@ -1562,11 +1547,11 @@ class EditorSearchEngine:
         from emend.transform import _rust
         t0 = time.monotonic()
 
-        logger.debug(f"goto_definition: file={file}, line={line}, col={col}")
+        logger.debug("goto_definition: file=%s, line=%s, col=%s", file, line, col)
 
         file_path = Path(file).resolve()
         if not file_path.exists() and str(file_path) not in self._hot_buffers:
-            logger.debug(f"goto_definition: file not found: {file_path}")
+            logger.debug("goto_definition: file not found: %s", file_path)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 
         # Parse with scope resolver.  PyScopeResolver now falls back to
@@ -1580,7 +1565,7 @@ class EditorSearchEngine:
                 return SearchResult(items=[], elapsed_ms=0, mode="symbol")
             resolver.index_file(str(file_path), content)
             refs = resolver.references_in_file(str(file_path))
-            logger.debug(f"goto_definition: found {len(refs)} references in file")
+            logger.debug("goto_definition: found %d references in file", len(refs))
 
             # Also get bindings (for parameters and other definitions)
             bindings = []
@@ -1591,9 +1576,9 @@ class EditorSearchEngine:
                         # scopes_in_file returns 0-based line numbers, convert to 1-based
                         binding_line_1based = b_line + 1
                         bindings.append((f"{b_name}", binding_line_1based, b_col, b_kind))
-                logger.debug(f"goto_definition: found {len(bindings)} bindings in scopes")
+                logger.debug("goto_definition: found %d bindings in scopes", len(bindings))
             except Exception as e:
-                logger.debug(f"goto_definition: error getting bindings: {e}")
+                logger.debug("goto_definition: error getting bindings: %s", e)
         except Exception as exc:
             logger.debug("Scope resolver failed: %s", exc)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
@@ -1616,7 +1601,7 @@ class EditorSearchEngine:
                 identifier = ""
                 # If cursor is at/past end and line is empty, skip
                 if cursor_idx < 0:
-                    logger.debug(f"goto_definition: empty line or cursor at start, skipping identifier extraction")
+                    pass
                 else:
                     # Find start of identifier (move left while alphanumeric/underscore)
                     start = cursor_idx
@@ -1646,8 +1631,6 @@ class EditorSearchEngine:
                             cursor_idx = right
                         elif found_left:
                             cursor_idx = left
-                        else:
-                            logger.debug(f"goto_definition: cursor not on identifier, skipping reference search")
 
                         # Recompute start from the chosen cursor position
                         start = cursor_idx
@@ -1660,7 +1643,7 @@ class EditorSearchEngine:
                         while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
                             end += 1
                         identifier = line_text[start:end]
-                        logger.debug(f"goto_definition: extracted identifier='{identifier}' from cursor at col={col}")
+                        logger.debug("goto_definition: extracted identifier=%r from cursor at col=%s", identifier, col)
 
                         # Find the reference with matching identifier (last component of QN)
                         for qn, r_line, r_col, r_offset, r_end_offset, r_kind, _ann in refs:
@@ -1669,7 +1652,7 @@ class EditorSearchEngine:
                                 qn_last = qn_parts[-1]
 
                                 if qn_last == identifier:
-                                    logger.debug(f"goto_definition: MATCH found target_qn={qn}")
+                                    logger.debug("goto_definition: MATCH found target_qn=%s", qn)
                                     target_qn = qn
                                     break
 
@@ -1678,7 +1661,7 @@ class EditorSearchEngine:
                             # First try exact line match
                             for b_name, b_line, b_col, b_kind in bindings:
                                 if b_line == line and b_name == identifier:
-                                    logger.debug(f"goto_definition: MATCH found binding {b_name} at line {b_line}")
+                                    logger.debug("goto_definition: MATCH found binding %s at line %s", b_name, b_line)
                                     target_qn = b_name
                                     break
 
@@ -1690,11 +1673,11 @@ class EditorSearchEngine:
                                     # Use the most recent one (highest line number)
                                     matching_bindings.sort(key=lambda x: -x[1])
                                     b_name, b_line, b_col, b_kind = matching_bindings[0]
-                                    logger.debug(f"goto_definition: MATCH found binding {b_name} in parent scope at line {b_line}")
+                                    logger.debug("goto_definition: MATCH found binding %s in parent scope at line %s", b_name, b_line)
                                     target_qn = b_name
 
         if not target_qn:
-            logger.debug(f"goto_definition: no target_qn found at line={line}, col={col}, trying DSL fallback")
+            logger.debug("goto_definition: no target_qn found at line=%s, col=%s, trying DSL fallback", line, col)
             # DSL fallback: if cursor is inside an embedded DSL region (e.g. SQL
             # string), resolve table/column names to host-language definitions.
             dsl_result = self._goto_dsl_fallback(str(file_path), line)
@@ -2816,7 +2799,7 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         file = params.get("file", "")
         line = int(params.get("line", 0))
         col = int(params.get("col", 0))
-        logger.debug(f"complete() called: prefix={prefix!r}, file={file!r}, line={line}, col={col}")
+        logger.debug("complete() called: prefix=%r, file=%r, line=%s, col=%s", prefix, file, line, col)
         return engine.complete(prefix, file=file, line=line, col=col).to_dict()
     elif method == "complete_diagnostics":
         prefix = params.get("prefix", params.get("query", ""))
@@ -2833,12 +2816,12 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             file = params.get("file", "")
             line = int(params.get("line", 1))
             col = int(params.get("col", 0))
-            logger.debug(f"mapping_goto: trying goto_definition(file={file!r}, line={line}, col={col})")
+            logger.debug("mapping_goto: trying goto_definition(file=%r, line=%s, col=%s)", file, line, col)
             res = engine.goto_definition(file, line, col)
-            logger.debug(f"mapping_goto: goto_definition returned {len(res.items)} items")
+            logger.debug("mapping_goto: goto_definition returned %d items", len(res.items))
             if res.items:
                 return res.to_dict()
-        logger.debug(f"mapping_goto: falling back to _mapping_goto")
+        logger.debug("mapping_goto: falling back to _mapping_goto")
         return _mapping_goto(engine, params)
     elif method == "module_resolve":
         return _module_resolve(engine, params)

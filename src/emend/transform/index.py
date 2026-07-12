@@ -81,62 +81,40 @@ def _extract_noqa_lines(source: str) -> set[int]:
     return result
 
 
-def _check_cache_hits(
-    db_path: str, all_hashes: list[bytes]
-) -> tuple[set[bytes], set[bytes], set[bytes], set[bytes]]:
-    """Pre-check which content hashes are already present in cache tables.
+def _check_cache_hits(db_path: str, all_hashes: list[bytes]) -> set[bytes]:
+    """Pre-check which content hashes already have a QN cache entry.
 
-    Returns four sets of cached hashes — one per cache table
-    (``qn_index``, ``symbol_index``, ``import_graph``, ``reference_index``).
-    On any error, returns empty sets so the caller processes everything.
+    Returns the set of hashes present in ``qn_index``. The derived tables
+    (``symbol_index``, ``import_graph``, ``reference_index``) are written in
+    lockstep with ``qn_index``, so a QN-cache hit implies their rows are
+    current and a QN-cache miss means all of them must be re-derived — only
+    ``qn_index`` needs to be probed. On any error, returns an empty set so
+    the caller processes everything.
     """
     import sqlite3
 
     cached_qn: set[bytes] = set()
-    cached_sym: set[bytes] = set()
-    cached_import: set[bytes] = set()
-    cached_ref: set[bytes] = set()
     if not all_hashes:
-        return cached_qn, cached_sym, cached_import, cached_ref
+        return cached_qn
     try:
         conn_check = sqlite3.connect(db_path, timeout=30)
         conn_check.execute("PRAGMA journal_mode=WAL")
         conn_check.execute("PRAGMA synchronous=NORMAL")
         placeholders = ",".join("?" * len(all_hashes))
-        for table, target_set in [
-            ("qn_index", cached_qn),
-        ]:
-            try:
-                target_set.update(
-                    row[0]
-                    for row in conn_check.execute(
-                        f"SELECT hash FROM {table} WHERE hash IN ({placeholders})",
-                        all_hashes,
-                    ).fetchall()
-                )
-            except Exception:
-                pass
-        # For the new tables, check by content_hash column
-        for table, target_set in [
-            ("symbol_index", cached_sym),
-            ("import_graph", cached_import),
-            ("reference_index", cached_ref),
-        ]:
-            try:
-                target_set.update(
-                    row[0]
-                    for row in conn_check.execute(
-                        f"SELECT DISTINCT content_hash FROM {table} "
-                        f"WHERE content_hash IN ({placeholders})",
-                        all_hashes,
-                    ).fetchall()
-                )
-            except Exception:
-                pass
+        try:
+            cached_qn.update(
+                row[0]
+                for row in conn_check.execute(
+                    f"SELECT hash FROM qn_index WHERE hash IN ({placeholders})",
+                    all_hashes,
+                ).fetchall()
+            )
+        except Exception:
+            pass
         conn_check.close()
     except Exception:
         pass  # If pre-check fails, caller processes everything
-    return cached_qn, cached_sym, cached_import, cached_ref
+    return cached_qn
 
 
 def _write_index_rows(
@@ -272,26 +250,21 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     ]
     all_hashes = [h for h, _, _ in file_hashes]
 
-    cached_qn, cached_sym, cached_import, cached_ref = _check_cache_hits(
-        db_path, all_hashes,
-    )
+    cached_qn = _check_cache_hits(db_path, all_hashes)
 
     skipped = 0
     processed = 0
     for content_hash, py_file, content in file_hashes:
         need_qn = content_hash not in cached_qn
-        need_sym = content_hash not in cached_sym
-        need_import = content_hash not in cached_import
-        need_ref = content_hash not in cached_ref
-        # Skip if the QN cache is populated (the core index).
-        # The derived tables (symbol_index, import_graph,
-        # reference_index) may legitimately have zero rows for a given file
-        # (e.g., a file with only assignments has no symbols, a file with
-        # no imports has no import_graph rows).  We re-derive them only
-        # when the QN cache needs updating.
+        # The QN cache is the core index. The derived tables (symbol_index,
+        # import_graph, reference_index) may legitimately have zero rows for a
+        # given file (e.g. a file with only assignments has no symbols) and are
+        # written in lockstep with the QN cache, so we re-derive all of them
+        # exactly when the QN cache entry is missing.
         if not need_qn:
             skipped += 1
             continue
+        need_sym = need_import = need_ref = True
 
         processed += 1
 
@@ -1577,7 +1550,3 @@ def _compute_duplicate_payloads(
 
     conn.commit()
     conn.close()
-
-
-# _METAVAR_RE is defined here for backward compatibility (used in patterns.py)
-_METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
