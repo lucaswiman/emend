@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
+import yaml
+
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
@@ -70,7 +74,7 @@ def load_duplicate_code_config(
     """
     try:
         config, _path = load_rules_document(config_path)
-    except (FileNotFoundError, Exception):
+    except (OSError, yaml.YAMLError, ValueError):
         return None
     raw = config.get("duplicate-code", config.get("duplicate"))
     return _parse_duplicate_code_config(raw)
@@ -482,6 +486,8 @@ def run_lint(
                     source_override=source,
                     language=file_lang,
                 )
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug(
                     "find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True
@@ -554,6 +560,8 @@ def run_lint(
                     not_inside=rule.not_inside,
                     language=file_lang,
                 )
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("find_pattern failed for rule %s on %s", rule.name, file_path, exc_info=True)
                 continue
@@ -637,6 +645,8 @@ def run_lint(
                     flow_results = execute_flow_spec(
                         spec, file_path, source, file_lang, fact_graph=None
                     )
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception:
                     logger.debug(
                         "Flow rule %s failed on %s",
@@ -765,6 +775,8 @@ def run_lint(
                     line=d.line,
                     match_text=d.selector,
                 ))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Dead code analysis failed", exc_info=True)
 
@@ -779,6 +791,8 @@ def run_lint(
         dc_project = project_path or "."
         try:
             violations.extend(_check_duplicate_code_impl(paths, duplicate_code_config, dc_project))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Duplicate code analysis failed", exc_info=True)
 

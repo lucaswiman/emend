@@ -15,9 +15,14 @@ duplicating the pattern.
 """
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+from emend.errors import BUG_EXCEPTIONS
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical noqa pattern core
@@ -195,14 +200,19 @@ class TreeSitterImportHandler(ImportHandler):
         import_line_indices: set[int] = set()
 
         # --- Step 1: try the scope resolver for precision ----------------
+        from emend import emend_core
+
+        ext = self._ext()
+        fake_path = "__temp__." + ext
         try:
-            from emend import emend_core
-            ext = self._ext()
-            fake_path = "__temp__." + ext
             resolver = emend_core.PyScopeResolver(".", ext)
             resolver.index_file(fake_path, source)
             imports = resolver.imports_in_file(fake_path)
         except Exception:
+            logger.debug(
+                "Scope-resolver import extraction failed; falling back to line scan",
+                exc_info=True,
+            )
             imports = []
 
         if imports:
@@ -540,7 +550,10 @@ class TreeSitterPatternCompiler(PatternCompiler):
         # 1. Parse metavariables using existing Lark grammar
         try:
             pattern = parse_pattern(pattern_str)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug("parse_pattern failed for %r", pattern_str, exc_info=True)
             return None
 
         # 2. Replace metavariables with placeholders
@@ -581,6 +594,7 @@ class TreeSitterPatternCompiler(PatternCompiler):
         try:
             ir = emend_core.compile_pattern_treesitter(temp_code, ext)
         except Exception:
+            logger.debug("compile_pattern_treesitter failed for %r", pattern_str, exc_info=True)
             return None
 
         # 4. Recursively replace placeholder nodes with Metavar/Ellipsis nodes
@@ -663,10 +677,14 @@ def _get_comment_prefix(language: str) -> str:
     Delegates to ``language_registry.get_comment_prefix``, which reads from
     the language's ``config.toml`` and falls back to ``"#"``.
     """
+    from emend.language_registry import get_comment_prefix
+
     try:
-        from emend.language_registry import get_comment_prefix
         return get_comment_prefix(language)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("get_comment_prefix failed for %s", language, exc_info=True)
         return "#"
 
 

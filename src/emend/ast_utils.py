@@ -2,11 +2,14 @@
 
 import ast
 import fnmatch
+import logging
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from emend import emend_core
 from emend.component_selector import NestedSymbol
+
+logger = logging.getLogger(__name__)
 
 # Re-export tree-sitter node types from emend_core so callers can do:
 #   from emend.ast_utils import PyNode, PyTree, parse_source, parse_file
@@ -28,7 +31,8 @@ def get_imports(filepath: str) -> list[dict]:
         with open(filepath, "r", encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=filepath)
-    except Exception:
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        logger.debug("Could not parse imports from %s", filepath, exc_info=True)
         return []
 
     imports = []
@@ -86,11 +90,12 @@ def resolve_through_reexports(
 
     try:
         definitions = find_nested_definitions(file_path)
+    except Exception:
+        logger.debug("Could not collect definitions from %s", file_path, exc_info=True)
+    else:
         symbol = find_symbol_by_path(definitions, [symbol_name])
         if symbol:
             return file_path, symbol.line_start
-    except Exception:
-        pass
 
     # Not defined here. Check imports.
     imports = get_imports(file_path)

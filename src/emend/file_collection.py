@@ -187,7 +187,8 @@ def collect_git_tracked_source_files(
             if p:
                 abs_paths.append(str(Path(resolved) / p))
         return abs_paths
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("git ls-files failed in %s", resolved, exc_info=True)
         return None
 
 

@@ -151,11 +151,13 @@ def _get_string_literals(
 
     Falls back to an empty list if ``emend_core`` is unavailable.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
+    ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
-        ext = Path(file_path).suffix.lstrip(".") or "py"
         return _rust.collect_string_literals(source, ext)
     except Exception:
+        logger.debug("collect_string_literals failed for %s", file_path, exc_info=True)
         return []
 
 
@@ -166,24 +168,26 @@ def _has_magic_comment(source: str, file_path: str, keyword: str) -> bool:
     simple regex over the raw source only if the Rust extension is unavailable.
     The regex fallback operates on comment text, not source structure.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
+    ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
-        ext = Path(file_path).suffix.lstrip(".") or "py"
         comments = _rust.collect_comments(source, ext)
-        keyword_lower = keyword.lower()
-        for _line, _col, text in comments:
-            # text is e.g. "# language=sql" or "# language = sql"
-            m = _MAGIC_COMMENT_RE.search(text)
-            if m and m.group(1).lower() == keyword_lower:
-                return True
-        return False
     except Exception:
+        logger.debug("collect_comments failed for %s", file_path, exc_info=True)
         # Fallback: regex on raw source (acceptable for comment text detection)
         return bool(re.search(
             r'#\s*language\s*=\s*' + re.escape(keyword),
             source,
             re.IGNORECASE,
         ))
+    keyword_lower = keyword.lower()
+    for _line, _col, text in comments:
+        # text is e.g. "# language=sql" or "# language = sql"
+        m = _MAGIC_COMMENT_RE.search(text)
+        if m and m.group(1).lower() == keyword_lower:
+            return True
+    return False
 
 
 def _make_region_from_ts(
@@ -780,12 +784,18 @@ def _index_classes_and_tablenames(
         * ``tablename_mapping`` maps ``tablename -> (class_name, line)`` for
           string-literal ``__tablename__`` assignments inside class bodies.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
+    except OSError:
+        logger.debug("Could not read %s", file_path, exc_info=True)
+        return [], {}
+    try:
         symbols = _rust.collect_symbols_from_str(source, ext="py")
         string_literals = _rust.collect_string_literals(source, "py")
     except Exception:
+        logger.debug("Symbol/string collection failed for %s", file_path, exc_info=True)
         return [], {}
 
     # Index string literals by start line so we can look up RHS values on a

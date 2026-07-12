@@ -7,9 +7,11 @@ was previously inlined in ``transform.py`` and ``lint.py``.
 from __future__ import annotations
 
 import io
+import logging
 import re
 import tokenize
 
+from emend.errors import BUG_EXCEPTIONS
 from emend.language_plugins import (
     NOQA_PATTERN,
     CommentHandler,
@@ -17,6 +19,8 @@ from emend.language_plugins import (
     LanguagePlugin,
     PatternCompiler,
 )
+
+logger = logging.getLogger(__name__)
 
 # Build the Python-specific noqa regex from the canonical NOQA_PATTERN.
 # Python's tokenize.COMMENT tokens include the leading '#', so we must
@@ -39,11 +43,13 @@ def _get_structured_imports(source: str) -> list[dict]:
 
     Returns an empty list on failure or if there are no imports.
     """
+    from emend import emend_core
+
     try:
-        from emend import emend_core
         resolver = emend_core.PyScopeResolver(".", "py")
         structured = resolver.collect_structured_imports_from_source(source, "py") or []
     except Exception:
+        logger.debug("Structured import collection failed", exc_info=True)
         return []
 
     # Re-add __future__ imports that the Rust resolver omits.
@@ -236,20 +242,23 @@ def _find_docstring_ranges(source: str) -> list[tuple[int, int]]:
     then ``find_pattern`` to locate string literals at the first statement
     position of each body.
     """
-    try:
-        from emend import emend_core
+    from emend import emend_core
+    from emend.transform import find_pattern
 
+    try:
         resolver = emend_core.PyScopeResolver(".", "py")
         resolver.index_file("__temp__.py", source)
         scopes = resolver.scopes_in_file("__temp__.py")
     except Exception:
+        logger.debug("Scope collection failed for docstring detection", exc_info=True)
         return []
 
     try:
-        from emend.transform import find_pattern
-
         str_matches = find_pattern("$X:str", "__temp__.py", source_override=source)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("String-literal pattern match failed for docstring detection", exc_info=True)
         return []
 
     # Build a dict from (1-indexed line) -> list of PatternMatch for strings

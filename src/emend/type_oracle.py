@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Any
 
+from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +456,8 @@ class TypeOracle(ABC):
             if resolved.exists():
                 try:
                     results[str(resolved)] = self.infer_file(resolved, project_root)
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception:
                     logger.debug("infer_file failed for %s", resolved, exc_info=True)
                     results[str(resolved)] = FileTypes(path=str(resolved))
@@ -930,7 +934,7 @@ class _TypeOracleDiskCache:
             )
             self._conn.commit()
             logger.debug("type oracle disk cache opened at %s", db_path)
-        except Exception as exc:
+        except sqlite3.Error as exc:
             logger.debug("type oracle disk cache unavailable: %s", exc)
             self._conn = None
 
@@ -948,8 +952,10 @@ class _TypeOracleDiskCache:
                 ft = pickle.loads(zlib.decompress(row[0]))
                 ft.build_index()
                 return ft
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            pass
+            logger.debug("type cache read failed for %s", content_hash, exc_info=True)
         return None
 
     def put(self, content_hash: str, ft: FileTypes) -> None:
@@ -967,8 +973,8 @@ class _TypeOracleDiskCache:
                     (content_hash, data),
                 )
                 self._conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error:
+            logger.debug("type cache write failed for %s", content_hash, exc_info=True)
 
     def clear(self) -> None:
         if self._conn is None:
@@ -977,8 +983,8 @@ class _TypeOracleDiskCache:
             with self._lock:
                 self._conn.execute("DELETE FROM type_cache")
                 self._conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error:
+            logger.debug("type cache clear failed", exc_info=True)
 
 
 def _content_hash(path: Path) -> str:
@@ -1007,7 +1013,8 @@ def _type_cache_db_path(project_root: Path | None = None) -> str | None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         _ensure_cache_ignore_files(str(root))
         return str(cache_dir / "parse.db")
-    except Exception:
+    except OSError:
+        logger.debug("type cache db path unavailable", exc_info=True)
         return None
 
 
@@ -1178,6 +1185,8 @@ class PyreflyAdapter(TypeOracle):
                 for path_obj in to_check:
                     try:
                         ft = _parse_pyrefly_debug(debug_json, str(path_obj))
+                    except BUG_EXCEPTIONS:
+                        raise
                     except Exception:
                         logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
                         ft = FileTypes(path=str(path_obj))
@@ -1299,6 +1308,8 @@ class _LSPTypeOracle(TypeOracle):
                 ft.bindings.append(binding)
 
             ft.build_index()
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
             ft = FileTypes(path=str(path))

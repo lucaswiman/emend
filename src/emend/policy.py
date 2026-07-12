@@ -15,6 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from emend.errors import BUG_EXCEPTIONS
 from emend.rules_config import (
     DeadCodeConfig,
     load_rules_document,
@@ -603,6 +604,8 @@ def run_policy_checks(
                         violations.extend(
                             _run_custom_check(check, policy, file_path, source, language)
                         )
+                except BUG_EXCEPTIONS:
+                    raise
                 except Exception:
                     logger.warning(
                         "Policy %r check failed on %s",

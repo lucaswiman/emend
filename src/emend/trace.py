@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from emend.errors import BUG_EXCEPTIONS
 from emend.transform import find_pattern, PatternMatch
 from emend.checks.rules_config import (
     as_list,
@@ -576,6 +577,8 @@ def _maybe_create_type_oracle(config: TraceConfig) -> Any | None:
         oracle = create_type_oracle(engine="auto")
         if oracle.is_available():
             return oracle
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("Could not create type oracle for type constraints", exc_info=True)
     return None
@@ -601,6 +604,8 @@ def _filter_vars_by_type(
     try:
         file_types: FileTypes = type_oracle.infer_file(Path(file_path))
         file_types.build_index()
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("Type oracle failed for %s, keeping all vars", file_path, exc_info=True)
         return vars
@@ -648,7 +653,10 @@ def _filter_by_receiver_type(
 
     try:
         resolved_types = graph.method_call_types()
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("method_call_types query failed; skipping receiver-type filter", exc_info=True)
         return matches
 
     # Build a lookup: (file_path, func_qn, receiver) -> type_str
@@ -750,8 +758,13 @@ def _resolve_match_to_location(
 
     try:
         return graph.resolve_location(file_path, line)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug(
+            "resolve_location failed for %s:%d; using module-level fallback",
+            file_path, line, exc_info=True,
+        )
     return MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK
 
 
@@ -826,7 +839,10 @@ def _defs_from_cfgs(
     seen: set[tuple[int, str]] = set()
     try:
         cfgs = build_cfgs_for_source(source, ext=ext)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("CFG build failed; returning no defs", exc_info=True)
         return defs
 
     for cfg in cfgs:
@@ -934,7 +950,13 @@ def _build_trace_fact_graph(
 
     try:
         return FactGraph.build_from_files(paths, language=language)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug(
+            "FactGraph.build_from_files failed; falling back to project-wide graph",
+            exc_info=True,
+        )
         return _get_or_build_fact_graph(project_path)
 
 
@@ -1018,7 +1040,8 @@ def _run_trace_datalog(
             continue
         try:
             source_text = path_obj.read_text()
-        except Exception:
+        except (OSError, UnicodeDecodeError):
+            logger.debug("Could not read %s", file_path, exc_info=True)
             continue
 
         source_lines = source_text.split("\n")
@@ -1265,6 +1288,8 @@ def _run_trace_datalog(
                     if du.var_name == sink_var or du.var_name.startswith(f"{sink_var}."):
                         raw = _first_line(du.use_line, du.def_line)
                         return raw + 1 if raw is not None else 0
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug(
                 "Failed to resolve effect sink line for %s:%s %s in block %s",
@@ -2149,7 +2174,7 @@ def _run_interprocedural_trace_datalog(
             continue
         try:
             source = path_obj.read_text()
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             logger.debug("Could not read %s", file_path, exc_info=True)
             continue
 
@@ -2157,6 +2182,8 @@ def _run_interprocedural_trace_datalog(
 
         try:
             symbols = find_nested_definitions(file_path)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Could not parse %s", file_path, exc_info=True)
             continue
