@@ -8,6 +8,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from emend.errors import BUG_EXCEPTIONS
+
 mcp_app = FastMCP(
     "emend",
     instructions="""\
@@ -36,12 +38,14 @@ def _warm_caches_background() -> None:
     import logging as _logging
 
     def _worker() -> None:
+        _logging.basicConfig(level=_logging.WARNING)
         try:
             from emend.transform import warm_caches
-            _logging.basicConfig(level=_logging.WARNING)
             warm_caches(".")
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            pass
+            _logging.getLogger("emend.mcp").debug("Background cache warming failed", exc_info=True)
 
     proc = multiprocessing.Process(target=_worker, daemon=True)
     proc.start()

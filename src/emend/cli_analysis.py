@@ -14,6 +14,7 @@ from emend.cli_base import (
 )
 from emend.component_selector import parse_extended_selector
 from emend.checks.rules_config import resolve_rules_path
+from emend.errors import BUG_EXCEPTIONS
 from emend.transform import (
     DeadBlock,
     DeadModule,
@@ -584,8 +585,10 @@ def impact_cmd(
                 from emend.dsl import find_dsl_impact
                 _proj = project or "."
                 dsl_impacts = find_dsl_impact(result.changed_symbols, _proj)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
-                pass
+                logger.debug("DSL impact analysis failed", exc_info=True)
 
         if json_output:
             data = {
@@ -897,6 +900,8 @@ def cfg_cmd(
         for fpath in files:
             try:
                 cfgs = build_cfgs_for_file(fpath)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception as exc:
                 logger.debug("CFG build failed for %s: %s", fpath, exc)
                 continue
@@ -925,6 +930,12 @@ def cfg_cmd(
                 func_filter = function if function else None
                 unr_blocks = graph.unreachable_blocks_datalog(func_qn=func_filter)
                 datalog_used = True
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
+                logger.debug("Datalog unreachable query failed, falling back", exc_info=True)
+
+            if datalog_used:
                 # The Datalog facts identify unreachable blocks by id but do
                 # not carry line spans.  Resolve real spans from the freshly
                 # built CFGs (block ids are consistent between fact population
@@ -961,8 +972,6 @@ def cfg_cmd(
                         "function": short_name,
                         "unreachable_blocks": entries,
                     })
-            except Exception:
-                logger.debug("Datalog unreachable query failed, falling back", exc_info=True)
 
             # Fallback to per-CFG BFS
             if not datalog_used:

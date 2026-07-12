@@ -7,6 +7,7 @@ import json
 from contextlib import redirect_stdout
 from typing import Annotated, Any
 
+from lark.exceptions import LarkError
 from pydantic import Field
 
 from emend.component_selector import parse_extended_selector, parse_selector
@@ -93,7 +94,7 @@ def search(
         try:
             _parsed_sel = parse_extended_selector(query)
             has_component = _parsed_sel.component is not None
-        except Exception:
+        except LarkError:
             pass
 
     json_output = output_base == "json"

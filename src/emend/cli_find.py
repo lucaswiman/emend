@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from lark.exceptions import LarkError
 
 from emend import ast_commands
 from emend.cli_base import (
@@ -16,6 +17,7 @@ from emend.cli_base import (
     resolve_files,
 )
 from emend.component_selector import parse_extended_selector
+from emend.errors import BUG_EXCEPTIONS
 from emend.language_registry import is_source_file
 from emend.transform import cmd_lookup, find_pattern_in_project
 
@@ -51,7 +53,7 @@ def _print_pattern_match_code(
     if file_path_str not in file_lines_cache:
         try:
             file_lines_cache[file_path_str] = Path(file_path_str).read_text().splitlines()
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             file_lines_cache[file_path_str] = []
     lines = file_lines_cache[file_path_str]
 
@@ -435,7 +437,7 @@ def search(
         try:
             _parsed_sel = parse_extended_selector(query)
             has_component = _parsed_sel.component is not None
-        except Exception:
+        except LarkError:
             pass
 
     # Determine effective output format
@@ -527,28 +529,31 @@ def search(
                         resolver.index_file(file_str, source)
 
                         symbol_dicts = resolver.get_symbols(file_str)
-
-                        # Derive module path
-                        try:
-                            rel_path = fp.relative_to(proj_root)
-                            parts = list(rel_path.parts)
-                            if parts and parts[0] == "src":
-                                parts.pop(0)
-                            if parts:
-                                parts[-1] = fp.stem
-                            module_path = sep.join(parts)
-                        except ValueError:
-                            module_path = fp.stem
-
-                        symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path, separator=sep)
-                        print(f"\nModule: {file_str}")
-                        if symbols:
-                            if flat_output:
-                                ast_commands._print_symbol_flat(symbols, max_depth=tree_depth, separator=sep)
-                            else:
-                                ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
+                    except BUG_EXCEPTIONS:
+                        raise
                     except Exception as e:
                         logging.getLogger("emend.cli").warning("Failed to index %s: %s", file_str, e)
+                        continue
+
+                    # Derive module path
+                    try:
+                        rel_path = fp.relative_to(proj_root)
+                        parts = list(rel_path.parts)
+                        if parts and parts[0] == "src":
+                            parts.pop(0)
+                        if parts:
+                            parts[-1] = fp.stem
+                        module_path = sep.join(parts)
+                    except ValueError:
+                        module_path = fp.stem
+
+                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path, separator=sep)
+                    print(f"\nModule: {file_str}")
+                    if symbols:
+                        if flat_output:
+                            ast_commands._print_symbol_flat(symbols, max_depth=tree_depth, separator=sep)
+                        else:
+                            ast_commands._print_symbol_tree(symbols, indent=1, max_depth=tree_depth)
             else:
                 if not file_path_obj.exists():
                     raise FileNotFoundError(f"No such file or directory: {file_for_summary!r}")

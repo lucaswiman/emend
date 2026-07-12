@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 
 import click
 import typer
+from lark.exceptions import LarkError
 
 from emend.component_selector import parse_extended_selector, parse_selector
 
@@ -209,7 +210,7 @@ def detect_query_shape(query: str, path: str | None = None) -> QueryShape:
             try:
                 parse_extended_selector(selector_query)
                 has_selector = True
-            except Exception:
+            except LarkError:
                 is_pattern_mode = True
 
         if is_pattern_mode:

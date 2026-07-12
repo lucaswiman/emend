@@ -45,6 +45,7 @@ from emend.cli_map import (
     map_update_module_cmd,
 )
 from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd
+from emend.errors import BUG_EXCEPTIONS
 
 
 @dataclass
@@ -154,6 +155,8 @@ for _entry in _COMMANDS:
 def main():
     try:
         app()
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
