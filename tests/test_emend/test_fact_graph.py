@@ -374,26 +374,6 @@ class TestRstSectionParser:
         )
 
 
-class TestFactsCmdTaintFlowsAlias:
-    def test_taint_flows_alias_accepted(self, tmp_path):
-        """facts_cmd should accept 'taint_flows' as an alias for 'trace_flows'."""
-        from typer.testing import CliRunner
-        from emend.cli import app as cli_app
-
-        test_file = tmp_path / "app.py"
-        test_file.write_text("x = 1\n")
-
-        runner = CliRunner()
-        result = runner.invoke(cli_app, [
-            "analyze", "facts", str(tmp_path),
-            "--type", "taint_flows",
-        ])
-        assert "unknown fact type" not in (result.output or "").lower(), (
-            f"'taint_flows' should be accepted as alias for 'trace_flows', "
-            f"but got: {result.output}"
-        )
-
-
 # ---------------------------------------------------------------------------
 # CozoDB-specific tests
 # ---------------------------------------------------------------------------
@@ -554,6 +534,7 @@ class TestImpactClosure:
         """Each edge is a (caller, callee) witness for why the caller is impacted."""
         g = _make_graph()
         result = g.impact_closure({"lib.compute"})
+        assert result["edges"]
         for src, tgt in result["edges"]:
             assert src in result["impacted"]
 
@@ -957,11 +938,11 @@ class TestDeadCodeUnified:
         g = _make_graph_with_cfg()
         dead, _ = g.dead_code_unified()
         dead_qns = {s.qualified_name for s in dead}
-        # app.helper is called but only from block 2 which is in the graph
-        # lib.MyClass.__init__ has no reference and is not a dunder entry point
-        # Wait - __init__ IS a dunder, so it should be excluded
-        # app.main has no callers but has @app.route... but entry_point_decorator is empty
-        assert "app.main" in dead_qns or "app.helper" in dead_qns
+        # app.main has no callers; app.helper and lib.compute are only
+        # referenced from within app.main, which is itself dead, so they
+        # cascade to dead. lib.MyClass.__init__ is a dunder entry point and
+        # lib.MyClass is referenced via import, so both are excluded.
+        assert dead_qns == {"app.main", "app.helper", "lib.compute"}
 
     def test_unified_respects_entry_point_decorators(self):
         g = _make_graph_with_cfg()

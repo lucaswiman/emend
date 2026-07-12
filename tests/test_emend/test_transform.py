@@ -6,6 +6,46 @@ Basic find_pattern() tests are in test_find.py and test_cli_transform.py.
 
 import pytest
 
+from emend.component_selector import ExtendedSelector
+
+
+def sel(file_path, *symbol_path, component=None, accessor=None):
+    """Build an ExtendedSelector with a positional symbol path."""
+    return ExtendedSelector(
+        file_path=str(file_path),
+        symbol_path=list(symbol_path),
+        component=component,
+        accessor=accessor,
+    )
+
+
+def assert_find(tmp_path, source, pattern, count):
+    """Write *source*, run find_pattern(*pattern*) and assert the match count.
+
+    Returns the matches so callers can make further assertions.
+    """
+    from emend.transform import find_pattern
+
+    test_file = tmp_path / "test.py"
+    test_file.write_text(source)
+    matches = find_pattern(pattern, str(test_file))
+    assert len(matches) == count
+    return matches
+
+
+def assert_replace(tmp_path, source, pattern, replacement, count):
+    """Write *source*, apply replace_pattern and assert the count.
+
+    Returns the rewritten file content for further assertions.
+    """
+    from emend.transform import replace_pattern
+
+    test_file = tmp_path / "test.py"
+    test_file.write_text(source)
+    _, actual = replace_pattern(pattern, replacement, str(test_file), apply=True)
+    assert actual == count
+    return test_file.read_text()
+
 
 class TestReplacePattern:
     """Tests for replace_pattern() function."""
@@ -255,89 +295,69 @@ class TestReplacePattern:
         assert "y is 10" in content
 
     def test_find_comparison_is_none(self, tmp_path):
-        """Find pattern with 'is None' comparison."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        """Find pattern with 'is None' comparison (not '== None')."""
+        assert_find(
+            tmp_path,
             "if x is None:\n"
             "    pass\n"
             "if y == None:\n"
             "    pass\n"
             "if z is None:\n"
-            "    pass\n"
+            "    pass\n",
+            "$X is None",
+            2,
         )
-
-        matches = find_pattern("$X is None", str(test_file))
-
-        assert len(matches) == 2  # Only 'is None', not '== None'
 
     def test_replace_binary_operation_pattern(self, tmp_path):
-        """Replace pattern with binary operators."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        """Replace pattern with binary operators (only +, not *)."""
+        content = assert_replace(
+            tmp_path,
             "result = a + b\n"
             "total = x + y\n"
-            "product = m * n\n"
+            "product = m * n\n",
+            "$A + $B",
+            "$A - $B",
+            2,
         )
-
-        diff, count = replace_pattern("$A + $B", "$A - $B", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 2  # Only the + operations, not *
         assert "a - b" in content
         assert "x - y" in content
         assert "m * n" in content  # Unchanged
 
     def test_replace_boolean_operation_pattern(self, tmp_path):
         """Replace pattern with boolean operators."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        content = assert_replace(
+            tmp_path,
             "if a and b:\n"
             "    pass\n"
             "if x or y:\n"
-            "    pass\n"
+            "    pass\n",
+            "$A and $B",
+            "$A or $B",
+            1,
         )
-
-        diff, count = replace_pattern("$A and $B", "$A or $B", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 1
         assert "a or b" in content
 
     def test_find_unary_operation_pattern(self, tmp_path):
         """Find pattern with unary operators."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "result = not x\n"
             "value = -y\n"
-            "flag = not z\n"
+            "flag = not z\n",
+            "not $X",
+            2,
         )
-
-        matches = find_pattern("not $X", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_subscript_pattern(self, tmp_path):
         """Replace pattern with subscripts."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        content = assert_replace(
+            tmp_path,
             "value = config['key']\n"
-            "item = data['field']\n"
+            "item = data['field']\n",
+            "$X['key']",
+            "$X.get('key')",
+            1,
         )
-
-        diff, count = replace_pattern("$X['key']", "$X.get('key')", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 1
         assert "config.get('key')" in content
 
     def test_find_with_anonymous_metavar(self, tmp_path):
@@ -376,8 +396,9 @@ class TestReplacePattern:
         assert "new_foo(bar())" in content
         assert "new_foo(baz())" in content
 
-    def test_replace_with_anonymous_metavar_in_replacement(self, tmp_path):
-        """Replace pattern using $_ in replacement to indicate don't care."""
+    def test_replace_omits_a_captured_metavar(self, tmp_path):
+        """A replacement may reference a subset of the captured metavars,
+        dropping the ones it does not use."""
         from emend.transform import replace_pattern
 
         test_file = tmp_path / "test.py"
@@ -386,9 +407,7 @@ class TestReplacePattern:
             "value = func(x, y, z)\n"
         )
 
-        # Replace func($A, $B, $C) with func($A, $_) - discard second arg, keep third
-        # Note: This test is about $_ in replacement, but since we can't really use it meaningfully
-        # in replacement (it's not captured), we test that it doesn't break parsing
+        # Match three args but keep only the first and third, dropping $B.
         diff, count = replace_pattern("func($A, $B, $C)", "func($A, $C)", str(test_file), apply=True)
 
         content = test_file.read_text()
@@ -398,22 +417,19 @@ class TestReplacePattern:
 
     def test_find_float_literal(self, tmp_path):
         """Find float literal patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "x = 3.14\n"
             "y = 2.718\n"
             "z = 3.14\n"
-            "w = 42\n"
+            "w = 42\n",
+            "3.14",
+            2,
         )
 
-        matches = find_pattern("3.14", str(test_file))
-
-        assert len(matches) == 2
-
     def test_replace_float_literal(self, tmp_path):
-        """Replace float literals."""
+        """Replace float literals; the '3.14' pattern must not match the
+        substring of the larger float 3.14159 (regression)."""
         from emend.transform import replace_pattern
 
         test_file = tmp_path / "test.py"
@@ -429,22 +445,18 @@ class TestReplacePattern:
         assert count == 2
         assert "pi = math.pi" in content
         assert "radius = math.pi" in content
-        assert "3.14159" in content  # Unchanged
+        assert "approx_pi = 3.14159" in content  # not matched as a substring
 
     def test_find_ternary_ifexp(self, tmp_path):
         """Find ternary (if-else) expression patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "result = x if condition else y\n"
             "value = a if test() else b\n"
-            "z = 1 + 2\n"
+            "z = 1 + 2\n",
+            "$A if $B else $C",
+            2,
         )
-
-        matches = find_pattern("$A if $B else $C", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_ternary_ifexp(self, tmp_path):
         """Replace ternary expressions."""
@@ -470,19 +482,15 @@ class TestReplacePattern:
 
     def test_find_await_expression(self, tmp_path):
         """Find await expression patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "async def func():\n"
             "    result = await fetch_data()\n"
             "    value = await get_value()\n"
-            "    return result\n"
+            "    return result\n",
+            "await $X",
+            2,
         )
-
-        matches = find_pattern("await $X", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_await_expression(self, tmp_path):
         """Replace await expressions."""
@@ -508,22 +516,20 @@ class TestReplacePattern:
         assert "await new_fetch(endpoint)" in content
 
     def test_find_tuple_pattern(self, tmp_path):
-        """Find tuple patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        """Find tuple patterns (only 2-element tuples)."""
+        assert_find(
+            tmp_path,
             "coords = (x, y)\n"
             "point = (a, b)\n"
-            "triple = (1, 2, 3)\n"
+            "triple = (1, 2, 3)\n",
+            "($A, $B)",
+            2,
         )
 
-        matches = find_pattern("($A, $B)", str(test_file))
-
-        assert len(matches) == 2  # Only 2-element tuples
-
     def test_replace_tuple_pattern(self, tmp_path):
-        """Replace tuple patterns."""
+        """Replace tuple patterns, swapping coordinates. The match coordinates
+        must exclude the surrounding parens so no double-paren form is produced
+        (regression)."""
         from emend.transform import replace_pattern
 
         test_file = tmp_path / "test.py"
@@ -538,137 +544,78 @@ class TestReplacePattern:
         assert count == 2
         assert "point = (y, x)" in content
         assert "coords = (b, a)" in content
-
-    def test_replace_float_substring_regression(self, tmp_path):
-        """Verify float patterns do not match substrings of larger floats."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "pi = 3.14\n"
-            "approx_pi = 3.14159\n"
-            "radius = 3.14\n"
-        )
-
-        diff, count = replace_pattern("3.14", "math.pi", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 2
-        assert "pi = math.pi" in content
-        assert "approx_pi = 3.14159" in content
-        assert "radius = math.pi" in content
-
-    def test_replace_tuple_coordinate_regression(self, tmp_path):
-        """Verify tuple patterns correctly handle coordinate alignment (parentheses)."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "point = (x, y)\n"
-        )
-
-        # If coordinates are misaligned (include parens when tree-sitter expects them excluded),
-        # this might produce point = ((y, x))
-        diff, count = replace_pattern("($A, $B)", "($B, $A)", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 1
-        assert "point = (y, x)" in content
-        assert "point = ((y, x))" not in content
+        assert "((y, x))" not in content
+        assert "((b, a))" not in content
 
     def test_find_list_pattern(self, tmp_path):
         """Find list patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "items = [a, b]\n"
             "values = [x, y]\n"
-            "triple = [1, 2, 3]\n"
+            "triple = [1, 2, 3]\n",
+            "[$A, $B]",
+            2,
         )
-
-        matches = find_pattern("[$A, $B]", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_list_to_tuple(self, tmp_path):
         """Replace list with tuple."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        content = assert_replace(
+            tmp_path,
             "coords = [x, y]\n"
-            "point = [a, b]\n"
+            "point = [a, b]\n",
+            "[$A, $B]",
+            "($A, $B)",
+            2,
         )
-
-        diff, count = replace_pattern("[$A, $B]", "($A, $B)", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 2
         assert "coords = (x, y)" in content
         assert "point = (a, b)" in content
 
     def test_find_set_pattern(self, tmp_path):
         """Find set patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "items = {a, b}\n"
             "values = {x, y}\n"
-            "triple = {1, 2, 3}\n"
+            "triple = {1, 2, 3}\n",
+            "{$A, $B}",
+            2,
         )
-
-        matches = find_pattern("{$A, $B}", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_set_pattern(self, tmp_path):
         """Replace set with list."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        content = assert_replace(
+            tmp_path,
             "coords = {x, y}\n"
-            "point = {a, b}\n"
+            "point = {a, b}\n",
+            "{$A, $B}",
+            "[$A, $B]",
+            2,
         )
-
-        diff, count = replace_pattern("{$A, $B}", "[$A, $B]", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 2
         assert "coords = [x, y]" in content
         assert "point = [a, b]" in content
 
     def test_find_set_ellipsis(self, tmp_path):
-        """Find sets with ellipsis matching."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        """Find sets with ellipsis matching (all sets match)."""
+        assert_find(
+            tmp_path,
             "small = {1}\n"
             "medium = {1, 2}\n"
-            "large = {1, 2, 3}\n"
+            "large = {1, 2, 3}\n",
+            "{$...ELEMS}",
+            3,
         )
-
-        matches = find_pattern("{$...ELEMS}", str(test_file))
-
-        assert len(matches) == 3  # All sets match
 
     def test_replace_set_ellipsis(self, tmp_path):
         """Replace set patterns with ellipsis."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        content = assert_replace(
+            tmp_path,
             "items = {1, 2, 3}\n"
-            "values = {a, b}\n"
+            "values = {a, b}\n",
+            "{$FIRST, $...REST}",
+            "[$FIRST, $...REST]",
+            2,
         )
-
-        diff, count = replace_pattern("{$FIRST, $...REST}", "[$FIRST, $...REST]", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 2
         assert "items = [1, 2, 3]" in content
         assert "values = [a, b]" in content
 
@@ -709,17 +656,13 @@ class TestReplacePattern:
 
     def test_replace_dict_pattern(self, tmp_path):
         """Replace dict literal patterns."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "data = {name: 'old'}\n"
+        content = assert_replace(
+            tmp_path,
+            "data = {name: 'old'}\n",
+            "{$K: 'old'}",
+            "{$K: 'new'}",
+            1,
         )
-
-        diff, count = replace_pattern("{$K: 'old'}", "{$K: 'new'}", str(test_file), apply=True)
-
-        content = test_file.read_text()
-        assert count == 1
         assert "{name: 'new'}" in content
 
     def test_find_lambda_pattern(self, tmp_path):
@@ -758,7 +701,7 @@ class TestReplacePattern:
         assert "lambda: y + 1 + 1" in content
 
     def test_find_lambda_with_args(self, tmp_path):
-        """Find lambda patterns with parameters."""
+        """`lambda $...PARAMS: $BODY` matches only lambdas that take parameters."""
         from emend.transform import find_pattern
 
         test_file = tmp_path / "test.py"
@@ -768,12 +711,12 @@ class TestReplacePattern:
             "h = lambda: 42\n"
         )
 
-        # Note: lambda params are DoNotCare in the matcher,
-        # so pattern matching will be lenient about parameters
-        matches = find_pattern("lambda: $BODY", str(test_file))
+        matches = find_pattern("lambda $...PARAMS: $BODY", str(test_file))
 
-        # Should match lambdas (parameters are DoNotCare, so all lambdas match)
-        assert len(matches) >= 1
+        # Only the two parameterized lambdas match, not the parameterless one.
+        assert len(matches) == 2
+        bodies = {m.captures["BODY"] for m in matches}
+        assert bodies == {"x + 1", "a + b"}
 
     def test_find_walrus_operator(self, tmp_path):
         """Find walrus operator (named expression) patterns."""
@@ -902,25 +845,17 @@ class TestReplacePattern:
 
     def test_find_return_statement(self, tmp_path):
         """Find return statement patterns."""
-        from emend.transform import find_pattern
-        from emend.pattern import compile_pattern_to_rust_ir
-
-        print(f"IR: {compile_pattern_to_rust_ir('return $X', 'python')}")
-
-        test_file = tmp_path / "test.py"
-
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "def func1():\n"
             "    return x\n"
             "def func2():\n"
             "    return y\n"
             "def func3():\n"
-            "    pass\n"
+            "    pass\n",
+            "return $X",
+            2,
         )
-
-        matches = find_pattern("return $X", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_return_statement(self, tmp_path):
         """Replace return statements."""
@@ -942,18 +877,14 @@ class TestReplacePattern:
 
     def test_find_assert_statement(self, tmp_path):
         """Find assert statement patterns."""
-        from emend.transform import find_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
+        assert_find(
+            tmp_path,
             "assert x == 5\n"
             "assert y > 0\n"
-            "z = 10\n"
+            "z = 10\n",
+            "assert $X",
+            2,
         )
-
-        matches = find_pattern("assert $X", str(test_file))
-
-        assert len(matches) == 2
 
     def test_replace_assert_with_specific_pattern(self, tmp_path):
         """Replace assert with specific comparison pattern."""
@@ -1223,7 +1154,6 @@ class TestImportsComponent:
     def test_get_imports(self, tmp_path):
         """Get all imports from a module."""
         from emend.transform import get_component
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1235,12 +1165,7 @@ class TestImportsComponent:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=[],
-            component="imports",
-            accessor=None
-        )
+        selector = sel(test_file, component="imports")
 
         result = get_component(selector)
         assert "import os" in result
@@ -1250,7 +1175,6 @@ class TestImportsComponent:
     def test_get_imports_empty(self, tmp_path):
         """Get imports from module with no imports."""
         from emend.transform import get_component
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1258,12 +1182,7 @@ class TestImportsComponent:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=[],
-            component="imports",
-            accessor=None
-        )
+        selector = sel(test_file, component="imports")
 
         result = get_component(selector)
         assert result == ""
@@ -1271,7 +1190,6 @@ class TestImportsComponent:
     def test_get_imports_with_multiline(self, tmp_path):
         """Get imports including multiline imports."""
         from emend.transform import get_component
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1285,12 +1203,7 @@ class TestImportsComponent:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=[],
-            component="imports",
-            accessor=None
-        )
+        selector = sel(test_file, component="imports")
 
         result = get_component(selector)
         assert "from typing import" in result
@@ -1301,7 +1214,6 @@ class TestImportsComponent:
     def test_add_import(self, tmp_path):
         """Add an import to a module."""
         from emend.transform import add_to_component
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1311,12 +1223,7 @@ class TestImportsComponent:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=[],
-            component="imports",
-            accessor=None
-        )
+        selector = sel(test_file, component="imports")
 
         diff = add_to_component(selector, "import sys", position=-1, apply=True)
 
@@ -1327,7 +1234,6 @@ class TestImportsComponent:
     def test_add_import_prepend(self, tmp_path):
         """Add import at the beginning."""
         from emend.transform import add_to_component
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1337,12 +1243,7 @@ class TestImportsComponent:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=[],
-            component="imports",
-            accessor=None
-        )
+        selector = sel(test_file, component="imports")
 
         diff = add_to_component(selector, "import os", position=0, apply=True)
 
@@ -1359,7 +1260,6 @@ class TestGetSymbolSource:
     def test_get_simple_function(self, tmp_path):
         """Get source of a simple function."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1367,12 +1267,7 @@ class TestGetSymbolSource:
             "    return 1\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["foo"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "foo")
 
         source = get_symbol_source(selector)
         assert source == "def foo():\n    return 1\n"
@@ -1380,7 +1275,6 @@ class TestGetSymbolSource:
     def test_get_function_with_decorator(self, tmp_path):
         """Get source of function with decorator."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1389,12 +1283,7 @@ class TestGetSymbolSource:
             "    return 1\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["foo"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "foo")
 
         source = get_symbol_source(selector)
         assert "@decorator" in source
@@ -1404,7 +1293,6 @@ class TestGetSymbolSource:
     def test_get_function_with_multiline_decorator(self, tmp_path):
         """Get source of function with multiline decorator."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1416,12 +1304,7 @@ class TestGetSymbolSource:
             "    return 1\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["foo"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "foo")
 
         source = get_symbol_source(selector)
         assert "@decorator(" in source
@@ -1431,7 +1314,6 @@ class TestGetSymbolSource:
     def test_get_method_from_class(self, tmp_path):
         """Get source of a method from a class."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1440,12 +1322,7 @@ class TestGetSymbolSource:
             "        return 42\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["MyClass", "method"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "MyClass", "method")
 
         source = get_symbol_source(selector)
         assert "def method(self):" in source
@@ -1454,7 +1331,6 @@ class TestGetSymbolSource:
     def test_get_nested_function(self, tmp_path):
         """Get source of a nested function."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1464,12 +1340,7 @@ class TestGetSymbolSource:
             "    return inner\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["outer", "inner"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "outer", "inner")
 
         source = get_symbol_source(selector)
         assert "def inner():" in source
@@ -1479,7 +1350,6 @@ class TestGetSymbolSource:
     def test_get_class(self, tmp_path):
         """Get source of a class."""
         from emend.transform import get_symbol_source
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1490,12 +1360,7 @@ class TestGetSymbolSource:
             "        pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["MyClass"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "MyClass")
 
         source = get_symbol_source(selector)
         assert "class MyClass(Base):" in source
@@ -1509,7 +1374,6 @@ class TestCopySymbol:
     def test_copy_function_to_empty_file(self, tmp_path):
         """Copy a function to an empty file."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text(
@@ -1520,12 +1384,7 @@ class TestCopySymbol:
         dest_file = tmp_path / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "my_func")
 
         diff = copy_symbol(selector, str(dest_file), apply=True)
 
@@ -1536,7 +1395,6 @@ class TestCopySymbol:
     def test_copy_function_append(self, tmp_path):
         """Copy function to end of file with existing code."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text(
@@ -1550,12 +1408,7 @@ class TestCopySymbol:
             "    return 'existing'\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["func_to_copy"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "func_to_copy")
 
         diff = copy_symbol(selector, str(dest_file), position="end", apply=True)
 
@@ -1568,7 +1421,6 @@ class TestCopySymbol:
     def test_copy_function_with_decorator(self, tmp_path):
         """Copy function with decorators."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text(
@@ -1581,12 +1433,7 @@ class TestCopySymbol:
         dest_file = tmp_path / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["decorated_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "decorated_func")
 
         diff = copy_symbol(selector, str(dest_file), apply=True)
 
@@ -1598,7 +1445,6 @@ class TestCopySymbol:
     def test_copy_nested_function(self, tmp_path):
         """Copy a nested function."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text(
@@ -1612,12 +1458,7 @@ class TestCopySymbol:
         dest_file = tmp_path / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["Builder", "_build", "nested"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "Builder", "_build", "nested")
 
         diff = copy_symbol(selector, str(dest_file), apply=True)
 
@@ -1628,7 +1469,6 @@ class TestCopySymbol:
     def test_copy_dry_run(self, tmp_path):
         """Test that dry-run doesn't modify destination."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text("def func(): pass\n")
@@ -1636,12 +1476,7 @@ class TestCopySymbol:
         dest_file = tmp_path / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "func")
 
         diff = copy_symbol(selector, str(dest_file), apply=False)
 
@@ -1653,7 +1488,6 @@ class TestCopySymbol:
     def test_copy_nonexistent_symbol(self, tmp_path):
         """Error when copying nonexistent symbol."""
         from emend.transform import copy_symbol
-        from emend.component_selector import ExtendedSelector
 
         source_file = tmp_path / "source.py"
         source_file.write_text("def foo(): pass\n")
@@ -1661,12 +1495,7 @@ class TestCopySymbol:
         dest_file = tmp_path / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["nonexistent"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "nonexistent")
 
         with pytest.raises(ValueError, match="Symbol.*not found"):
             copy_symbol(selector, str(dest_file), apply=False)
@@ -1678,7 +1507,6 @@ class TestRemoveSymbol:
     def test_remove_simple_function(self, tmp_path):
         """Remove a simple module-level function."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1692,12 +1520,7 @@ class TestRemoveSymbol:
             "    return 3\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["bar"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "bar")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1710,7 +1533,6 @@ class TestRemoveSymbol:
     def test_remove_function_with_decorators(self, tmp_path):
         """Remove function with decorators."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1726,12 +1548,7 @@ class TestRemoveSymbol:
             "    return 3\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["bar"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "bar")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1745,7 +1562,6 @@ class TestRemoveSymbol:
     def test_remove_class(self, tmp_path):
         """Remove an entire class."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1760,12 +1576,7 @@ class TestRemoveSymbol:
             "    pass\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["Second"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "Second")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1778,7 +1589,6 @@ class TestRemoveSymbol:
     def test_remove_method(self, tmp_path):
         """Remove a method from a class."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1793,12 +1603,7 @@ class TestRemoveSymbol:
             "        return 3\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["MyClass", "method2"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "MyClass", "method2")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1811,7 +1616,6 @@ class TestRemoveSymbol:
     def test_remove_nested_function(self, tmp_path):
         """Remove a nested function."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1824,12 +1628,7 @@ class TestRemoveSymbol:
             "        return middle\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["MyClass", "outer", "middle", "inner"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "MyClass", "outer", "middle", "inner")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1843,7 +1642,6 @@ class TestRemoveSymbol:
     def test_remove_dry_run(self, tmp_path):
         """Test that dry-run mode doesn't modify file."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         original = (
@@ -1855,12 +1653,7 @@ class TestRemoveSymbol:
         )
         test_file.write_text(original)
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["bar"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "bar")
 
         diff = remove_symbol(selector, apply=False)
 
@@ -1872,17 +1665,11 @@ class TestRemoveSymbol:
     def test_remove_nonexistent_symbol(self, tmp_path):
         """Error when symbol doesn't exist."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text("def foo():\n    pass\n")
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["nonexistent"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "nonexistent")
 
         with pytest.raises(ValueError, match="Symbol.*not found"):
             remove_symbol(selector, apply=False)
@@ -1890,7 +1677,6 @@ class TestRemoveSymbol:
     def test_remove_function_with_multiline_decorator(self, tmp_path):
         """Remove function with multiline decorator."""
         from emend.transform import remove_symbol
-        from emend.component_selector import ExtendedSelector
 
         test_file = tmp_path / "test.py"
         test_file.write_text(
@@ -1908,12 +1694,7 @@ class TestRemoveSymbol:
             "    return 3\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(test_file),
-            symbol_path=["bar"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(test_file, "bar")
 
         diff = remove_symbol(selector, apply=True)
 
@@ -1931,7 +1712,6 @@ class TestFindReferences:
     def test_find_simple_function_references(self, tmp_path):
         """Find all references to a simple function."""
         from emend.transform import find_references
-        from emend.component_selector import ExtendedSelector
 
         # Create a simple project structure
         project_dir = tmp_path / "project"
@@ -1946,12 +1726,7 @@ class TestFindReferences:
             "result = my_func()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "my_func")
 
         refs = list(find_references(selector))
 
@@ -1966,7 +1741,6 @@ class TestFindReferences:
     def test_find_references_exclude_definition(self, tmp_path):
         """Find references excluding the definition."""
         from emend.transform import find_references
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -1979,12 +1753,7 @@ class TestFindReferences:
             "result = my_func()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "my_func")
 
         refs = find_references(selector, include_definition=False)
 
@@ -1994,7 +1763,6 @@ class TestFindReferences:
     def test_find_references_exclude_imports(self, tmp_path):
         """Find references excluding imports."""
         from emend.transform import find_references
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2012,12 +1780,7 @@ class TestFindReferences:
             "result = my_func()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "my_func")
 
         refs = find_references(selector, include_imports=False)
 
@@ -2031,7 +1794,6 @@ class TestRenameSymbol:
     def test_rename_simple_function(self, tmp_path):
         """Rename a simple function across files."""
         from emend.transform import rename_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2044,12 +1806,7 @@ class TestRenameSymbol:
             "result = old_func()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["old_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "old_func")
 
         diffs = rename_symbol(selector, "new_func", apply=True)
 
@@ -2067,7 +1824,6 @@ class TestRenameSymbol:
     def test_rename_function_across_files(self, tmp_path):
         """Rename a function that's used across multiple files."""
         from emend.transform import rename_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2085,12 +1841,7 @@ class TestRenameSymbol:
             "result = helper()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["helper"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "helper")
 
         diffs = rename_symbol(selector, "helper_v2", apply=True)
 
@@ -2105,7 +1856,6 @@ class TestRenameSymbol:
     def test_rename_dry_run(self, tmp_path):
         """Test rename in dry-run mode doesn't modify files."""
         from emend.transform import rename_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2117,12 +1867,7 @@ class TestRenameSymbol:
         )
         main_file.write_text(original)
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["old_name"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(main_file, "old_name")
 
         diffs = rename_symbol(selector, "new_name", apply=False)
 
@@ -2143,7 +1888,6 @@ class TestRenameSymbol:
         missed (or renamed at the wrong position).
         """
         from emend.transform import rename_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2158,12 +1902,7 @@ class TestRenameSymbol:
             "old_name()\n"
         )
 
-        selector = ExtendedSelector(
-            file_path=str(main_file),
-            symbol_path=["old_name"],
-            component=None,
-            accessor=None,
-        )
+        selector = sel(main_file, "old_name")
 
         diffs = rename_symbol(selector, "new_name", project_path=str(project_dir), apply=True)
 
@@ -2183,7 +1922,6 @@ class TestMoveSymbol:
     def test_move_function_to_new_file(self, tmp_path):
         """Move a function to a new file."""
         from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2199,12 +1937,7 @@ class TestMoveSymbol:
 
         dest_file = project_dir / "dest.py"
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "my_func")
 
         diffs = move_symbol(
             selector,
@@ -2230,7 +1963,6 @@ class TestMoveSymbol:
     def test_move_function_with_import_updates(self, tmp_path):
         """Move a function and update imports."""
         from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2253,12 +1985,7 @@ class TestMoveSymbol:
         # Destination for the move
         dest_file = project_dir / "dest.py"
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["helper"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "helper")
 
         diffs = move_symbol(
             selector,
@@ -2283,7 +2010,6 @@ class TestMoveSymbol:
     def test_move_dry_run(self, tmp_path):
         """Test move in dry-run mode doesn't modify files."""
         from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2295,12 +2021,7 @@ class TestMoveSymbol:
         dest_file = project_dir / "dest.py"
         dest_file.write_text("")
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["my_func"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "my_func")
 
         diffs = move_symbol(
             selector,
@@ -2320,7 +2041,6 @@ class TestMoveSymbol:
     def test_move_without_import_updates(self, tmp_path):
         """Move a function without updating imports."""
         from emend.transform import move_symbol
-        from emend.component_selector import ExtendedSelector
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -2341,12 +2061,7 @@ class TestMoveSymbol:
 
         dest_file = project_dir / "dest.py"
 
-        selector = ExtendedSelector(
-            file_path=str(source_file),
-            symbol_path=["helper"],
-            component=None,
-            accessor=None
-        )
+        selector = sel(source_file, "helper")
 
         diffs = move_symbol(
             selector,
@@ -2642,7 +2357,7 @@ class TestTypeConstraints:
         assert len(matches) == 2  # Only the two attribute accesses
 
     def test_stmt_constraint_matches_statements(self, tmp_path):
-        """Type constraint $X:stmt matches statement nodes (for type-filtering in find)."""
+        """Type constraint $X:stmt matches statement-level nodes."""
         test_file = tmp_path / "test.py"
         test_file.write_text(
             "return 42\n"
@@ -2653,16 +2368,16 @@ class TestTypeConstraints:
         )
 
         from emend.transform import find_pattern
-        # In practice, $X:stmt works best for filtering statement-level nodes
-        # Here we test that it can match various statement types
-        # Note: "return $X:int" tries to match integer literal as X, inside return
-        matches_return = find_pattern("return 42", str(test_file))
-        matches_assert = find_pattern("assert $X == $Y", str(test_file))
-        matches_raise = find_pattern("raise $X", str(test_file))
-
-        assert len(matches_return) == 1
-        assert len(matches_assert) == 1
-        assert len(matches_raise) == 1
+        matches = find_pattern("$X:stmt", str(test_file))
+        # Every top-level line is a statement, so all five match.
+        captured = {m.captures["X"] for m in matches}
+        assert captured == {
+            "return 42",
+            "assert x == 5",
+            "raise ValueError('bad')",
+            "x = 1",
+            "del my_var",
+        }
 
 
 class TestAnalyzeImports:

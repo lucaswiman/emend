@@ -8,6 +8,38 @@ import yaml
 from emend.component_selector import ExtendedSelector
 
 
+def make_project(tmp_path, files: dict[str, str]) -> Path:
+    """Create a ``project/`` dir under *tmp_path* populated from *files*.
+
+    Keys are relative paths (subdirectories are created as needed); values
+    are file contents.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    for name, content in files.items():
+        p = project / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return project
+
+
+def dead_names(tmp_path, files: dict[str, str], **kwargs) -> set[str]:
+    """Run find_dead_code over a throwaway project and return the dead names."""
+    from emend.transform import find_dead_code
+
+    project = make_project(tmp_path, files)
+    return {d.name for d in find_dead_code(str(project), **kwargs)}
+
+
+def load_deadcode_config(tmp_path, deadcode, *, filename="rules.yaml"):
+    """Write a ``{deadcode: ...}`` rules doc and return ``load_rules()`` output."""
+    from emend.lint import load_rules
+
+    config_file = tmp_path / filename
+    config_file.write_text(yaml.dump({"deadcode": deadcode}))
+    return load_rules(str(config_file))
+
+
 class TestDeadCodeWarmPath:
     """Tests for the index-accelerated warm path of find_dead_code()."""
 
@@ -195,13 +227,7 @@ class TestFindDeadCode:
 
     def test_finds_unreferenced_function(self, tmp_path):
         """A function with no references is flagged as dead."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "def used_func():\n"
             "    return 1\n"
             "\n"
@@ -209,22 +235,13 @@ class TestFindDeadCode:
             "    return 2\n"
             "\n"
             "result = used_func()\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "unused_func" in dead_names
-        assert "used_func" not in dead_names
+        })
+        assert "unused_func" in names
+        assert "used_func" not in names
 
     def test_finds_unreferenced_class(self, tmp_path):
         """A class with no references is flagged as dead."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "class UsedClass:\n"
             "    pass\n"
             "\n"
@@ -232,165 +249,86 @@ class TestFindDeadCode:
             "    pass\n"
             "\n"
             "obj = UsedClass()\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "UnusedClass" in dead_names
-        assert "UsedClass" not in dead_names
+        })
+        assert "UnusedClass" in names
+        assert "UsedClass" not in names
 
     def test_cross_file_reference_not_dead(self, tmp_path):
         """A function referenced from another file is not dead."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        lib_file = project / "lib.py"
-        lib_file.write_text(
-            "def helper():\n"
-            "    return 42\n"
-            "\n"
-            "def orphan():\n"
-            "    return 0\n"
-        )
-
-        user_file = project / "user.py"
-        user_file.write_text(
-            "from lib import helper\n"
-            "\n"
-            "result = helper()\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "orphan" in dead_names
-        assert "helper" not in dead_names
+        names = dead_names(tmp_path, {
+            "lib.py":
+                "def helper():\n"
+                "    return 42\n"
+                "\n"
+                "def orphan():\n"
+                "    return 0\n",
+            "user.py":
+                "from lib import helper\n"
+                "\n"
+                "result = helper()\n",
+        })
+        assert "orphan" in names
+        assert "helper" not in names
 
     def test_skips_dunder_methods(self, tmp_path):
         """Dunder methods like __init__ are never flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
-            "def __init__():\n"
-            "    pass\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "__init__" not in dead_names
+        names = dead_names(tmp_path, {"main.py": "def __init__():\n    pass\n"})
+        assert "__init__" not in names
 
     def test_skips_test_functions(self, tmp_path):
         """Functions starting with test_ are never flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        test_file = project / "test_example.py"
-        test_file.write_text(
+        names = dead_names(tmp_path, {"test_example.py":
             "def test_something():\n"
             "    assert True\n"
             "\n"
             "class TestSuite:\n"
             "    pass\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "test_something" not in dead_names
-        assert "TestSuite" not in dead_names
+        })
+        assert "test_something" not in names
+        assert "TestSuite" not in names
 
     def test_skips_describe_functions(self, tmp_path):
         """Functions starting with describe_ are never flagged (pytest-describe)."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        test_file = project / "test_describe.py"
-        test_file.write_text(
+        names = dead_names(tmp_path, {"test_describe.py":
             "def describe_feature():\n"
             "    def it_works():\n"
             "        assert True\n"
             "\n"
             "def describe_another_feature():\n"
             "    pass\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "describe_feature" not in dead_names
-        assert "describe_another_feature" not in dead_names
+        })
+        assert "describe_feature" not in names
+        assert "describe_another_feature" not in names
 
     def test_skips_main(self, tmp_path):
         """The 'main' function is never flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
-            "def main():\n"
-            "    pass\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "main" not in dead_names
+        names = dead_names(tmp_path, {"main.py": "def main():\n    pass\n"})
+        assert "main" not in names
 
     def test_skips_private_by_default(self, tmp_path):
         """Private symbols (_name) are skipped by default."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "def _private_helper():\n"
             "    return 1\n"
             "\n"
             "def public_unused():\n"
             "    return 2\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "_private_helper" not in dead_names
-        assert "public_unused" in dead_names
+        })
+        assert "_private_helper" not in names
+        assert "public_unused" in names
 
     def test_include_private(self, tmp_path):
         """With include_private=True, _private symbols are checked."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
-            "def _private_helper():\n"
-            "    return 1\n"
+        names = dead_names(
+            tmp_path,
+            {"main.py": "def _private_helper():\n    return 1\n"},
+            include_private=True,
         )
-
-        dead = list(find_dead_code(str(project), include_private=True))
-        dead_names = {d.name for d in dead}
-        assert "_private_helper" in dead_names
+        assert "_private_helper" in names
 
     def test_skips_all_exports(self, tmp_path):
         """Symbols listed in __all__ are not flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "__all__ = ['exported_func']\n"
             "\n"
             "def exported_func():\n"
@@ -398,54 +336,41 @@ class TestFindDeadCode:
             "\n"
             "def not_exported():\n"
             "    return 2\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "exported_func" not in dead_names
-        assert "not_exported" in dead_names
+        })
+        assert "exported_func" not in names
+        assert "not_exported" in names
 
     def test_kind_filter_function(self, tmp_path):
         """With kind='function', only functions are checked."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
-            "def unused_func():\n"
-            "    return 1\n"
-            "\n"
-            "class UnusedClass:\n"
-            "    pass\n"
+        names = dead_names(
+            tmp_path,
+            {"main.py":
+                "def unused_func():\n"
+                "    return 1\n"
+                "\n"
+                "class UnusedClass:\n"
+                "    pass\n"
+            },
+            kind="function",
         )
-
-        dead = list(find_dead_code(str(project), kind="function"))
-        dead_names = {d.name for d in dead}
-        assert "unused_func" in dead_names
-        assert "UnusedClass" not in dead_names
+        assert "unused_func" in names
+        assert "UnusedClass" not in names
 
     def test_kind_filter_class(self, tmp_path):
         """With kind='class', only classes are checked."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
-            "def unused_func():\n"
-            "    return 1\n"
-            "\n"
-            "class UnusedClass:\n"
-            "    pass\n"
+        names = dead_names(
+            tmp_path,
+            {"main.py":
+                "def unused_func():\n"
+                "    return 1\n"
+                "\n"
+                "class UnusedClass:\n"
+                "    pass\n"
+            },
+            kind="class",
         )
-
-        dead = list(find_dead_code(str(project), kind="class"))
-        dead_names = {d.name for d in dead}
-        assert "UnusedClass" in dead_names
-        assert "unused_func" not in dead_names
+        assert "UnusedClass" in names
+        assert "unused_func" not in names
 
     def test_returns_correct_fields(self, tmp_path):
         """DeadSymbol has correct file_path, name, kind, line, selector."""
@@ -472,23 +397,11 @@ class TestFindDeadCode:
 
     def test_empty_project(self, tmp_path):
         """An empty project returns no dead code."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        dead = list(find_dead_code(str(project)))
-        assert dead == []
+        assert dead_names(tmp_path, {}) == set()
 
     def test_skips_decorated_entry_points(self, tmp_path):
         """Functions decorated with framework decorators are skipped."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "def route(f):\n"
             "    return f\n"
             "\n"
@@ -498,22 +411,13 @@ class TestFindDeadCode:
             "\n"
             "def truly_unused():\n"
             "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "my_handler" not in dead_names
-        assert "truly_unused" in dead_names
+        })
+        assert "my_handler" not in names
+        assert "truly_unused" in names
 
     def test_skips_fastapi_router_decorators(self, tmp_path):
         """FastAPI-style @router.get/post/etc decorators are skipped."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "class Router:\n"
             "    def get(self, path): return lambda f: f\n"
             "    def post(self, path): return lambda f: f\n"
@@ -530,13 +434,10 @@ class TestFindDeadCode:
             "\n"
             "def truly_unused():\n"
             "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        assert "list_users" not in dead_names
-        assert "create_user" not in dead_names
-        assert "truly_unused" in dead_names
+        })
+        assert "list_users" not in names
+        assert "create_user" not in names
+        assert "truly_unused" in names
 
     def test_sorted_output(self, tmp_path):
         """Results are sorted by file path then line number."""
@@ -571,26 +472,16 @@ class TestFindDeadCode:
 
     def test_only_top_level_symbols(self, tmp_path):
         """Only top-level symbols are checked, not nested methods."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        main_file = project / "main.py"
-        main_file.write_text(
+        names = dead_names(tmp_path, {"main.py":
             "class MyClass:\n"
             "    def unused_method(self):\n"
             "        pass\n"
             "\n"
             "obj = MyClass()\n"
-        )
-
-        dead = list(find_dead_code(str(project)))
-        dead_names = {d.name for d in dead}
-        # Methods are nested (depth > 1), so should not be checked
-        assert "unused_method" not in dead_names
-        # MyClass is used, so not dead
-        assert "MyClass" not in dead_names
+        })
+        # unused_method is nested (depth > 1); MyClass is instantiated.
+        assert "unused_method" not in names
+        assert "MyClass" not in names
 
 
 class TestDeadCodeCLI:
@@ -1136,7 +1027,7 @@ class TestDeadCodeLint:
             "    return 42\n"
         )
 
-        config_file = project / ".emend" / "patterns.yaml"
+        config_file = project / ".emend" / "rules.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(yaml.dump({
             "deadcode": {
@@ -1160,34 +1051,20 @@ class TestDeadCodeLint:
 
     def test_lint_deadcode_boolean_shorthand(self, tmp_path):
         """deadcode: true in config enables with defaults."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": True,
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, True)
         assert dc_config is not None
         assert dc_config.enabled is True
 
     def test_lint_deadcode_with_options(self, tmp_path):
         """deadcode config supports all options."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "kind": "function",
-                "include-private": True,
-                "exclude-references-from": ["tests/"],
-                "strings-count-as-references": False,
-                "message": "Custom dead code message",
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "kind": "function",
+            "include-private": True,
+            "exclude-references-from": ["tests/"],
+            "strings-count-as-references": False,
+            "message": "Custom dead code message",
+        })
         assert dc_config.kind == "function"
         assert dc_config.include_private is True
         assert dc_config.exclude_references_from == ["tests/"]
@@ -1207,7 +1084,7 @@ class TestDeadCodeLint:
             "    return 42\n"
         )
 
-        config_file = project / ".emend" / "patterns.yaml"
+        config_file = project / ".emend" / "rules.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(yaml.dump({
             "deadcode": {"enabled": False},
@@ -1239,7 +1116,7 @@ class TestDeadCodeLint:
             "    return 2\n"
         )
 
-        config_file = project / ".emend" / "patterns.yaml"
+        config_file = project / ".emend" / "rules.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(yaml.dump({
             "deadcode": True,
@@ -1261,117 +1138,83 @@ class TestDeadCodeLint:
 class TestEntryPointDecorators:
     """Tests for custom entry-point-decorators config."""
 
-    def test_custom_decorator_excludes_symbol(self, tmp_path):
-        """Symbols with a custom entry-point decorator are not flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "def my_handler(f):\n"
-            "    return f\n"
-            "\n"
-            "@my_handler\n"
-            "def process_event():\n"
-            "    return 'done'\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(
-            str(project),
-            entry_point_decorators=["my_handler"],
+    @pytest.mark.parametrize(
+        "source, decorators, alive",
+        [
+            pytest.param(
+                "def my_handler(f):\n"
+                "    return f\n"
+                "\n"
+                "@my_handler\n"
+                "def process_event():\n"
+                "    return 'done'\n"
+                "\n"
+                "def truly_unused():\n"
+                "    return 'bye'\n",
+                ["my_handler"],
+                "process_event",
+                id="bare-name",
+            ),
+            pytest.param(
+                "class Router:\n"
+                "    def sync_post(self, path): return lambda f: f\n"
+                "\n"
+                "router = Router()\n"
+                "\n"
+                "@router.sync_post('/endpoint')\n"
+                "def my_endpoint():\n"
+                "    return {}\n"
+                "\n"
+                "def truly_unused():\n"
+                "    return 'bye'\n",
+                ["sync_post"],
+                "my_endpoint",
+                id="basename-of-attribute",
+            ),
+            pytest.param(
+                "class App:\n"
+                "    def on_event(self, event): return lambda f: f\n"
+                "\n"
+                "app = App()\n"
+                "\n"
+                "@app.on_event('startup')\n"
+                "def startup_handler():\n"
+                "    pass\n"
+                "\n"
+                "def truly_unused():\n"
+                "    return 'bye'\n",
+                ["app.on_event"],
+                "startup_handler",
+                id="full-dotted-name",
+            ),
+        ],
+    )
+    def test_custom_decorator_excludes_symbol(self, tmp_path, source, decorators, alive):
+        """A symbol with a configured entry-point decorator is not flagged."""
+        names = dead_names(
+            tmp_path,
+            {"mod.py": source},
+            entry_point_decorators=decorators,
             show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        assert "process_event" not in dead_names
-        assert "truly_unused" in dead_names
-
-    def test_custom_decorator_basename_matching(self, tmp_path):
-        """Custom decorator basenames are matched (e.g. pkg.deco matches @x.deco)."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "class Router:\n"
-            "    def sync_post(self, path): return lambda f: f\n"
-            "\n"
-            "router = Router()\n"
-            "\n"
-            "@router.sync_post('/endpoint')\n"
-            "def my_endpoint():\n"
-            "    return {}\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
         )
-
-        dead = list(find_dead_code(
-            str(project),
-            entry_point_decorators=["sync_post"],
-            show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        assert "my_endpoint" not in dead_names
-        assert "truly_unused" in dead_names
-
-    def test_custom_decorator_full_name_matching(self, tmp_path):
-        """Custom decorator full names are matched exactly."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "class App:\n"
-            "    def on_event(self, event): return lambda f: f\n"
-            "\n"
-            "app = App()\n"
-            "\n"
-            "@app.on_event('startup')\n"
-            "def startup_handler():\n"
-            "    pass\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(
-            str(project),
-            entry_point_decorators=["app.on_event"],
-            show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        assert "startup_handler" not in dead_names
-        assert "truly_unused" in dead_names
+        assert alive not in names
+        assert "truly_unused" in names
 
     def test_without_custom_decorator_still_flagged(self, tmp_path):
         """Without custom entry-point-decorators, symbol is flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "def my_handler(f):\n"
-            "    return f\n"
-            "\n"
-            "@my_handler\n"
-            "def process_event():\n"
-            "    return 'done'\n"
-        )
-
-        dead = list(find_dead_code(
-            str(project),
+        names = dead_names(
+            tmp_path,
+            {"mod.py":
+                "def my_handler(f):\n"
+                "    return f\n"
+                "\n"
+                "@my_handler\n"
+                "def process_event():\n"
+                "    return 'done'\n"
+            },
             show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        # Without custom config, my_handler is not recognized as entry point
-        assert "process_event" in dead_names
+        )
+        assert "process_event" in names
 
 
 class TestEntryPointNames:
@@ -1379,76 +1222,52 @@ class TestEntryPointNames:
 
     def test_custom_name_excludes_symbol(self, tmp_path):
         """Symbols with a custom entry-point name are not flagged."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "def plugin_init():\n"
-            "    return 'initialized'\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(
-            str(project),
+        names = dead_names(
+            tmp_path,
+            {"mod.py":
+                "def plugin_init():\n"
+                "    return 'initialized'\n"
+                "\n"
+                "def truly_unused():\n"
+                "    return 'bye'\n"
+            },
             entry_point_names=["plugin_init"],
             show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        assert "plugin_init" not in dead_names
-        assert "truly_unused" in dead_names
+        )
+        assert "plugin_init" not in names
+        assert "truly_unused" in names
 
     def test_multiple_custom_names(self, tmp_path):
         """Multiple custom entry-point names all work."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "def plugin_init():\n"
-            "    pass\n"
-            "\n"
-            "def on_startup():\n"
-            "    pass\n"
-            "\n"
-            "def truly_unused():\n"
-            "    pass\n"
-        )
-
-        dead = list(find_dead_code(
-            str(project),
+        names = dead_names(
+            tmp_path,
+            {"mod.py":
+                "def plugin_init():\n"
+                "    pass\n"
+                "\n"
+                "def on_startup():\n"
+                "    pass\n"
+                "\n"
+                "def truly_unused():\n"
+                "    pass\n"
+            },
             entry_point_names=["plugin_init", "on_startup"],
             show_last_reference=False,
-        ))
-        dead_names = {d.name for d in dead}
-        assert "plugin_init" not in dead_names
-        assert "on_startup" not in dead_names
-        assert "truly_unused" in dead_names
+        )
+        assert "plugin_init" not in names
+        assert "on_startup" not in names
+        assert "truly_unused" in names
 
 
 class TestEntryPointConfig:
-    """Tests for entry-point config loading from patterns.yaml."""
+    """Tests for entry-point config loading from rules.yaml."""
 
     def test_load_entry_point_decorators(self, tmp_path):
         """entry-point-decorators config is loaded from YAML."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "entry-point-decorators": [
-                    "my_framework.handler",
-                    "sync_post",
-                ],
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "entry-point-decorators": ["my_framework.handler", "sync_post"],
+        })
         assert dc_config is not None
         assert dc_config.entry_point_decorators == [
             "my_framework.handler", "sync_post",
@@ -1456,48 +1275,27 @@ class TestEntryPointConfig:
 
     def test_load_entry_point_names(self, tmp_path):
         """entry-point-names config is loaded from YAML."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "entry-point-names": ["plugin_init", "on_startup"],
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "entry-point-names": ["plugin_init", "on_startup"],
+        })
         assert dc_config is not None
         assert dc_config.entry_point_names == ["plugin_init", "on_startup"]
 
     def test_load_single_string_entry_point_decorators(self, tmp_path):
         """A single string for entry-point-decorators is wrapped in a list."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "entry-point-decorators": "my_decorator",
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "entry-point-decorators": "my_decorator",
+        })
         assert dc_config.entry_point_decorators == ["my_decorator"]
 
     def test_load_single_string_entry_point_names(self, tmp_path):
         """A single string for entry-point-names is wrapped in a list."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "entry-point-names": "plugin_init",
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "entry-point-names": "plugin_init",
+        })
         assert dc_config.entry_point_names == ["plugin_init"]
 
     def test_lint_integration_with_entry_point_decorators(self, tmp_path):
@@ -1519,7 +1317,7 @@ class TestEntryPointConfig:
             "    return 'bye'\n"
         )
 
-        config_file = project / ".emend" / "patterns.yaml"
+        config_file = project / ".emend" / "rules.yaml"
         config_file.parent.mkdir(parents=True)
         config_file.write_text(yaml.dump({
             "deadcode": {
@@ -1625,34 +1423,20 @@ class TestExcludePaths:
         assert "script_func" not in dead_names
 
     def test_exclude_paths_config_loading(self, tmp_path):
-        """exclude-paths is loaded from patterns.yaml config."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "exclude-paths": ["scripts/", "frontends/devtools/"],
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        """exclude-paths is loaded from the rules config."""
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "exclude-paths": ["scripts/", "frontends/devtools/"],
+        })
         assert dc_config is not None
         assert dc_config.exclude_paths == ["scripts/", "frontends/devtools/"]
 
     def test_exclude_paths_single_string(self, tmp_path):
         """A single string for exclude-paths is wrapped in a list."""
-        from emend.lint import load_rules
-
-        config_file = tmp_path / "patterns.yaml"
-        config_file.write_text(yaml.dump({
-            "deadcode": {
-                "enabled": True,
-                "exclude-paths": "scripts/",
-            },
-        }))
-
-        rules, macros, dc_config = load_rules(str(config_file))
+        _, _, dc_config = load_deadcode_config(tmp_path, {
+            "enabled": True,
+            "exclude-paths": "scripts/",
+        })
         assert dc_config.exclude_paths == ["scripts/"]
 
     def test_cli_exclude_path(self, tmp_path, run_emend_cmd):
@@ -1777,57 +1561,34 @@ class TestExcludeReferencesFromGlob:
 class TestBuiltinSyncPostDecorator:
     """Tests for sync_post and similar built-in decorator basenames."""
 
-    def test_sync_post_is_entry_point(self, tmp_path):
-        """@router.sync_post() is recognized as an entry point."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "class Router:\n"
-            "    def sync_post(self, path): return lambda f: f\n"
-            "\n"
-            "router = Router()\n"
-            "\n"
-            "@router.sync_post('/endpoint')\n"
-            "def my_endpoint():\n"
-            "    return {}\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
+    @pytest.mark.parametrize(
+        "method, decorator, alive",
+        [
+            ("sync_post", "@router.sync_post('/endpoint')", "my_endpoint"),
+            ("websocket", "@router.websocket('/ws')", "ws_handler"),
+        ],
+    )
+    def test_builtin_decorator_is_entry_point(self, tmp_path, method, decorator, alive):
+        """Built-in router decorator basenames are recognized as entry points."""
+        names = dead_names(
+            tmp_path,
+            {"mod.py":
+                "class Router:\n"
+                f"    def {method}(self, path): return lambda f: f\n"
+                "\n"
+                "router = Router()\n"
+                "\n"
+                f"{decorator}\n"
+                f"def {alive}():\n"
+                "    pass\n"
+                "\n"
+                "def truly_unused():\n"
+                "    return 'bye'\n"
+            },
+            show_last_reference=False,
         )
-
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
-        assert "my_endpoint" not in dead_names
-        assert "truly_unused" in dead_names
-
-    def test_websocket_is_entry_point(self, tmp_path):
-        """@router.websocket() is recognized as an entry point."""
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        (project / "mod.py").write_text(
-            "class Router:\n"
-            "    def websocket(self, path): return lambda f: f\n"
-            "\n"
-            "router = Router()\n"
-            "\n"
-            "@router.websocket('/ws')\n"
-            "def ws_handler():\n"
-            "    pass\n"
-            "\n"
-            "def truly_unused():\n"
-            "    return 'bye'\n"
-        )
-
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
-        assert "ws_handler" not in dead_names
-        assert "truly_unused" in dead_names
+        assert alive not in names
+        assert "truly_unused" in names
 
 
 class TestDeadCodeUnreachableBlocks:
