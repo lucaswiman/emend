@@ -8,6 +8,8 @@ import re
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 def rename_symbol(
@@ -425,7 +427,13 @@ def _update_imports_for_move(
                 new_source_content = load_plugin(language).import_handler.add_import_text(
                     import_stmt, 0, source_content
                 )
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug(
+                    "add_import_text failed for %s, skipping source import",
+                    source_file, exc_info=True,
+                )
                 new_source_content = None
 
             if new_source_content and new_source_content != source_content:

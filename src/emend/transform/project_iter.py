@@ -13,6 +13,7 @@ import time
 
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
+from emend.errors import BUG_EXCEPTIONS
 
 if TYPE_CHECKING:
     import sqlite3
@@ -114,6 +115,10 @@ def find_pattern_in_project(
                 file_paths, literals,
             )
         except Exception:
+            logger.debug(
+                "Rust read_and_filter_files failed, using Python fallback",
+                exc_info=True,
+            )
             file_contents = _read_and_filter_py(file_paths, literals)
     else:
         file_contents = []
@@ -161,11 +166,15 @@ def find_pattern_in_project(
             if (inside is None or inside_ir is not None) and (
                 not_inside is None or not_inside_ir is not None
             ):
+                raw = None
                 try:
                     raw = _rust.find_pattern_in_files(
                         list(file_contents), pattern_ir,
                         inside_ir, not_inside_ir,
                     )
+                except Exception:
+                    logger.debug("Rust batch path failed, falling back", exc_info=True)
+                if raw is not None:
                     results = [
                         ProjectPatternMatch(
                             file_path=fp,
@@ -185,8 +194,6 @@ def find_pattern_in_project(
                     if limit is not None:
                         results = results[:limit]
                     return results
-                except Exception:
-                    logger.debug("Rust batch path failed, falling back")
 
     # --- Stage 4: Pattern matching fallback (parallel) ---
     results: list[ProjectPatternMatch] = []
@@ -218,7 +225,10 @@ def find_pattern_in_project(
                     language=language,
                 )
                 return [ProjectPatternMatch(file_path=fp, match=m) for m in matches]
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug("find_pattern failed for %s, skipping", fp, exc_info=True)
                 return []
 
         with ThreadPoolExecutor() as executor:
@@ -240,6 +250,8 @@ def _index_prefilter(
     Returns a set of file paths, or ``None`` if the index has no useful
     data (caller should skip this stage).
     """
+    import sqlite3
+
     per_literal: list[set[str]] = []
     for lit in literals:
         files_for_lit: set[str] = set()
@@ -250,8 +262,8 @@ def _index_prefilter(
                 ("%" + lit + "%",),
             ):
                 files_for_lit.add(fp)
-        except Exception:
-            pass
+        except sqlite3.Error:
+            pass  # index table missing or corrupt
         try:
             for (fp,) in conn.execute(
                 "SELECT DISTINCT file_path FROM symbol_index "
@@ -259,8 +271,8 @@ def _index_prefilter(
                 (lit, "%" + lit + "%"),
             ):
                 files_for_lit.add(fp)
-        except Exception:
-            pass
+        except sqlite3.Error:
+            pass  # index table missing or corrupt
         if files_for_lit:
             per_literal.append(files_for_lit)
 
@@ -281,10 +293,10 @@ def _read_and_filter_py(
     for fp in file_paths:
         try:
             content = Path(fp).read_text()
-            if all(lit in content for lit in literals):
-                results.append((fp, content))
-        except Exception:
-            pass
+        except (OSError, UnicodeDecodeError):
+            continue
+        if all(lit in content for lit in literals):
+            results.append((fp, content))
     return results
 
 
@@ -378,14 +390,16 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
                         candidate = root / where
                         if candidate.is_dir():
                             return str(candidate)
-                except Exception:
-                    pass
+                except (OSError, ValueError, TypeError, AttributeError):
+                    logger.debug(
+                        "pyproject.toml source-root detection failed", exc_info=True,
+                    )
 
         # --- setup.cfg ------------------------------------------------------
         setup_cfg = root / "setup.cfg"
         if setup_cfg.is_file():
+            import configparser
             try:
-                import configparser
                 cfg = configparser.ConfigParser()
                 cfg.read(str(setup_cfg))
                 pkg_dir = cfg.get("options", "package_dir", fallback=None)
@@ -398,8 +412,8 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
                             candidate = root / src_dir
                             if candidate.is_dir():
                                 return str(candidate)
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError, configparser.Error):
+                logger.debug("setup.cfg source-root detection failed", exc_info=True)
 
         # --- Heuristic: src/ with an __init__.py package --------------------
         src_dir = root / "src"
@@ -427,8 +441,10 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
                         candidate = (root / lib_path).parent
                         if candidate.is_dir():
                             return str(candidate)
-                except Exception:
-                    pass
+                except (OSError, ValueError, TypeError, AttributeError):
+                    logger.debug(
+                        "Cargo.toml source-root detection failed", exc_info=True,
+                    )
         src_dir = root / "src"
         if src_dir.is_dir():
             return str(src_dir)
@@ -456,8 +472,10 @@ def _find_source_root(project_root: str, language: str = "python") -> str:
                     candidate = root / base_url
                     if candidate.is_dir():
                         return str(candidate)
-            except Exception:
-                pass
+            except (OSError, ValueError, TypeError, AttributeError):
+                logger.debug(
+                    "tsconfig.json source-root detection failed", exc_info=True,
+                )
         src_dir = root / "src"
         if src_dir.is_dir():
             return str(src_dir)
@@ -565,6 +583,7 @@ def _files_importing_module(project_root: str, module_dotted: str, language: str
         matching = _rust.files_importing_module(source_files, module_dotted)
         return set(matching)
     except Exception:
+        logger.debug("Rust files_importing_module failed", exc_info=True)
         return None
 
 
@@ -623,13 +642,14 @@ def visit_project_ts(
 
     # Index and yield
     for py_file, content in file_contents:
+        ext = Path(py_file).suffix.lstrip('.')
         try:
-            ext = Path(py_file).suffix.lstrip('.')
             resolver = _rust.PyScopeResolver(project_root, ext)
             resolver.index_file(py_file, content)
-            yield py_file, content, resolver
         except Exception:
+            logger.debug("scope resolver failed for %s, skipping", py_file, exc_info=True)
             continue
+        yield py_file, content, resolver
 
     logger.info("visit_project_ts: finished in %.3fs", time.monotonic() - t_start)
 

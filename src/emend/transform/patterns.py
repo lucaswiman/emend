@@ -16,6 +16,7 @@ from ..pattern import (
     parse_oracle_type_constraint,
 )
 from emend import emend_core as _rust
+from emend.errors import BUG_EXCEPTIONS
 from .components import _CONTENT_REF_RE, _extract_string_content_from_text
 
 if TYPE_CHECKING:
@@ -568,6 +569,9 @@ def analyze_imports(
         source_content = source_path.read_text()
         resolver.index_file(str(source_path.resolve()), source_content)
     except Exception:
+        logger.debug(
+            "could not index %s for import analysis", source_path, exc_info=True,
+        )
         return []
 
     structured_imports = resolver.structured_imports_in_file(
@@ -740,10 +744,15 @@ def copy_symbol(
         imp_handler = load_plugin(lang).import_handler
         imports = analyze_imports(source, selector.file_path, source_module=source_module, project_path=project_path)
         for imp in imports:
+            pos = 0 if imp.startswith("from __future__") else -1
             try:
-                pos = 0 if imp.startswith("from __future__") else -1
                 new_content = imp_handler.add_import_text(imp.rstrip("\n"), pos, new_content)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug(
+                    "add_import_text failed for %r, prepending", imp, exc_info=True,
+                )
                 new_content = imp + "\n" + new_content
 
     # Generate diff
@@ -768,7 +777,10 @@ def _is_valid_replacement(code: str, language: str = "python") -> bool:
     from emend.language_registry import get_extensions
     try:
         exts = get_extensions(language)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("get_extensions failed for %s", language, exc_info=True)
         exts = []
     ext = exts[0] if exts else ("py" if language == "python" else None)
     if ext is None:
@@ -776,6 +788,7 @@ def _is_valid_replacement(code: str, language: str = "python") -> bool:
     try:
         return _rust.validate_syntax(code, ext)
     except Exception:
+        logger.debug("validate_syntax failed for %s", language, exc_info=True)
         return True
 
 

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import sqlite3
 
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
+from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +291,10 @@ def _get_disk_cache() -> "sqlite3.Connection | None":
             _init_cache_schema(conn)
             _disk_cache_conn = conn
             logger.debug("disk cache opened at %s", db_path)
-        except Exception as exc:
-            logger.debug("disk cache unavailable: %s", exc)
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("disk cache unavailable", exc_info=True)
             _disk_cache_conn = None
     return _disk_cache_conn
 
@@ -468,7 +471,7 @@ def _open_facts_db(db_path: str):
             try:
                 client.run(stmt)
             except Exception:
-                pass  # Already exists
+                logger.debug("facts schema statement failed (already exists?)", exc_info=True)
     return client
 
 
@@ -483,7 +486,7 @@ def _get_facts_db(project_root: str | None = None):
         try:
             from .project_iter import _find_project_root
             project_root = _find_project_root(".")
-        except Exception:
+        except OSError:
             return None
 
     key = str(Path(project_root).resolve())
@@ -507,8 +510,10 @@ def _get_facts_db(project_root: str | None = None):
             _facts_db_cache[key] = client
             logger.debug("facts db opened at %s", db_path)
             return client
-        except Exception as exc:
-            logger.debug("facts db unavailable: %s", exc)
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("facts db unavailable", exc_info=True)
             return None
 
 
@@ -552,7 +557,7 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         try:
             fdb.run(query, {"fp": file_path})
         except BaseException:
-            pass
+            pass  # relation may not exist yet in older facts.db files
 
 
 def _build_fact_sym_rows(
@@ -675,6 +680,7 @@ def _extract_file_facts(
     try:
         raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
     except Exception:
+        logger.debug("symbol extraction failed for %s", rel_path, exc_info=True)
         raw_symbols = []
 
     sym_facts_for_file: list = []
@@ -721,13 +727,14 @@ def _extract_file_facts(
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
         try:
-            for qn_str, line, col, _offset, _end_offset, kind, _ann in \
-                    scope_resolver.references_in_file(abs_path):
-                qn_str = _normalize_qn(qn_str)
-                file_refs.append((qn_str, line, col, kind))
-                result["fact_ref"].append([qn_str, rel_path, line, col, kind])
+            raw_refs = scope_resolver.references_in_file(abs_path)
         except Exception:
-            pass
+            logger.debug("reference extraction failed for %s", rel_path, exc_info=True)
+            raw_refs = []
+        for qn_str, line, col, _offset, _end_offset, kind, _ann in raw_refs:
+            qn_str = _normalize_qn(qn_str)
+            file_refs.append((qn_str, line, col, kind))
+            result["fact_ref"].append([qn_str, rel_path, line, col, kind])
 
     # -- Extract imports (all languages)
     # Detailed imports via _extract_imports (dispatches by language for TS/Rust).
@@ -758,7 +765,10 @@ def _extract_file_facts(
     # -- CFG
     try:
         cfgs = build_cfgs_for_source(content, ext=ext)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("CFG build failed for %s", rel_path, exc_info=True)
         cfgs = []
 
     block_ranges: list[tuple[str, int, int, int, bool]] = []
@@ -902,7 +912,10 @@ def _build_facts_db(
 
     try:
         fdb = _open_facts_db(facts_path)
+    except BUG_EXCEPTIONS:
+        raise
     except BaseException:
+        logger.debug("could not open facts db at %s", facts_path, exc_info=True)
         return
 
     resolved_root = str(Path(project_root).resolve())
@@ -927,7 +940,7 @@ def _build_facts_db(
             rel_path = _to_rel(abs_path)
             try:
                 content = Path(abs_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 continue
             ext = Path(abs_path).suffix.lstrip(".") or "py"
             file_contents.append((abs_path, rel_path, ext, content))
@@ -941,7 +954,7 @@ def _build_facts_db(
                 try:
                     scope_resolver.index_file(abs_path, content)
                 except Exception:
-                    pass
+                    logger.debug("scope indexing failed for %s", abs_path, exc_info=True)
 
         # ------------------------------------------------------------------
         # Per-file extraction: symbols, references, imports, CFG, def-use,
@@ -964,6 +977,10 @@ def _build_facts_db(
                     file_resolver = _rust.PyScopeResolver(resolved_root, ext)
                     file_resolver.index_file(abs_path, content)
                 except Exception:
+                    logger.debug(
+                        "per-file scope resolver failed for %s", abs_path,
+                        exc_info=True,
+                    )
                     file_resolver = scope_resolver
 
             return _extract_file_facts(
@@ -1148,13 +1165,15 @@ def _build_facts_db(
                 {"rows": all_exported_qns},
             )
 
+    except BUG_EXCEPTIONS:
+        raise
     except BaseException:
         logger.debug("facts db build failed", exc_info=True)
 
     try:
         fdb.close()
     except BaseException:
-        pass
+        logger.debug("facts db close failed", exc_info=True)
 
     # Invalidate the singleton cache so the next _get_facts_db() call
     # opens a fresh handle that sees the newly written data.
