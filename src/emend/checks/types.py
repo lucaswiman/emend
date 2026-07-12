@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from emend.errors import BUG_EXCEPTIONS
+
 if TYPE_CHECKING:
     from emend.policy import Policy, PolicyViolation
 
@@ -50,6 +52,8 @@ def run_type_check(
         try:
             from emend.type_oracle import create_type_oracle
             type_oracle = create_type_oracle(project_root=Path(project_root))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Could not create type oracle for type check", exc_info=True)
 

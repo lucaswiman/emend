@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from emend.errors import BUG_EXCEPTIONS
+
 if TYPE_CHECKING:
     from emend.fact_graph import FactGraph
     from emend.lint import LintRule, FlowWitness
@@ -367,6 +369,8 @@ def _execute_via_datalog(
             blocker_lines=blocker_lines,
             include_locations=True,
         )
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug(
             "Datalog flow check failed for %s; falling back to Python",

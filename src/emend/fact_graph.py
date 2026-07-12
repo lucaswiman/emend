@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Union
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -411,9 +413,10 @@ def _init_schema(client: Any) -> None:
         if stmt:
             try:
                 client.run(stmt)
-            except Exception:
+            except Exception as exc:
                 # Relation already exists — that's fine.
-                pass
+                if "conflicts with an existing one" not in str(exc):
+                    raise
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +453,7 @@ class FactGraph:
         try:
             self._client.close()
         except Exception:
-            pass
+            logger.debug("Failed to close CozoDB client", exc_info=True)
 
     # -- Mutation ---------------------------------------------------------
 
@@ -874,6 +877,7 @@ class FactGraph:
                 "starts_with(callee_qn, 'builtins.')"
             )["rows"]
         except Exception:
+            logger.debug("builtins.* call query failed; skipping builtin ref resolution", exc_info=True)
             return
 
         if not builtin_calls:
@@ -886,6 +890,7 @@ class FactGraph:
                 "imported_name != ''"
             )["rows"]
         except Exception:
+            logger.debug("import fact query failed; skipping builtin ref resolution", exc_info=True)
             return
 
         import_map: dict[tuple[str, str], str] = {}
@@ -1189,9 +1194,10 @@ class FactGraph:
         query = "?[fp, fq, rcv, meth, type_str] := " + ", ".join(clauses)
         try:
             result = self._client.run(query, params)
-            return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
         except Exception:
+            logger.debug("method_call_types query failed", exc_info=True)
             return []
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
 
     def cfg_blocks(self, func_qn: str | None = None, file_path: str | None = None) -> list[CfgBlockFact]:
         """Query CFG block facts."""
@@ -1354,7 +1360,7 @@ class FactGraph:
             try:
                 self._client.run(rule)
             except Exception:
-                pass
+                logger.debug("Entry point seed rule failed: %s", rule, exc_info=True)
 
         # Build excluded-path filter clauses for CozoDB.
         # We need two variants: one using the variable "fp" (for the
@@ -1459,16 +1465,17 @@ class FactGraph:
 
         try:
             unreachable_result = self._client.run(unreachable_query)
-            unreachable_blocks = [
-                CfgBlockFact(
-                    file_path=r[0], func_qn=r[1], block_id=r[2],
-                    is_entry=r[3], is_exit=r[4],
-                )
-                for r in unreachable_result["rows"]
-            ]
         except Exception:
-            unreachable_blocks = []
+            logger.debug("Unreachable block query failed", exc_info=True)
+            return dead_symbols, []
 
+        unreachable_blocks = [
+            CfgBlockFact(
+                file_path=r[0], func_qn=r[1], block_id=r[2],
+                is_entry=r[3], is_exit=r[4],
+            )
+            for r in unreachable_result["rows"]
+        ]
         return dead_symbols, unreachable_blocks
 
     def unreachable_blocks_datalog(self, func_qn: str | None = None) -> list[CfgBlockFact]:
@@ -2765,7 +2772,7 @@ class FactGraph:
                 try:
                     self._client.run(query, {"fp": fp})
                 except Exception:
-                    pass
+                    logger.debug("Fact removal query failed for %s", fp, exc_info=True)
 
     def update_files(
         self,
@@ -2822,6 +2829,8 @@ class FactGraph:
             # -- CFG blocks and edges ---------------------------------------
             try:
                 cfgs = build_cfgs_for_source(content, ext=ext)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
                 cfgs = []
@@ -2952,7 +2961,7 @@ class FactGraph:
         for abs_file_path in file_paths:
             try:
                 content = Path(abs_file_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 logger.debug("Could not read %s", abs_file_path, exc_info=True)
                 continue
             file_list.append((abs_file_path, content))
@@ -3022,7 +3031,7 @@ class FactGraph:
         for abs_file_path in source_files:
             try:
                 content = Path(abs_file_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 logger.debug("Could not read %s", abs_file_path, exc_info=True)
                 continue
 
@@ -3036,8 +3045,8 @@ class FactGraph:
             module_name = _file_to_module(abs_file_path, project_root)
 
             # -- Symbol facts (via Rust symbol collection) ----------------
+            ext = Path(abs_file_path).suffix.lstrip(".") or "py"
             try:
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
                 raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
             except Exception:
                 logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
@@ -3050,17 +3059,20 @@ class FactGraph:
             graph.add_decorator_on_batch(dec_facts)
 
             # -- Exported symbol facts (for TS/Rust visibility) ----------
+            _lang = _detect_lang(abs_file_path) or "python"
             try:
-                _lang = _detect_lang(abs_file_path) or "python"
                 exported_names = detect_exported_names(content, _lang)
-                if exported_names:
-                    exported_qns = [
-                        sf.qualified_name for sf in sym_facts
-                        if sf.name in exported_names
-                    ]
-                    graph.add_exported_symbols_batch(exported_qns)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Could not detect exported symbols for %s", abs_file_path, exc_info=True)
+                exported_names = set()
+            if exported_names:
+                exported_qns = [
+                    sf.qualified_name for sf in sym_facts
+                    if sf.name in exported_names
+                ]
+                graph.add_exported_symbols_batch(exported_qns)
 
             # -- Source location facts for symbols -----------------------
             source_loc_facts: list[SourceLocFact] = []
@@ -3075,10 +3087,11 @@ class FactGraph:
             graph.add_source_locs_batch(source_loc_facts)
 
             # -- CFG blocks and edges (via Rust CFG builder) -------------
+            from emend.cfg import build_cfgs_for_source
             try:
-                from emend.cfg import build_cfgs_for_source
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
                 cfgs = build_cfgs_for_source(content, ext=ext)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
                 cfgs = []
@@ -3093,7 +3106,6 @@ class FactGraph:
 
             # -- Reference and call facts (via scope resolver) ------------
             try:
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
                 resolver = _rust.PyScopeResolver(resolver_root, ext)
                 resolver.index_file(abs_file_path, content)
             except Exception:
@@ -3181,7 +3193,9 @@ class FactGraph:
             edge_result = graph._client.run(
                 "?[fp, fq, fb, tb] := *cfg_edge[fp, fq, fb, tb, _, _, _]"
             )
-
+        except Exception:
+            logger.debug("Could not query CFG blocks/edges for reachability", exc_info=True)
+        else:
             entries_by_func: dict[tuple[str, str], set[int]] = {}
             for fp, fq, bid, is_entry in block_result["rows"]:
                 if is_entry:
@@ -3194,13 +3208,14 @@ class FactGraph:
             reachable_rows = _bfs_reachable_blocks(entries_by_func, adj)
 
             if reachable_rows:
-                graph._client.run(
-                    "?[file_path, func_qn, block_id] <- $rows "
-                    ":put reachable_block {file_path, func_qn, block_id}",
-                    {"rows": reachable_rows},
-                )
-        except Exception:
-            logger.debug("Could not compute reachable blocks", exc_info=True)
+                try:
+                    graph._client.run(
+                        "?[file_path, func_qn, block_id] <- $rows "
+                        ":put reachable_block {file_path, func_qn, block_id}",
+                        {"rows": reachable_rows},
+                    )
+                except Exception:
+                    logger.debug("Could not store reachable blocks", exc_info=True)
 
         # -- Resolve builtins.* references using import facts -----------
         # When a scope resolver can't resolve a cross-file import (common
@@ -3225,6 +3240,8 @@ class FactGraph:
                         rel_path = abs_file_path
                     try:
                         file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
+                    except BUG_EXCEPTIONS:
+                        raise
                     except Exception:
                         logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
                         continue
@@ -3239,6 +3256,8 @@ class FactGraph:
                             binding_kind=binding.binding_kind,
                         ))
                     graph.add_types_batch(type_facts)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Could not populate type bindings", exc_info=True)
 
@@ -3421,6 +3440,7 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
     during development without a compiled extension).
     """
     facts: list[ImportFact] = []
+    structured = None
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         resolver = getattr(_extract_imports_python, "_resolver", None)
@@ -3428,6 +3448,14 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
             resolver = ec.PyScopeResolver(".", extension="py")
             _extract_imports_python._resolver = resolver  # type: ignore[attr-defined]
         structured = resolver.collect_structured_imports_from_source(content, ext="py")
+    except Exception:
+        logger.debug(
+            "emend_core structured import extraction failed for %s, falling back to ast.parse",
+            file_path,
+            exc_info=True,
+        )
+
+    if structured is not None:
         for imp in structured:
             # StructuredImport start_line is 0-indexed; ImportFact.line is
             # 1-indexed like every other fact kind.
@@ -3458,18 +3486,12 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
                         line=line,
                     ))
         return facts
-    except Exception:
-        logger.debug(
-            "emend_core structured import extraction failed for %s, falling back to ast.parse",
-            file_path,
-            exc_info=True,
-        )
 
     # Fallback: stdlib ast (Python only, but always available)
     import ast as stdlib_ast
     try:
         tree = stdlib_ast.parse(content, filename=file_path)
-    except Exception:
+    except (SyntaxError, ValueError, RecursionError):
         logger.debug("ast.parse failed for %s", file_path, exc_info=True)
         return facts
     for node in stdlib_ast.walk(tree):
@@ -3535,6 +3557,7 @@ def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact
     ``0``.
     """
     facts: list[ImportFact] = []
+    imports: list = []
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         ext = Path(file_path).suffix.lstrip(".") or "ts"
@@ -3542,21 +3565,26 @@ def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact
             ext = "ts"
         resolver = ec.PyScopeResolver(".", ext)
         resolver.index_file(file_path, content)
-        for local_name, module_path, imported_name, is_star in resolver.imports_in_file(file_path):
-            # Strip surrounding quotes that the scope resolver includes in the
-            # module path (e.g. '"./foo"' → './foo').
-            clean_module = module_path.strip("\"'")
-            if not clean_module:
-                continue
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=clean_module,
-                imported_name="*" if is_star else (imported_name or None),
-                alias=local_name if local_name != imported_name else None,
-                line=0,  # scope resolver does not return line numbers here
-            ))
+        imports = resolver.imports_in_file(file_path)
     except Exception:
-        pass
+        logger.debug(
+            "emend_core TypeScript import extraction failed for %s",
+            file_path,
+            exc_info=True,
+        )
+    for local_name, module_path, imported_name, is_star in imports:
+        # Strip surrounding quotes that the scope resolver includes in the
+        # module path (e.g. '"./foo"' → './foo').
+        clean_module = module_path.strip("\"'")
+        if not clean_module:
+            continue
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=clean_module,
+            imported_name="*" if is_star else (imported_name or None),
+            alias=local_name if local_name != imported_name else None,
+            line=0,  # scope resolver does not return line numbers here
+        ))
     return facts
 
 
@@ -3567,30 +3595,31 @@ def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
     ``pub use``, ``pub(crate) use``, and ``mod name;`` declarations.
     """
     facts: list[ImportFact] = []
+    imports: list = []
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         resolver = getattr(_extract_imports_rust, "_resolver", None)
         if resolver is None:
             resolver = ec.PyScopeResolver(".", extension="rs")
             _extract_imports_rust._resolver = resolver  # type: ignore[attr-defined]
-        for local_name, module_path, imported_name, is_star, line in \
-                resolver.collect_rust_imports_from_source(content, ext="rs"):
-            if not module_path and not is_star:
-                continue
-            alias = local_name if (imported_name and local_name != imported_name) else None
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=module_path,
-                imported_name="*" if is_star else (imported_name or None),
-                alias=alias,
-                line=line,
-            ))
+        imports = resolver.collect_rust_imports_from_source(content, ext="rs")
     except Exception:
         logger.debug(
             "emend_core Rust import extraction failed for %s",
             file_path,
             exc_info=True,
         )
+    for local_name, module_path, imported_name, is_star, line in imports:
+        if not module_path and not is_star:
+            continue
+        alias = local_name if (imported_name and local_name != imported_name) else None
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=module_path,
+            imported_name="*" if is_star else (imported_name or None),
+            alias=alias,
+            line=line,
+        ))
     return facts
 
 
@@ -4294,7 +4323,8 @@ def compile_sequence_rule(
 
             try:
                 source = Path(abs_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
+                logger.debug("Could not read %s for sequence step resolution", abs_path, exc_info=True)
                 continue
 
             try:
@@ -4304,6 +4334,8 @@ def compile_sequence_rule(
                     source_override=source,
                     language="python",
                 )
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Pattern match failed for %s in %s", resolved_pattern, fp, exc_info=True)
                 continue
@@ -4337,27 +4369,30 @@ def compile_sequence_rule(
             resolved = pattern
             for mvar, val in accumulated_bindings.items():
                 resolved = resolved.replace(f"${mvar}", val)
-            try:
-                for fp in file_paths:
-                    abs_path = fp
-                    if resolve_root:
-                        candidate = resolve_root / fp
-                        if candidate.exists():
-                            abs_path = str(candidate)
-                    try:
-                        source = Path(abs_path).read_text(encoding="utf-8")
-                    except Exception:
-                        continue
+            for fp in file_paths:
+                abs_path = fp
+                if resolve_root:
+                    candidate = resolve_root / fp
+                    if candidate.exists():
+                        abs_path = str(candidate)
+                try:
+                    source = Path(abs_path).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                try:
                     matches = find_pattern(resolved, abs_path, source_override=source, language="python")
-                    for m in matches:
-                        if m.line is None:
-                            continue
-                        fq = _find_func_for_line(fp, m.line)
-                        if fq:
-                            bid = _find_block_for_line(fp, fq, m.line)
-                            target.append((fp, fq, bid))
-            except Exception:
-                pass
+                except BUG_EXCEPTIONS:
+                    raise
+                except Exception:
+                    logger.debug("Blocker pattern match failed for %s in %s", resolved, fp, exc_info=True)
+                    continue
+                for m in matches:
+                    if m.line is None:
+                        continue
+                    fq = _find_func_for_line(fp, m.line)
+                    if fq:
+                        bid = _find_block_for_line(fp, fq, m.line)
+                        target.append((fp, fq, bid))
 
     for pc in check.path_constraints:
         pair_key = (pc.from_step, pc.to_step)
