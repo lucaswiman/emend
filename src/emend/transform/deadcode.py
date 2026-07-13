@@ -960,6 +960,8 @@ def find_dead_code(
             dead_symbols, scan_root, all_files, exclude_references_from,
         )
 
+    dead_symbols.sort(key=lambda symbol: (symbol.file_path, symbol.line))
+
     logger.info(
         "dead_code: %d dead symbols in %.3fs",
         len(dead_symbols), time.monotonic() - t0,
@@ -1311,4 +1313,3 @@ def safe_delete(
 
 
 # visit_project_ts yields (py_file, content, resolver)
-

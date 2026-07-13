@@ -556,7 +556,7 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
     ):
         try:
             fdb.run(query, {"fp": file_path})
-        except BaseException:
+        except Exception:
             pass  # relation may not exist yet in older facts.db files
 
 
@@ -642,17 +642,8 @@ def _extract_file_facts(
     content: str,
     project_root: str,
     module_name: str,
-    scope_resolver,
-    _rust,
-    build_cfgs_for_source,
-    _walk_symbols,
-    _find_containing_block,
-    _enclosing_symbol,
-    _extract_imports,
-    _build_symbol_line_index,
-    _build_fact_sym_rows_func,
-    SymbolFact,
-    DecoratorOnFact,
+    scope_resolver=None,
+    fact_symbol_rows_builder=None,
     precomputed_refs: list[tuple] | None = None,
 ) -> dict:
     """Extract all analysis facts for a single file.
@@ -665,7 +656,19 @@ def _extract_file_facts(
             tuples from parse.db's reference_index.  When provided, skips
             the expensive scope_resolver.references_in_file() call.
     """
-    from emend.fact_graph import _normalize_qn, _resolve_cfg_func_qn
+    from emend import emend_core
+    from emend.cfg import build_cfgs_for_source
+    from emend.fact_graph import (
+        _build_method_call_facts,
+        _build_symbol_line_index,
+        _enclosing_symbol,
+        _extract_imports,
+        _find_containing_block,
+        _map_ref_kind,
+        _normalize_qn,
+        _resolve_cfg_func_qn,
+        _walk_symbols,
+    )
 
     result: dict[str, list] = {
         "fact_sym": [], "fact_ref": [], "fact_imp": [], "fg_sym": [],
@@ -678,7 +681,7 @@ def _extract_file_facts(
 
     # -- Extract symbols via Rust
     try:
-        raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
+        raw_symbols = emend_core.collect_symbols_from_str(content, ext=ext)
     except Exception:
         logger.debug("symbol extraction failed for %s", rel_path, exc_info=True)
         raw_symbols = []
@@ -691,10 +694,11 @@ def _extract_file_facts(
     )
 
     # Build fact_symbol rows from the raw Rust output (all symbol kinds)
-    _build_fact_sym_rows_func(
-        result["fact_sym"], raw_symbols, rel_path, module_name,
-        abs_path, project_root, content,
-    )
+    if fact_symbol_rows_builder is not None:
+        fact_symbol_rows_builder(
+            result["fact_sym"], raw_symbols, rel_path, module_name,
+            abs_path, project_root, content,
+        )
 
     # Populate FactGraph-style symbol rows (filtered)
     for sf in sym_facts_for_file:
@@ -723,6 +727,7 @@ def _extract_file_facts(
     if precomputed_refs is not None:
         for qn_str, line, col, kind in precomputed_refs:
             qn_str = _normalize_qn(qn_str)
+            kind = _map_ref_kind(kind)
             file_refs.append((qn_str, line, col, kind))
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
     else:
@@ -733,6 +738,7 @@ def _extract_file_facts(
             raw_refs = []
         for qn_str, line, col, _offset, _end_offset, kind, _ann in raw_refs:
             qn_str = _normalize_qn(qn_str)
+            kind = _map_ref_kind(kind)
             file_refs.append((qn_str, line, col, kind))
             result["fact_ref"].append([qn_str, rel_path, line, col, kind])
 
@@ -839,15 +845,19 @@ def _extract_file_facts(
             result["calls_by_callee"].append([tqn, caller_qn, rel_path, line, col, fq, bid])
             result["calls_by_file"].append([rel_path, caller_qn, tqn, line, col, fq, bid])
 
-            # method_call for dotted call refs
-            if "." in tqn:
-                parts = tqn.rsplit(".", 1)
-                if len(parts) == 2:
-                    result["method_calls"].append([
-                        rel_path, fq,
-                        parts[0].rsplit(".", 1)[-1], parts[1],
-                        bid, line,
-                    ])
+    # Method-call location conventions are shared with the public builders:
+    # 0-based lines and explicit sentinels for module-level code.
+    raw_method_refs = [
+        (qn, line, col, 0, 0, kind, None)
+        for qn, line, col, kind in file_refs
+    ]
+    for fact in _build_method_call_facts(
+        raw_method_refs, rel_path, content_block_ranges, normalize_qn=False,
+    ):
+        result["method_calls"].append([
+            fact.file_path, fact.func_qn, fact.receiver, fact.method,
+            fact.block_id, fact.line,
+        ])
 
     from emend.fact_graph import build_def_use_facts
     for du in build_def_use_facts(cfgs, sym_facts_for_file, rel_path, module_name):
@@ -856,6 +866,27 @@ def _extract_file_facts(
             du.def_block, du.use_block,
             du.def_line, du.def_col, du.use_line, du.use_col,
         ])
+
+    # CFGs cover functions only.  Preserve module-level data flow using the
+    # same reference stream regardless of which builder invoked us.
+    from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
+    module_defs: dict[str, list[tuple[int, int]]] = {}
+    module_uses: dict[str, list[tuple[int, int]]] = {}
+    for qn, line, col, kind in file_refs:
+        if _find_containing_block(content_block_ranges, line) != ("", -1):
+            continue
+        name = qn.rsplit(".", 1)[-1]
+        target = module_defs if kind == "write" else module_uses
+        if kind in ("write", "read", "call"):
+            target.setdefault(name, []).append((line - 1, col))
+    for name, uses in module_uses.items():
+        for def_line, def_col in module_defs.get(name, []):
+            for use_line, use_col in uses:
+                result["def_uses"].append([
+                    rel_path, MODULE_LEVEL_FUNC, name, "write",
+                    MODULE_LEVEL_BLOCK, MODULE_LEVEL_BLOCK,
+                    def_line, def_col, use_line, use_col,
+                ])
 
     return result
 
@@ -892,29 +923,18 @@ def _build_facts_db(
     from concurrent.futures import ThreadPoolExecutor
     import multiprocessing
 
-    from emend.cfg import build_cfgs_for_source
-    from emend.fact_graph import (
-        _find_containing_block,
-        _enclosing_symbol,
-        _extract_imports,
-        _build_symbol_line_index,
-        _normalize_qn,
-        _resolve_cfg_func_qn,
-        _bfs_reachable_blocks,
-        _walk_symbols,
-        SymbolFact,
-        DecoratorOnFact,
-    )
+    from emend.fact_graph import _bfs_reachable_blocks
     from emend import emend_core as _rust
 
     cache_dir = _cache_db_dir(project_root)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     facts_path = str(cache_dir / "facts.db")
 
     try:
         fdb = _open_facts_db(facts_path)
     except BUG_EXCEPTIONS:
         raise
-    except BaseException:
+    except Exception:
         logger.debug("could not open facts db at %s", facts_path, exc_info=True)
         return
 
@@ -986,10 +1006,7 @@ def _build_facts_db(
             return _extract_file_facts(
                 abs_path, rel_path, ext, content,
                 project_root, module_name, file_resolver,
-                _rust, build_cfgs_for_source, _walk_symbols,
-                _find_containing_block, _enclosing_symbol,
-                _extract_imports, _build_symbol_line_index,
-                _build_fact_sym_rows, SymbolFact, DecoratorOnFact,
+                _build_fact_sym_rows,
                 precomputed_refs=file_refs,
             )
 
@@ -1167,13 +1184,13 @@ def _build_facts_db(
 
     except BUG_EXCEPTIONS:
         raise
-    except BaseException:
+    except Exception:
         logger.debug("facts db build failed", exc_info=True)
-
-    try:
-        fdb.close()
-    except BaseException:
-        logger.debug("facts db close failed", exc_info=True)
+    finally:
+        try:
+            fdb.close()
+        except Exception:
+            logger.debug("facts db close failed", exc_info=True)
 
     # Invalidate the singleton cache so the next _get_facts_db() call
     # opens a fresh handle that sees the newly written data.

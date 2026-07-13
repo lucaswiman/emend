@@ -464,11 +464,8 @@ class TestFindDeadCode:
         dead = list(find_dead_code(str(project)))
         # Should be sorted: a.py first, then b.py, then by line within file
         assert len(dead) >= 3
-        file_paths = [d.file_path for d in dead]
-        assert file_paths == sorted(file_paths) or all(
-            (file_paths[i], dead[i].line) <= (file_paths[i + 1], dead[i + 1].line)
-            for i in range(len(dead) - 1)
-        )
+        locations = [(d.file_path, d.line) for d in dead]
+        assert locations == sorted(locations)
 
     def test_only_top_level_symbols(self, tmp_path):
         """Only top-level symbols are checked, not nested methods."""

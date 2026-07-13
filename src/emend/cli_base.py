@@ -127,6 +127,19 @@ def resolve_file_scopes(
     return resolved, is_multi_file
 
 
+def resolve_many_files(
+    paths: list[str] | tuple[str, ...] | None,
+    *,
+    language: str = "python",
+    default: str | None = None,
+) -> tuple[list[Path], bool]:
+    """Compatibility wrapper for resolving multiple file scopes."""
+    effective_paths = paths
+    if not effective_paths and default is not None:
+        effective_paths = [default]
+    return resolve_file_scopes(effective_paths, language=language)
+
+
 def print_symbol_rename_move(diffs: dict[str, str], *, apply: bool) -> None:
     """Print CLI output for a symbol rename/move given the per-file diffs."""
     if not diffs:
@@ -372,5 +385,6 @@ __all__ = [
     "print_symbol_rename_move",
     "resolve_file_scopes",
     "resolve_files",
+    "resolve_many_files",
     "tool_app",
 ]

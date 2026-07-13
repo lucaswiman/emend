@@ -392,12 +392,24 @@ class TestUnifiedSearch:
 class TestReferenceSearch:
     def test_find_references(self, indexed_project):
         with _engine(indexed_project) as engine:
-            # "greet" is called in greet_loudly
+            conn = engine._get_conn()
+            conn.execute(
+                "INSERT INTO reference_index "
+                "(content_hash, target_qn, file_path, line, col, ref_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (b"h", "sample.greet", "sample.py", 6, 15, "call"),
+            )
+            conn.commit()
+
             result = engine.search_references("sample.greet")
             assert result.mode == "reference"
-            # May or may not find refs depending on index quality
-            # Just verify it doesn't crash and returns valid structure
-            assert isinstance(result.items, list)
+            assert result.items == [{
+                "target_qn": "sample.greet",
+                "file_path": "sample.py",
+                "line": 6,
+                "col": 15,
+                "ref_kind": "call",
+            }]
 
     def test_ref_kind_filter(self, indexed_project):
         with _engine(indexed_project) as engine:
@@ -620,9 +632,7 @@ class TestPatternPrefilter:
             # "math" and "sqrt" both in b.py only
             candidates = _index_prefilter(["math", "sqrt"], conn)
             assert candidates is not None
-            assert len(candidates) <= 1
-            if candidates:
-                assert any("b.py" in f for f in candidates)
+            assert {Path(f).name for f in candidates} == {"b.py"}
         finally:
             conn.close()
 

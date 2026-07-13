@@ -434,6 +434,8 @@ def duplicates_analysis(
     min_lines: int = 5,
     min_score: float = 0.0,
     cross_file: bool | None = None,
+    *,
+    involves_file: str | None = None,
 ) -> str:
     """Run duplicate detection and return JSON results."""
     from emend.duplicate import query_duplicates, format_duplicates_json
@@ -446,8 +448,28 @@ def duplicates_analysis(
         min_lines=min_lines,
         min_score=min_score,
         cross_file=cross_file,
+        involves_file=involves_file,
     )
     return format_duplicates_json(clusters)
+
+
+def check_duplicates(
+    file_path: Annotated[str, Field(description="File to check for duplication (usually the just-written file in a post-write hook).")],
+    project: Annotated[str | None, Field(description="Project root to scan against. Defaults to CWD.")] = None,
+    mode: Annotated[str, Field(description="Detection mode: exact, sequence, or all.")] = "all",
+    limit: Annotated[int, Field(description="Maximum number of clusters to return.")] = 10,
+    min_lines: Annotated[int, Field(description="Minimum lines for a finding.")] = 5,
+    min_score: Annotated[float, Field(description="Minimum score threshold (use ~50 to suppress tiny matches in hooks).")] = 0.0,
+) -> str:
+    """Check whether *file_path* introduces duplication in the project."""
+    return duplicates_analysis(
+        path=project or ".",
+        mode=mode,
+        limit=limit,
+        min_lines=min_lines,
+        min_score=min_score,
+        involves_file=file_path,
+    )
 
 
 @mcp_app.tool()

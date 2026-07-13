@@ -363,10 +363,9 @@ class TestRustAssignMatching:
         """Typed assignments like x: int = 0 are a different tree-sitter node."""
         f = tmp_path / "test.py"
         f.write_text("x = None\ny: int = None\n")
-        # x = None is an assignment, y: int = None is typed_assignment
         matches = find_pattern("$X = None", str(f))
-        # Should match x = None; y: int = None depends on tree-sitter grammar
-        assert len(matches) >= 1
+        assert len(matches) == 1
+        assert matches[0].line == 1
 
     def test_assign_parity(self, tmp_path):
         n = _assert_rust_python_parity(

@@ -69,7 +69,7 @@ def run_sequence_check(
         )]
 
     try:
-        result = compile_sequence_rule(graph, check)
+        result = compile_sequence_rule(graph, check, project_path=project_path)
         if result is None:
             return []
         query_str, step_data = result

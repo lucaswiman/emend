@@ -1720,9 +1720,9 @@ class TestTypesCLIEdgeCases:
         write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file), "--json"], check=False)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            assert isinstance(data, list)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data == []
 
     def test_types_kind_filter(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"

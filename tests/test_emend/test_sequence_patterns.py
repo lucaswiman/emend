@@ -914,10 +914,13 @@ class TestCompileSequenceRule:
         query, step_data = result
         assert isinstance(query, str)
         assert isinstance(step_data, dict)
-        # The compiled query is runnable and yields the standard result shape.
+        assert step_data["bindings"] == {"FD": "fd"}
+        assert len(step_data["step_locations"]["close"]) == 1
+        assert len(step_data["step_locations"]["use"]) == 1
+        # The compiled query is runnable and finds the resolved sequence.
         run = g.run_query(query)
         assert "headers" in run
-        assert "rows" in run
+        assert run["rows"]
 
 
 # ---------------------------------------------------------------------------
@@ -953,9 +956,10 @@ class TestRunSequenceCheckIntegration:
         """When violations are found, they are PolicyViolation instances."""
         # Write a Python file with the TOCTOU pattern
         (tmp_path / "app.py").write_text(
-            "def process(session):\n"
+            "def process(session, should_mutate):\n"
             "    obj = session.query(User)\n"
-            "    obj.name = 'new'\n"
+            "    if should_mutate:\n"
+            "        obj.update()\n"
         )
 
         policy = Policy(
@@ -975,7 +979,7 @@ class TestRunSequenceCheckIntegration:
         )
 
         violations = _run_sequence_check(policy.checks[0], policy, str(tmp_path))
-        # All returned items must be PolicyViolation instances
+        assert violations, "expected the TOCTOU sequence to produce a violation"
         for v in violations:
             assert isinstance(v, PolicyViolation)
             assert v.policy_name == "toctou-check"

@@ -2058,6 +2058,14 @@ fn matches_node<'a>(
             if node.kind() != config.pattern_matching.assignment.as_str() {
                 return None;
             }
+            // Some grammars represent annotated assignments with the same
+            // node kind as plain assignments and add an annotation field.
+            if node
+                .child_by_field_name(&config.pattern_matching.annotation_field)
+                .is_some()
+            {
+                return None;
+            }
             let left_node = match node.child_by_field_name("left") {
                 Some(n) => n,
                 None => return None,

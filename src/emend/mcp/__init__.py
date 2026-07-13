@@ -46,6 +46,7 @@ from emend.mcp.analyze import (
     semantic_context,
     trace_analysis,
     duplicates_analysis,
+    check_duplicates,
 )
 from emend.mcp.checks import check
 from emend.mcp.tooling import (
@@ -80,6 +81,7 @@ __all__ = [
     "semantic_context",
     "trace_analysis",
     "duplicates_analysis",
+    "check_duplicates",
     "check",
     "facts_query",
     "mappings",

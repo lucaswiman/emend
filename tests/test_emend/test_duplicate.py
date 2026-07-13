@@ -356,11 +356,15 @@ class TestCLI:
         json_str = format_duplicates_json(clusters)
         data = json.loads(json_str)
         assert isinstance(data, list)
-        if data:
-            item = data[0]
-            assert "kind" in item
-            assert "score" in item
-            assert "members" in item
+        assert data, "expected the duplicated helpers to produce a cluster"
+        members = {
+            member["symbol"]
+            for cluster in data
+            for member in cluster["members"]
+        }
+        assert {"process_data", "handle_records"} <= members
+        assert all("kind" in cluster for cluster in data)
+        assert all("score" in cluster for cluster in data)
 
 
 # ---------------------------------------------------------------------------

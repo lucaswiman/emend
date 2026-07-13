@@ -1212,6 +1212,31 @@ class TestBuildFromProjectMethodCallFacts:
             "MethodCallFact line numbers are inconsistent between the two builders."
         )
 
+    def test_persisted_builder_matches_project_method_calls(self, tmp_path):
+        """Persisted and project builders emit identical method-call facts."""
+        from emend.transform.cache import _build_facts_db, _cache_db_dir
+
+        src = tmp_path / "app.py"
+        src.write_text(
+            "class Client:\n"
+            "    def fetch(self):\n"
+            "        return 1\n\n"
+            "client = Client()\n"
+            "client.fetch()\n"
+        )
+
+        _build_facts_db(str(tmp_path))
+        persisted = FactGraph(db_path=str(_cache_db_dir(tmp_path) / "facts.db"))
+        project = FactGraph.build_from_project(str(tmp_path))
+
+        def method_calls(graph):
+            return {
+                (f.file_path, f.func_qn, f.receiver, f.method, f.block_id, f.line)
+                for f in graph.method_calls()
+            }
+
+        assert method_calls(persisted) == method_calls(project)
+
     def test_module_level_method_call_has_sentinel_func_qn(self, tmp_path):
         """Module-level method calls must use the MODULE_LEVEL_FUNC sentinel.
 
@@ -1429,29 +1454,13 @@ class TestTypescriptImportExtraction:
         modules = {f.imported_module for f in facts}
         assert "./utils" in modules, f"Expected './utils' in {modules}"
 
-    def test_side_effect_import_omitted(self):
-        """Side-effect imports (import './side-effect') are not supported by
-        PyScopeResolver.imports_in_file() and are silently omitted."""
-        source = 'import "./side-effect";'
-        facts = self._imports("/tmp/app.ts", source)
-        # The scope resolver does not track side-effect imports; result may be
-        # empty.  We just verify no exception is raised.
-        assert isinstance(facts, list)
-
-    def test_export_from_omitted(self):
-        """Re-export statements (export { X } from './bar') are not supported by
-        PyScopeResolver.imports_in_file() and are silently omitted."""
-        source = 'export { X } from "./bar";'
-        facts = self._imports("/tmp/app.ts", source)
-        # May be empty — just verify no exception is raised.
-        assert isinstance(facts, list)
-
-    def test_require_omitted(self):
-        """CommonJS require() calls are not handled by PyScopeResolver."""
-        source = 'const { a, b } = require("./c");'
-        facts = self._imports("/tmp/app.ts", source)
-        # May be empty — just verify no exception is raised.
-        assert isinstance(facts, list)
+    @pytest.mark.parametrize("source", [
+        'import "./side-effect";',
+        'export { X } from "./bar";',
+        'const { a, b } = require("./c");',
+    ])
+    def test_unsupported_import_forms_are_omitted(self, source):
+        assert self._imports("/tmp/app.ts", source) == []
 
 
 class TestFactsCliTaintFlowsAlias:

@@ -2774,10 +2774,51 @@ class FactGraph:
                 except Exception:
                     logger.debug("Fact removal query failed for %s", fp, exc_info=True)
 
+    def _insert_extracted_file_facts(self, rows: dict[str, list[list[Any]]]) -> None:
+        """Insert the language-neutral rows returned by the canonical extractor."""
+        specs = {
+            "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
+            "dec": ("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator"),
+            "fg_refs": ("reference", "symbol_qn, file_path, line, col, ref_kind, func_qn, block_id", "symbol_qn, file_path, line, col => ref_kind, func_qn, block_id"),
+            "calls": ("call", "caller_qn, callee_qn, file_path, line, col, func_qn, block_id", "caller_qn, callee_qn, file_path, line, col => func_qn, block_id"),
+            "calls_by_callee": ("call_by_callee", "callee_qn, caller_qn, file_path, line, col, func_qn, block_id", "callee_qn, caller_qn, file_path, line, col => func_qn, block_id"),
+            "calls_by_file": ("call_by_file", "file_path, caller_qn, callee_qn, line, col, func_qn, block_id", "file_path, caller_qn, callee_qn, line, col => func_qn, block_id"),
+            "cfg_blocks": ("cfg_block", "file_path, func_qn, block_id, is_entry, is_exit", "file_path, func_qn, block_id => is_entry, is_exit"),
+            "cfg_edges": ("cfg_edge", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line"),
+            "def_uses": ("def_use", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col"),
+            "method_calls": ("method_call", "file_path, func_qn, receiver, method, block_id, line", "file_path, func_qn, receiver, method, block_id, line"),
+            "source_locs": ("source_loc", "file_path, loc_kind, loc_id, line, col, end_line, rel_line", "file_path, loc_kind, loc_id => line, col, end_line, rel_line"),
+            "imports": ("import", "importing_file, imported_module, imported_name, line, alias", "importing_file, imported_module, imported_name, line => alias"),
+            "ref_by_block": ("ref_by_block", "file_path, func_qn, block_id, symbol_qn", "file_path, func_qn, block_id, symbol_qn"),
+            "module_level_refs": ("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line"),
+            "exported_qns": ("exported_symbol", "qualified_name", "qualified_name"),
+        }
+        for key, (relation, cols, schema) in specs.items():
+            relation_rows = rows[key]
+            if relation_rows:
+                self._put_batch(relation, cols, schema, relation_rows)
+
+        entries: dict[tuple[str, str], set[int]] = {}
+        adjacency: dict[tuple[str, str, int], list[int]] = {}
+        for fp, fq, bid, is_entry, _is_exit in rows["cfg_blocks"]:
+            if is_entry:
+                entries.setdefault((fp, fq), set()).add(bid)
+        for fp, fq, from_block, to_block, *_ in rows["cfg_edges"]:
+            adjacency.setdefault((fp, fq, from_block), []).append(to_block)
+        reachable = _bfs_reachable_blocks(entries, adjacency)
+        if reachable:
+            self._put_batch(
+                "reachable_block", "file_path, func_qn, block_id",
+                "file_path, func_qn, block_id", reachable,
+            )
+
     def update_files(
         self,
         file_list: list[tuple[str, str]],
         language: str = "python",
+        *,
+        project_root: str | None = None,
+        resolver_root: str | None = None,
     ) -> None:
         """Incrementally update facts for a set of files.
 
@@ -2785,160 +2826,51 @@ class FactGraph:
         file, all existing facts are deleted and fresh facts are extracted
         from the provided content.  Files not in *file_list* are untouched.
 
-        This is the single primitive on which ``build_from_files()``,
-        ``build_from_project()``, and ``_build_facts_db()`` should be
-        built.
+        Per-file extraction is shared with ``build_from_project()`` and the
+        persisted index builder; this method owns incremental deletion and
+        insertion only.
         """
         from emend import emend_core as _rust
-        from emend.cfg import build_cfgs_for_source
+        from emend.transform.cache import _extract_file_facts
 
         # 1. Delete existing facts for all files in the batch.
-        self.remove_files([str(Path(fp).resolve()) for fp, _ in file_list])
+        resolved_project_root = Path(project_root).resolve() if project_root else None
 
-        # 2. Extract and insert new facts per file.
+        def stored_path(file_path: str) -> str:
+            resolved = Path(file_path).resolve()
+            if resolved_project_root is not None:
+                try:
+                    return str(resolved.relative_to(resolved_project_root))
+                except ValueError:
+                    pass
+            return str(resolved)
+
+        self.remove_files([stored_path(fp) for fp, _ in file_list])
+
+        # 2. Extract and insert new facts per file.  The persisted index uses
+        # this same extractor, so analysis semantics cannot drift by builder.
         for abs_file_path, content in file_list:
-            rel_path = str(Path(abs_file_path).resolve())
-            module_name = Path(abs_file_path).stem
-
-            # -- Symbol facts -----------------------------------------------
+            rel_path = stored_path(abs_file_path)
+            if project_root:
+                from emend.transform.project_iter import _file_to_module
+                module_name = _file_to_module(abs_file_path, project_root)
+            else:
+                module_name = Path(abs_file_path).stem
             ext = Path(abs_file_path).suffix.lstrip(".") or "py"
             try:
-                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
-            except Exception:
-                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
-                raw_symbols = []
-
-            sym_facts: list[SymbolFact] = []
-            dec_facts: list[DecoratorOnFact] = []
-            _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
-            self.add_symbols_batch(sym_facts)
-            self.add_decorator_on_batch(dec_facts)
-
-            # -- Source location facts for symbols --------------------------
-            source_loc_facts: list[SourceLocFact] = []
-            for sf in sym_facts:
-                source_loc_facts.append(SourceLocFact(
-                    file_path=sf.file_path,
-                    loc_kind="symbol",
-                    loc_id=sf.qualified_name,
-                    line=sf.line,
-                    end_line=sf.end_line,
-                ))
-            self.add_source_locs_batch(source_loc_facts)
-
-            # -- CFG blocks and edges ---------------------------------------
-            try:
-                cfgs = build_cfgs_for_source(content, ext=ext)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
-                cfgs = []
-
-            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
-                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
-            )
-            self.add_cfg_blocks_batch(cfg_block_facts)
-            self.add_cfg_edges_batch(cfg_edge_facts)
-            self.add_source_locs_batch(block_loc_facts)
-
-            # -- Reference and call facts (scope resolver) ------------------
-            resolver = None
-            refs: list = []
-            try:
-                resolver_root = str(Path(abs_file_path).parent.resolve())
-                resolver = _rust.PyScopeResolver(resolver_root, ext)
+                effective_resolver_root = resolver_root or str(Path(abs_file_path).parent.resolve())
+                resolver = _rust.PyScopeResolver(effective_resolver_root, ext)
                 resolver.index_file(abs_file_path, content)
             except Exception:
                 logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
+                resolver = None
 
-            if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
-                try:
-                    refs = resolver.references_in_file(abs_file_path)
-                except Exception:
-                    logger.debug("references_in_file failed for %s", abs_file_path, exc_info=True)
-                    refs = []
-
-                ref_facts: list[ReferenceFact] = []
-                call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    ref_kind = _map_ref_kind(kind)
-                    fq, bid = _find_containing_block(block_ranges, line)
-                    ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=rel_path,
-                        line=line, col=col, ref_kind=ref_kind,
-                        func_qn=fq, block_id=bid,
-                    ))
-                    if ref_kind == "call":
-                        caller = _enclosing_symbol(symbol_ranges, line)
-                        caller_qn = caller if caller is not None else module_name
-                        call_facts.append(CallFact(
-                            caller_qn=caller_qn, callee_qn=qn,
-                            file_path=rel_path, line=line, col=col,
-                            func_qn=fq, block_id=bid,
-                        ))
-                self.add_references_batch(ref_facts)
-                self.add_calls_batch(call_facts)
-
-            # -- Def-use facts ----------------------------------------------
-            def_use_facts: list[DefUseFact] = build_def_use_facts(
-                cfgs, sym_facts, rel_path, module_name
+            rows = _extract_file_facts(
+                abs_file_path, rel_path, ext, content,
+                project_root or str(Path(abs_file_path).parent),
+                module_name, scope_resolver=resolver,
             )
-            method_call_facts: list[MethodCallFact] = []
-
-            # -- Module-level def-use facts ---------------------------------
-            # The Rust CFG builder only produces CFGs for functions, so
-            # module-level code has no def-use facts.  Synthesise them from
-            # scope-resolver references that fall outside any function block.
-            if resolver is not None:
-                from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
-                # Scope resolver uses 1-based lines; CFG uses 0-based.
-                # Convert to 0-based for consistency with CFG def-use facts.
-                mod_defs: dict[str, list[tuple[int, int]]] = {}  # var -> [(line, col)]
-                mod_uses: dict[str, list[tuple[int, int]]] = {}
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    fq_check, bid_check = _find_containing_block(block_ranges, line)
-                    if fq_check != "" or bid_check != -1:
-                        continue  # inside a function — already handled
-                    # Extract simple variable name (last segment of qn)
-                    var_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
-                    rk = _map_ref_kind(kind)
-                    line0 = line - 1  # convert to 0-based
-                    if rk == "write":
-                        mod_defs.setdefault(var_name, []).append((line0, col))
-                    elif rk in ("read", "call"):
-                        mod_uses.setdefault(var_name, []).append((line0, col))
-
-                for var_name, use_entries in mod_uses.items():
-                    if var_name in mod_defs:
-                        for dl, dc in mod_defs[var_name]:
-                            for ul, uc in use_entries:
-                                def_use_facts.append(DefUseFact(
-                                    file_path=rel_path,
-                                    func_qn=MODULE_LEVEL_FUNC,
-                                    var_name=var_name,
-                                    kind="write",
-                                    def_block=MODULE_LEVEL_BLOCK,
-                                    use_block=MODULE_LEVEL_BLOCK,
-                                    def_line=dl,
-                                    def_col=dc,
-                                    use_line=ul,
-                                    use_col=uc,
-                                ))
-
-            # Method call facts from dotted-name call references.
-            if resolver is not None:
-                method_call_facts = _build_method_call_facts(
-                    refs, rel_path, block_ranges, normalize_qn=False,
-                )
-
-            self.add_def_uses_batch(def_use_facts)
-            self.add_method_calls_batch(method_call_facts)
-
-            # -- Import facts -----------------------------------------------
-            import_facts = _extract_imports(rel_path, content)
-            self.add_imports_batch(import_facts)
+            self._insert_extracted_file_facts(rows)
 
     # -- File-list builder ------------------------------------------------
 
@@ -2991,16 +2923,11 @@ class FactGraph:
         ``languages`` (a list) or leave both as ``None`` to auto-detect
         from the project directory.
 
-        **Note**: This is a deliberate full-rebuild path used by tests and
-        one-off analysis.  In steady-state indexing, ``_build_facts_db()``
-        in ``transform.py`` is the canonical path that populates the
-        persisted ``facts.db`` directly from source files.
+        This full-rebuild API and the persisted index share the same
+        per-file extractor.
         """
-        from emend import emend_core as _rust
         from emend.transform import (
             _collect_all_source_files,
-            _collect_source_files,
-            _file_to_module,
             _find_project_root,
             detect_project_languages,
         )
@@ -3025,197 +2952,21 @@ class FactGraph:
         # the detected project_root.
         resolver_root = str(Path(project_path).resolve())
 
-        from emend.language_registry import detect_language as _detect_lang
-        from emend.language_registry import detect_exported_names
-
+        file_list: list[tuple[str, str]] = []
         for abs_file_path in source_files:
             try:
-                content = Path(abs_file_path).read_text(encoding="utf-8")
+                file_list.append((
+                    abs_file_path,
+                    Path(abs_file_path).read_text(encoding="utf-8"),
+                ))
             except (OSError, UnicodeDecodeError):
                 logger.debug("Could not read %s", abs_file_path, exc_info=True)
-                continue
 
-            # Store relative paths in the fact graph so they match
-            # selector paths regardless of working directory.
-            try:
-                rel_path = str(Path(abs_file_path).relative_to(Path(project_root).resolve()))
-            except ValueError:
-                rel_path = abs_file_path
-
-            module_name = _file_to_module(abs_file_path, project_root)
-
-            # -- Symbol facts (via Rust symbol collection) ----------------
-            ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-            try:
-                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
-            except Exception:
-                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
-                raw_symbols = []
-
-            sym_facts: list[SymbolFact] = []
-            dec_facts: list[DecoratorOnFact] = []
-            _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
-            graph.add_symbols_batch(sym_facts)
-            graph.add_decorator_on_batch(dec_facts)
-
-            # -- Exported symbol facts (for TS/Rust visibility) ----------
-            _lang = _detect_lang(abs_file_path) or "python"
-            try:
-                exported_names = detect_exported_names(content, _lang)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Could not detect exported symbols for %s", abs_file_path, exc_info=True)
-                exported_names = set()
-            if exported_names:
-                exported_qns = [
-                    sf.qualified_name for sf in sym_facts
-                    if sf.name in exported_names
-                ]
-                graph.add_exported_symbols_batch(exported_qns)
-
-            # -- Source location facts for symbols -----------------------
-            source_loc_facts: list[SourceLocFact] = []
-            for sf in sym_facts:
-                source_loc_facts.append(SourceLocFact(
-                    file_path=sf.file_path,
-                    loc_kind="symbol",
-                    loc_id=sf.qualified_name,
-                    line=sf.line,
-                    end_line=sf.end_line,
-                ))
-            graph.add_source_locs_batch(source_loc_facts)
-
-            # -- CFG blocks and edges (via Rust CFG builder) -------------
-            from emend.cfg import build_cfgs_for_source
-            try:
-                cfgs = build_cfgs_for_source(content, ext=ext)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
-                cfgs = []
-
-            # Build block line ranges for block-tagging references
-            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
-                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
-            )
-            graph.add_cfg_blocks_batch(cfg_block_facts)
-            graph.add_cfg_edges_batch(cfg_edge_facts)
-            graph.add_source_locs_batch(block_loc_facts)
-
-            # -- Reference and call facts (via scope resolver) ------------
-            try:
-                resolver = _rust.PyScopeResolver(resolver_root, ext)
-                resolver.index_file(abs_file_path, content)
-            except Exception:
-                logger.debug(
-                    "Could not build scope resolver for %s", abs_file_path, exc_info=True
-                )
-                resolver = None
-
-            if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
-
-                try:
-                    refs = resolver.references_in_file(abs_file_path)
-                except Exception:
-                    logger.debug(
-                        "references_in_file failed for %s", abs_file_path, exc_info=True
-                    )
-                    refs = []
-
-                ref_facts: list[ReferenceFact] = []
-                call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    qn = _normalize_qn(qn)
-                    ref_kind = _map_ref_kind(kind)
-                    fq, bid = _find_containing_block(block_ranges, line)
-                    ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=rel_path,
-                        line=line, col=col, ref_kind=ref_kind,
-                        func_qn=fq, block_id=bid,
-                    ))
-
-                    if ref_kind == "call":
-                        caller = _enclosing_symbol(symbol_ranges, line)
-                        # Use module name as caller for module-level calls
-                        caller_qn = caller if caller is not None else module_name
-                        call_facts.append(CallFact(
-                            caller_qn=caller_qn, callee_qn=qn,
-                            file_path=rel_path, line=line, col=col,
-                            func_qn=fq, block_id=bid,
-                        ))
-
-                graph.add_references_batch(ref_facts)
-                graph.add_calls_batch(call_facts)
-
-                # Exclude definition-site "references" (e.g. class/fn name
-                # at its own definition line) to avoid inflating live_ref.
-                sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts}
-                ref_by_block_rows = [
-                    [f.file_path, f.func_qn, f.block_id, f.symbol_qn]
-                    for f in ref_facts
-                    if f.func_qn and f.block_id >= 0
-                    and (f.symbol_qn, f.line) not in sym_def_lines
-                ]
-                if ref_by_block_rows:
-                    graph._client.run(
-                        "?[file_path, func_qn, block_id, symbol_qn] <- $rows "
-                        ":put ref_by_block {file_path, func_qn, block_id, symbol_qn}",
-                        {"rows": ref_by_block_rows},
-                    )
-
-            # -- Def-use facts with block IDs ----------------------------
-            def_use_facts: list[DefUseFact] = build_def_use_facts(
-                cfgs, sym_facts, rel_path, module_name
-            )
-            method_call_facts: list[MethodCallFact] = []
-
-            # -- Method call facts (from call references with dotted names) --
-            if resolver is not None:
-                method_call_facts = _build_method_call_facts(
-                    refs, rel_path, block_ranges, normalize_qn=True,
-                )
-
-            graph.add_def_uses_batch(def_use_facts)
-            graph.add_method_calls_batch(method_call_facts)
-
-            # -- Import facts (via stdlib ast) ----------------------------
-            import_facts = _extract_imports(rel_path, content)
-            graph.add_imports_batch(import_facts)
-
-        # -- Compute reachable blocks via BFS from entry blocks ----------
-        try:
-            block_result = graph._client.run(
-                "?[fp, fq, bid, ie] := *cfg_block[fp, fq, bid, ie, _]"
-            )
-            edge_result = graph._client.run(
-                "?[fp, fq, fb, tb] := *cfg_edge[fp, fq, fb, tb, _, _, _]"
-            )
-        except Exception:
-            logger.debug("Could not query CFG blocks/edges for reachability", exc_info=True)
-        else:
-            entries_by_func: dict[tuple[str, str], set[int]] = {}
-            for fp, fq, bid, is_entry in block_result["rows"]:
-                if is_entry:
-                    entries_by_func.setdefault((fp, fq), set()).add(bid)
-
-            adj: dict[tuple[str, str, int], list[int]] = {}
-            for fp, fq, fb, tb in edge_result["rows"]:
-                adj.setdefault((fp, fq, fb), []).append(tb)
-
-            reachable_rows = _bfs_reachable_blocks(entries_by_func, adj)
-
-            if reachable_rows:
-                try:
-                    graph._client.run(
-                        "?[file_path, func_qn, block_id] <- $rows "
-                        ":put reachable_block {file_path, func_qn, block_id}",
-                        {"rows": reachable_rows},
-                    )
-                except Exception:
-                    logger.debug("Could not store reachable blocks", exc_info=True)
+        graph.update_files(
+            file_list,
+            project_root=project_root,
+            resolver_root=resolver_root,
+        )
 
         # -- Resolve builtins.* references using import facts -----------
         # When a scope resolver can't resolve a cross-file import (common
