@@ -14,8 +14,10 @@ YAML, suitable for version control.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import sqlite3
 import subprocess
 import threading
 import time
@@ -25,6 +27,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
+
+from emend.errors import BUG_EXCEPTIONS
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +86,8 @@ def _load_yaml(path: Path) -> dict:
         with open(path, "r") as fh:
             data = yaml.safe_load(fh)
             return data if isinstance(data, dict) else {}
-    except Exception:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        logger.debug("Failed to load mappings YAML from %s", path, exc_info=True)
         return {}
 
 
@@ -195,7 +202,8 @@ def make_resolve_module_cb(
             return None
         try:
             return store.resolve_module_to_path(module)
-        except Exception:
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            logger.debug("Module resolution failed for %r", module, exc_info=True)
             return None
 
     return resolve_module_cb
@@ -329,7 +337,6 @@ class MappingStore:
             return
 
         try:
-            import sqlite3
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             data: dict[str, Any] = {}
@@ -358,12 +365,12 @@ class MappingStore:
                         try:
                             import json
                             m.metadata = json.loads(row["metadata_json"])
-                        except Exception:
-                            pass
+                        except (KeyError, IndexError, TypeError, ValueError):
+                            logger.debug("Skipping unreadable metadata_json", exc_info=True)
                         mappings.append(_identifier_mapping_to_yaml(m))
                     data["identifier_mappings"] = mappings
-            except Exception:
-                pass
+            except (sqlite3.Error, KeyError, IndexError):
+                logger.debug("identifier_mapping migration skipped", exc_info=True)
 
             # Migrate module_mappings
             try:
@@ -385,20 +392,21 @@ class MappingStore:
                         try:
                             import json
                             m.metadata = json.loads(row["metadata_json"])
-                        except Exception:
-                            pass
+                        except (KeyError, IndexError, TypeError, ValueError):
+                            logger.debug("Skipping unreadable metadata_json", exc_info=True)
                         modules.append(_module_mapping_to_yaml(m))
                     data["module_mappings"] = modules
-            except Exception:
-                pass
+            except (sqlite3.Error, KeyError, IndexError):
+                logger.debug("module_mapping migration skipped", exc_info=True)
 
             conn.close()
 
             if data:
                 _save_yaml(self._yaml_path, data)
 
-        except Exception:
-            pass  # Migration is best-effort
+        except (sqlite3.Error, OSError, yaml.YAMLError):
+            # Migration is best-effort
+            logger.debug("Migration from knowledge.db failed", exc_info=True)
 
     def _save(self) -> None:
         """Persist current state to YAML."""
@@ -713,7 +721,10 @@ class MappingStore:
                 rem_parts,
                 resolve_module_cb=make_resolve_module_cb(self)
             )
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug("Selector resolution failed for %r", selector, exc_info=True)
             return None
 
     def fetch_module_repo(self, module_prefix: str) -> str | None:
@@ -870,8 +881,8 @@ def _default_branch(bare_dir: Path) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+    except (subprocess.SubprocessError, OSError):
+        logger.debug("Reading default branch in %s failed", bare_dir, exc_info=True)
     return ""
 
 
@@ -884,7 +895,8 @@ def _is_tag(bare_dir: Path, ref: str) -> bool:
             capture_output=True, text=True, timeout=5,
         )
         return result.returncode == 0
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
+        logger.debug("Tag check for %r in %s failed", ref, bare_dir, exc_info=True)
         return False
 
 
@@ -900,7 +912,7 @@ def _maybe_fetch_branch(
             mtime = last_fetch_file.stat().st_mtime
             if (now - mtime) < (ttl_hours * 3600):
                 return
-        except Exception:
+        except OSError:
             pass
 
     try:
@@ -918,9 +930,9 @@ def _maybe_fetch_branch(
         )
         # 3. Update timestamp
         last_fetch_file.touch()
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         # Best effort - if network is down or merge fails, just keep going
-        pass
+        logger.debug("Branch fetch for %r failed", ref, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

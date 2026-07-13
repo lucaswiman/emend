@@ -113,6 +113,8 @@ def rename(
     project: Annotated[str | None, Field(description="Project root directory.")] = None,
 ) -> str:
     """Rename a symbol or module across the project, updating all references."""
+    from emend.cli_base import format_module_rename_move, format_symbol_rename_move
+
     if "::" in selector:
         parsed = parse_extended_selector(selector)
         diffs = rename_symbol(
@@ -124,21 +126,12 @@ def rename(
             unsure=unsure,
             apply=apply,
         )
-        if not diffs:
-            return "No changes needed."
-        parts = [d for d in diffs.values() if d]
-        result = "".join(parts)
-        if not apply:
-            result += "\nDry-run. Set apply=True to write changes."
-        return result
+        return format_symbol_rename_move(diffs, apply=apply)
     else:
         diffs = rename_module(selector, to, project, apply)
-        if apply:
-            return "Module renamed successfully."
-        if "__description__" in diffs:
-            return diffs["__description__"] + "\nDry-run. Set apply=True to write changes."
-        parts = [d for d in diffs.values() if d]
-        return "".join(parts) + "\nDry-run. Set apply=True to write changes."
+        return format_module_rename_move(
+            diffs, apply=apply, success_msg="Module renamed successfully."
+        )
 
 
 def move(
@@ -156,6 +149,8 @@ def move(
         with redirect_stdout(buf):
             ast_commands.cmd_copy_to(selector, destination, append=True, dedent=dedent, apply=apply, project_path=project)
         return buf.getvalue()
+    from emend.cli_base import format_module_rename_move, format_symbol_rename_move
+
     if "::" in selector:
         parsed = parse_extended_selector(selector)
         diffs = move_symbol(
@@ -166,21 +161,12 @@ def move(
             project_path=project,
             apply=apply,
         )
-        if not diffs:
-            return "No changes needed."
-        parts = [d for d in diffs.values() if d]
-        result = "".join(parts)
-        if not apply:
-            result += "\nDry-run. Set apply=True to write changes."
-        return result
+        return format_symbol_rename_move(diffs, apply=apply)
     else:
         diffs = move_module(selector, destination, project, apply)
-        if apply:
-            return "Module moved successfully."
-        if "__description__" in diffs:
-            return diffs["__description__"] + "\nDry-run. Set apply=True to write changes."
-        parts = [d for d in diffs.values() if d]
-        return "".join(parts) + "\nDry-run. Set apply=True to write changes."
+        return format_module_rename_move(
+            diffs, apply=apply, success_msg="Module moved successfully."
+        )
 
 
 @mcp_app.tool()

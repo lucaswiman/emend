@@ -106,11 +106,6 @@ _MAGIC_COMMENT_RE = re.compile(r'#\s*language\s*=\s*(\w+)', re.IGNORECASE)
 # Applied to already-extracted string content (not raw source).
 _JINJA_EXPR_RE = re.compile(r'\{\{.*?\}\}', re.DOTALL)
 _JINJA_TAG_RE = re.compile(r'\{%.*?%\}', re.DOTALL)
-_JINJA_COMMENT_RE = re.compile(r'\{#.*?#\}', re.DOTALL)
-_JINJA_KEYWORD_RE = re.compile(
-    r'\{[%{].*?\b(extends|block|macro|include|import|from|for|if|set|call|filter)\b.*?[%}]\}',
-    re.IGNORECASE | re.DOTALL,
-)
 # Jinja2 file extensions
 _JINJA_EXTENSIONS = frozenset({'.html', '.jinja', '.jinja2', '.j2'})
 
@@ -156,11 +151,13 @@ def _get_string_literals(
 
     Falls back to an empty list if ``emend_core`` is unavailable.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
+    ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
-        ext = Path(file_path).suffix.lstrip(".") or "py"
         return _rust.collect_string_literals(source, ext)
     except Exception:
+        logger.debug("collect_string_literals failed for %s", file_path, exc_info=True)
         return []
 
 
@@ -171,24 +168,26 @@ def _has_magic_comment(source: str, file_path: str, keyword: str) -> bool:
     simple regex over the raw source only if the Rust extension is unavailable.
     The regex fallback operates on comment text, not source structure.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
+    ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
-        ext = Path(file_path).suffix.lstrip(".") or "py"
         comments = _rust.collect_comments(source, ext)
-        keyword_lower = keyword.lower()
-        for _line, _col, text in comments:
-            # text is e.g. "# language=sql" or "# language = sql"
-            m = _MAGIC_COMMENT_RE.search(text)
-            if m and m.group(1).lower() == keyword_lower:
-                return True
-        return False
     except Exception:
+        logger.debug("collect_comments failed for %s", file_path, exc_info=True)
         # Fallback: regex on raw source (acceptable for comment text detection)
         return bool(re.search(
             r'#\s*language\s*=\s*' + re.escape(keyword),
             source,
             re.IGNORECASE,
         ))
+    keyword_lower = keyword.lower()
+    for _line, _col, text in comments:
+        # text is e.g. "# language=sql" or "# language = sql"
+        m = _MAGIC_COMMENT_RE.search(text)
+        if m and m.group(1).lower() == keyword_lower:
+            return True
+    return False
 
 
 def _make_region_from_ts(
@@ -392,11 +391,6 @@ _SQL_COLUMN_LIST_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-_SQL_WHERE_COLUMN_RE = re.compile(
-    r'\bWHERE\s+.*?`?(\w+)`?\s*(?:=|<|>|LIKE|IN|IS)',
-    re.IGNORECASE,
-)
-
 # SQL reserved words to skip when extracting column names
 _SQL_RESERVED = frozenset({
     "select", "from", "where", "join", "on", "as", "and", "or", "not",
@@ -512,8 +506,6 @@ _JINJA_BLOCK_RE = re.compile(r'\{%[-\s]*block\s+(\w+)')
 _JINJA_EXTENDS_RE = re.compile(r'\{%[-\s]*extends\s+["\']([^"\']+)["\']')
 # Jinja2 macro: {% macro render_field(field) %} -> "render_field"
 _JINJA_MACRO_RE = re.compile(r'\{%[-\s]*macro\s+(\w+)')
-# Jinja2 include: {% include "header.html" %} -> "header.html"
-_JINJA_INCLUDE_RE = re.compile(r'\{%[-\s]*include\s+["\']([^"\']+)["\']')
 # Jinja2 for loop variable: {% for item in items %} -> "items" (iterable)
 _JINJA_FOR_RE = re.compile(r'\{%[-\s]*for\s+\w+\s+in\s+(\w+)')
 
@@ -792,12 +784,18 @@ def _index_classes_and_tablenames(
         * ``tablename_mapping`` maps ``tablename -> (class_name, line)`` for
           string-literal ``__tablename__`` assignments inside class bodies.
     """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
-        from emend import emend_core as _rust  # type: ignore[attr-defined]
+    except OSError:
+        logger.debug("Could not read %s", file_path, exc_info=True)
+        return [], {}
+    try:
         symbols = _rust.collect_symbols_from_str(source, ext="py")
         string_literals = _rust.collect_string_literals(source, "py")
     except Exception:
+        logger.debug("Symbol/string collection failed for %s", file_path, exc_info=True)
         return [], {}
 
     # Index string literals by start line so we can look up RHS values on a
@@ -842,6 +840,29 @@ def _find_tablename_mapping(file_path: str) -> dict[str, tuple[str, int]]:
     return mapping
 
 
+def _iter_project_files(
+    project_root: str,
+    languages: tuple[str, ...],
+    suffixes: tuple[str, ...],
+) -> list[Path]:
+    """Collect project files for the given languages via the shared,
+    gitignore-aware ``collect_source_files_scandir`` (skips ``.venv`` /
+    ``node_modules`` / build dirs), filtered to *suffixes* to preserve the
+    original ``rglob`` semantics.
+    """
+    from emend.file_collection import collect_source_files_scandir
+
+    seen: set[str] = set()
+    out: list[Path] = []
+    for lang in languages:
+        for p in collect_source_files_scandir(project_root, lang):
+            if p in seen or (suffixes and not p.endswith(suffixes)):
+                continue
+            seen.add(p)
+            out.append(Path(p))
+    return out
+
+
 def resolve_orm_links(
     dsl_symbols: list[DslSymbol],
     project_root: str,
@@ -865,10 +886,8 @@ def resolve_orm_links(
     Returns:
         List of DslLink objects.
     """
-    root = Path(project_root)
-
     # Collect all Python files in project
-    py_files = list(root.rglob("*.py"))
+    py_files = _iter_project_files(project_root, ("python",), (".py",))
 
     # Build index: class_name -> (file_path, line)
     class_index: dict[str, tuple[str, int]] = {}
@@ -953,11 +972,10 @@ def resolve_jinja_links(
     Returns:
         List of DslLink objects.
     """
-    root = Path(project_root)
     links: list[DslLink] = []
 
     # Collect all Python files and scan for render_template calls
-    py_files = list(root.rglob("*.py"))
+    py_files = _iter_project_files(project_root, ("python",), (".py",))
 
     # Build index: template_name -> [(file_path, line, context_vars)]
     template_contexts: dict[str, list[tuple[str, int, set[str]]]] = {}
@@ -977,7 +995,9 @@ def resolve_jinja_links(
             )
 
     # Build block index: scan template files for matching block definitions
-    template_dirs = list(root.rglob("*.html")) + list(root.rglob("*.jinja2")) + list(root.rglob("*.j2"))
+    template_dirs = _iter_project_files(
+        project_root, ("html", "jinja2"), (".html", ".jinja2", ".j2")
+    )
     block_index: dict[str, list[tuple[str, int]]] = {}  # block_name -> [(file, line)]
     extends_map: dict[str, str] = {}  # child_file -> parent_template
     for tpl_file in template_dirs:
@@ -1073,11 +1093,12 @@ def resolve_graphql_links(
     Returns:
         List of DslLink objects.
     """
-    root = Path(project_root)
     links: list[DslLink] = []
 
     # Scan Python and TypeScript files for resolver classes and methods
-    code_files = list(root.rglob("*.py")) + list(root.rglob("*.ts"))
+    code_files = _iter_project_files(
+        project_root, ("python", "typescript"), (".py", ".ts")
+    )
 
     # Build class/function index
     class_index: dict[str, tuple[str, int]] = {}  # class_name -> (file, line)
@@ -1506,7 +1527,6 @@ def find_dsl_impact(
     Returns:
         List of (dsl_file, dsl_line, reason) tuples describing impacted DSL regions.
     """
-    root = Path(project_root)
     impacted: list[tuple[str, str, str]] = []
 
     # Extract class names from changed selectors
@@ -1519,21 +1539,21 @@ def find_dsl_impact(
     if not changed_classes:
         return impacted
 
+    py_files = _iter_project_files(project_root, ("python",), (".py",))
+
+    # Build class -> declared __tablename__ index once (single pass over files).
+    class_tablenames: dict[str, set[str]] = {}
+    for py_file in py_files:
+        for _tn_name, (tn_class, _line) in _find_tablename_mapping(str(py_file)).items():
+            class_tablenames.setdefault(tn_class, set()).add(_tn_name)
+
     # Build reverse mapping: class -> possible table names
     class_to_tables: dict[str, set[str]] = {}
     for cls in changed_classes:
         # Convention: PascalCase -> snake_case plural
         snake = re.sub(r'(?<!^)(?=[A-Z])', '_', cls).lower()
         tables = {snake, snake + "s", snake + "es"}
-        # Also check __tablename__ in project files
-        for py_file in root.rglob("*.py"):
-            try:
-                source = py_file.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for tn_name, (tn_class, _line) in _find_tablename_mapping(str(py_file)).items():
-                if tn_class == cls:
-                    tables.add(tn_name)
+        tables |= class_tablenames.get(cls, set())
         class_to_tables[cls] = tables
 
     all_tables = set()
@@ -1544,7 +1564,7 @@ def find_dsl_impact(
         return impacted
 
     # Scan all files for SQL regions referencing those tables
-    for py_file in root.rglob("*.py"):
+    for py_file in py_files:
         try:
             source = py_file.read_text(encoding="utf-8", errors="replace")
         except OSError:

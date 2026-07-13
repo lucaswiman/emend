@@ -11,6 +11,8 @@ import time
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -199,8 +201,8 @@ def _get_last_reference_commit(file_path: str, symbol_name: str) -> str | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError):
+        pass  # git missing, not a repo, or timed out
     return None
 
 
@@ -268,6 +270,9 @@ def _string_literal_filter(
             ext = Path(path).suffix.lstrip(".") or "py"
             literals = _rust.collect_string_literals(source, ext)
         except Exception:
+            logger.debug(
+                "string-literal collection failed for %s", path, exc_info=True,
+            )
             return []
         # Each tuple is
         # (start_byte, end_byte, start_line, start_col, end_line, end_col, content)
@@ -283,7 +288,7 @@ def _string_literal_filter(
             continue
         try:
             _content = Path(_fp).read_text(errors="replace")
-        except Exception:
+        except OSError:
             continue
         # Cheap prefilter: skip files that don't mention any candidate name.
         if not any(n in _content for n in str_names):
@@ -292,21 +297,16 @@ def _string_literal_filter(
         if literals:
             file_str_cache[_r] = "\n".join(literals)
 
-    names_with_str_ref: set[tuple[str, str]] = set()
-    for d in candidates:
-        if len(d.name) <= 3:
-            continue
-        r = str(Path(d.file_path).resolve())
+    # Concatenate all collected literal text into one project-wide blob and
+    # scan it once per unique candidate name. Joining on "\n" prevents a name
+    # from matching across a file boundary (identifiers contain no newline), so
+    # this preserves the per-file substring semantics exactly. A name counts as
+    # referenced if it appears inside a string literal in any scanned file
+    # (including its own — e.g. a registry dict key or its own docstring).
+    project_str_blob = "\n".join(file_str_cache.values())
+    referenced_names = {n for n in str_names if n in project_str_blob}
 
-        # A name counts as referenced if it appears inside a string literal
-        # in any scanned file (including its own file — e.g. a registry dict
-        # or the symbol's own docstring mentioning it).
-        for _r, _str_text in file_str_cache.items():
-            if d.name in _str_text:
-                names_with_str_ref.add((d.file_path, d.name))
-                break
-
-    return [d for d in candidates if (d.file_path, d.name) not in names_with_str_ref]
+    return [d for d in candidates if d.name not in referenced_names]
 
 
 import re as _re
@@ -556,16 +556,20 @@ def semantic_context(
                 test_caller_count += 1
             else:
                 non_test_caller_count += 1
-    except Exception as exc:
-        logger.debug("semantic_context: find_callers failed: %s", exc)
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("semantic_context: find_callers failed", exc_info=True)
 
     # ---- Gather callees ---------------------------------------------------
     callees_list: list[str] = []
     try:
         for callee in find_callees(selector, project_path=project_root):
             callees_list.append(callee.qualified_name or callee.name)
-    except Exception as exc:
-        logger.debug("semantic_context: find_callees failed: %s", exc)
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("semantic_context: find_callees failed", exc_info=True)
 
     # ---- Count references -------------------------------------------------
     ref_count = 0
@@ -573,8 +577,10 @@ def semantic_context(
         for _ in find_references(selector, project_path=project_root,
                                  include_definition=False, include_imports=False):
             ref_count += 1
-    except Exception as exc:
-        logger.debug("semantic_context: find_references failed: %s", exc)
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("semantic_context: find_references failed", exc_info=True)
 
     # ---- Build interface decorators set -----------------------------------
     iface_decorators = set(_EXTERNAL_INTERFACE_DECORATORS)
@@ -618,30 +624,35 @@ def semantic_context(
     # Uses same regex approach as dead code string scanning
     symbol_name = symbol_path[-1]
     if len(symbol_name) > 3:
+        matched: list[tuple[str, str]] = []
         try:
             source_files = _collect_source_files(project_root)
             matched = _rust.read_and_filter_files(source_files, [symbol_name])
-            str_ref_files: list[str] = []
-            for fp, content in matched:
-                for line_text in content.splitlines():
-                    if symbol_name not in line_text:
-                        continue
-                    # Strip non-string content; if name disappears, it was in a string
-                    stripped = _STRING_LITERAL_RE.sub("", line_text)
-                    if symbol_name in line_text and symbol_name not in stripped:
-                        str_ref_files.append(fp)
-                        break
-            if str_ref_files:
-                dangers.append(Danger(
-                    level="medium",
-                    category="dynamic_reference",
-                    message=f"Name '{symbol_name}' appears as string literal — renaming may miss dynamic references",
-                    evidence=", ".join(str_ref_files[:3]) + (
-                        f" (+{len(str_ref_files) - 3} more)" if len(str_ref_files) > 3 else ""
-                    ),
-                ))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            pass  # best-effort
+            logger.debug(
+                "semantic_context: string-reference scan failed", exc_info=True,
+            )
+        str_ref_files: list[str] = []
+        for fp, content in matched:
+            for line_text in content.splitlines():
+                if symbol_name not in line_text:
+                    continue
+                # Strip non-string content; if name disappears, it was in a string
+                stripped = _STRING_LITERAL_RE.sub("", line_text)
+                if symbol_name in line_text and symbol_name not in stripped:
+                    str_ref_files.append(fp)
+                    break
+        if str_ref_files:
+            dangers.append(Danger(
+                level="medium",
+                category="dynamic_reference",
+                message=f"Name '{symbol_name}' appears as string literal — renaming may miss dynamic references",
+                evidence=", ".join(str_ref_files[:3]) + (
+                    f" (+{len(str_ref_files) - 3} more)" if len(str_ref_files) > 3 else ""
+                ),
+            ))
 
     # 4. High fan-out (many callers)
     if non_test_caller_count >= 10:
@@ -703,8 +714,12 @@ def semantic_context(
                 name="return",
                 type_annotation=sym_infos[0].returns,
             ))
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug(
+            "semantic_context: return-type lookup failed", exc_info=True,
+        )
 
     # ---- Detect side effects from callees ---------------------------------
     # Build a prefix to identify local-scope callees (e.g., set.add on local vars)
@@ -879,7 +894,7 @@ def find_dead_code(
         if fp not in _file_lines_cache:
             try:
                 _file_lines_cache[fp] = Path(fp).read_text(errors="replace").splitlines()
-            except Exception:
+            except OSError:
                 _file_lines_cache[fp] = []
         lines = _file_lines_cache[fp]
         if 0 < line <= len(lines):
@@ -945,6 +960,8 @@ def find_dead_code(
             dead_symbols, scan_root, all_files, exclude_references_from,
         )
 
+    dead_symbols.sort(key=lambda symbol: (symbol.file_path, symbol.line))
+
     logger.info(
         "dead_code: %d dead symbols in %.3fs",
         len(dead_symbols), time.monotonic() - t0,
@@ -991,6 +1008,25 @@ def find_dead_code(
                     return True
         return False
 
+    # Batch all block line-range lookups into a single source_loc query
+    # instead of running one query per unreachable block.
+    needed_loc_keys = {
+        (ub.file_path, f"{ub.func_qn}:{ub.block_id}") for ub in raw_unreachable
+    }
+    block_loc_index: dict[tuple[str, str], tuple[int, int]] = {}
+    if needed_loc_keys:
+        loc_rows: list = []
+        try:
+            loc_rows = graph._client.run(
+                '?[fp, loc_id, line, end_line] := '
+                '*source_loc[fp, "block", loc_id, line, _, end_line, _]'
+            )["rows"]
+        except Exception:
+            logger.debug("source_loc block query failed", exc_info=True)
+        for fp, loc_id, line, end_line in loc_rows:
+            if (fp, loc_id) in needed_loc_keys:
+                block_loc_index.setdefault((fp, loc_id), (line, end_line))
+
     # Yield unreachable blocks first
     for ub in raw_unreachable:
         abs_fp = (
@@ -998,19 +1034,10 @@ def find_dead_code(
             if not Path(ub.file_path).is_absolute()
             else ub.file_path
         )
-        # Look up block line range from source_loc
-        try:
-            loc_result = graph._client.run(
-                '?[line, end_line] := *source_loc[$fp, "block", $loc_id, line, _, end_line, _]',
-                {"fp": ub.file_path, "loc_id": f"{ub.func_qn}:{ub.block_id}"},
-            )
-            if loc_result["rows"]:
-                start_line = loc_result["rows"][0][0]
-                end_line = loc_result["rows"][0][1]
-            else:
-                continue  # Skip blocks without line info
-        except Exception:
-            continue
+        loc = block_loc_index.get((ub.file_path, f"{ub.func_qn}:{ub.block_id}"))
+        if loc is None:
+            continue  # Skip blocks without line info
+        start_line, end_line = loc
 
         # Skip blocks with no real lines
         if start_line <= 0:
@@ -1056,7 +1083,7 @@ def find_dead_code(
             continue
         try:
             content = abs_path.read_text(encoding="utf-8")
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             continue
         for imp in _extract_imports(str(abs_path), content):
             imported_targets.add(imp.imported_module)
@@ -1215,24 +1242,25 @@ def safe_delete(
                         '  not starts_with(name, "test_"), not starts_with(name, "Test"), '
                         '  not (starts_with(name, "__"), ends_with(name, "__"))\n'
                     )
-                    for row in result["rows"]:
-                        mqn, name, sym_kind, fp, line = row
-                        if mqn not in delete_qns:
-                            # Convert relative path back to absolute.
-                            abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
-                            sym_selector = f"{abs_fp}::{name}"
-                            delete_set.append({
-                                "selector": sym_selector,
-                                "file_path": abs_fp,
-                                "name": name,
-                                "kind": sym_kind,
-                                "line": line,
-                                "reason": "only referenced by deleted symbol(s)",
-                            })
-                            delete_qns.add(mqn)
-                            changed = True
                 except Exception:
                     logger.debug("CozoDB cascade query failed", exc_info=True)
+                    break
+                for row in result["rows"]:
+                    mqn, name, sym_kind, fp, line = row
+                    if mqn not in delete_qns:
+                        # Convert relative path back to absolute.
+                        abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
+                        sym_selector = f"{abs_fp}::{name}"
+                        delete_set.append({
+                            "selector": sym_selector,
+                            "file_path": abs_fp,
+                            "name": name,
+                            "kind": sym_kind,
+                            "line": line,
+                            "reason": "only referenced by deleted symbol(s)",
+                        })
+                        delete_qns.add(mqn)
+                        changed = True
 
     # ----- Phase 2: Apply deletions and collect diffs --------------------
     # Group by file, process in reverse line order to avoid offset shifts.
@@ -1285,4 +1313,3 @@ def safe_delete(
 
 
 # visit_project_ts yields (py_file, content, resolver)
-

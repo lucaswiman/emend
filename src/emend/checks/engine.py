@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from emend.lint import LintViolation, LintRule
     from emend.policy import PolicyViolation, Policy, FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck, DatalogCheck, CustomCheck, SequenceCheck
-    from emend.rules_config import DeadCodeConfig
+    from emend.checks.rules_config import DeadCodeConfig
     from emend.checks.duplicates import DuplicateCodeConfig
 
 
@@ -157,8 +157,6 @@ def _dedup_key(violation: CheckViolation) -> tuple[str, int, str, str]:
 LINT_KINDS = frozenset({"match", "flow", "deadcode", "duplicate-code"})
 # Rule kinds owned by the policy engine (structural/type/datalog/custom/sequence).
 POLICY_KINDS = frozenset({"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"})
-# All known kinds.
-ALL_KINDS = LINT_KINDS | POLICY_KINDS
 
 
 def run_checks(
@@ -200,8 +198,7 @@ def run_checks(
     run_lint_engine = mode in (None, "lint", "all")
     run_policy_engine = mode in (None, "policy", "all")
 
-    lint_kinds = {"match", "flow", "deadcode", "duplicate-code"}
-    if run_lint_engine and (kind is None or kind in lint_kinds):
+    if run_lint_engine and (kind is None or kind in LINT_KINDS):
         lint_rules, _macros, deadcode_config = load_rules(config)
         duplicate_code_config = load_duplicate_code_config(config)
         selected_lint_rules = lint_rules
@@ -245,22 +242,17 @@ def run_checks(
         )
         normalized.extend(lint_checks)
 
-    policy_kinds = {"match", "structural", "type", "flow", "deadcode", "datalog", "custom", "sequence"}
-    if run_policy_engine and (kind is None or kind in policy_kinds):
-        # A rules document may legitimately contain no policy-bearing keys
-        # (e.g. only a ``duplicate`` or ``trace`` section); skip the policy
-        # engine then.  Malformed policies must still raise, so only the
-        # missing-key case is treated as empty.
+    if run_policy_engine and (kind is None or kind in POLICY_KINDS):
+        # Skip the policy engine when the document has no policy-bearing keys;
+        # malformed policies must still raise, so only the missing-key case is
+        # treated as empty.
         from emend.checks.rules_config import load_rules_document
 
         data, _path = load_rules_document(config)
-        # In combined mode (``None``/``"all"``) the lint engine already
-        # processed every ``rules:`` entry, so the policy engine must only
-        # handle the ``policies:`` key — otherwise ``load_policies`` would
-        # synthesise a duplicate structural/flow/deadcode policy from each
-        # ``rules:`` entry and every rule would be reported twice.  The
-        # ``rules:`` fallback is only for a standalone ``mode == "policy"`` run
-        # where the lint engine did not run.
+        # In combined mode the lint engine already processed every ``rules:``
+        # entry, so the policy engine only handles ``policies:`` to avoid
+        # reporting each rule twice; the ``rules:`` fallback is for a standalone
+        # ``mode == "policy"`` run where lint did not run.
         if "policies" in data:
             policies = load_policies(config)
         elif mode == "policy" and "rules" in data:
@@ -271,7 +263,7 @@ def run_checks(
             policies,
             rule_name=rule_name,
             kind=kind,
-            allowed_kinds=policy_kinds,
+            allowed_kinds=POLICY_KINDS,
         )
         if selected_policies:
             policy_violations = run_policy_checks(
@@ -281,9 +273,8 @@ def run_checks(
                 project_path=project_path,
             )
             policy_checks = _policy_violations_to_checks(policy_violations)
-            # When both engines run, ``rules:`` entries are processed by lint
-            # AND re-derived into unified policies, so the same match surfaces
-            # from both. Drop the policy copies that lint already reported.
+            # When both engines run, each ``rules:`` match surfaces from lint
+            # and again from the re-derived policy; drop the policy copies.
             if run_lint_engine:
                 lint_keys = {_dedup_key(v) for v in lint_checks}
                 policy_checks = [

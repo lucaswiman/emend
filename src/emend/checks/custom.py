@@ -48,6 +48,9 @@ def run_custom_check(
             local_ns,
         )
     except Exception as exc:
+        # Exceptions here (including NameError) come from the user-supplied
+        # query expression, not emend itself — surface them as a violation.
+        logger.debug("Custom check query failed", exc_info=True)
         return [PolicyViolation(
             file_path=file_path,
             line=0,

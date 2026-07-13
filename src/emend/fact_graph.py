@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Union
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -411,9 +413,10 @@ def _init_schema(client: Any) -> None:
         if stmt:
             try:
                 client.run(stmt)
-            except Exception:
+            except Exception as exc:
                 # Relation already exists — that's fine.
-                pass
+                if "conflicts with an existing one" not in str(exc):
+                    raise
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +453,7 @@ class FactGraph:
         try:
             self._client.close()
         except Exception:
-            pass
+            logger.debug("Failed to close CozoDB client", exc_info=True)
 
     # -- Mutation ---------------------------------------------------------
 
@@ -874,6 +877,7 @@ class FactGraph:
                 "starts_with(callee_qn, 'builtins.')"
             )["rows"]
         except Exception:
+            logger.debug("builtins.* call query failed; skipping builtin ref resolution", exc_info=True)
             return
 
         if not builtin_calls:
@@ -886,6 +890,7 @@ class FactGraph:
                 "imported_name != ''"
             )["rows"]
         except Exception:
+            logger.debug("import fact query failed; skipping builtin ref resolution", exc_info=True)
             return
 
         import_map: dict[tuple[str, str], str] = {}
@@ -1189,9 +1194,10 @@ class FactGraph:
         query = "?[fp, fq, rcv, meth, type_str] := " + ", ".join(clauses)
         try:
             result = self._client.run(query, params)
-            return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
         except Exception:
+            logger.debug("method_call_types query failed", exc_info=True)
             return []
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
 
     def cfg_blocks(self, func_qn: str | None = None, file_path: str | None = None) -> list[CfgBlockFact]:
         """Query CFG block facts."""
@@ -1354,7 +1360,7 @@ class FactGraph:
             try:
                 self._client.run(rule)
             except Exception:
-                pass
+                logger.debug("Entry point seed rule failed: %s", rule, exc_info=True)
 
         # Build excluded-path filter clauses for CozoDB.
         # We need two variants: one using the variable "fp" (for the
@@ -1459,16 +1465,17 @@ class FactGraph:
 
         try:
             unreachable_result = self._client.run(unreachable_query)
-            unreachable_blocks = [
-                CfgBlockFact(
-                    file_path=r[0], func_qn=r[1], block_id=r[2],
-                    is_entry=r[3], is_exit=r[4],
-                )
-                for r in unreachable_result["rows"]
-            ]
         except Exception:
-            unreachable_blocks = []
+            logger.debug("Unreachable block query failed", exc_info=True)
+            return dead_symbols, []
 
+        unreachable_blocks = [
+            CfgBlockFact(
+                file_path=r[0], func_qn=r[1], block_id=r[2],
+                is_entry=r[3], is_exit=r[4],
+            )
+            for r in unreachable_result["rows"]
+        ]
         return dead_symbols, unreachable_blocks
 
     def unreachable_blocks_datalog(self, func_qn: str | None = None) -> list[CfgBlockFact]:
@@ -1683,7 +1690,7 @@ class FactGraph:
             facts = [f for f in facts if f.kind in kinds]
         return facts
 
-    # -- Phase 3: Direct relation queries via Datalog --------------------
+    # -- Direct relation queries via Datalog --------------------
 
     def refs_datalog(
         self,
@@ -1782,7 +1789,7 @@ class FactGraph:
             )
         return [(r[0], r[1]) for r in result["rows"]]
 
-    # -- Phase 5: Trace (data-flow) analysis via Datalog --------------------------------
+    # -- Trace (data-flow) analysis via Datalog --------------------------------
 
     @staticmethod
     def _cozo_quote(v: str | int) -> str:
@@ -1898,7 +1905,7 @@ class FactGraph:
         scope_kill_line_rule = _ir("scope_kill_in_block", _5line,
                                    scope_kill_lines or [])
 
-        # -- Phase 4: type-conditioned filtering --
+        # -- type-conditioned filtering --
         if scalar_types:
             type_filter_rules = (
                 _ir("scalar_type", ["t"], [(t,) for t in scalar_types])
@@ -2470,6 +2477,31 @@ class FactGraph:
 
     # -- Generic query (predicate-based, for backwards compat) -----------
 
+    def _fact_accessors(self) -> list[Callable[[], list[Fact]]]:
+        """Ordered accessors covering every fact relation.
+
+        Single source of truth for ``query`` and ``to_json`` — the order fixes
+        the serialised JSON layout (pinned by tests), so append new relations
+        at the end.
+        """
+        return [
+            self.symbols,
+            self._all_calls,
+            self._all_references,
+            self.trace_flows,
+            self._all_types,
+            self._all_imports,
+            self._all_cfg_edges,
+            self._all_def_uses,
+            self._all_method_calls,
+            self._all_cfg_blocks,
+            self._all_decorator_on,
+            self._all_source_locs,
+            self._all_func_summaries,
+            self._all_entry_point_decorators,
+            self._all_entry_point_names,
+        ]
+
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
         """Return all facts matching *predicate*.
 
@@ -2478,51 +2510,8 @@ class FactGraph:
         CozoScript instead.
         """
         results: list[Fact] = []
-        for fact in self.symbols():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_calls():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_references():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self.trace_flows():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_types():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_imports():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_cfg_edges():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_def_uses():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_method_calls():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_cfg_blocks():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_decorator_on():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_source_locs():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_func_summaries():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_entry_point_decorators():
-            if predicate(fact):
-                results.append(fact)
-        for fact in self._all_entry_point_names():
-            if predicate(fact):
-                results.append(fact)
+        for accessor in self._fact_accessors():
+            results.extend(fact for fact in accessor() if predicate(fact))
         return results
 
     def _query_all(
@@ -2650,36 +2639,8 @@ class FactGraph:
             return d
 
         data: list[dict[str, Any]] = []
-        for fact in self.symbols():
-            data.append(_tag(fact))
-        for fact in self._all_calls():
-            data.append(_tag(fact))
-        for fact in self._all_references():
-            data.append(_tag(fact))
-        for fact in self.trace_flows():
-            data.append(_tag(fact))
-        for fact in self._all_types():
-            data.append(_tag(fact))
-        for fact in self._all_imports():
-            data.append(_tag(fact))
-        for fact in self._all_cfg_edges():
-            data.append(_tag(fact))
-        for fact in self._all_def_uses():
-            data.append(_tag(fact))
-        for fact in self._all_method_calls():
-            data.append(_tag(fact))
-        for fact in self._all_cfg_blocks():
-            data.append(_tag(fact))
-        for fact in self._all_decorator_on():
-            data.append(_tag(fact))
-        for fact in self._all_source_locs():
-            data.append(_tag(fact))
-        for fact in self._all_func_summaries():
-            data.append(_tag(fact))
-        for fact in self._all_entry_point_decorators():
-            data.append(_tag(fact))
-        for fact in self._all_entry_point_names():
-            data.append(_tag(fact))
+        for accessor in self._fact_accessors():
+            data.extend(_tag(fact) for fact in accessor())
         return json.dumps(data, indent=2)
 
     @classmethod
@@ -2811,12 +2772,53 @@ class FactGraph:
                 try:
                     self._client.run(query, {"fp": fp})
                 except Exception:
-                    pass
+                    logger.debug("Fact removal query failed for %s", fp, exc_info=True)
+
+    def _insert_extracted_file_facts(self, rows: dict[str, list[list[Any]]]) -> None:
+        """Insert the language-neutral rows returned by the canonical extractor."""
+        specs = {
+            "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
+            "dec": ("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator"),
+            "fg_refs": ("reference", "symbol_qn, file_path, line, col, ref_kind, func_qn, block_id", "symbol_qn, file_path, line, col => ref_kind, func_qn, block_id"),
+            "calls": ("call", "caller_qn, callee_qn, file_path, line, col, func_qn, block_id", "caller_qn, callee_qn, file_path, line, col => func_qn, block_id"),
+            "calls_by_callee": ("call_by_callee", "callee_qn, caller_qn, file_path, line, col, func_qn, block_id", "callee_qn, caller_qn, file_path, line, col => func_qn, block_id"),
+            "calls_by_file": ("call_by_file", "file_path, caller_qn, callee_qn, line, col, func_qn, block_id", "file_path, caller_qn, callee_qn, line, col => func_qn, block_id"),
+            "cfg_blocks": ("cfg_block", "file_path, func_qn, block_id, is_entry, is_exit", "file_path, func_qn, block_id => is_entry, is_exit"),
+            "cfg_edges": ("cfg_edge", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line"),
+            "def_uses": ("def_use", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col"),
+            "method_calls": ("method_call", "file_path, func_qn, receiver, method, block_id, line", "file_path, func_qn, receiver, method, block_id, line"),
+            "source_locs": ("source_loc", "file_path, loc_kind, loc_id, line, col, end_line, rel_line", "file_path, loc_kind, loc_id => line, col, end_line, rel_line"),
+            "imports": ("import", "importing_file, imported_module, imported_name, line, alias", "importing_file, imported_module, imported_name, line => alias"),
+            "ref_by_block": ("ref_by_block", "file_path, func_qn, block_id, symbol_qn", "file_path, func_qn, block_id, symbol_qn"),
+            "module_level_refs": ("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line"),
+            "exported_qns": ("exported_symbol", "qualified_name", "qualified_name"),
+        }
+        for key, (relation, cols, schema) in specs.items():
+            relation_rows = rows[key]
+            if relation_rows:
+                self._put_batch(relation, cols, schema, relation_rows)
+
+        entries: dict[tuple[str, str], set[int]] = {}
+        adjacency: dict[tuple[str, str, int], list[int]] = {}
+        for fp, fq, bid, is_entry, _is_exit in rows["cfg_blocks"]:
+            if is_entry:
+                entries.setdefault((fp, fq), set()).add(bid)
+        for fp, fq, from_block, to_block, *_ in rows["cfg_edges"]:
+            adjacency.setdefault((fp, fq, from_block), []).append(to_block)
+        reachable = _bfs_reachable_blocks(entries, adjacency)
+        if reachable:
+            self._put_batch(
+                "reachable_block", "file_path, func_qn, block_id",
+                "file_path, func_qn, block_id", reachable,
+            )
 
     def update_files(
         self,
         file_list: list[tuple[str, str]],
         language: str = "python",
+        *,
+        project_root: str | None = None,
+        resolver_root: str | None = None,
     ) -> None:
         """Incrementally update facts for a set of files.
 
@@ -2824,158 +2826,51 @@ class FactGraph:
         file, all existing facts are deleted and fresh facts are extracted
         from the provided content.  Files not in *file_list* are untouched.
 
-        This is the single primitive on which ``build_from_files()``,
-        ``build_from_project()``, and ``_build_facts_db()`` should be
-        built.
+        Per-file extraction is shared with ``build_from_project()`` and the
+        persisted index builder; this method owns incremental deletion and
+        insertion only.
         """
         from emend import emend_core as _rust
-        from emend.cfg import build_cfgs_for_source
+        from emend.transform.cache import _extract_file_facts
 
         # 1. Delete existing facts for all files in the batch.
-        self.remove_files([str(Path(fp).resolve()) for fp, _ in file_list])
+        resolved_project_root = Path(project_root).resolve() if project_root else None
 
-        # 2. Extract and insert new facts per file.
+        def stored_path(file_path: str) -> str:
+            resolved = Path(file_path).resolve()
+            if resolved_project_root is not None:
+                try:
+                    return str(resolved.relative_to(resolved_project_root))
+                except ValueError:
+                    pass
+            return str(resolved)
+
+        self.remove_files([stored_path(fp) for fp, _ in file_list])
+
+        # 2. Extract and insert new facts per file.  The persisted index uses
+        # this same extractor, so analysis semantics cannot drift by builder.
         for abs_file_path, content in file_list:
-            rel_path = str(Path(abs_file_path).resolve())
-            module_name = Path(abs_file_path).stem
-
-            # -- Symbol facts -----------------------------------------------
+            rel_path = stored_path(abs_file_path)
+            if project_root:
+                from emend.transform.project_iter import _file_to_module
+                module_name = _file_to_module(abs_file_path, project_root)
+            else:
+                module_name = Path(abs_file_path).stem
             ext = Path(abs_file_path).suffix.lstrip(".") or "py"
             try:
-                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
-            except Exception:
-                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
-                raw_symbols = []
-
-            sym_facts: list[SymbolFact] = []
-            dec_facts: list[DecoratorOnFact] = []
-            _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
-            self.add_symbols_batch(sym_facts)
-            self.add_decorator_on_batch(dec_facts)
-
-            # -- Source location facts for symbols --------------------------
-            source_loc_facts: list[SourceLocFact] = []
-            for sf in sym_facts:
-                source_loc_facts.append(SourceLocFact(
-                    file_path=sf.file_path,
-                    loc_kind="symbol",
-                    loc_id=sf.qualified_name,
-                    line=sf.line,
-                    end_line=sf.end_line,
-                ))
-            self.add_source_locs_batch(source_loc_facts)
-
-            # -- CFG blocks and edges ---------------------------------------
-            try:
-                cfgs = build_cfgs_for_source(content, ext=ext)
-            except Exception:
-                logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
-                cfgs = []
-
-            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
-                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
-            )
-            self.add_cfg_blocks_batch(cfg_block_facts)
-            self.add_cfg_edges_batch(cfg_edge_facts)
-            self.add_source_locs_batch(block_loc_facts)
-
-            # -- Reference and call facts (scope resolver) ------------------
-            resolver = None
-            refs: list = []
-            try:
-                resolver_root = str(Path(abs_file_path).parent.resolve())
-                resolver = _rust.PyScopeResolver(resolver_root, ext)
+                effective_resolver_root = resolver_root or str(Path(abs_file_path).parent.resolve())
+                resolver = _rust.PyScopeResolver(effective_resolver_root, ext)
                 resolver.index_file(abs_file_path, content)
             except Exception:
                 logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
+                resolver = None
 
-            if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
-                try:
-                    refs = resolver.references_in_file(abs_file_path)
-                except Exception:
-                    logger.debug("references_in_file failed for %s", abs_file_path, exc_info=True)
-                    refs = []
-
-                ref_facts: list[ReferenceFact] = []
-                call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    ref_kind = _map_ref_kind(kind)
-                    fq, bid = _find_containing_block(block_ranges, line)
-                    ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=rel_path,
-                        line=line, col=col, ref_kind=ref_kind,
-                        func_qn=fq, block_id=bid,
-                    ))
-                    if ref_kind == "call":
-                        caller = _enclosing_symbol(symbol_ranges, line)
-                        caller_qn = caller if caller is not None else module_name
-                        call_facts.append(CallFact(
-                            caller_qn=caller_qn, callee_qn=qn,
-                            file_path=rel_path, line=line, col=col,
-                            func_qn=fq, block_id=bid,
-                        ))
-                self.add_references_batch(ref_facts)
-                self.add_calls_batch(call_facts)
-
-            # -- Def-use facts ----------------------------------------------
-            def_use_facts: list[DefUseFact] = build_def_use_facts(
-                cfgs, sym_facts, rel_path, module_name
+            rows = _extract_file_facts(
+                abs_file_path, rel_path, ext, content,
+                project_root or str(Path(abs_file_path).parent),
+                module_name, scope_resolver=resolver,
             )
-            method_call_facts: list[MethodCallFact] = []
-
-            # -- Module-level def-use facts ---------------------------------
-            # The Rust CFG builder only produces CFGs for functions, so
-            # module-level code has no def-use facts.  Synthesise them from
-            # scope-resolver references that fall outside any function block.
-            if resolver is not None:
-                from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
-                # Scope resolver uses 1-based lines; CFG uses 0-based.
-                # Convert to 0-based for consistency with CFG def-use facts.
-                mod_defs: dict[str, list[tuple[int, int]]] = {}  # var -> [(line, col)]
-                mod_uses: dict[str, list[tuple[int, int]]] = {}
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    fq_check, bid_check = _find_containing_block(block_ranges, line)
-                    if fq_check != "" or bid_check != -1:
-                        continue  # inside a function — already handled
-                    # Extract simple variable name (last segment of qn)
-                    var_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
-                    rk = _map_ref_kind(kind)
-                    line0 = line - 1  # convert to 0-based
-                    if rk == "write":
-                        mod_defs.setdefault(var_name, []).append((line0, col))
-                    elif rk in ("read", "call"):
-                        mod_uses.setdefault(var_name, []).append((line0, col))
-
-                for var_name, use_entries in mod_uses.items():
-                    if var_name in mod_defs:
-                        for dl, dc in mod_defs[var_name]:
-                            for ul, uc in use_entries:
-                                def_use_facts.append(DefUseFact(
-                                    file_path=rel_path,
-                                    func_qn=MODULE_LEVEL_FUNC,
-                                    var_name=var_name,
-                                    kind="write",
-                                    def_block=MODULE_LEVEL_BLOCK,
-                                    use_block=MODULE_LEVEL_BLOCK,
-                                    def_line=dl,
-                                    def_col=dc,
-                                    use_line=ul,
-                                    use_col=uc,
-                                ))
-
-            # Method call facts from dotted-name call references.
-            if resolver is not None:
-                method_call_facts = _build_method_call_facts(
-                    refs, rel_path, block_ranges, normalize_qn=False,
-                )
-
-            self.add_def_uses_batch(def_use_facts)
-            self.add_method_calls_batch(method_call_facts)
-
-            # -- Import facts -----------------------------------------------
-            import_facts = _extract_imports(rel_path, content)
-            self.add_imports_batch(import_facts)
+            self._insert_extracted_file_facts(rows)
 
     # -- File-list builder ------------------------------------------------
 
@@ -2998,7 +2893,7 @@ class FactGraph:
         for abs_file_path in file_paths:
             try:
                 content = Path(abs_file_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 logger.debug("Could not read %s", abs_file_path, exc_info=True)
                 continue
             file_list.append((abs_file_path, content))
@@ -3028,16 +2923,11 @@ class FactGraph:
         ``languages`` (a list) or leave both as ``None`` to auto-detect
         from the project directory.
 
-        **Note**: This is a deliberate full-rebuild path used by tests and
-        one-off analysis.  In steady-state indexing, ``_build_facts_db()``
-        in ``transform.py`` is the canonical path that populates the
-        persisted ``facts.db`` directly from source files.
+        This full-rebuild API and the persisted index share the same
+        per-file extractor.
         """
-        from emend import emend_core as _rust
         from emend.transform import (
             _collect_all_source_files,
-            _collect_source_files,
-            _file_to_module,
             _find_project_root,
             detect_project_languages,
         )
@@ -3062,203 +2952,21 @@ class FactGraph:
         # the detected project_root.
         resolver_root = str(Path(project_path).resolve())
 
-        from emend.language_registry import detect_language as _detect_lang
-        from emend.language_registry import detect_exported_names
-
+        file_list: list[tuple[str, str]] = []
         for abs_file_path in source_files:
             try:
-                content = Path(abs_file_path).read_text(encoding="utf-8")
-            except Exception:
-                logger.debug("Could not read %s", abs_file_path, exc_info=True)
-                continue
-
-            # Store relative paths in the fact graph so they match
-            # selector paths regardless of working directory.
-            try:
-                rel_path = str(Path(abs_file_path).relative_to(Path(project_root).resolve()))
-            except ValueError:
-                rel_path = abs_file_path
-
-            module_name = _file_to_module(abs_file_path, project_root)
-
-            # -- Symbol facts (via Rust symbol collection) ----------------
-            try:
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-                raw_symbols = _rust.collect_symbols_from_str(content, ext=ext)
-            except Exception:
-                logger.debug("Could not parse %s for symbols", abs_file_path, exc_info=True)
-                raw_symbols = []
-
-            sym_facts: list[SymbolFact] = []
-            dec_facts: list[DecoratorOnFact] = []
-            _walk_symbols(sym_facts, dec_facts, raw_symbols, rel_path, module_name, parent_qn=None)
-            graph.add_symbols_batch(sym_facts)
-            graph.add_decorator_on_batch(dec_facts)
-
-            # -- Exported symbol facts (for TS/Rust visibility) ----------
-            try:
-                _lang = _detect_lang(abs_file_path) or "python"
-                exported_names = detect_exported_names(content, _lang)
-                if exported_names:
-                    exported_qns = [
-                        sf.qualified_name for sf in sym_facts
-                        if sf.name in exported_names
-                    ]
-                    graph.add_exported_symbols_batch(exported_qns)
-            except Exception:
-                logger.debug("Could not detect exported symbols for %s", abs_file_path, exc_info=True)
-
-            # -- Source location facts for symbols -----------------------
-            source_loc_facts: list[SourceLocFact] = []
-            for sf in sym_facts:
-                source_loc_facts.append(SourceLocFact(
-                    file_path=sf.file_path,
-                    loc_kind="symbol",
-                    loc_id=sf.qualified_name,
-                    line=sf.line,
-                    end_line=sf.end_line,
+                file_list.append((
+                    abs_file_path,
+                    Path(abs_file_path).read_text(encoding="utf-8"),
                 ))
-            graph.add_source_locs_batch(source_loc_facts)
+            except (OSError, UnicodeDecodeError):
+                logger.debug("Could not read %s", abs_file_path, exc_info=True)
 
-            # -- CFG blocks and edges (via Rust CFG builder) -------------
-            try:
-                from emend.cfg import build_cfgs_for_source
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-                cfgs = build_cfgs_for_source(content, ext=ext)
-            except Exception:
-                logger.debug("Could not build CFGs for %s", abs_file_path, exc_info=True)
-                cfgs = []
-
-            # Build block line ranges for block-tagging references
-            cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges = (
-                _build_cfg_facts(cfgs, sym_facts, rel_path, module_name)
-            )
-            graph.add_cfg_blocks_batch(cfg_block_facts)
-            graph.add_cfg_edges_batch(cfg_edge_facts)
-            graph.add_source_locs_batch(block_loc_facts)
-
-            # -- Reference and call facts (via scope resolver) ------------
-            try:
-                ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-                resolver = _rust.PyScopeResolver(resolver_root, ext)
-                resolver.index_file(abs_file_path, content)
-            except Exception:
-                logger.debug(
-                    "Could not build scope resolver for %s", abs_file_path, exc_info=True
-                )
-                resolver = None
-
-            if resolver is not None:
-                symbol_ranges = _build_symbol_line_index(sym_facts, rel_path)
-
-                try:
-                    refs = resolver.references_in_file(abs_file_path)
-                except Exception:
-                    logger.debug(
-                        "references_in_file failed for %s", abs_file_path, exc_info=True
-                    )
-                    refs = []
-
-                ref_facts: list[ReferenceFact] = []
-                call_facts: list[CallFact] = []
-                for qn, line, col, _offset, _end_offset, kind, _ann in refs:
-                    qn = _normalize_qn(qn)
-                    ref_kind = _map_ref_kind(kind)
-                    fq, bid = _find_containing_block(block_ranges, line)
-                    ref_facts.append(ReferenceFact(
-                        symbol_qn=qn, file_path=rel_path,
-                        line=line, col=col, ref_kind=ref_kind,
-                        func_qn=fq, block_id=bid,
-                    ))
-
-                    if ref_kind == "call":
-                        caller = _enclosing_symbol(symbol_ranges, line)
-                        # Use module name as caller for module-level calls
-                        caller_qn = caller if caller is not None else module_name
-                        call_facts.append(CallFact(
-                            caller_qn=caller_qn, callee_qn=qn,
-                            file_path=rel_path, line=line, col=col,
-                            func_qn=fq, block_id=bid,
-                        ))
-
-                graph.add_references_batch(ref_facts)
-                graph.add_calls_batch(call_facts)
-
-                # Exclude definition-site "references" (e.g. class/fn name
-                # at its own definition line) to avoid inflating live_ref.
-                sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts}
-                ref_by_block_rows = [
-                    [f.file_path, f.func_qn, f.block_id, f.symbol_qn]
-                    for f in ref_facts
-                    if f.func_qn and f.block_id >= 0
-                    and (f.symbol_qn, f.line) not in sym_def_lines
-                ]
-                if ref_by_block_rows:
-                    graph._client.run(
-                        "?[file_path, func_qn, block_id, symbol_qn] <- $rows "
-                        ":put ref_by_block {file_path, func_qn, block_id, symbol_qn}",
-                        {"rows": ref_by_block_rows},
-                    )
-
-            # -- Def-use facts with block IDs ----------------------------
-            def_use_facts: list[DefUseFact] = build_def_use_facts(
-                cfgs, sym_facts, rel_path, module_name
-            )
-            method_call_facts: list[MethodCallFact] = []
-
-            # -- Method call facts (from call references with dotted names) --
-            if resolver is not None:
-                method_call_facts = _build_method_call_facts(
-                    refs, rel_path, block_ranges, normalize_qn=True,
-                )
-
-            graph.add_def_uses_batch(def_use_facts)
-            graph.add_method_calls_batch(method_call_facts)
-
-            # -- Import facts (via stdlib ast) ----------------------------
-            import_facts = _extract_imports(rel_path, content)
-            graph.add_imports_batch(import_facts)
-
-        # -- Compute reachable blocks via BFS from entry blocks ----------
-        try:
-            block_result = graph._client.run(
-                "?[fp, fq, bid, ie] := *cfg_block[fp, fq, bid, ie, _]"
-            )
-            edge_result = graph._client.run(
-                "?[fp, fq, fb, tb] := *cfg_edge[fp, fq, fb, tb, _, _, _]"
-            )
-
-            entries_by_func: dict[tuple[str, str], set[int]] = {}
-            for fp, fq, bid, is_entry in block_result["rows"]:
-                if is_entry:
-                    entries_by_func.setdefault((fp, fq), set()).add(bid)
-
-            adj: dict[tuple[str, str, int], list[int]] = {}
-            for fp, fq, fb, tb in edge_result["rows"]:
-                adj.setdefault((fp, fq, fb), []).append(tb)
-
-            reachable_rows: list[list] = []
-            for (fp, fq), entry_set in entries_by_func.items():
-                visited: set[int] = set()
-                stack = list(entry_set)
-                while stack:
-                    bid = stack.pop()
-                    if bid in visited:
-                        continue
-                    visited.add(bid)
-                    reachable_rows.append([fp, fq, bid])
-                    for nb in adj.get((fp, fq, bid), []):
-                        if nb not in visited:
-                            stack.append(nb)
-
-            if reachable_rows:
-                graph._client.run(
-                    "?[file_path, func_qn, block_id] <- $rows "
-                    ":put reachable_block {file_path, func_qn, block_id}",
-                    {"rows": reachable_rows},
-                )
-        except Exception:
-            logger.debug("Could not compute reachable blocks", exc_info=True)
+        graph.update_files(
+            file_list,
+            project_root=project_root,
+            resolver_root=resolver_root,
+        )
 
         # -- Resolve builtins.* references using import facts -----------
         # When a scope resolver can't resolve a cross-file import (common
@@ -3283,6 +2991,8 @@ class FactGraph:
                         rel_path = abs_file_path
                     try:
                         file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
+                    except BUG_EXCEPTIONS:
+                        raise
                     except Exception:
                         logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
                         continue
@@ -3297,6 +3007,8 @@ class FactGraph:
                             binding_kind=binding.binding_kind,
                         ))
                     graph.add_types_batch(type_facts)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Could not populate type bindings", exc_info=True)
 
@@ -3479,6 +3191,7 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
     during development without a compiled extension).
     """
     facts: list[ImportFact] = []
+    structured = None
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         resolver = getattr(_extract_imports_python, "_resolver", None)
@@ -3486,6 +3199,14 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
             resolver = ec.PyScopeResolver(".", extension="py")
             _extract_imports_python._resolver = resolver  # type: ignore[attr-defined]
         structured = resolver.collect_structured_imports_from_source(content, ext="py")
+    except Exception:
+        logger.debug(
+            "emend_core structured import extraction failed for %s, falling back to ast.parse",
+            file_path,
+            exc_info=True,
+        )
+
+    if structured is not None:
         for imp in structured:
             # StructuredImport start_line is 0-indexed; ImportFact.line is
             # 1-indexed like every other fact kind.
@@ -3516,18 +3237,12 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
                         line=line,
                     ))
         return facts
-    except Exception:
-        logger.debug(
-            "emend_core structured import extraction failed for %s, falling back to ast.parse",
-            file_path,
-            exc_info=True,
-        )
 
     # Fallback: stdlib ast (Python only, but always available)
     import ast as stdlib_ast
     try:
         tree = stdlib_ast.parse(content, filename=file_path)
-    except Exception:
+    except (SyntaxError, ValueError, RecursionError):
         logger.debug("ast.parse failed for %s", file_path, exc_info=True)
         return facts
     for node in stdlib_ast.walk(tree):
@@ -3561,17 +3276,21 @@ import re as _re
 from bisect import bisect_right as _bisect_right
 
 
-def _offset_to_line(content: str, offset: int, _newline_cache: dict[int, list[int]] = {}) -> int:
+def _offset_to_line(
+    content: str, offset: int, _newline_cache: dict[tuple[int, int], list[int]] = {}
+) -> int:
     """Return 1-based line number for a character *offset* in *content*.
 
-    Uses a cached newline-position index keyed by ``id(content)`` so that
-    repeated calls on the same string are O(log n) instead of O(n).
+    Uses a cached newline-position index keyed by ``(hash(content),
+    len(content))`` so that repeated calls on the same string are O(log n)
+    instead of O(n). Content identity is used (not ``id(content)``, whose value
+    can be reused for a different string after garbage collection).
     """
-    cid = id(content)
-    positions = _newline_cache.get(cid)
+    key = (hash(content), len(content))
+    positions = _newline_cache.get(key)
     if positions is None:
         positions = [i for i, ch in enumerate(content) if ch == "\n"]
-        _newline_cache[cid] = positions
+        _newline_cache[key] = positions
         # Keep cache bounded — evict oldest if too large.
         if len(_newline_cache) > 64:
             oldest = next(iter(_newline_cache))
@@ -3589,6 +3308,7 @@ def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact
     ``0``.
     """
     facts: list[ImportFact] = []
+    imports: list = []
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         ext = Path(file_path).suffix.lstrip(".") or "ts"
@@ -3596,21 +3316,26 @@ def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact
             ext = "ts"
         resolver = ec.PyScopeResolver(".", ext)
         resolver.index_file(file_path, content)
-        for local_name, module_path, imported_name, is_star in resolver.imports_in_file(file_path):
-            # Strip surrounding quotes that the scope resolver includes in the
-            # module path (e.g. '"./foo"' → './foo').
-            clean_module = module_path.strip("\"'")
-            if not clean_module:
-                continue
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=clean_module,
-                imported_name="*" if is_star else (imported_name or None),
-                alias=local_name if local_name != imported_name else None,
-                line=0,  # scope resolver does not return line numbers here
-            ))
+        imports = resolver.imports_in_file(file_path)
     except Exception:
-        pass
+        logger.debug(
+            "emend_core TypeScript import extraction failed for %s",
+            file_path,
+            exc_info=True,
+        )
+    for local_name, module_path, imported_name, is_star in imports:
+        # Strip surrounding quotes that the scope resolver includes in the
+        # module path (e.g. '"./foo"' → './foo').
+        clean_module = module_path.strip("\"'")
+        if not clean_module:
+            continue
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=clean_module,
+            imported_name="*" if is_star else (imported_name or None),
+            alias=local_name if local_name != imported_name else None,
+            line=0,  # scope resolver does not return line numbers here
+        ))
     return facts
 
 
@@ -3621,30 +3346,31 @@ def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
     ``pub use``, ``pub(crate) use``, and ``mod name;`` declarations.
     """
     facts: list[ImportFact] = []
+    imports: list = []
     try:
         from emend import emend_core as ec  # type: ignore[attr-defined]
         resolver = getattr(_extract_imports_rust, "_resolver", None)
         if resolver is None:
             resolver = ec.PyScopeResolver(".", extension="rs")
             _extract_imports_rust._resolver = resolver  # type: ignore[attr-defined]
-        for local_name, module_path, imported_name, is_star, line in \
-                resolver.collect_rust_imports_from_source(content, ext="rs"):
-            if not module_path and not is_star:
-                continue
-            alias = local_name if (imported_name and local_name != imported_name) else None
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=module_path,
-                imported_name="*" if is_star else (imported_name or None),
-                alias=alias,
-                line=line,
-            ))
+        imports = resolver.collect_rust_imports_from_source(content, ext="rs")
     except Exception:
         logger.debug(
             "emend_core Rust import extraction failed for %s",
             file_path,
             exc_info=True,
         )
+    for local_name, module_path, imported_name, is_star, line in imports:
+        if not module_path and not is_star:
+            continue
+        alias = local_name if (imported_name and local_name != imported_name) else None
+        facts.append(ImportFact(
+            importing_file=file_path,
+            imported_module=module_path,
+            imported_name="*" if is_star else (imported_name or None),
+            alias=alias,
+            line=line,
+        ))
     return facts
 
 
@@ -3664,6 +3390,56 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
         return _extract_imports_rust(file_path, content)
     else:
         return _extract_imports_python(file_path, content)
+
+
+def _resolve_cfg_func_qn(
+    cfg: Any,
+    sym_facts: list[SymbolFact],
+    rel_path: str,
+    module_name: str,
+) -> str:
+    """Resolve the qualified name of a CFG's function.
+
+    Matches ``cfg.func_name`` against *sym_facts* first by name and line range
+    (disambiguating same-named methods across classes; CFG lines are
+    0-indexed, symbol lines 1-indexed), then by name only, and finally falls
+    back to ``module_name.func_name``.
+    """
+    func_name = cfg.func_name
+    cfg_start = cfg.func_start_line + 1
+    for sf in sym_facts:
+        if sf.name == func_name and sf.file_path == rel_path:
+            if sf.line <= cfg_start <= (sf.end_line or sf.line):
+                return sf.qualified_name
+    for sf in sym_facts:
+        if sf.name == func_name and sf.file_path == rel_path:
+            return sf.qualified_name
+    return f"{module_name}.{func_name}"
+
+
+def _bfs_reachable_blocks(
+    entries_by_func: dict[tuple[str, str], set[int]],
+    adj: dict[tuple[str, str, int], list[int]],
+) -> list[list]:
+    """Return ``[file_path, func_qn, block_id]`` rows reachable from entry blocks.
+
+    Runs a per-function traversal over the CFG adjacency map *adj*, seeded by
+    the entry block ids in *entries_by_func*.
+    """
+    reachable_rows: list[list] = []
+    for (fp, fq), entry_set in entries_by_func.items():
+        visited: set[int] = set()
+        stack = list(entry_set)
+        while stack:
+            bid = stack.pop()
+            if bid in visited:
+                continue
+            visited.add(bid)
+            reachable_rows.append([fp, fq, bid])
+            for nb in adj.get((fp, fq, bid), []):
+                if nb not in visited:
+                    stack.append(nb)
+    return reachable_rows
 
 
 def _build_cfg_facts(
@@ -3687,25 +3463,7 @@ def _build_cfg_facts(
     cfg_edge_facts: list[CfgEdgeFact] = []
 
     for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        # Match by name AND line range to disambiguate methods with the
-        # same name in different classes (e.g. two classes both having
-        # "method").  CFG lines are 0-indexed, symbol lines are 1-indexed.
-        cfg_start = cfg.func_start_line + 1
-        for sf in sym_facts:
-            if sf.name == func_name and sf.file_path == rel_path:
-                if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                    func_qn = sf.qualified_name
-                    break
-        # Fallback: match by name only if line-range match failed
-        if not func_qn:
-            for sf in sym_facts:
-                if sf.name == func_name and sf.file_path == rel_path:
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
+        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
 
         for block in cfg.get_blocks():
             bid = block["id"]
@@ -3763,21 +3521,7 @@ def build_def_use_facts(
     def_use_facts: list[DefUseFact] = []
 
     for cfg in cfgs:
-        func_name = cfg.func_name
-        func_qn = ""
-        cfg_start = cfg.func_start_line + 1
-        for sf in sym_facts:
-            if sf.name == func_name and sf.file_path == rel_path:
-                if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            for sf in sym_facts:
-                if sf.name == func_name and sf.file_path == rel_path:
-                    func_qn = sf.qualified_name
-                    break
-        if not func_qn:
-            func_qn = f"{module_name}.{func_name}"
+        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
 
         defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
         for block in cfg.get_blocks():
@@ -4330,7 +4074,8 @@ def compile_sequence_rule(
 
             try:
                 source = Path(abs_path).read_text(encoding="utf-8")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
+                logger.debug("Could not read %s for sequence step resolution", abs_path, exc_info=True)
                 continue
 
             try:
@@ -4340,6 +4085,8 @@ def compile_sequence_rule(
                     source_override=source,
                     language="python",
                 )
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Pattern match failed for %s in %s", resolved_pattern, fp, exc_info=True)
                 continue
@@ -4373,27 +4120,30 @@ def compile_sequence_rule(
             resolved = pattern
             for mvar, val in accumulated_bindings.items():
                 resolved = resolved.replace(f"${mvar}", val)
-            try:
-                for fp in file_paths:
-                    abs_path = fp
-                    if resolve_root:
-                        candidate = resolve_root / fp
-                        if candidate.exists():
-                            abs_path = str(candidate)
-                    try:
-                        source = Path(abs_path).read_text(encoding="utf-8")
-                    except Exception:
-                        continue
+            for fp in file_paths:
+                abs_path = fp
+                if resolve_root:
+                    candidate = resolve_root / fp
+                    if candidate.exists():
+                        abs_path = str(candidate)
+                try:
+                    source = Path(abs_path).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                try:
                     matches = find_pattern(resolved, abs_path, source_override=source, language="python")
-                    for m in matches:
-                        if m.line is None:
-                            continue
-                        fq = _find_func_for_line(fp, m.line)
-                        if fq:
-                            bid = _find_block_for_line(fp, fq, m.line)
-                            target.append((fp, fq, bid))
-            except Exception:
-                pass
+                except BUG_EXCEPTIONS:
+                    raise
+                except Exception:
+                    logger.debug("Blocker pattern match failed for %s in %s", resolved, fp, exc_info=True)
+                    continue
+                for m in matches:
+                    if m.line is None:
+                        continue
+                    fq = _find_func_for_line(fp, m.line)
+                    if fq:
+                        bid = _find_block_for_line(fp, fq, m.line)
+                        target.append((fp, fq, bid))
 
     for pc in check.path_constraints:
         pair_key = (pc.from_step, pc.to_step)

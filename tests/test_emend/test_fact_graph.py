@@ -374,26 +374,6 @@ class TestRstSectionParser:
         )
 
 
-class TestFactsCmdTaintFlowsAlias:
-    def test_taint_flows_alias_accepted(self, tmp_path):
-        """facts_cmd should accept 'taint_flows' as an alias for 'trace_flows'."""
-        from typer.testing import CliRunner
-        from emend.cli import app as cli_app
-
-        test_file = tmp_path / "app.py"
-        test_file.write_text("x = 1\n")
-
-        runner = CliRunner()
-        result = runner.invoke(cli_app, [
-            "analyze", "facts", str(tmp_path),
-            "--type", "taint_flows",
-        ])
-        assert "unknown fact type" not in (result.output or "").lower(), (
-            f"'taint_flows' should be accepted as alias for 'trace_flows', "
-            f"but got: {result.output}"
-        )
-
-
 # ---------------------------------------------------------------------------
 # CozoDB-specific tests
 # ---------------------------------------------------------------------------
@@ -554,6 +534,7 @@ class TestImpactClosure:
         """Each edge is a (caller, callee) witness for why the caller is impacted."""
         g = _make_graph()
         result = g.impact_closure({"lib.compute"})
+        assert result["edges"]
         for src, tgt in result["edges"]:
             assert src in result["impacted"]
 
@@ -957,11 +938,11 @@ class TestDeadCodeUnified:
         g = _make_graph_with_cfg()
         dead, _ = g.dead_code_unified()
         dead_qns = {s.qualified_name for s in dead}
-        # app.helper is called but only from block 2 which is in the graph
-        # lib.MyClass.__init__ has no reference and is not a dunder entry point
-        # Wait - __init__ IS a dunder, so it should be excluded
-        # app.main has no callers but has @app.route... but entry_point_decorator is empty
-        assert "app.main" in dead_qns or "app.helper" in dead_qns
+        # app.main has no callers; app.helper and lib.compute are only
+        # referenced from within app.main, which is itself dead, so they
+        # cascade to dead. lib.MyClass.__init__ is a dunder entry point and
+        # lib.MyClass is referenced via import, so both are excluded.
+        assert dead_qns == {"app.main", "app.helper", "lib.compute"}
 
     def test_unified_respects_entry_point_decorators(self):
         g = _make_graph_with_cfg()
@@ -1231,6 +1212,31 @@ class TestBuildFromProjectMethodCallFacts:
             "MethodCallFact line numbers are inconsistent between the two builders."
         )
 
+    def test_persisted_builder_matches_project_method_calls(self, tmp_path):
+        """Persisted and project builders emit identical method-call facts."""
+        from emend.transform.cache import _build_facts_db, _cache_db_dir
+
+        src = tmp_path / "app.py"
+        src.write_text(
+            "class Client:\n"
+            "    def fetch(self):\n"
+            "        return 1\n\n"
+            "client = Client()\n"
+            "client.fetch()\n"
+        )
+
+        _build_facts_db(str(tmp_path))
+        persisted = FactGraph(db_path=str(_cache_db_dir(tmp_path) / "facts.db"))
+        project = FactGraph.build_from_project(str(tmp_path))
+
+        def method_calls(graph):
+            return {
+                (f.file_path, f.func_qn, f.receiver, f.method, f.block_id, f.line)
+                for f in graph.method_calls()
+            }
+
+        assert method_calls(persisted) == method_calls(project)
+
     def test_module_level_method_call_has_sentinel_func_qn(self, tmp_path):
         """Module-level method calls must use the MODULE_LEVEL_FUNC sentinel.
 
@@ -1448,29 +1454,13 @@ class TestTypescriptImportExtraction:
         modules = {f.imported_module for f in facts}
         assert "./utils" in modules, f"Expected './utils' in {modules}"
 
-    def test_side_effect_import_omitted(self):
-        """Side-effect imports (import './side-effect') are not supported by
-        PyScopeResolver.imports_in_file() and are silently omitted."""
-        source = 'import "./side-effect";'
-        facts = self._imports("/tmp/app.ts", source)
-        # The scope resolver does not track side-effect imports; result may be
-        # empty.  We just verify no exception is raised.
-        assert isinstance(facts, list)
-
-    def test_export_from_omitted(self):
-        """Re-export statements (export { X } from './bar') are not supported by
-        PyScopeResolver.imports_in_file() and are silently omitted."""
-        source = 'export { X } from "./bar";'
-        facts = self._imports("/tmp/app.ts", source)
-        # May be empty — just verify no exception is raised.
-        assert isinstance(facts, list)
-
-    def test_require_omitted(self):
-        """CommonJS require() calls are not handled by PyScopeResolver."""
-        source = 'const { a, b } = require("./c");'
-        facts = self._imports("/tmp/app.ts", source)
-        # May be empty — just verify no exception is raised.
-        assert isinstance(facts, list)
+    @pytest.mark.parametrize("source", [
+        'import "./side-effect";',
+        'export { X } from "./bar";',
+        'const { a, b } = require("./c");',
+    ])
+    def test_unsupported_import_forms_are_omitted(self, source):
+        assert self._imports("/tmp/app.ts", source) == []
 
 
 class TestFactsCliTaintFlowsAlias:

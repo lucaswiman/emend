@@ -1,10 +1,15 @@
 """Pattern parsing with metavariables."""
 from __future__ import annotations
+import logging
 from dataclasses import dataclass
 from lark import Lark, Transformer, Token
 import importlib.resources
 from typing import Union
 import re as _re
+
+from emend.errors import BUG_EXCEPTIONS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1093,7 +1098,10 @@ def _compile_python_pattern_to_rust_ir(pattern_str: str) -> dict | None:
 
         return ir
 
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("Rust IR compilation failed for %r", pattern_str, exc_info=True)
         return None
 
 

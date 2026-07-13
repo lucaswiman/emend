@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from lark import Lark, Transformer, Token
+from lark.exceptions import LarkError
 import importlib.resources
 
 
@@ -286,7 +287,7 @@ def parse_extended_selector(selector_str: str) -> ExtendedSelector:
         # For dotted selectors without ::, use dotted_selector start rule
         try:
             return _parser.parse(selector_str, start="dotted_selector")
-        except Exception:
+        except LarkError:
             # Fall back to default start (selector) which will probably fail but with a better error
             pass
 

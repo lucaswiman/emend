@@ -66,66 +66,25 @@ class TestRustIRCompilation:
         assert ir["type"] == "subscript"
         assert ir["slices"][0]["type"] == "subscript"
 
-    def test_binary_op_add(self):
-        ir = compile_pattern_to_rust_ir("$X + $Y")
+    @pytest.mark.parametrize("pattern, op", [
+        ("$X + $Y", "+"),
+        ("$X - $Y", "-"),
+        ("$X * $Y", "*"),
+        ("$X / $Y", "/"),
+        ("$X // $Y", "//"),
+        ("$X % $Y", "%"),
+        ("$X ** $Y", "**"),
+        ("$X & $Y", "&"),
+        ("$X | $Y", "|"),
+        ("$X ^ $Y", "^"),
+        ("$X and $Y", "and"),
+        ("$X or $Y", "or"),
+    ])
+    def test_binary_op(self, pattern, op):
+        ir = compile_pattern_to_rust_ir(pattern)
         assert ir is not None
         assert ir["type"] == "binary_op"
-        assert ir["op"] == "+"
-
-    def test_binary_op_subtract(self):
-        ir = compile_pattern_to_rust_ir("$X - $Y")
-        assert ir is not None
-        assert ir["op"] == "-"
-
-    def test_binary_op_multiply(self):
-        ir = compile_pattern_to_rust_ir("$X * $Y")
-        assert ir is not None
-        assert ir["op"] == "*"
-
-    def test_binary_op_divide(self):
-        ir = compile_pattern_to_rust_ir("$X / $Y")
-        assert ir is not None
-        assert ir["op"] == "/"
-
-    def test_binary_op_floor_divide(self):
-        ir = compile_pattern_to_rust_ir("$X // $Y")
-        assert ir is not None
-        assert ir["op"] == "//"
-
-    def test_binary_op_modulo(self):
-        ir = compile_pattern_to_rust_ir("$X % $Y")
-        assert ir is not None
-        assert ir["op"] == "%"
-
-    def test_binary_op_power(self):
-        ir = compile_pattern_to_rust_ir("$X ** $Y")
-        assert ir is not None
-        assert ir["op"] == "**"
-
-    def test_binary_op_bitand(self):
-        ir = compile_pattern_to_rust_ir("$X & $Y")
-        assert ir is not None
-        assert ir["op"] == "&"
-
-    def test_binary_op_bitor(self):
-        ir = compile_pattern_to_rust_ir("$X | $Y")
-        assert ir is not None
-        assert ir["op"] == "|"
-
-    def test_binary_op_bitxor(self):
-        ir = compile_pattern_to_rust_ir("$X ^ $Y")
-        assert ir is not None
-        assert ir["op"] == "^"
-
-    def test_boolean_and(self):
-        ir = compile_pattern_to_rust_ir("$X and $Y")
-        assert ir is not None
-        assert ir["op"] == "and"
-
-    def test_boolean_or(self):
-        ir = compile_pattern_to_rust_ir("$X or $Y")
-        assert ir is not None
-        assert ir["op"] == "or"
+        assert ir["op"] == op
 
     def test_assign_none(self):
         ir = compile_pattern_to_rust_ir("$X = None")
@@ -158,56 +117,23 @@ class TestRustIRCompilation:
         assert ir is not None
         assert ir["value"] == {"type": "name", "value": "foo"}
 
-    def test_compare_eq(self):
-        ir = compile_pattern_to_rust_ir("$A == $B")
+    @pytest.mark.parametrize("pattern, op", [
+        ("$A == $B", "=="),
+        ("$A != $B", "!="),
+        ("$A < $B", "<"),
+        ("$A > $B", ">"),
+        ("$A <= $B", "<="),
+        ("$A >= $B", ">="),
+        ("$X is None", "is"),
+        ("$X is not None", "is not"),
+        ("$X in $Y", "in"),
+        ("$X not in $Y", "not in"),
+    ])
+    def test_compare(self, pattern, op):
+        ir = compile_pattern_to_rust_ir(pattern)
         assert ir is not None
         assert ir["type"] == "compare"
-        assert ir["ops"][0]["op"] == "=="
-
-    def test_compare_neq(self):
-        ir = compile_pattern_to_rust_ir("$A != $B")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "!="
-
-    def test_compare_lt(self):
-        ir = compile_pattern_to_rust_ir("$A < $B")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "<"
-
-    def test_compare_gt(self):
-        ir = compile_pattern_to_rust_ir("$A > $B")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == ">"
-
-    def test_compare_lte(self):
-        ir = compile_pattern_to_rust_ir("$A <= $B")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "<="
-
-    def test_compare_gte(self):
-        ir = compile_pattern_to_rust_ir("$A >= $B")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == ">="
-
-    def test_compare_is(self):
-        ir = compile_pattern_to_rust_ir("$X is None")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "is"
-
-    def test_compare_is_not(self):
-        ir = compile_pattern_to_rust_ir("$X is not None")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "is not"
-
-    def test_compare_in(self):
-        ir = compile_pattern_to_rust_ir("$X in $Y")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "in"
-
-    def test_compare_not_in(self):
-        ir = compile_pattern_to_rust_ir("$X not in $Y")
-        assert ir is not None
-        assert ir["ops"][0]["op"] == "not in"
+        assert ir["ops"][0]["op"] == op
 
     def test_unary_not(self):
         ir = compile_pattern_to_rust_ir("not $X")
@@ -419,56 +345,27 @@ class TestRustSubscriptMatching:
 class TestRustAssignMatching:
     """Tests that assignment patterns produce correct matches."""
 
-    def test_assign_none(self, tmp_path):
+    @pytest.mark.parametrize("source, pattern, expected", [
+        ("x = None\ny = None\nz = 1\nw = 'hello'\n", "$X = None", 2),
+        ("debug = True\nverbose = False\nflag = True\n", "$X = True", 2),
+        ("debug = True\nverbose = False\nflag = False\n", "$X = False", 2),
+        ("x = 42\ny = 42\nz = 0\n", "$X = 42", 2),
+        ("x = 'hello'\ny = 'hello'\nz = 'world'\n", "$X = 'hello'", 2),
+        ("x = foo\ny = bar\nz = foo\n", "$X = foo", 2),
+        ("x = []\ny = [1]\nz = []\n", "$X = []", 2),
+    ])
+    def test_assign_match_count(self, tmp_path, source, pattern, expected):
         f = tmp_path / "test.py"
-        f.write_text("x = None\ny = None\nz = 1\nw = 'hello'\n")
-        matches = find_pattern("$X = None", str(f))
-        assert len(matches) == 2
-
-    def test_assign_true(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("debug = True\nverbose = False\nflag = True\n")
-        matches = find_pattern("$X = True", str(f))
-        assert len(matches) == 2
-
-    def test_assign_false(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("debug = True\nverbose = False\nflag = False\n")
-        matches = find_pattern("$X = False", str(f))
-        assert len(matches) == 2
-
-    def test_assign_integer(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = 42\ny = 42\nz = 0\n")
-        matches = find_pattern("$X = 42", str(f))
-        assert len(matches) == 2
-
-    def test_assign_string(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = 'hello'\ny = 'hello'\nz = 'world'\n")
-        matches = find_pattern("$X = 'hello'", str(f))
-        assert len(matches) == 2
-
-    def test_assign_name_value(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = foo\ny = bar\nz = foo\n")
-        matches = find_pattern("$X = foo", str(f))
-        assert len(matches) == 2
-
-    def test_assign_empty_list(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = []\ny = [1]\nz = []\n")
-        matches = find_pattern("$X = []", str(f))
-        assert len(matches) == 2
+        f.write_text(source)
+        assert len(find_pattern(pattern, str(f))) == expected
 
     def test_assign_no_false_positive_annotated(self, tmp_path):
         """Typed assignments like x: int = 0 are a different tree-sitter node."""
         f = tmp_path / "test.py"
         f.write_text("x = None\ny: int = None\n")
-        # x = None is an assignment, y: int = None is typed_assignment
         matches = find_pattern("$X = None", str(f))
-        # Should match x = None; y: int = None depends on tree-sitter grammar
-        assert len(matches) >= 1
+        assert len(matches) == 1
+        assert matches[0].line == 1
 
     def test_assign_parity(self, tmp_path):
         n = _assert_rust_python_parity(
@@ -487,78 +384,25 @@ class TestRustAssignMatching:
 class TestRustBinaryOpMatching:
     """Tests that binary operation patterns produce correct matches."""
 
-    def test_addition(self, tmp_path):
+    @pytest.mark.parametrize("source, pattern, expected", [
+        ("x = a + b\ny = c - d\nz = e + f\n", "$X + $Y", 2),
+        ("x = a + b\ny = c - d\nz = e - f\n", "$X - $Y", 2),
+        ("x = a * b\ny = c + d\n", "$X * $Y", 1),
+        ("x = a / b\ny = c // d\n", "$X / $Y", 1),
+        ("x = a / b\ny = c // d\n", "$X // $Y", 1),
+        ("x = a % b\ny = c + d\n", "$X % $Y", 1),
+        ("x = a ** 2\ny = b ** 3\n", "$X ** $Y", 2),
+        ("x = a | b\ny = c & d\n", "$X | $Y", 1),
+        ("x = a | b\ny = c & d\n", "$X & $Y", 1),
+        ("if a or b:\n    pass\nif c and d:\n    pass\n", "$X or $Y", 1),
+        ("if a or b:\n    pass\nif c and d:\n    pass\n", "$X and $Y", 1),
+        # Right operand pinned to a specific literal.
+        ("x = a + 1\ny = b + 2\nz = c + 1\n", "$X + 1", 2),
+    ])
+    def test_binary_op_match_count(self, tmp_path, source, pattern, expected):
         f = tmp_path / "test.py"
-        f.write_text("x = a + b\ny = c - d\nz = e + f\n")
-        matches = find_pattern("$X + $Y", str(f))
-        assert len(matches) == 2
-
-    def test_subtraction(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a + b\ny = c - d\nz = e - f\n")
-        matches = find_pattern("$X - $Y", str(f))
-        assert len(matches) == 2
-
-    def test_multiplication(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a * b\ny = c + d\n")
-        matches = find_pattern("$X * $Y", str(f))
-        assert len(matches) == 1
-
-    def test_division(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a / b\ny = c // d\n")
-        matches = find_pattern("$X / $Y", str(f))
-        assert len(matches) == 1
-
-    def test_floor_division(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a / b\ny = c // d\n")
-        matches = find_pattern("$X // $Y", str(f))
-        assert len(matches) == 1
-
-    def test_modulo(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a % b\ny = c + d\n")
-        matches = find_pattern("$X % $Y", str(f))
-        assert len(matches) == 1
-
-    def test_power(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a ** 2\ny = b ** 3\n")
-        matches = find_pattern("$X ** $Y", str(f))
-        assert len(matches) == 2
-
-    def test_bitwise_or(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a | b\ny = c & d\n")
-        matches = find_pattern("$X | $Y", str(f))
-        assert len(matches) == 1
-
-    def test_bitwise_and(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("x = a | b\ny = c & d\n")
-        matches = find_pattern("$X & $Y", str(f))
-        assert len(matches) == 1
-
-    def test_boolean_or(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if a or b:\n    pass\nif c and d:\n    pass\n")
-        matches = find_pattern("$X or $Y", str(f))
-        assert len(matches) == 1
-
-    def test_boolean_and(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if a or b:\n    pass\nif c and d:\n    pass\n")
-        matches = find_pattern("$X and $Y", str(f))
-        assert len(matches) == 1
-
-    def test_specific_operand(self, tmp_path):
-        """Match only when right operand is a specific value."""
-        f = tmp_path / "test.py"
-        f.write_text("x = a + 1\ny = b + 2\nz = c + 1\n")
-        matches = find_pattern("$X + 1", str(f))
-        assert len(matches) == 2
+        f.write_text(source)
+        assert len(find_pattern(pattern, str(f))) == expected
 
     def test_binary_parity(self, tmp_path):
         _assert_rust_python_parity(
@@ -576,60 +420,22 @@ class TestRustBinaryOpMatching:
 class TestRustCompareMatching:
     """Tests that comparison patterns produce correct matches."""
 
-    def test_equality(self, tmp_path):
+    @pytest.mark.parametrize("source, pattern, expected", [
+        ("if x == 1:\n    pass\nif y != 2:\n    pass\nif z == 3:\n    pass\n", "$X == $Y", 2),
+        ("if x == 1:\n    pass\nif y != 2:\n    pass\n", "$X != $Y", 1),
+        ("if x < 10:\n    pass\nif y > 20:\n    pass\n", "$X < $Y", 1),
+        ("if x < 10:\n    pass\nif y > 20:\n    pass\n", "$X > $Y", 1),
+        ("if x is None:\n    pass\nif y is not None:\n    pass\n", "$X is None", 1),
+        ("if x is None:\n    pass\nif y is not None:\n    pass\n", "$X is not None", 1),
+        ("if x in items:\n    pass\nif y not in items:\n    pass\n", "$X in $Y", 1),
+        ("if x in items:\n    pass\nif y not in items:\n    pass\n", "$X not in $Y", 1),
+        # Right operand pinned to a specific literal.
+        ("if x == 0:\n    pass\nif y == 0:\n    pass\nif z == 1:\n    pass\n", "$X == 0", 2),
+    ])
+    def test_compare_match_count(self, tmp_path, source, pattern, expected):
         f = tmp_path / "test.py"
-        f.write_text("if x == 1:\n    pass\nif y != 2:\n    pass\nif z == 3:\n    pass\n")
-        matches = find_pattern("$X == $Y", str(f))
-        assert len(matches) == 2
-
-    def test_not_equal(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x == 1:\n    pass\nif y != 2:\n    pass\n")
-        matches = find_pattern("$X != $Y", str(f))
-        assert len(matches) == 1
-
-    def test_less_than(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x < 10:\n    pass\nif y > 20:\n    pass\n")
-        matches = find_pattern("$X < $Y", str(f))
-        assert len(matches) == 1
-
-    def test_greater_than(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x < 10:\n    pass\nif y > 20:\n    pass\n")
-        matches = find_pattern("$X > $Y", str(f))
-        assert len(matches) == 1
-
-    def test_is_none(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x is None:\n    pass\nif y is not None:\n    pass\n")
-        matches = find_pattern("$X is None", str(f))
-        assert len(matches) == 1
-
-    def test_is_not_none(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x is None:\n    pass\nif y is not None:\n    pass\n")
-        matches = find_pattern("$X is not None", str(f))
-        assert len(matches) == 1
-
-    def test_in(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x in items:\n    pass\nif y not in items:\n    pass\n")
-        matches = find_pattern("$X in $Y", str(f))
-        assert len(matches) == 1
-
-    def test_not_in(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("if x in items:\n    pass\nif y not in items:\n    pass\n")
-        matches = find_pattern("$X not in $Y", str(f))
-        assert len(matches) == 1
-
-    def test_compare_specific_value(self, tmp_path):
-        """Match comparison with a specific literal."""
-        f = tmp_path / "test.py"
-        f.write_text("if x == 0:\n    pass\nif y == 0:\n    pass\nif z == 1:\n    pass\n")
-        matches = find_pattern("$X == 0", str(f))
-        assert len(matches) == 2
+        f.write_text(source)
+        assert len(find_pattern(pattern, str(f))) == expected
 
     def test_compare_parity(self, tmp_path):
         _assert_rust_python_parity(
@@ -735,14 +541,6 @@ class TestRustLiteralMatching:
             "$X is None",
         )
         assert n == 1
-
-    def test_none_assignment_parity(self, tmp_path):
-        n = _assert_rust_python_parity(
-            tmp_path,
-            "x = None\ny = None\nz = 0\n",
-            "$X = None",
-        )
-        assert n == 2
 
 
 # ============================================================================

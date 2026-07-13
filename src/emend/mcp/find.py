@@ -7,6 +7,7 @@ import json
 from contextlib import redirect_stdout
 from typing import Annotated, Any
 
+from lark.exceptions import LarkError
 from pydantic import Field
 
 from emend.component_selector import parse_extended_selector, parse_selector
@@ -93,7 +94,7 @@ def search(
         try:
             _parsed_sel = parse_extended_selector(query)
             has_component = _parsed_sel.component is not None
-        except Exception:
+        except LarkError:
             pass
 
     json_output = output_base == "json"
@@ -187,7 +188,7 @@ def search(
                 )
                 for match in file_matches:
                     all_matches.append((file_path_str, match))
-            except (FileNotFoundError, Exception):
+            except (FileNotFoundError, UnicodeDecodeError):
                 if not is_multi_file:
                     raise
                 continue

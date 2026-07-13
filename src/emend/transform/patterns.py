@@ -16,6 +16,7 @@ from ..pattern import (
     parse_oracle_type_constraint,
 )
 from emend import emend_core as _rust
+from emend.errors import BUG_EXCEPTIONS
 from .components import _CONTENT_REF_RE, _extract_string_content_from_text
 
 if TYPE_CHECKING:
@@ -56,6 +57,11 @@ def _filter_matches_by_import(
     resolver = _rust.PyScopeResolver(project_root)
     resolver.index_file(file_path, content)
 
+    # Resolve references once and index by (line, col) for O(1) lookup.
+    qn_by_position: dict[tuple[int, int], str] = {}
+    for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(file_path):
+        qn_by_position.setdefault((line, col), qn)
+
     filtered = []
     for match in matches:
         # Extract the root name from the matched node
@@ -65,15 +71,8 @@ def _filter_matches_by_import(
         if not root_name:
             continue
 
-        # Resolve QN at match position
-        references = resolver.references_in_file(file_path)
-        
-        match_qn = None
-        for qn, line, col, offset, end_offset, kind, _ann in references:
-            if line == match.line and col == match.col:
-                match_qn = qn
-                break
-        
+        match_qn = qn_by_position.get((match.line, match.col))
+
         if match_qn and match_qn.startswith(f"{imported_from}."):
             filtered.append(match)
         elif match_qn == imported_from:
@@ -274,7 +273,6 @@ def find_pattern(
 
     # Find matches using Rust engine
     ext = Path(file_path).suffix.lstrip('.') if file_path else None
-    # print(f"DEBUG: find_pattern ext={ext} ir={rust_ir}")
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -393,7 +391,8 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
 
     Args:
         selector: Extended selector specifying the symbol
-        dedent: If True, remove leading indentation
+        dedent: Remove leading indentation. Only applies to line-based
+            selectors; symbol source is always dedented.
 
     Returns:
         String containing the complete source code of the symbol
@@ -447,16 +446,12 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     symbol_lines = lines[start_line - 1 : sym.line_end]
     code = "".join(symbol_lines)
 
-    # We ALWAYS dedent here because we extracted raw lines from a potentially
-    # indented context (e.g. a method in a class). The parser returns positions
-    # relative to the node's own start, which is effectively dedented.
+    # Symbol source is always dedented (the `dedent` flag only applies to
+    # line-based selectors above): raw lines come from a potentially indented
+    # context (e.g. a method in a class), so we normalise to column zero.
     import textwrap
     code = textwrap.dedent(code)
 
-    # If the explicit dedent flag is True, we've already done it above.
-    # The expected behavior is that get_symbol_source(selector) returns
-    # dedented code for the symbol.
-    
     # Ensure it ends with exactly one newline to match expected test behavior
     if not code.endswith("\n"):
         code += "\n"
@@ -574,6 +569,9 @@ def analyze_imports(
         source_content = source_path.read_text()
         resolver.index_file(str(source_path.resolve()), source_content)
     except Exception:
+        logger.debug(
+            "could not index %s for import analysis", source_path, exc_info=True,
+        )
         return []
 
     structured_imports = resolver.structured_imports_in_file(
@@ -746,10 +744,15 @@ def copy_symbol(
         imp_handler = load_plugin(lang).import_handler
         imports = analyze_imports(source, selector.file_path, source_module=source_module, project_path=project_path)
         for imp in imports:
+            pos = 0 if imp.startswith("from __future__") else -1
             try:
-                pos = 0 if imp.startswith("from __future__") else -1
                 new_content = imp_handler.add_import_text(imp.rstrip("\n"), pos, new_content)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug(
+                    "add_import_text failed for %r, prepending", imp, exc_info=True,
+                )
                 new_content = imp + "\n" + new_content
 
     # Generate diff
@@ -774,7 +777,10 @@ def _is_valid_replacement(code: str, language: str = "python") -> bool:
     from emend.language_registry import get_extensions
     try:
         exts = get_extensions(language)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("get_extensions failed for %s", language, exc_info=True)
         exts = []
     ext = exts[0] if exts else ("py" if language == "python" else None)
     if ext is None:
@@ -782,6 +788,7 @@ def _is_valid_replacement(code: str, language: str = "python") -> bool:
     try:
         return _rust.validate_syntax(code, ext)
     except Exception:
+        logger.debug("validate_syntax failed for %s", language, exc_info=True)
         return True
 
 

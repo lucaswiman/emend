@@ -17,20 +17,25 @@ from emend.trace import (
 )
 
 
-def _write_config(tmp_path, config_dict):
-    """Helper to write a YAML config file."""
-    config_file = tmp_path / ".emend" / "patterns.yaml"
+def _write_config(tmp_path, config_dict, name="patterns.yaml"):
+    """Helper to write a YAML config file under ``.emend/``."""
+    config_file = tmp_path / ".emend" / name
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(yaml.dump(config_dict))
     return config_file
 
 
 def _write_rules_config(tmp_path, config_dict):
-    """Helper to write canonical rules.yaml config."""
-    config_file = tmp_path / ".emend" / "rules.yaml"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(yaml.dump(config_dict))
-    return config_file
+    """Write the canonical ``rules.yaml`` config."""
+    return _write_config(tmp_path, config_dict, name="rules.yaml")
+
+
+# The recurring "user input flows straight into cursor.execute" snippet.
+SQLI_SOURCE = (
+    "def handle_request(request, cursor):\n"
+    "    name = request.args.get('name')\n"
+    "    cursor.execute(name)\n"
+)
 
 
 def test_trace_load_config_from_unified_flow_rules(tmp_path):
@@ -90,40 +95,32 @@ def test_trace_load_config_merges_trace_section_and_unified_flow_rules(tmp_path)
 
 
 def _make_sql_injection_config():
-    """Return a TraceConfig for SQL injection detection."""
-    return TraceConfig(
-        labels=["user_input"],
-        sources=[
-            TraceSource(pattern="request.args.get($X)", label="user_input"),
-            TraceSource(pattern="request.form[$X]", label="user_input"),
-        ],
-        sinks=[
-            TraceSink(
-                pattern="cursor.execute($X)",
-                label="user_input",
-                message="Potential SQL injection: user input reaches cursor.execute()",
-            ),
-            TraceSink(
-                pattern="eval($X)",
-                label="user_input",
-                message="Potential code injection: user input reaches eval()",
-            ),
-        ],
-        sanitizers=[
-            TraceSanitizer(pattern="escape($X)", label="user_input"),
-            TraceSanitizer(pattern="sanitize($X)", label="user_input"),
-        ],
+    """SQL-injection ``TraceConfig``: the shared conftest base extended with a
+    ``request.form[...]`` source, an ``eval()`` sink, and a ``sanitize()``
+    sanitizer that several tests in this module rely on."""
+    from conftest import make_sql_injection_config
+
+    config = make_sql_injection_config()
+    config.sources.append(
+        TraceSource(pattern="request.form[$X]", label="user_input")
     )
+    config.sinks.append(
+        TraceSink(
+            pattern="eval($X)",
+            label="user_input",
+            message="Potential code injection: user input reaches eval()",
+        )
+    )
+    config.sanitizers.append(
+        TraceSanitizer(pattern="sanitize($X)", label="user_input")
+    )
+    return config
 
 
 def test_trace_basic_source_to_sink(tmp_path):
     """Detects tainted value flowing from source to sink."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
@@ -205,11 +202,7 @@ def test_trace_does_not_cross_contaminate_separate_functions(tmp_path):
 def test_trace_trace_output(tmp_path):
     """Trace includes source and sink steps."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
@@ -226,11 +219,7 @@ def test_trace_trace_output(tmp_path):
 def test_trace_label_filtering(tmp_path):
     """--label filters to only check a specific taint label."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
 
@@ -246,11 +235,7 @@ def test_trace_label_filtering(tmp_path):
 def test_trace_json_output(tmp_path):
     """JSON output format is valid and contains expected fields."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
@@ -268,11 +253,7 @@ def test_trace_json_output(tmp_path):
 def test_trace_json_output_with_trace(tmp_path):
     """JSON output includes trace when requested."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
@@ -287,11 +268,7 @@ def test_trace_json_output_with_trace(tmp_path):
 def test_trace_text_output_format(tmp_path):
     """Text output uses standard file:line:col format."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)
@@ -304,11 +281,7 @@ def test_trace_text_output_format(tmp_path):
 def test_trace_text_output_with_trace(tmp_path):
     """Text output includes indented trace lines."""
     test_file = tmp_path / "app.py"
-    test_file.write_text(
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    cursor.execute(name)\n"
-    )
+    test_file.write_text(SQLI_SOURCE)
 
     config = _make_sql_injection_config()
     violations = run_trace_analysis([str(test_file)], config)

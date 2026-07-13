@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from emend.errors import BUG_EXCEPTIONS
+
 if TYPE_CHECKING:
     from emend.policy import Policy, PolicyViolation
 
@@ -35,7 +37,10 @@ def run_datalog_check(
     try:
         graph = FactGraph.build_from_project(project_path)
         result = graph.run_query(check.cozoscript)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as exc:
+        logger.debug("Datalog check failed", exc_info=True)
         return [PolicyViolation(
             file_path="<project>",
             line=0,

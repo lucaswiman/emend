@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from lark.exceptions import LarkError
 
 from emend.cli_base import JsonFlag
 from emend.component_selector import parse_extended_selector
@@ -300,7 +301,7 @@ def map_resolve_cmd(
 
         try:
             sel = parse_extended_selector(selector)
-        except Exception:
+        except LarkError:
             sel = None
         if sel and sel.file_path:
             file_path = sel.file_path

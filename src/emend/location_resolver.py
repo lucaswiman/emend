@@ -177,37 +177,40 @@ class LocationResolver:
 
         # -- Function ranges via tree-sitter symbol collector --
         func_ranges: list[_FuncRange] = []
+        raw_syms = None
         try:
             from emend import emend_core
             raw_syms = emend_core.collect_symbols_from_str(source, ext=ext)
-            _collect_func_ranges_from_raw(raw_syms, func_ranges)
         except Exception:
             logger.debug(
                 "collect_symbols_from_str failed for %s; skipping function index",
                 file_path,
                 exc_info=True,
             )
+        if raw_syms is not None:
+            _collect_func_ranges_from_raw(raw_syms, func_ranges)
 
         # -- Block ranges via CFG builder --
         block_ranges: list[_BlockRange] = []
+        cfgs: list = []
         try:
             from emend.cfg import build_cfgs_for_source
             cfgs = build_cfgs_for_source(source, ext=ext)
-            for cfg in cfgs:
-                # CFG lines from Rust are 0-based tree-sitter rows;
-                # convert to 1-based to match symbol / FactGraph conventions.
-                func_start_1b = cfg.func_start_line + 1
-                func_qn = _find_innermost_func(func_ranges, func_start_1b)
-                for block in cfg.get_blocks():
-                    abs_start = block["start_line"] + 1
-                    abs_end = block["end_line"] + 1
-                    block_ranges.append((func_qn, block["id"], abs_start, abs_end))
         except Exception:
             logger.debug(
                 "build_cfgs_for_source failed for %s; block index unavailable",
                 file_path,
                 exc_info=True,
             )
+        for cfg in cfgs:
+            # CFG lines from Rust are 0-based tree-sitter rows;
+            # convert to 1-based to match symbol / FactGraph conventions.
+            func_start_1b = cfg.func_start_line + 1
+            func_qn = _find_innermost_func(func_ranges, func_start_1b)
+            for block in cfg.get_blocks():
+                abs_start = block["start_line"] + 1
+                abs_end = block["end_line"] + 1
+                block_ranges.append((func_qn, block["id"], abs_start, abs_end))
 
         return cls(func_ranges, block_ranges)
 

@@ -18,6 +18,7 @@ try:
         references,
         analyze,
         trace_analysis,
+        check_duplicates,
         check,
         facts_query,
         mappings,
@@ -45,6 +46,23 @@ def test_all_tools_registered_core():
         "facts_query",
         "grammar_and_cookbook",
     }
+
+
+def test_check_duplicates_preserves_involves_file_scope(monkeypatch):
+    import emend.duplicate
+
+    captured = {}
+
+    def fake_query_duplicates(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(emend.duplicate, "query_duplicates", fake_query_duplicates)
+
+    assert json.loads(check_duplicates("changed.py", project="repo")) == []
+    assert captured["project_path"] == "repo"
+    assert captured["involves_file"] == "changed.py"
+    assert captured["file_scope"] is None
 
 
 def test_expert_profile_includes_mappings_and_facts_query():

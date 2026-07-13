@@ -11,6 +11,7 @@ import re
 
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
+from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +21,23 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     conn = _get_disk_cache()
     if conn is None:
         return None
+    import pickle
+    import sqlite3
+    import zlib
     try:
-        import pickle
-        import zlib
         row = conn.execute(
             "SELECT qnames FROM qn_index WHERE hash = ?", (content_hash,)
         ).fetchone()
-        if row is not None:
-            return pickle.loads(zlib.decompress(row[0]))
+    except sqlite3.Error:
+        logger.debug("qn_index cache lookup failed", exc_info=True)
+        return None
+    if row is None:
+        return None
+    try:
+        return pickle.loads(zlib.decompress(row[0]))
     except Exception:
-        pass
-    return None
+        logger.debug("corrupt qn_index cache row; ignoring", exc_info=True)
+        return None
 
 
 def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> set[str]:
@@ -51,7 +58,10 @@ def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> se
             source_override=source,
             language="python",
         )
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("__all__ pattern match failed in %s", file_path, exc_info=True)
         return names
     for m in matches:
         raw = m.captures.get("NAMES", "")
@@ -81,62 +91,41 @@ def _extract_noqa_lines(source: str) -> set[int]:
     return result
 
 
-def _check_cache_hits(
-    db_path: str, all_hashes: list[bytes]
-) -> tuple[set[bytes], set[bytes], set[bytes], set[bytes]]:
-    """Pre-check which content hashes are already present in cache tables.
+def _check_cache_hits(db_path: str, all_hashes: list[bytes]) -> set[bytes]:
+    """Pre-check which content hashes already have a QN cache entry.
 
-    Returns four sets of cached hashes — one per cache table
-    (``qn_index``, ``symbol_index``, ``import_graph``, ``reference_index``).
-    On any error, returns empty sets so the caller processes everything.
+    Returns the set of hashes present in ``qn_index``. The derived tables
+    (``symbol_index``, ``import_graph``, ``reference_index``) are written in
+    lockstep with ``qn_index``, so a QN-cache hit implies their rows are
+    current and a QN-cache miss means all of them must be re-derived — only
+    ``qn_index`` needs to be probed. On any error, returns an empty set so
+    the caller processes everything.
     """
     import sqlite3
 
     cached_qn: set[bytes] = set()
-    cached_sym: set[bytes] = set()
-    cached_import: set[bytes] = set()
-    cached_ref: set[bytes] = set()
     if not all_hashes:
-        return cached_qn, cached_sym, cached_import, cached_ref
+        return cached_qn
     try:
         conn_check = sqlite3.connect(db_path, timeout=30)
         conn_check.execute("PRAGMA journal_mode=WAL")
         conn_check.execute("PRAGMA synchronous=NORMAL")
         placeholders = ",".join("?" * len(all_hashes))
-        for table, target_set in [
-            ("qn_index", cached_qn),
-        ]:
-            try:
-                target_set.update(
-                    row[0]
-                    for row in conn_check.execute(
-                        f"SELECT hash FROM {table} WHERE hash IN ({placeholders})",
-                        all_hashes,
-                    ).fetchall()
-                )
-            except Exception:
-                pass
-        # For the new tables, check by content_hash column
-        for table, target_set in [
-            ("symbol_index", cached_sym),
-            ("import_graph", cached_import),
-            ("reference_index", cached_ref),
-        ]:
-            try:
-                target_set.update(
-                    row[0]
-                    for row in conn_check.execute(
-                        f"SELECT DISTINCT content_hash FROM {table} "
-                        f"WHERE content_hash IN ({placeholders})",
-                        all_hashes,
-                    ).fetchall()
-                )
-            except Exception:
-                pass
+        try:
+            cached_qn.update(
+                row[0]
+                for row in conn_check.execute(
+                    f"SELECT hash FROM qn_index WHERE hash IN ({placeholders})",
+                    all_hashes,
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            logger.debug("qn_index cache pre-check query failed", exc_info=True)
         conn_check.close()
-    except Exception:
-        pass  # If pre-check fails, caller processes everything
-    return cached_qn, cached_sym, cached_import, cached_ref
+    except sqlite3.Error:
+        # If pre-check fails, caller processes everything
+        logger.debug("qn_index cache pre-check failed", exc_info=True)
+    return cached_qn
 
 
 def _write_index_rows(
@@ -150,8 +139,8 @@ def _write_index_rows(
     """Bulk-write collected index rows to the SQLite cache.
 
     Performs a delete-then-insert for the per-file-derived tables so that
-    a second indexing pass replaces stale rows.  Errors are swallowed —
-    the worker process must not raise.
+    a second indexing pass replaces stale rows.  SQLite errors are swallowed
+    (and logged) — environmental failures must not crash the worker process.
     """
     import sqlite3
     from .cache import _init_cache_schema
@@ -226,8 +215,8 @@ def _write_index_rows(
             )
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except sqlite3.Error:
+        logger.debug("bulk index write failed", exc_info=True)
 
 
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
@@ -250,6 +239,10 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     import zlib
     from emend.query import _collect_symbols as _collect_symbols_ts
     from emend import emend_core as _rust
+    from emend.dsl import (
+        detect_dsl_regions, extract_sql_symbols,
+        extract_jinja_symbols, extract_graphql_symbols, DslKind,
+    )
 
     from .deadcode import _is_likely_entry_point
     db_path, source_root, project_root, file_batch = args
@@ -272,26 +265,21 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     ]
     all_hashes = [h for h, _, _ in file_hashes]
 
-    cached_qn, cached_sym, cached_import, cached_ref = _check_cache_hits(
-        db_path, all_hashes,
-    )
+    cached_qn = _check_cache_hits(db_path, all_hashes)
 
     skipped = 0
     processed = 0
     for content_hash, py_file, content in file_hashes:
         need_qn = content_hash not in cached_qn
-        need_sym = content_hash not in cached_sym
-        need_import = content_hash not in cached_import
-        need_ref = content_hash not in cached_ref
-        # Skip if the QN cache is populated (the core index).
-        # The derived tables (symbol_index, import_graph,
-        # reference_index) may legitimately have zero rows for a given file
-        # (e.g., a file with only assignments has no symbols, a file with
-        # no imports has no import_graph rows).  We re-derive them only
-        # when the QN cache needs updating.
+        # The QN cache is the core index. The derived tables (symbol_index,
+        # import_graph, reference_index) may legitimately have zero rows for a
+        # given file (e.g. a file with only assignments has no symbols) and are
+        # written in lockstep with the QN cache, so we re-derive all of them
+        # exactly when the QN cache entry is missing.
         if not need_qn:
             skipped += 1
             continue
+        need_sym = need_import = need_ref = True
 
         processed += 1
 
@@ -303,31 +291,42 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 scope_resolver.index_file(py_file, content)
                 scope_indexed = True
             except Exception:
-                pass
+                logger.debug("scope indexing failed for %s", py_file, exc_info=True)
 
         if need_qn and scope_indexed:
             try:
                 all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
+            except Exception:
+                logger.debug("qname collection failed for %s", py_file, exc_info=True)
+            else:
                 qn_blob = zlib.compress(
                     pickle.dumps(all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
                     level=1,
                 )
                 qn_rows.append((content_hash, qn_blob))
-            except Exception:
-                pass
 
         if need_sym:
             try:
                 syms_for_file = _collect_symbols_ts(Path(py_file), content)
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
+                logger.debug("symbol collection failed for %s", py_file, exc_info=True)
+                syms_for_file = []
 
-                # Compute module_qn prefix for this file.
-                _src = Path(source_root)
-                _proj = Path(project_root)
-                _abs = Path(py_file).resolve()
+            # Compute module_qn prefix for this file.
+            _src = Path(source_root)
+            _proj = Path(project_root)
+            _abs = Path(py_file).resolve()
+            try:
+                _rel = _abs.relative_to(_src)
+            except ValueError:
                 try:
-                    _rel = _abs.relative_to(_src)
-                except ValueError:
                     _rel = _abs.relative_to(_proj)
+                except ValueError:
+                    _rel = None
+
+            if _rel is not None:
                 _module_prefix = ".".join(
                     list(_rel.parts[:-1]) + [_rel.stem]
                 )
@@ -367,30 +366,28 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                         int(sym.name in exported_names),
                         int(sym.line in noqa_lines),
                     ))
-            except Exception:
-                pass
 
         if need_import and scope_indexed:
             try:
-                for _local, _mod, _imp_name, _is_star in scope_resolver.imports_in_file(py_file):
-                    if _mod:
-                        import_rows.append((content_hash, py_file, _mod))
+                file_imports = scope_resolver.imports_in_file(py_file)
             except Exception:
-                pass
+                logger.debug("import collection failed for %s", py_file, exc_info=True)
+                file_imports = []
+            for _local, _mod, _imp_name, _is_star in file_imports:
+                if _mod:
+                    import_rows.append((content_hash, py_file, _mod))
 
         if need_ref and scope_indexed:
             try:
-                for qn_str, line, col, offset, end_offset, kind, _ann in scope_resolver.references_in_file(py_file):
-                    ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
+                file_refs = scope_resolver.references_in_file(py_file)
             except Exception:
-                pass
+                logger.debug("reference collection failed for %s", py_file, exc_info=True)
+                file_refs = []
+            for qn_str, line, col, offset, end_offset, kind, _ann in file_refs:
+                ref_rows.append((content_hash, qn_str, py_file, line, col, kind))
 
         # DSL symbol extraction (SQL, Jinja2, GraphQL, etc.)
         try:
-            from emend.dsl import (
-                detect_dsl_regions, extract_sql_symbols,
-                extract_jinja_symbols, extract_graphql_symbols, DslKind,
-            )
             regions = detect_dsl_regions(py_file, source=content)
             for region in regions:
                 syms = []
@@ -412,8 +409,10 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                         region.host_end_col,
                         content_hash,
                     ))
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            pass
+            logger.debug("DSL extraction failed for %s", py_file, exc_info=True)
 
     # Bulk-write to SQLite from this worker process.
     # WAL mode allows concurrent readers/writers across processes.
@@ -483,15 +482,16 @@ def _scan_manifest(
             conn = _sql3.connect(str(db_path), timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
             close_conn = True
-        except Exception:
+        except _sql3.Error:
+            logger.debug("could not open parse.db for manifest scan", exc_info=True)
             result.new_files = source_files
             return result
 
     try:
         # Tier 1: Git HEAD check (scoped to this worktree)
         git_head_key = f"git_head:{worktree_id}"
+        import subprocess as _sp
         try:
-            import subprocess as _sp
             git_result = _sp.run(
                 ["git", "rev-parse", "HEAD"],
                 capture_output=True, timeout=5,
@@ -505,8 +505,8 @@ def _scan_manifest(
                 ).fetchone()
                 if stored and stored[0] != current_head:
                     result.git_head_changed = True
-        except Exception:
-            pass
+        except (OSError, _sp.SubprocessError, _sql3.Error):
+            logger.debug("git HEAD staleness check failed", exc_info=True)
 
         # Tier 2 + 3: Stat scan + hash verification
         # Load manifest into memory for fast lookup (filtered by worktree)
@@ -518,8 +518,9 @@ def _scan_manifest(
                 (worktree_id,),
             ).fetchall():
                 manifest[row[0]] = (row[1], row[2], row[3])
-        except Exception:
+        except _sql3.Error:
             # Table might not exist yet
+            logger.debug("file_manifest read failed; treating all files as new", exc_info=True)
             result.new_files = source_files
             return result
 
@@ -551,19 +552,20 @@ def _scan_manifest(
             # Tier 3: content hash verification
             try:
                 content = Path(resolved_path).read_text()
-                actual_hash = hashlib.md5(
-                    content.encode(), usedforsecurity=False
-                ).digest()
-                if actual_hash == stored_hash:
-                    # Content identical — just mtime changed (e.g. git checkout)
-                    mtime_updates.append(
-                        (st.st_mtime_ns, st.st_size, worktree_id, resolved_path)
-                    )
-                    result.unchanged.append(original_path)
-                else:
-                    result.changed.append((original_path, stored_hash, actual_hash))
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 result.new_files.append(original_path)
+                continue
+            actual_hash = hashlib.md5(
+                content.encode(), usedforsecurity=False
+            ).digest()
+            if actual_hash == stored_hash:
+                # Content identical — just mtime changed (e.g. git checkout)
+                mtime_updates.append(
+                    (st.st_mtime_ns, st.st_size, worktree_id, resolved_path)
+                )
+                result.unchanged.append(original_path)
+            else:
+                result.changed.append((original_path, stored_hash, actual_hash))
 
         # Batch-commit all mtime updates (avoids per-file fsync)
         if mtime_updates:
@@ -574,8 +576,8 @@ def _scan_manifest(
                     mtime_updates,
                 )
                 conn.commit()
-            except Exception:
-                pass
+            except _sql3.Error:
+                logger.debug("manifest mtime batch update failed", exc_info=True)
     finally:
         if close_conn and conn:
             conn.close()
@@ -611,7 +613,8 @@ def _ensure_index_fresh(
     try:
         conn = _sql3.connect(str(db_path), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
+    except _sql3.Error:
+        logger.debug("could not open parse.db for freshness check", exc_info=True)
         return False
 
     try:
@@ -623,14 +626,14 @@ def _ensure_index_fresh(
             if ver is None or ver[0] != _SCHEMA_VERSION:
                 conn.close()
                 return False
-        except Exception:
+        except _sql3.Error:
             conn.close()
             return False
 
         # Check if index tables exist and have data
         try:
             count = conn.execute("SELECT COUNT(*) FROM symbol_index").fetchone()[0]
-        except Exception:
+        except _sql3.Error:
             conn.close()
             return False
         if count == 0:
@@ -653,13 +656,13 @@ def _ensure_index_fresh(
             try:
                 content = Path(path).read_text()
                 files_to_index.append((path, content))
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 pass
         for path, old_hash, _new_hash in scan.changed:
             try:
                 content = Path(path).read_text()
                 files_to_index.append((path, content))
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 continue
             # Remove stale derived-table entries for the old content hash
             # so they don't linger after re-indexing with the new hash.
@@ -669,8 +672,8 @@ def _ensure_index_fresh(
                         f"DELETE FROM {table} WHERE content_hash = ?",
                         (old_hash,),
                     )
-                except Exception:
-                    pass
+                except _sql3.Error:
+                    logger.debug("stale %s cleanup failed", table, exc_info=True)
         if scan.changed:
             conn.commit()
 
@@ -688,12 +691,16 @@ def _ensure_index_fresh(
                 else:
                     # No existing facts.db — fall back to full build.
                     _build_facts_db(project_root)
+            except BUG_EXCEPTIONS:
+                raise
             except BaseException:
                 logger.debug("incremental facts update failed, falling back to full rebuild", exc_info=True)
                 try:
                     _build_facts_db(project_root)
+                except BUG_EXCEPTIONS:
+                    raise
                 except BaseException:
-                    pass
+                    logger.debug("full facts rebuild also failed", exc_info=True)
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
@@ -710,8 +717,8 @@ def _ensure_index_fresh(
                         "VALUES (?, ?, ?, ?, ?, ?)",
                         (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now),
                     )
-                except Exception:
-                    pass
+                except (OSError, _sql3.Error):
+                    logger.debug("manifest update failed for %s", py_file, exc_info=True)
             conn.commit()
 
         # Clean up deleted files
@@ -738,8 +745,8 @@ def _ensure_index_fresh(
                     "DELETE FROM file_manifest WHERE worktree_id = ? AND path = ?",
                     (worktree_id, deleted_path),
                 )
-            except Exception:
-                pass
+            except _sql3.Error:
+                logger.debug("deleted-file cleanup failed for %s", deleted_path, exc_info=True)
         if scan.deleted:
             conn.commit()
             # Also clean CozoDB facts db for deleted files
@@ -764,15 +771,20 @@ def _ensure_index_fresh(
                         rel_deleted.append(dp)
                 fg.remove_files(rel_deleted)
                 fg.close()
+            except BUG_EXCEPTIONS:
+                raise
             except BaseException:
-                pass
+                logger.debug("facts cleanup for deleted files failed", exc_info=True)
 
         conn.close()
         return True
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("inline re-index failed; treating index as stale", exc_info=True)
         try:
             conn.close()
-        except Exception:
+        except _sql3.Error:
             pass
         return False
 
@@ -923,6 +935,8 @@ def _query_symbol_index_cozo(
             }
             for r in result["rows"]
         ]
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("CozoDB query_symbol_index failed", exc_info=True)
         return None
@@ -944,12 +958,16 @@ def _lookup_via_modmap(
     """
     try:
         from emend.knowledge import MappingStore
-    except Exception:
+    except ImportError:
+        logger.debug("emend.knowledge unavailable; skipping modmap lookup", exc_info=True)
         return []
 
     try:
         store = MappingStore(project_root)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("MappingStore init failed; skipping modmap lookup", exc_info=True)
         return []
 
     try:
@@ -984,40 +1002,46 @@ def _lookup_via_modmap(
 
         results: list[dict] = []
         for fpath in search_files:
+            ext = fpath.suffix.lstrip(".") or "py"
             try:
                 source = fpath.read_text()
-                ext = fpath.suffix.lstrip(".") or "py"
                 rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
-                for sym in rust_syms:
-                    if sym.get("name") == sym_name or (name_pattern and sym.get("name") == name_pattern):
-                        if kind and sym.get("kind") != kind:
-                            continue
-                        decs = sym.get("decorators", [])
-                        results.append({
-                            "name": sym.get("name", ""),
-                            "qualified_name": sym.get("qualified_name", ""),
-                            "kind": sym.get("kind", ""),
-                            "file_path": str(fpath),
-                            "line": sym.get("line", 0),
-                            "end_line": sym.get("end_line", 0),
-                            "depth": sym.get("depth", 0),
-                            "parent": sym.get("parent", ""),
-                            "signature": sym.get("signature", ""),
-                            "returns": sym.get("returns", ""),
-                            "decorators": decs if isinstance(decs, list) else decs.split(",") if decs else [],
-                        })
-                        if limit > 0 and len(results) >= limit:
-                            return results
             except Exception:
+                logger.debug("modmap symbol scan failed for %s", fpath, exc_info=True)
                 continue
+            for sym in rust_syms:
+                if sym.get("name") == sym_name or (name_pattern and sym.get("name") == name_pattern):
+                    if kind and sym.get("kind") != kind:
+                        continue
+                    decs = sym.get("decorators", [])
+                    results.append({
+                        "name": sym.get("name", ""),
+                        "qualified_name": sym.get("qualified_name", ""),
+                        "kind": sym.get("kind", ""),
+                        "file_path": str(fpath),
+                        "line": sym.get("line", 0),
+                        "end_line": sym.get("end_line", 0),
+                        "depth": sym.get("depth", 0),
+                        "parent": sym.get("parent", ""),
+                        "signature": sym.get("signature", ""),
+                        "returns": sym.get("returns", ""),
+                        "decorators": decs if isinstance(decs, list) else decs.split(",") if decs else [],
+                    })
+                    if limit > 0 and len(results) >= limit:
+                        return results
         return results
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("modmap lookup failed for %s", qualified_name, exc_info=True)
         return []
     finally:
+        # No BUG_EXCEPTIONS re-raise here: raising from a finally clause
+        # would clobber any in-flight exception from the main body.
         try:
             store.close()
         except Exception:
-            pass
+            logger.debug("MappingStore close failed", exc_info=True)
 
 
 def query_reference_index(
@@ -1064,6 +1088,8 @@ def query_reference_index(
             }
             for r in result["rows"]
         ]
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("CozoDB query_reference_index failed", exc_info=True)
         return None
@@ -1095,6 +1121,8 @@ def query_import_graph(
             str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0]
             for r in result["rows"]
         ]
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("CozoDB query_import_graph failed", exc_info=True)
         return None
@@ -1115,7 +1143,8 @@ def get_index_status(project_path: str) -> dict | None:
     try:
         conn = _sql3.connect(str(db_path), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
+    except _sql3.Error:
+        logger.debug("could not open parse.db for status check", exc_info=True)
         return None
 
     try:
@@ -1140,7 +1169,8 @@ def get_index_status(project_path: str) -> dict | None:
                 info[f"{table}_count"] = conn.execute(
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
-            except Exception:
+            except _sql3.Error:
+                # Table might not exist yet
                 info[f"{table}_count"] = 0
 
         # Staleness scan
@@ -1153,10 +1183,13 @@ def get_index_status(project_path: str) -> dict | None:
 
         conn.close()
         return info
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
+        logger.debug("index status collection failed", exc_info=True)
         try:
             conn.close()
-        except Exception:
+        except _sql3.Error:
             pass
         return None
 
@@ -1231,13 +1264,13 @@ def warm_caches(
     _ensure_cache_ignore_files(project_root)
     db_path = str(cache_dir / "parse.db")
     # Pre-create all tables in the main process so workers don't race on schema setup.
+    import sqlite3 as _sqlite3
     try:
-        import sqlite3 as _sqlite3
         _init_conn = _sqlite3.connect(db_path)
         _init_cache_schema(_init_conn)
         _init_conn.close()
-    except Exception:
-        pass
+    except _sqlite3.Error:
+        logger.debug("cache schema pre-creation failed", exc_info=True)
 
     # Resolve source root once so _index_batch workers can compute module_qn.
     source_root = _find_source_root(project_root, language=language)
@@ -1278,9 +1311,8 @@ def warm_caches(
 
     # Phase 2.5: Update file_manifest and index_meta with freshness data.
     worktree_id = _get_worktree_id(project_root)
+    import os as _os
     try:
-        import os as _os
-        import sqlite3 as _sqlite3
         _mf_conn = _sqlite3.connect(db_path, timeout=30)
         _mf_conn.execute("PRAGMA journal_mode=WAL")
         _mf_conn.execute("PRAGMA synchronous=NORMAL")
@@ -1311,8 +1343,8 @@ def warm_caches(
             )
         # Update git HEAD (scoped to this worktree)
         git_head_key = f"git_head:{worktree_id}"
+        import subprocess as _sp
         try:
-            import subprocess as _sp
             result = _sp.run(
                 ["git", "rev-parse", "HEAD"],
                 capture_output=True, timeout=5,
@@ -1324,8 +1356,8 @@ def warm_caches(
                     "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
                     (git_head_key, head_sha),
                 )
-        except Exception:
-            pass
+        except (OSError, _sp.SubprocessError, _sqlite3.Error):
+            logger.debug("git HEAD update failed", exc_info=True)
         _mf_conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
             (f"indexed_at:{worktree_id}", str(now)),
@@ -1336,8 +1368,10 @@ def warm_caches(
         )
         _mf_conn.commit()
         _mf_conn.close()
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug("warm_caches: file_manifest update failed", exc_info=True)
 
     # Phase 3: type indexing — populate the type_cache table.
     # Runs in the main process.  Pyrefly handles its own parallelism
@@ -1382,7 +1416,6 @@ def warm_caches(
     if callback:
         callback("phase", "Full-text search index")
     try:
-        import sqlite3 as _sqlite3
         from emend.editor_search import rebuild_fts as _rebuild_fts
 
         _fts_conn = _sqlite3.connect(db_path, timeout=30)
@@ -1396,8 +1429,10 @@ def warm_caches(
             "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
             fts_count, time.monotonic() - t_fts,
         )
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as exc:
-        logger.debug("warm_caches: FTS rebuild skipped: %s", exc)
+        logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
         stats["fts_indexed"] = 0
 
     # Phase 5: build CozoDB facts.db directly from source files.
@@ -1419,7 +1454,6 @@ def warm_caches(
             t_facts = time.monotonic()
             precomputed_refs: dict[str, list[tuple]] = {}
             try:
-                import sqlite3 as _sqlite3
                 _ref_conn = _sqlite3.connect(db_path, timeout=30)
                 _ref_conn.execute("PRAGMA journal_mode=WAL")
                 for row in _ref_conn.execute(
@@ -1434,7 +1468,8 @@ def warm_caches(
                     sum(len(v) for v in precomputed_refs.values()),
                     len(precomputed_refs),
                 )
-            except Exception:
+            except _sqlite3.Error:
+                logger.debug("warm_caches: pre-computed ref load failed", exc_info=True)
                 precomputed_refs = {}
 
             if precomputed_refs:
@@ -1450,12 +1485,14 @@ def warm_caches(
                     try:
                         scope_resolver.index_file(py_file, content)
                     except Exception:
-                        pass
+                        logger.debug("scope indexing failed for %s", py_file, exc_info=True)
                 _build_facts_db(project_root, scope_resolver=scope_resolver)
             logger.info(
                 "warm_caches: facts db built in %.3fs",
                 time.monotonic() - t_facts,
             )
+        except BUG_EXCEPTIONS:
+            raise
         except BaseException:
             logger.debug("warm_caches: facts db build failed", exc_info=True)
 
@@ -1473,6 +1510,8 @@ def warm_caches(
             "warm_caches: duplicate analysis done in %.3fs",
             time.monotonic() - t_dup,
         )
+    except BUG_EXCEPTIONS:
+        raise
     except BaseException:
         logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
         stats["dup_cached"] = 0
@@ -1526,8 +1565,9 @@ def _compute_duplicate_payloads(
             "SELECT hash FROM dup_cache WHERE version = ?", (DUP_VERSION,)
         ):
             cached_hashes.add(row[0])
-    except Exception:
-        pass
+    except _sqlite3.Error:
+        # Table might not exist yet
+        logger.debug("dup_cache read failed; recomputing all payloads", exc_info=True)
 
     # Filter to Python files only and compute content hashes.
     py_files: list[tuple[str, str, str]] = []  # (path, content, content_hash)
@@ -1556,7 +1596,7 @@ def _compute_duplicate_payloads(
         try:
             scope_resolver.index_file(file_path, content)
         except Exception:
-            pass
+            logger.debug("scope indexing failed for %s", file_path, exc_info=True)
 
     from emend.duplicate import canonicalize_file_for_cache, build_statement_seqs_for_cache
 
@@ -1572,12 +1612,11 @@ def _compute_duplicate_payloads(
                 "INSERT OR REPLACE INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",
                 (content_hash, DUP_VERSION, data),
             )
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug("duplicate payload computation failed for %s", file_path, exc_info=True)
             continue
 
     conn.commit()
     conn.close()
-
-
-# _METAVAR_RE is defined here for backward compatibility (used in patterns.py)
-_METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')

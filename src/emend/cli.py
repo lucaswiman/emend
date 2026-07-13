@@ -45,6 +45,7 @@ from emend.cli_map import (
     map_update_module_cmd,
 )
 from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd
+from emend.errors import BUG_EXCEPTIONS
 
 
 @dataclass
@@ -55,12 +56,11 @@ class _CmdEntry:
     name: str
     fn: object
     hidden: bool = False
-    no_args_is_help: bool = False
     aliases: list[str] = field(default_factory=list)
 
 
 _COMMANDS: list[_CmdEntry] = [
-    # ---- top-level public commands (order preserved from original registration sequence) ----
+    # ---- top-level public commands ----
     _CmdEntry(app, "lint",   lint_cmd,     hidden=False),
     _CmdEntry(app, "policy", policy_cmd,   hidden=False),
     _CmdEntry(app, "check",  check_cmd,    hidden=False),
@@ -111,7 +111,7 @@ _COMMANDS: list[_CmdEntry] = [
     _CmdEntry(edit_app, "copy-to",  copy_to_cmd,  hidden=True),
     _CmdEntry(edit_app, "move",     move_cmd,     hidden=True),
 
-    # ---- analyze subapp (dupes first: original was registered by decorator before cli.py registrations) ----
+    # ---- analyze subapp (dupes first) ----
     _CmdEntry(analyze_app, "dupes",      dupes_cmd,     hidden=False),
     _CmdEntry(analyze_app, "refs",       refs_cmd,      hidden=False),
     _CmdEntry(analyze_app, "graph",      graph_cmd,     hidden=False),
@@ -147,10 +147,7 @@ _COMMANDS: list[_CmdEntry] = [
 app.add_typer(map_app, name="map")
 
 for _entry in _COMMANDS:
-    kwargs = {"hidden": _entry.hidden}
-    if _entry.no_args_is_help:
-        kwargs["no_args_is_help"] = True
-    _entry.subapp.command(_entry.name, **kwargs)(_entry.fn)
+    _entry.subapp.command(_entry.name, hidden=_entry.hidden)(_entry.fn)
     for _alias in _entry.aliases:
         _entry.subapp.command(_alias, hidden=True)(_entry.fn)
 
@@ -158,6 +155,8 @@ for _entry in _COMMANDS:
 def main():
     try:
         app()
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

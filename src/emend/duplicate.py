@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from emend import emend_core
+from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 from emend.duplicate_heuristics import (
@@ -34,7 +35,6 @@ from emend.duplicate_heuristics import (
 # ---------------------------------------------------------------------------
 
 DUP_CACHE_VERSION = "1"
-_SUPPRESSION_THRESHOLD = 500.0
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -49,12 +49,7 @@ import keyword as _keyword_mod
 _PYTHON_KEYWORDS: frozenset[str] = frozenset(_keyword_mod.kwlist) | {"self", "cls"}
 
 # Winnowing parameters
-WINNOW_K = 5   # k-gram size
 WINNOW_W = 4   # window size
-
-# Minimum thresholds for candidates
-MIN_CANDIDATE_NODES = 8
-MIN_CANDIDATE_DEPTH = 3
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +161,7 @@ def _build_qn_at(file_path: str, scope_resolver) -> tuple[dict[tuple[int, int], 
     try:
         refs = scope_resolver.references_in_file(file_path)
     except Exception:
+        logger.debug("references_in_file failed for %s", file_path, exc_info=True)
         refs = []
 
     for ref in refs:
@@ -221,14 +217,6 @@ def _node_depth(node) -> int:
     if node.named_child_count == 0:
         return 1
     return 1 + max(_node_depth(c) for c in node.named_children())
-
-
-def _node_count(node) -> int:
-    """Count named nodes in subtree."""
-    count = 1
-    for c in node.named_children():
-        count += _node_count(c)
-    return count
 
 
 def canonicalize_subtree(
@@ -483,6 +471,8 @@ def canonicalize_file_for_cache(
     for cand in _iter_candidates(tree):
         try:
             kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("canonicalize_subtree failed in %s", file_path, exc_info=True)
             continue
@@ -542,11 +532,12 @@ def build_statement_seqs_for_cache(
     def_line_to_qn: dict[int, str] = {}
     try:
         defs = scope_resolver.definitions_in_file(file_path)
-        for item in defs:
-            qn_d, line_d = item[0], item[1]
-            def_line_to_qn[line_d] = qn_d  # definitions_in_file lines are 0-indexed
     except Exception:
-        pass
+        logger.debug("definitions_in_file failed for %s", file_path, exc_info=True)
+        defs = []
+    for item in defs:
+        qn_d, line_d = item[0], item[1]
+        def_line_to_qn[line_d] = qn_d  # definitions_in_file lines are 0-indexed
 
     out: list[dict] = []
 
@@ -573,6 +564,8 @@ def build_statement_seqs_for_cache(
                         h = _stmt_canonical_hash(
                             stmt, func_start, func_end, qn_at, def_loc
                         )
+                    except BUG_EXCEPTIONS:
+                        raise
                     except Exception:
                         logger.debug("_stmt_canonical_hash failed in %s", file_path, exc_info=True)
                         continue
@@ -660,7 +653,7 @@ def _preparse_files(
         try:
             scope_resolver.index_file(file_path, content)
         except Exception:
-            pass
+            logger.debug("index_file failed for %s", file_path, exc_info=True)
         tree = emend_core.parse_source(content, "py")
         if tree is None:
             continue
@@ -693,7 +686,10 @@ def _subtree_cands_from_file_data(
 
             try:
                 kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
+                logger.debug("canonicalize_subtree failed in %s", file_path, exc_info=True)
                 continue
 
             nc = len(kind_seq)
@@ -913,6 +909,8 @@ def _query_sequence_clusters(
     for file_path, (content, _tree, _qn_at, _def_loc, _symbol_index) in file_data.items():
         try:
             seqs = build_statement_seqs_for_cache(file_path, content, scope_resolver)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("build_statement_seqs_for_cache failed in %s", file_path, exc_info=True)
             continue
@@ -942,12 +940,14 @@ def _load_cached_payloads(
     import sqlite3
     import zlib
 
+    from emend.transform import _cache_db_dir
+
     try:
-        from emend.transform import _cache_db_dir
         db_path = _cache_db_dir(project_path) / "parse.db"
         if not db_path.exists():
             return None
-    except Exception:
+    except OSError:
+        logger.debug("Could not stat dup_cache db for %s", project_path, exc_info=True)
         return None
 
     try:
@@ -959,7 +959,8 @@ def _load_cached_payloads(
         ):
             cached_rows[row[0]] = row[1]
         conn.close()
-    except Exception:
+    except sqlite3.Error:
+        logger.debug("dup_cache query failed for %s", db_path, exc_info=True)
         return None
 
     if not cached_rows:
@@ -980,7 +981,7 @@ def _load_cached_payloads(
             try:
                 result[file_path] = pickle.loads(zlib.decompress(blob))
             except Exception:
-                pass
+                logger.debug("Corrupt dup_cache entry for %s", file_path, exc_info=True)
     return result if result else None
 
 

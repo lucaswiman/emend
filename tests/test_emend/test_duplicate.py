@@ -279,7 +279,8 @@ class TestSequenceDuplicates:
     """Test sibling-sequence duplicate detection."""
 
     def test_finds_shared_statement_runs(self, tmp_path):
-        """Functions sharing a long initialization sequence are detected."""
+        """Functions sharing a long initialization sequence are detected as a
+        cross-file sequence cluster."""
         from emend.duplicate import query_duplicates
 
         _write_files(tmp_path, {
@@ -291,9 +292,10 @@ class TestSequenceDuplicates:
             str(tmp_path), mode="sequence", min_lines=2, min_score=0.0,
         )
         seq = [c for c in clusters if c.kind == "sequence"]
-        # May or may not find depending on canonicalization details
-        # At minimum, ensure no crash
-        assert isinstance(seq, list)
+        assert len(seq) >= 1
+        # The shared initialization run spans both files.
+        files = {m.file for m in seq[0].members}
+        assert len(files) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +332,7 @@ class TestCLI:
     """Test the emend analyze dupes CLI command."""
 
     def test_cli_returns_exact_duplicate(self, tmp_path):
-        """CLI returns findings for duplicated helper functions."""
+        """CLI text output names the duplicated helper functions."""
         from emend.duplicate import query_duplicates, format_duplicates_text
 
         _write_files(tmp_path, {
@@ -339,7 +341,8 @@ class TestCLI:
         })
         clusters = query_duplicates(str(tmp_path), mode="all", min_score=0.0)
         text = format_duplicates_text(clusters)
-        assert isinstance(text, str)
+        assert "process_data" in text
+        assert "handle_records" in text
 
     def test_json_output_roundtrips(self, tmp_path):
         """--json output is valid JSON with expected fields."""
@@ -353,11 +356,15 @@ class TestCLI:
         json_str = format_duplicates_json(clusters)
         data = json.loads(json_str)
         assert isinstance(data, list)
-        if data:
-            item = data[0]
-            assert "kind" in item
-            assert "score" in item
-            assert "members" in item
+        assert data, "expected the duplicated helpers to produce a cluster"
+        members = {
+            member["symbol"]
+            for cluster in data
+            for member in cluster["members"]
+        }
+        assert {"process_data", "handle_records"} <= members
+        assert all("kind" in cluster for cluster in data)
+        assert all("score" in cluster for cluster in data)
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +396,15 @@ class TestLintIntegration:
         assert len(violations) == 0
 
     def test_lint_emits_warning_for_nontrivial(self, tmp_path):
-        """Non-trivial duplicate emits a lint warning."""
+        """A non-trivial duplicate across two files emits lint violations."""
         from emend.lint import _check_duplicate_code, DuplicateCodeConfig
 
+        # Duplicate detection needs the copies in separate files.
+        funcs = NON_TRIVIAL_DUP.split("\n\n\n")
+        assert len(funcs) == 2
         _write_files(tmp_path, {
-            "a.py": NON_TRIVIAL_DUP,
+            "a.py": funcs[0] + "\n",
+            "b.py": funcs[1] + "\n",
         })
 
         config = DuplicateCodeConfig(
@@ -402,12 +413,12 @@ class TestLintIntegration:
             min_score=0.0,
         )
         violations = _check_duplicate_code(
-            [str(tmp_path / "a.py")],
+            [str(tmp_path / "a.py"), str(tmp_path / "b.py")],
             config,
             str(tmp_path),
         )
-        # May or may not find, but should not crash
-        assert isinstance(violations, list)
+        assert len(violations) >= 1
+        assert all(v.rule_name == "duplicate-code" for v in violations)
 
 
 # ---------------------------------------------------------------------------
@@ -419,19 +430,29 @@ class TestProductionHeuristics:
     """Integration tests: suppressions are applied through query_duplicates."""
 
     def test_abstract_stubs_suppressed(self, tmp_path):
-        """Abstract stubs (raise NotImplementedError) don't appear in output."""
+        """Abstract stubs are penalised below the score threshold while a
+        genuine duplicate in the same project survives.
+
+        Paired control: at a threshold that keeps the real duplicate, the
+        stub-only clusters must be filtered out entirely.
+        """
         from emend.duplicate import query_duplicates
 
         _write_files(tmp_path, {
-            "a.py": ABSTRACT_STUB,
+            "real.py": NON_TRIVIAL_DUP,
+            "stub.py": ABSTRACT_STUB,
         })
         clusters = query_duplicates(
-            str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
+            str(tmp_path), mode="exact", min_lines=1, min_score=100.0,
         )
-        assert all(c.score > 0 for c in clusters)
-        for c in clusters:
-            for m in c.members:
-                assert "NotImplementedError" not in m.symbol
+        symbols = {m.symbol for c in clusters for m in c.members}
+        # Positive control: the genuine duplicate survives.
+        assert "validate_and_transform" in symbols
+        assert "check_and_convert" in symbols
+        # Negative control: the abstract-stub classes/methods are suppressed.
+        assert not any(
+            "BaseHandler" in s or "AnotherBase" in s for s in symbols
+        )
 
     def test_constant_tables_distinguished(self, tmp_path):
         """Literal-preserving hashing distinguishes constant tables with different values."""
@@ -450,19 +471,6 @@ class TestProductionHeuristics:
             if len({m.file for m in c.members}) > 1
         ]
         assert len(cross) == 0
-
-    def test_non_trivial_duplicates_survive(self, tmp_path):
-        """Real non-trivial duplicates survive the production filter."""
-        from emend.duplicate import query_duplicates
-
-        _write_files(tmp_path, {
-            "a.py": NON_TRIVIAL_DUP,
-        })
-
-        clusters = query_duplicates(
-            str(tmp_path), mode="exact", min_lines=3, min_score=0.0,
-        )
-        assert isinstance(clusters, list)
 
     def test_heuristics_unit_stubs(self):
         """Suppression helpers return expected penalties."""
@@ -495,17 +503,22 @@ class TestProductionHeuristics:
         assert is_trivial_validator(8, ks, ts) == 0.0
 
     def test_min_score_filters_low_clusters(self, tmp_path):
-        """min_score parameter removes low-scoring clusters."""
+        """min_score strictly removes clusters scoring below the threshold."""
         from emend.duplicate import query_duplicates
 
         _write_files(tmp_path, {"a.py": NON_TRIVIAL_DUP})
         all_clusters = query_duplicates(
             str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
         )
-        high_clusters = query_duplicates(
-            str(tmp_path), mode="exact", min_lines=1, min_score=999.0,
+        filtered = query_duplicates(
+            str(tmp_path), mode="exact", min_lines=1, min_score=250.0,
         )
-        assert len(high_clusters) <= len(all_clusters)
+        # The threshold sits between the strong and weak clusters, so it
+        # strictly reduces the count while keeping the strongest matches.
+        assert len(filtered) >= 1
+        assert len(filtered) < len(all_clusters)
+        assert all(c.score >= 250.0 for c in filtered)
+        assert any(c.score < 250.0 for c in all_clusters)
 
 
 # ---------------------------------------------------------------------------

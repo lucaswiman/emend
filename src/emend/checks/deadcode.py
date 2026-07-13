@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emend.policy import Policy, PolicyViolation
-    from emend.rules_config import DeadCodeConfig
+    from emend.checks.rules_config import DeadCodeConfig
 
 logger = logging.getLogger(__name__)
 

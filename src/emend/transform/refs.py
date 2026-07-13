@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
     from ..fact_graph import FactGraph
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 _fact_graph_cache: dict[str, "FactGraph"] = {}
@@ -66,6 +68,8 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
                 _fact_graph_cache[project_root] = graph
                 return graph
             logger.debug("facts.db has no symbol data, rebuilding")
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("Failed to load facts.db, rebuilding", exc_info=True)
 
@@ -82,8 +86,13 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         logger.debug("Type engine unavailable, retrying warm_caches without type indexing")
         try:
             warm_caches(project_path, type_engine="none")
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            logger.debug("warm_caches retry also failed, falling back to in-memory build")
+            logger.debug(
+                "warm_caches retry also failed, falling back to in-memory build",
+                exc_info=True,
+            )
     # Always attempt to load from facts.db — FactGraph(db_path=...) creates the
     # file on first open, so calling it unconditionally is intentional and is
     # what allows test_fact_graph_bootstrap_persists_facts_db to pass.
@@ -95,10 +104,14 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         if count > 0:
             try:
                 graph._resolve_builtin_refs()
+            except BUG_EXCEPTIONS:
+                raise
             except Exception:
                 logger.debug("Failed to resolve builtin refs", exc_info=True)
             _fact_graph_cache[project_root] = graph
             return graph
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
         logger.debug("Failed to load facts.db after indexing", exc_info=True)
 

@@ -9,6 +9,8 @@ import re
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
+from emend.errors import BUG_EXCEPTIONS
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -108,7 +110,13 @@ def _parse_diff_to_selectors(
 
         try:
             symbols = find_nested_definitions(file_path)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug(
+                "could not collect symbols from %s, skipping", file_path,
+                exc_info=True,
+            )
             continue
 
         for line_no in lines:
@@ -179,7 +187,10 @@ def _find_impact_via_fact_graph(
     for sel_str in changed_selectors:
         try:
             sel = parse_extended_selector(sel_str)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
+            logger.debug("unparseable selector %r, skipping", sel_str, exc_info=True)
             continue
         if not sel.symbol_path:
             continue
@@ -195,14 +206,17 @@ def _find_impact_via_fact_graph(
                     "fp == $fp, name == $name",
                     {"fp": fp, "name": name},
                 )
-                if result["rows"]:
-                    mqn = result["rows"][0][0]
-                    changed_mqns.add(mqn)
-                    sel_to_mqn[sel_str] = mqn
-                    mqn_to_sel[mqn] = sel_str
-                    break
             except Exception:
+                logger.debug(
+                    "fact_symbol lookup failed for %s", fp, exc_info=True,
+                )
                 continue
+            if result["rows"]:
+                mqn = result["rows"][0][0]
+                changed_mqns.add(mqn)
+                sel_to_mqn[sel_str] = mqn
+                mqn_to_sel[mqn] = sel_str
+                break
 
     if not changed_mqns:
         return ImpactResult(
@@ -313,17 +327,18 @@ def _find_impact_via_fact_graph(
 
     # Build set of decorator-based test symbols from fact graph (e.g. Rust #[test])
     test_decorated_sels: set[str] = set()
+    deco_rows: list = []
     try:
-        deco_result = fdb.run(
+        deco_rows = fdb.run(
             '?[sqn] := *decorator_on[sqn, dec], '
             'dec in ["test", "tokio::test"]'
-        )
-        for row in deco_result["rows"]:
-            mqn = row[0]
-            if mqn in mqn_to_sel:
-                test_decorated_sels.add(mqn_to_sel[mqn])
+        )["rows"]
     except Exception:
-        pass
+        logger.debug("decorator_on query failed", exc_info=True)
+    for row in deco_rows:
+        mqn = row[0]
+        if mqn in mqn_to_sel:
+            test_decorated_sels.add(mqn_to_sel[mqn])
 
     test_edges: list[ImpactEdge] = []
     for sel_str in all_impacted:
@@ -425,8 +440,10 @@ def find_impact(
     # facts.db unavailable — warm the index and retry once.
     try:
         warm_caches(proj_root, type_engine="none")
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug("warm_caches failed before impact retry", exc_info=True)
     dl_result = _find_impact_via_fact_graph(
         changed_selectors, proj_root, max_depth=max_depth,
     )

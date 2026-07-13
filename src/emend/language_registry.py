@@ -20,9 +20,12 @@ Usage::
 """
 from __future__ import annotations
 
+import logging
 import sys
 from functools import lru_cache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Hardcoded fallbacks
@@ -90,43 +93,36 @@ def _discover_entry_point_languages() -> dict[str, Path]:
                 if mod_dir and (mod_dir / "config.toml").is_file():
                     result[ep.name] = mod_dir
             except Exception:
+                logger.debug("Skipping broken language plugin %s", ep.name, exc_info=True)
                 continue
     except Exception:
-        pass
+        logger.debug("Entry-point discovery for emend.languages failed", exc_info=True)
     return result
 
 
 def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return None
     try:
-        if sys.version_info >= (3, 11):
-            import tomllib  # stdlib ≥ 3.11
-            with open(path, "rb") as fh:
-                data = tomllib.load(fh)
-        else:
-            # Python 3.10: parse just the two fields we need with regex
-            import re
-            text = path.read_text()
-            name_m = re.search(r'^name\s*=\s*"([^"]+)"', text, re.MULTILINE)
-            exts_m = re.search(r'^file_extensions\s*=\s*\[([^\]]+)\]', text, re.MULTILINE)
-            if not name_m or not exts_m:
-                return None
-            name = name_m.group(1)
-            exts = [
-                e.strip().strip('"')
-                for e in exts_m.group(1).split(",")
-                if e.strip().strip('"')
-            ]
-            return name, exts
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
+        logger.debug("Could not parse %s", path, exc_info=True)
+        return None
 
-        lang = data.get("language", {})
-        name = lang.get("name")
-        exts = lang.get("file_extensions", [])
-        if name and exts:
-            return name, list(exts)
-        return None
-    except Exception:
-        return None
+    lang = data.get("language", {})
+    name = lang.get("name")
+    exts = lang.get("file_extensions", [])
+    if name and exts:
+        return name, list(exts)
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -232,8 +228,8 @@ def get_module_separator(language: str) -> str:
 def get_comment_prefix(language: str) -> str:
     """Return the line-comment prefix for *language* (e.g. ``"#"`` or ``"//"``)."""
     config = load_config(language)
-    # Prefer the dedicated [comments] section (Phase 6); fall back to the
-    # legacy [language].comment_prefix key for backward compatibility.
+    # Prefer the dedicated [comments] section; fall back to the legacy
+    # [language].comment_prefix key.
     comments_section = config.get("comments", {})
     if "line_prefix" in comments_section:
         return comments_section["line_prefix"]
@@ -281,7 +277,9 @@ def load_config(language: str) -> dict:
                 return tomli.loads(config_path.read_text())
             except ImportError:
                 return {}
-    except Exception:
+    except (OSError, ValueError):
+        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
+        logger.debug("Could not parse %s", config_path, exc_info=True)
         return {}
 
 
@@ -345,6 +343,7 @@ def _detect_exported_names_typescript(content: str) -> set[str]:
     try:
         ranges = emend_core.get_statement_ranges(content, "ts")
     except Exception:
+        logger.debug("get_statement_ranges failed for TypeScript source", exc_info=True)
         return exported
 
     for start_line, _end_line in ranges:
@@ -405,6 +404,7 @@ def _detect_exported_names_rust(content: str) -> set[str]:
     try:
         symbols = emend_core.collect_symbols_from_str(content, ext="rs")
     except Exception:
+        logger.debug("collect_symbols_from_str failed for Rust source", exc_info=True)
         return exported
 
     lines = content.split("\n")

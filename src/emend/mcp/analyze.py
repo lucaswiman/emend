@@ -17,9 +17,11 @@ from emend.transform import (
     generate_graph,
     find_dead_code,
     find_impact,
+    DeadBlock,
+    DeadModule,
     semantic_context as _semantic_context,
 )
-from emend.rules_config import resolve_rules_path
+from emend.checks.rules_config import resolve_rules_path
 
 from emend.mcp.dispatch import mcp_app
 
@@ -208,15 +210,7 @@ def deadcode(
     )
     data = []
     for d in results:
-        if hasattr(d, "module_name"):
-            entry = {
-                "file_path": d.file_path,
-                "name": d.name,
-                "module_name": d.module_name,
-                "kind": "module",
-                "reason": d.reason,
-            }
-        elif hasattr(d, "func_qn") and hasattr(d, "block_id"):
+        if isinstance(d, DeadBlock):
             entry = {
                 "file_path": d.file_path,
                 "func_qn": d.func_qn,
@@ -224,6 +218,14 @@ def deadcode(
                 "start_line": d.start_line,
                 "end_line": d.end_line,
                 "reason": "unreachable code",
+            }
+        elif isinstance(d, DeadModule):
+            entry = {
+                "file_path": d.file_path,
+                "name": d.name,
+                "module_name": d.module_name,
+                "kind": "module",
+                "reason": d.reason,
             }
         else:
             entry = {
@@ -432,6 +434,8 @@ def duplicates_analysis(
     min_lines: int = 5,
     min_score: float = 0.0,
     cross_file: bool | None = None,
+    *,
+    involves_file: str | None = None,
 ) -> str:
     """Run duplicate detection and return JSON results."""
     from emend.duplicate import query_duplicates, format_duplicates_json
@@ -444,6 +448,7 @@ def duplicates_analysis(
         min_lines=min_lines,
         min_score=min_score,
         cross_file=cross_file,
+        involves_file=involves_file,
     )
     return format_duplicates_json(clusters)
 
@@ -456,18 +461,15 @@ def check_duplicates(
     min_lines: Annotated[int, Field(description="Minimum lines for a finding.")] = 5,
     min_score: Annotated[float, Field(description="Minimum score threshold (use ~50 to suppress tiny matches in hooks).")] = 0.0,
 ) -> str:
-    """Check whether *file_path* introduces code duplication vs the project."""
-    from emend.duplicate import format_duplicates_json, query_duplicates
-
-    clusters = query_duplicates(
-        project_path=project or ".",
+    """Check whether *file_path* introduces duplication in the project."""
+    return duplicates_analysis(
+        path=project or ".",
         mode=mode,
         limit=limit,
         min_lines=min_lines,
         min_score=min_score,
         involves_file=file_path,
     )
-    return format_duplicates_json(clusters)
 
 
 @mcp_app.tool()

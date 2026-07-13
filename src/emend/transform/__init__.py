@@ -30,7 +30,6 @@ from .cache import (
 # index.py
 # ---------------------------------------------------------------------------
 from .index import (
-    _METAVAR_RE,
     _NOQA_RE,
     _compute_duplicate_payloads,
     _ensure_cache_ignore_files,
@@ -221,7 +220,7 @@ __all__ = [
     "_open_facts_db", "_resolve_cache_root", "_build_facts_db", "_build_fact_sym_rows",
     "_extract_file_facts", "_facts_db_cache",
     # index
-    "_METAVAR_RE", "_NOQA_RE", "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
+    "_NOQA_RE", "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
     "_ensure_index_fresh", "_ensure_venv_index", "_extract_all_exports_text",
     "_extract_noqa_lines", "_get_cached_qnames", "_index_batch", "_lookup_via_modmap",
     "_query_symbol_index_cozo", "_scan_manifest", "_venv_db_path", "ManifestScanResult",

@@ -3,7 +3,7 @@
 Provides an e-graph data structure and rewrite rule engine for
 multi-step expression rewrites using equality saturation.
 
-This is Phase 7 of the roadmap — explicitly experimental.
+Explicitly experimental.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 import yaml
 
+from emend.errors import BUG_EXCEPTIONS
 from emend.union_find import UnionFind
 
 logger = logging.getLogger(__name__)
@@ -597,8 +598,13 @@ def _match_expr_pattern(
         )
         if matches:
             return matches[0].captures or {}
+    except BUG_EXCEPTIONS:
+        raise
     except Exception:
-        pass
+        logger.debug(
+            "find_pattern expression match failed for %r; using regex fallback",
+            pattern, exc_info=True,
+        )
 
     # Fallback: simple regex-based matching
     regex_pattern = re.escape(pattern)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import io
 import json
 import sys
-from contextlib import redirect_stdout
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+
+from emend.errors import BUG_EXCEPTIONS
 
 mcp_app = FastMCP(
     "emend",
@@ -32,26 +32,20 @@ Prefer the discriminated tools:
 )
 
 
-def _capture_output(func: Any, *args: Any, **kwargs: Any) -> str:
-    """Call *func* and return whatever it printed to stdout."""
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        func(*args, **kwargs)
-    return buf.getvalue()
-
-
 def _warm_caches_background() -> None:
     """Warm parse and QN-index caches in a background process."""
     import multiprocessing
     import logging as _logging
 
     def _worker() -> None:
+        _logging.basicConfig(level=_logging.WARNING)
         try:
             from emend.transform import warm_caches
-            _logging.basicConfig(level=_logging.WARNING)
             warm_caches(".")
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
-            pass
+            _logging.getLogger("emend.mcp").debug("Background cache warming failed", exc_info=True)
 
     proc = multiprocessing.Process(target=_worker, daemon=True)
     proc.start()

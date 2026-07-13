@@ -11,11 +11,14 @@ Currently supports:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,7 +48,9 @@ def _load_toml(path: Path) -> dict[str, Any]:
                 return {}
         with open(path, "rb") as fh:
             return tomllib.load(fh)
-    except Exception:
+    except (OSError, ValueError):
+        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
+        logger.debug("Could not parse %s", path, exc_info=True)
         return {}
 
 

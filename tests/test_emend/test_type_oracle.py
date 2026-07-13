@@ -42,6 +42,11 @@ from emend.type_oracle import (
 )
 
 
+def write_pyrefly_config(tmp_path):
+    """Write a minimal pyrefly.toml into *tmp_path* so pyrefly runs cleanly."""
+    (tmp_path / "pyrefly.toml").write_text('[default]\nproject_includes = ["."]\n')
+
+
 # ---------------------------------------------------------------------------
 # TypeDescriptor parsing
 # ---------------------------------------------------------------------------
@@ -49,25 +54,11 @@ from emend.type_oracle import (
 class TestParseTypeString:
     """Tests for parse_type_string()."""
 
-    def test_simple_named(self):
-        td = parse_type_string("int")
+    @pytest.mark.parametrize("name", ["int", "str", "None", "Connection"])
+    def test_named_type(self, name):
+        td = parse_type_string(name)
         assert td.kind == "named"
-        assert td.name == "int"
-
-    def test_str_type(self):
-        td = parse_type_string("str")
-        assert td.kind == "named"
-        assert td.name == "str"
-
-    def test_none_type(self):
-        td = parse_type_string("None")
-        assert td.kind == "named"
-        assert td.name == "None"
-
-    def test_class_type(self):
-        td = parse_type_string("Connection")
-        assert td.kind == "named"
-        assert td.name == "Connection"
+        assert td.name == name
 
     def test_unknown(self):
         td = parse_type_string("Unknown")
@@ -586,17 +577,16 @@ class TestFileTypeCache:
 
 class TestCreateTypeOracle:
 
-    def test_creates_pyrefly(self):
-        oracle = create_type_oracle("pyrefly")
-        assert isinstance(oracle, PyreflyAdapter)
-
-    def test_creates_pyright(self):
-        oracle = create_type_oracle("pyright")
-        assert isinstance(oracle, PyrightAdapter)
-
-    def test_creates_ty(self):
-        oracle = create_type_oracle("ty")
-        assert isinstance(oracle, TyAdapter)
+    @pytest.mark.parametrize(
+        "engine, cls",
+        [
+            ("pyrefly", PyreflyAdapter),
+            ("pyright", PyrightAdapter),
+            ("ty", TyAdapter),
+        ],
+    )
+    def test_creates_adapter(self, engine, cls):
+        assert isinstance(create_type_oracle(engine), cls)
 
     def test_auto_detection(self, tmp_path):
         """Auto mode should return *some* TypeOracle without error."""
@@ -660,59 +650,79 @@ class TestDetectTypeEngine:
 
 
 # ---------------------------------------------------------------------------
-# PyrightAdapter unit tests
+# Shared adapter unit tests (Pyright / Ty / TypeScript / RustAnalyzer)
 # ---------------------------------------------------------------------------
 
-class TestPyrightAdapter:
+# For each adapter: kwargs that force is_available() False, kwargs for normal
+# construction (a bogus binary path or db_path=None so no real inference runs),
+# the source file extension, and a minimal source snippet.
+_ADAPTER_CASES = [
+    pytest.param(
+        PyrightAdapter,
+        {"pyright_path": "/nonexistent/pyright"},
+        {"pyright_path": "/nonexistent/pyright"},
+        ".py",
+        "x = 1\n",
+        id="pyright",
+    ),
+    pytest.param(
+        TyAdapter,
+        {"ty_path": "/nonexistent/ty"},
+        {"ty_path": "/nonexistent/ty"},
+        ".py",
+        "x = 1\n",
+        id="ty",
+    ),
+    pytest.param(
+        TypeScriptAdapter,
+        {"node_path": "/nonexistent/node", "db_path": None},
+        {"db_path": None},
+        ".ts",
+        "const x: number = 42;\n",
+        id="typescript",
+    ),
+    pytest.param(
+        RustAnalyzerAdapter,
+        {"rust_analyzer_path": "/nonexistent/rust-analyzer", "db_path": None},
+        {"db_path": None},
+        ".rs",
+        "fn main() { let x: i32 = 42; }\n",
+        id="rust-analyzer",
+    ),
+]
 
-    def test_not_available_when_missing(self):
-        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
+
+@pytest.mark.parametrize(
+    "adapter_cls, unavailable_kwargs, construct_kwargs, ext, source", _ADAPTER_CASES
+)
+class TestAdapterCommon:
+    """Behaviour shared by every TypeOracle adapter's non-integration path."""
+
+    def test_not_available_when_missing(
+        self, adapter_cls, unavailable_kwargs, construct_kwargs, ext, source
+    ):
+        adapter = adapter_cls(**unavailable_kwargs)
         assert not adapter.is_available()
 
-    def test_nonexistent_file(self, tmp_path):
-        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
-        ft = adapter.infer_file(tmp_path / "nofile.py")
+    def test_nonexistent_file(
+        self, adapter_cls, unavailable_kwargs, construct_kwargs, ext, source, tmp_path
+    ):
+        adapter = adapter_cls(**construct_kwargs)
+        ft = adapter.infer_file(tmp_path / ("nofile" + ext))
         assert isinstance(ft, FileTypes)
         assert len(ft.bindings) == 0
 
-    def test_cache_behavior(self, tmp_path):
-        adapter = PyrightAdapter(pyright_path="/nonexistent/pyright")
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        # First call fills cache (returns empty because pyright isn't available)
-        ft1 = adapter.infer_file(test_file)
-        ft2 = adapter.infer_file(test_file)
+    def test_cache_behavior(
+        self, adapter_cls, unavailable_kwargs, construct_kwargs, ext, source, tmp_path
+    ):
+        adapter = adapter_cls(**construct_kwargs)
+        test_file = tmp_path / ("test" + ext)
+        test_file.write_text(source)
+        ft1 = adapter.infer_file(test_file, project_root=tmp_path)
+        ft2 = adapter.infer_file(test_file, project_root=tmp_path)
         assert ft1 is ft2  # same object from cache
         adapter.clear_cache()
-        ft3 = adapter.infer_file(test_file)
-        assert ft3 is not ft1
-
-
-# ---------------------------------------------------------------------------
-# TyAdapter unit tests
-# ---------------------------------------------------------------------------
-
-class TestTyAdapter:
-
-    def test_not_available_when_missing(self):
-        adapter = TyAdapter(ty_path="/nonexistent/ty")
-        assert not adapter.is_available()
-
-    def test_nonexistent_file(self, tmp_path):
-        adapter = TyAdapter(ty_path="/nonexistent/ty")
-        ft = adapter.infer_file(tmp_path / "nofile.py")
-        assert isinstance(ft, FileTypes)
-        assert len(ft.bindings) == 0
-
-    def test_cache_behavior(self, tmp_path):
-        adapter = TyAdapter(ty_path="/nonexistent/ty")
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        ft1 = adapter.infer_file(test_file)
-        ft2 = adapter.infer_file(test_file)
-        assert ft1 is ft2
-        adapter.clear_cache()
-        ft3 = adapter.infer_file(test_file)
+        ft3 = adapter.infer_file(test_file, project_root=tmp_path)
         assert ft3 is not ft1
 
 
@@ -731,25 +741,29 @@ class TestPyrightAdapterIntegration:
         assert adapter.is_available()
 
     def test_infer_file_with_error(self, tmp_path):
-        """Pyright should produce diagnostics for type errors."""
+        """Pyright infers a type for the annotated variable."""
         test_file = tmp_path / "bad_types.py"
-        test_file.write_text(textwrap.dedent("""\
-            x: str = 42
-        """))
+        test_file.write_text("x: str = 42\n")
         adapter = PyrightAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
         assert isinstance(ft, FileTypes)
+        x_types = ft.types_for_name("x")
+        assert x_types, "expected a binding for x"
+        assert x_types[0].raw_type == "str"
 
     def test_infer_clean_file(self, tmp_path):
-        """A clean file may produce no diagnostics (no bindings)."""
+        """A clean, fully-annotated function yields int bindings for its params."""
         test_file = tmp_path / "clean.py"
-        test_file.write_text(textwrap.dedent("""\
-            def add(a: int, b: int) -> int:
-                return a + b
-        """))
+        test_file.write_text(
+            "def add(a: int, b: int) -> int:\n"
+            "    return a + b\n"
+        )
         adapter = PyrightAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
         assert isinstance(ft, FileTypes)
+        a_types = ft.types_for_name("a")
+        assert a_types, "expected bindings for parameter a"
+        assert all(b.raw_type == "int" for b in a_types)
 
 
 # ---------------------------------------------------------------------------
@@ -767,24 +781,30 @@ class TestTyAdapterIntegration:
         assert adapter.is_available()
 
     def test_infer_file_with_error(self, tmp_path):
-        """ty should produce diagnostics for type errors."""
+        """ty infers a type for the annotated variable when it emits bindings."""
         test_file = tmp_path / "bad_types.py"
-        test_file.write_text(textwrap.dedent("""\
-            x: str = 42
-        """))
+        test_file.write_text("x: str = 42\n")
         adapter = TyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
         assert isinstance(ft, FileTypes)
+        if not ft.bindings:
+            pytest.skip("ty produced no bindings in this environment")
+        assert ft.types_for_name("x")
 
     def test_infer_clean_file(self, tmp_path):
+        """A clean, annotated function yields a binding for at least one symbol."""
         test_file = tmp_path / "clean.py"
-        test_file.write_text(textwrap.dedent("""\
-            def add(a: int, b: int) -> int:
-                return a + b
-        """))
+        test_file.write_text(
+            "def add(a: int, b: int) -> int:\n"
+            "    return a + b\n"
+        )
         adapter = TyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
         assert isinstance(ft, FileTypes)
+        if not ft.bindings:
+            pytest.skip("ty produced no bindings in this environment")
+        names = {b.name for b in ft.bindings}
+        assert names & {"add", "a", "b"}
 
 
 # ---------------------------------------------------------------------------
@@ -813,8 +833,7 @@ class TestPyreflyAdapterIntegration:
         """))
 
         # Create a minimal pyrefly config so it doesn't complain
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -844,8 +863,7 @@ class TestPyreflyAdapterIntegration:
             conn = create()
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -861,8 +879,7 @@ class TestPyreflyAdapterIntegration:
         test_file = tmp_path / "cached.py"
         test_file.write_text("x: int = 42\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
 
@@ -878,8 +895,7 @@ class TestPyreflyAdapterIntegration:
         test_file = tmp_path / "changing.py"
         test_file.write_text("x: int = 42\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
 
@@ -905,8 +921,7 @@ class TestPyreflyAdapterIntegration:
                 x: int = 42
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -919,8 +934,7 @@ class TestPyreflyAdapterIntegration:
         test_file = tmp_path / "clear.py"
         test_file.write_text("x: int = 42\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         adapter.infer_file(test_file, project_root=tmp_path)
@@ -935,8 +949,7 @@ class TestPyreflyAdapterIntegration:
         f2 = tmp_path / "mod_b.py"
         f2.write_text("b: str = 'hello'\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         results = adapter.infer_batch([f1, f2], project_root=tmp_path)
@@ -961,8 +974,7 @@ class TestPyreflyAdapterIntegration:
             result: Optional[int] = maybe_int(True)
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -989,8 +1001,7 @@ class TestTypesCLI:
                 return a + b
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file)], check=False)
         assert result.returncode == 0
@@ -1002,13 +1013,12 @@ class TestTypesCLI:
             x: int = 42
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file), "--json"], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            data = json.loads(result.stdout)
-            assert isinstance(data, list)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
 
     def test_types_definitions_only(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"
@@ -1020,16 +1030,15 @@ class TestTypesCLI:
                     return "baz"
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file), "--definitions-only", "--json"], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            data = json.loads(result.stdout)
-            assert isinstance(data, list)
-            # All entries should be definitions
-            for entry in data:
-                assert entry["kind"] == "definition"
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert data, "expected at least one definition"
+        for entry in data:
+            assert entry["kind"] == "definition"
 
     def test_types_name_filter(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"
@@ -1038,15 +1047,15 @@ class TestTypesCLI:
             y: str = "hello"
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file), "--name", "x", "--json"], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            data = json.loads(result.stdout)
-            assert isinstance(data, list)
-            for entry in data:
-                assert entry["name"] == "x"
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert data, "expected the x binding to be reported"
+        for entry in data:
+            assert entry["name"] == "x"
 
     def test_types_unavailable_engine(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"
@@ -1582,8 +1591,7 @@ class TestPyreflyAdapterEdgeCases:
         test_file = tmp_path / "bad.py"
         test_file.write_text("def foo(\n")  # intentional syntax error
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         # Should not raise — just return empty or partial results
@@ -1594,8 +1602,7 @@ class TestPyreflyAdapterEdgeCases:
         test_file = tmp_path / "empty.py"
         test_file.write_text("")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -1605,8 +1612,7 @@ class TestPyreflyAdapterEdgeCases:
         test_file = tmp_path / "comments.py"
         test_file.write_text("# This is a comment\n# Another comment\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -1620,8 +1626,7 @@ class TestPyreflyAdapterEdgeCases:
         test_file = tmp_path / "large.py"
         test_file.write_text("\n".join(lines) + "\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(test_file, project_root=tmp_path)
@@ -1636,8 +1641,7 @@ class TestPyreflyAdapterEdgeCases:
         f2 = tmp_path / "uncached_file.py"
         f2.write_text("y: str = 'hello'\n")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
 
@@ -1667,17 +1671,16 @@ class TestPyreflyAdapterEdgeCases:
             w = Widget("button")
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         ft = adapter.infer_file(mod_b, project_root=tmp_path)
 
         # w should be inferred as Widget
         w_bindings = ft.types_for_name("w")
-        if w_bindings:
-            w_types = {b.raw_type for b in w_bindings}
-            assert "Widget" in w_types
+        assert w_bindings, "expected pyrefly to infer a type for w"
+        w_types = {b.raw_type for b in w_bindings}
+        assert "Widget" in w_types
 
     def test_nonexistent_batch_file(self, tmp_path):
         """Batch with a nonexistent file should produce empty FileTypes for it."""
@@ -1685,8 +1688,7 @@ class TestPyreflyAdapterEdgeCases:
         f1.write_text("x: int = 1\n")
         f2 = tmp_path / "does_not_exist.py"
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         adapter = PyreflyAdapter()
         results = adapter.infer_batch([f1, f2], project_root=tmp_path)
@@ -1706,8 +1708,7 @@ class TestTypesCLIEdgeCases:
         test_file = tmp_path / "empty.py"
         test_file.write_text("")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file)], check=False)
         assert result.returncode == 0
@@ -1716,13 +1717,12 @@ class TestTypesCLIEdgeCases:
         test_file = tmp_path / "empty.py"
         test_file.write_text("")
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(["types", str(test_file), "--json"], check=False)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            assert isinstance(data, list)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data == []
 
     def test_types_kind_filter(self, tmp_path, run_emend_cmd):
         test_file = tmp_path / "example.py"
@@ -1731,17 +1731,17 @@ class TestTypesCLIEdgeCases:
             y = x + 1
         """))
 
-        config = tmp_path / "pyrefly.toml"
-        config.write_text('[default]\nproject_includes = ["."]\n')
+        write_pyrefly_config(tmp_path)
 
         result = run_emend_cmd(
             ["types", str(test_file), "--kind", "definition", "--json"],
             check=False,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            data = json.loads(result.stdout)
-            for entry in data:
-                assert entry["kind"] == "definition"
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data, "expected at least one definition"
+        for entry in data:
+            assert entry["kind"] == "definition"
 
 
 # ---------------------------------------------------------------------------
@@ -2039,72 +2039,6 @@ class TestTypeDescriptorMatchesCrossLanguage:
 
 
 # ---------------------------------------------------------------------------
-# Phase 11: TypeScriptAdapter unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestTypeScriptAdapter:
-    """Unit tests for TypeScriptAdapter (non-integration)."""
-
-    def test_not_available_when_missing(self):
-        adapter = TypeScriptAdapter(node_path="/nonexistent/node", db_path=None)
-        assert not adapter.is_available()
-
-    def test_nonexistent_file(self, tmp_path):
-        adapter = TypeScriptAdapter(db_path=None)
-        ft = adapter.infer_file(tmp_path / "nofile.ts")
-        assert isinstance(ft, FileTypes)
-        assert len(ft.bindings) == 0
-
-    def test_cache_behavior(self, tmp_path):
-        adapter = TypeScriptAdapter(db_path=None)
-        ts_file = tmp_path / "test.ts"
-        ts_file.write_text("const x: number = 42;\n")
-
-        ft1 = adapter.infer_file(ts_file, project_root=tmp_path)
-        ft2 = adapter.infer_file(ts_file, project_root=tmp_path)
-        assert ft1 is ft2  # cached
-
-        adapter.clear_cache()
-        ft3 = adapter.infer_file(ts_file, project_root=tmp_path)
-        assert ft3 is not ft1  # cache cleared
-
-
-# ---------------------------------------------------------------------------
-# Phase 11: RustAnalyzerAdapter unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestRustAnalyzerAdapter:
-    """Unit tests for RustAnalyzerAdapter (non-integration)."""
-
-    def test_not_available_when_missing(self):
-        adapter = RustAnalyzerAdapter(
-            rust_analyzer_path="/nonexistent/rust-analyzer", db_path=None,
-        )
-        assert not adapter.is_available()
-
-    def test_nonexistent_file(self, tmp_path):
-        adapter = RustAnalyzerAdapter(db_path=None)
-        ft = adapter.infer_file(tmp_path / "nofile.rs")
-        assert isinstance(ft, FileTypes)
-        assert len(ft.bindings) == 0
-
-    def test_cache_behavior(self, tmp_path):
-        adapter = RustAnalyzerAdapter(db_path=None)
-        rs_file = tmp_path / "test.rs"
-        rs_file.write_text("fn main() { let x: i32 = 42; }\n")
-
-        ft1 = adapter.infer_file(rs_file, project_root=tmp_path)
-        ft2 = adapter.infer_file(rs_file, project_root=tmp_path)
-        assert ft1 is ft2
-
-        adapter.clear_cache()
-        ft3 = adapter.infer_file(rs_file, project_root=tmp_path)
-        assert ft3 is not ft1
-
-
-# ---------------------------------------------------------------------------
 # Phase 11: detect_type_engine with file_path and TS/Rust signals
 # ---------------------------------------------------------------------------
 
@@ -2187,10 +2121,6 @@ class TestCreateTypeOracleCrossLanguage:
         )
         assert isinstance(oracle, RustAnalyzerAdapter)
 
-    def test_unknown_engine_still_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="Unknown type inference engine"):
-            create_type_oracle(engine="nonexistent", project_root=tmp_path)
-
 
 # ---------------------------------------------------------------------------
 # Phase 11: TypeScriptAdapter integration (requires node + typescript)
@@ -2208,13 +2138,13 @@ class TestTypeScriptAdapterIntegration:
         ts_file.write_text("const greeting: string = 'hello';\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        # May return empty if typescript module not available
-        if ft.bindings:
-            names = {b.name for b in ft.bindings}
-            assert "greeting" in names
-            greeting_bindings = ft.types_for_name("greeting")
-            if greeting_bindings:
-                assert "string" in greeting_bindings[0].raw_type
+        if not ft.bindings:
+            pytest.skip("TypeScript toolchain produced no bindings")
+        names = {b.name for b in ft.bindings}
+        assert "greeting" in names
+        greeting_bindings = ft.types_for_name("greeting")
+        assert greeting_bindings
+        assert "string" in greeting_bindings[0].raw_type
 
     def test_function_types(self, tmp_path):
         ts_file = tmp_path / "test.ts"
@@ -2226,19 +2156,21 @@ class TestTypeScriptAdapterIntegration:
         """))
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if ft.bindings:
-            names = {b.name for b in ft.bindings}
-            assert "add" in names or "result" in names
+        if not ft.bindings:
+            pytest.skip("TypeScript toolchain produced no bindings")
+        names = {b.name for b in ft.bindings}
+        assert "add" in names or "result" in names
 
     def test_generic_type(self, tmp_path):
         ts_file = tmp_path / "test.ts"
         ts_file.write_text("const items: Array<string> = ['a', 'b'];\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if ft.bindings:
-            items = ft.types_for_name("items")
-            if items:
-                assert "string" in items[0].raw_type
+        if not ft.bindings:
+            pytest.skip("TypeScript toolchain produced no bindings")
+        items = ft.types_for_name("items")
+        assert items
+        assert "string" in items[0].raw_type
 
 
 # ---------------------------------------------------------------------------
@@ -2267,8 +2199,14 @@ class TestRustAnalyzerAdapterIntegration:
 
         adapter = RustAnalyzerAdapter(db_path=None)
         ft = adapter.infer_file(rs_file, project_root=tmp_path)
-        # rust-analyzer may be slow to initialize; just verify no crash
         assert isinstance(ft, FileTypes)
+        # rust-analyzer may be slow to initialize and emit nothing; when it does
+        # produce bindings, x must be inferred as i32.
+        if not ft.bindings:
+            pytest.skip("rust-analyzer produced no bindings in this environment")
+        x_types = ft.types_for_name("x")
+        assert x_types
+        assert "i32" in x_types[0].raw_type
 
 
 # ---------------------------------------------------------------------------

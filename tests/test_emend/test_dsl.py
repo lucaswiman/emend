@@ -2,7 +2,9 @@
 
 import json
 import pytest
+from typer.testing import CliRunner
 
+from emend.cli import app
 from emend.dsl import (
     DslKind,
     DslMatch,
@@ -29,6 +31,46 @@ from emend.dsl import (
     _to_pascal_case,
     _find_tablename_mapping,
 )
+
+runner = CliRunner()
+
+
+def _region(
+    dsl,
+    content,
+    *,
+    host_file="app.py",
+    start_line=1,
+    start_col=0,
+    end_line=1,
+    end_col=0,
+    trigger="call",
+):
+    """Build a DslRegion with sensible test defaults."""
+    return DslRegion(
+        dsl=dsl,
+        content=content,
+        host_file=host_file,
+        host_start_line=start_line,
+        host_start_col=start_col,
+        host_end_line=end_line,
+        host_end_col=end_col,
+        trigger=trigger,
+    )
+
+
+def sql_region(content, **kwargs):
+    return _region(DslKind.SQL, content, **kwargs)
+
+
+def jinja_region(content, **kwargs):
+    kwargs.setdefault("trigger", "file_extension")
+    return _region(DslKind.JINJA, content, **kwargs)
+
+
+def graphql_region(content, **kwargs):
+    kwargs.setdefault("trigger", "file_extension")
+    return _region(DslKind.GRAPHQL, content, **kwargs)
 
 
 class TestNamingHelpers:
@@ -245,30 +287,14 @@ class TestDetectDslRegions:
 
 class TestExtractSqlSymbols:
     def test_extract_table_from_select(self):
-        region = DslRegion(
-            dsl=DslKind.SQL,
-            content="SELECT name FROM users WHERE id = 1",
-            host_file="app.py",
-            host_start_line=2,
-            host_start_col=20,
-            host_end_line=2,
-            host_end_col=55,
-            trigger="call",
-        )
+        region = sql_region("SELECT name FROM users WHERE id = 1")
         symbols = extract_sql_symbols(region)
         table_names = [s.name for s in symbols if s.kind == DslSymbolKind.TABLE]
         assert "users" in table_names
 
     def test_extract_table_from_join(self):
-        region = DslRegion(
-            dsl=DslKind.SQL,
-            content="SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id",
-            host_file="app.py",
-            host_start_line=2,
-            host_start_col=0,
-            host_end_line=2,
-            host_end_col=60,
-            trigger="call",
+        region = sql_region(
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
         )
         symbols = extract_sql_symbols(region)
         table_names = [s.name for s in symbols if s.kind == DslSymbolKind.TABLE]
@@ -276,47 +302,20 @@ class TestExtractSqlSymbols:
         assert "orders" in table_names
 
     def test_extract_columns_from_select(self):
-        region = DslRegion(
-            dsl=DslKind.SQL,
-            content="SELECT name, email FROM users",
-            host_file="app.py",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=1,
-            host_end_col=30,
-            trigger="call",
-        )
+        region = sql_region("SELECT name, email FROM users")
         symbols = extract_sql_symbols(region)
         col_names = [s.name for s in symbols if s.kind == DslSymbolKind.COLUMN]
         assert "name" in col_names
         assert "email" in col_names
 
     def test_extract_table_from_insert(self):
-        region = DslRegion(
-            dsl=DslKind.SQL,
-            content="INSERT INTO users (name, email) VALUES (:name, :email)",
-            host_file="app.py",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=1,
-            host_end_col=55,
-            trigger="call",
-        )
+        region = sql_region("INSERT INTO users (name, email) VALUES (:name, :email)")
         symbols = extract_sql_symbols(region)
         table_names = [s.name for s in symbols if s.kind == DslSymbolKind.TABLE]
         assert "users" in table_names
 
     def test_link_hints_for_table(self):
-        region = DslRegion(
-            dsl=DslKind.SQL,
-            content="SELECT * FROM users",
-            host_file="app.py",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=1,
-            host_end_col=20,
-            trigger="call",
-        )
+        region = sql_region("SELECT * FROM users")
         symbols = extract_sql_symbols(region)
         tables = [s for s in symbols if s.kind == DslSymbolKind.TABLE]
         assert len(tables) >= 1
@@ -426,31 +425,22 @@ class TestDslDebugCommand:
 
     def test_dsl_debug_command_exists(self):
         """The dsl-debug command is registered."""
-        from typer.testing import CliRunner
-        from emend.cli import app
-        runner = CliRunner()
         result = runner.invoke(app, ["dsl-debug", "--help"])
         assert result.exit_code == 0
         assert "Debug" in result.output or "debug" in result.output or "DSL" in result.output
 
     def test_dsl_hidden_alias(self):
         """The old 'dsl' command still works as a hidden alias."""
-        from typer.testing import CliRunner
-        from emend.cli import app
-        runner = CliRunner()
         result = runner.invoke(app, ["dsl", "--help"])
         assert result.exit_code == 0
 
     def test_dsl_debug_detects_sql(self, tmp_path):
         """dsl-debug detects SQL in files."""
-        from typer.testing import CliRunner
-        from emend.cli import app
         f = tmp_path / "app.py"
         f.write_text(
             'def query(cursor):\n'
             '    cursor.execute("SELECT name FROM users WHERE id = 1")\n'
         )
-        runner = CliRunner()
         result = runner.invoke(app, ["dsl-debug", str(f)])
         assert result.exit_code == 0
         assert "users" in result.output
@@ -460,10 +450,7 @@ class TestSearchDslSymbols:
     """Tests for automatic DSL symbol discovery in search."""
 
     def test_search_finds_sql_tables(self, tmp_path):
-        """search surfaces SQL table symbols alongside host-language results."""
-        from typer.testing import CliRunner
-        from emend.cli import app
-
+        """search --dsl surfaces the SQL table referenced in a query string."""
         f = tmp_path / "app.py"
         f.write_text(
             'class User:\n'
@@ -471,18 +458,16 @@ class TestSearchDslSymbols:
             '\n'
             'QUERY = "SELECT name FROM users WHERE id = 1"\n'
         )
-        runner = CliRunner()
-        result = runner.invoke(app, ["grep", str(f) + "::User"])
+        result = runner.invoke(
+            app, ["find", "SELECT $COLS FROM $TABLE", str(f), "--dsl", "sql"]
+        )
         assert result.exit_code == 0
+        assert "users" in result.output
 
     def test_search_no_crash_without_dsl(self, tmp_path):
         """search doesn't crash on files without DSL content."""
-        from typer.testing import CliRunner
-        from emend.cli import app
-
         f = tmp_path / "app.py"
         f.write_text('def hello():\n    pass\n')
-        runner = CliRunner()
         result = runner.invoke(app, ["grep", str(f) + "::hello"])
         assert result.exit_code == 0
 
@@ -492,8 +477,6 @@ class TestRefsDslSymbols:
 
     def test_refs_finds_sql_references(self, tmp_path):
         """refs surfaces SQL table references for ORM models."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         model_file = tmp_path / "models.py"
         model_file.write_text(
@@ -505,7 +488,6 @@ class TestRefsDslSymbols:
         query_file.write_text(
             'QUERY = "SELECT name FROM users WHERE active = 1"\n'
         )
-        runner = CliRunner()
         result = runner.invoke(app, [
             "refs", str(model_file) + "::User",
             "--project", str(tmp_path),
@@ -515,12 +497,9 @@ class TestRefsDslSymbols:
 
     def test_refs_no_crash_without_matches(self, tmp_path):
         """refs doesn't crash when no DSL matches exist."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "app.py"
         f.write_text('def foo():\n    pass\n')
-        runner = CliRunner()
         result = runner.invoke(app, [
             "refs", str(f) + "::foo",
             "--project", str(tmp_path),
@@ -539,14 +518,19 @@ class TestRefsDslSymbols:
         query_file.write_text(
             'QUERY = "SELECT name FROM users WHERE active = 1"\n'
         )
-        from typer.testing import CliRunner
-        from emend.cli import app
-        runner = CliRunner()
         result = runner.invoke(app, [
             "refs", str(model_file) + "::User",
             "--json", "--project", str(tmp_path),
         ])
         assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert isinstance(data, list)
+        # The SQL "FROM users" reference in queries.py is surfaced as a
+        # non-definition reference to the User model.
+        assert any(
+            r["file_path"].endswith("queries.py") and not r["is_definition"]
+            for r in data
+        ), f"Expected a DSL reference from queries.py, got: {data}"
 
     def test_refs_json_single_valid_json_with_dsl(self, tmp_path):
         """refs --json should output a single valid JSON array, not two."""
@@ -560,19 +544,13 @@ class TestRefsDslSymbols:
         query_file.write_text(
             'QUERY = "SELECT name FROM users WHERE active = 1"\n'
         )
-        import json
-        from typer.testing import CliRunner
-        from emend.cli import app
-        runner = CliRunner()
         result = runner.invoke(app, [
             "refs", str(model_file) + "::User",
             "--json", "--project", str(tmp_path),
         ])
         assert result.exit_code == 0
-        output = result.stdout.strip()
-        if output:
-            data = json.loads(output)
-            assert isinstance(data, list), "Output should be a single JSON array"
+        data = json.loads(result.stdout.strip())
+        assert isinstance(data, list), "Output should be a single JSON array"
 
 
 class TestGotoLocalDslFallback:
@@ -594,8 +572,8 @@ class TestGotoLocalDslFallback:
         engine = EditorSearchEngine(str(tmp_path))
         result = engine.goto_definition(file=str(query_file), line=1, col=25)
         assert result.mode == "symbol"
-        if result.items:
-            assert any("User" in item.get("qualified_name", "") for item in result.items)
+        assert result.items
+        assert any("User" in item.get("qualified_name", "") for item in result.items)
 
     def test_goto_definition_no_dsl_when_normal_ref(self, tmp_path):
         """goto_definition uses normal resolution for non-DSL code."""
@@ -605,16 +583,19 @@ class TestGotoLocalDslFallback:
         engine = EditorSearchEngine(str(tmp_path))
         result = engine.goto_definition(file=str(f), line=3, col=1)
         assert result.mode == "symbol"
+        assert any(
+            item.get("qualified_name", "").endswith("hello") for item in result.items
+        )
 
     def test_goto_definition_empty_for_plain_string(self, tmp_path):
-        """goto_definition returns empty for non-DSL strings."""
+        """goto_definition returns no symbols for a non-DSL plain string."""
         f = tmp_path / "app.py"
         f.write_text('msg = "hello world"\n')
         from emend.editor_search import EditorSearchEngine
         engine = EditorSearchEngine(str(tmp_path))
         result = engine.goto_definition(file=str(f), line=1, col=8)
-        # No DSL content, no identifier — empty is fine
         assert result.mode == "symbol"
+        assert result.items == []
 
 
 class TestFindInDsl:
@@ -826,12 +807,9 @@ class TestDslSearchCommand:
 
     def test_search_dsl_sql(self, tmp_path):
         """search --dsl sql finds patterns in SQL regions."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "app.py"
         f.write_text('QUERY = "SELECT * FROM users"\n')
-        runner = CliRunner()
         result = runner.invoke(app, [
             "grep", "SELECT", str(f), "--dsl", "sql",
         ])
@@ -840,12 +818,9 @@ class TestDslSearchCommand:
 
     def test_search_dsl_no_match(self, tmp_path):
         """search --dsl returns nothing for non-DSL content."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "app.py"
         f.write_text('x = "hello"\n')
-        runner = CliRunner()
         result = runner.invoke(app, [
             "grep", "SELECT", str(f), "--dsl", "sql",
         ])
@@ -860,8 +835,6 @@ class TestDslSearchCommand:
         matches from docstrings/comments. DSL symbols should only appear when
         --dsl is explicitly provided.
         """
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "app.py"
         f.write_text(
@@ -872,7 +845,6 @@ class TestDslSearchCommand:
             "        obj = User.objects.get(id=uid)\n"
             "        return obj\n"
         )
-        runner = CliRunner()
         result = runner.invoke(app, ["find", "$X.objects.get($...ARGS)", str(f), "--output", "code"])
         assert result.exit_code == 0
         # Should find the Python pattern match
@@ -883,12 +855,9 @@ class TestDslSearchCommand:
 
     def test_pattern_find_includes_dsl_with_explicit_flag(self, tmp_path):
         """Pattern find with --dsl flag explicitly searches DSL regions."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "app.py"
         f.write_text('QUERY = "SELECT * FROM users"\n')
-        runner = CliRunner()
         result = runner.invoke(app, ["find", "SELECT $...REST", str(f), "--dsl", "sql"])
         assert result.exit_code == 0
         assert "[sql" in result.output or "users" in result.output
@@ -1004,15 +973,8 @@ class TestExtractJinjaSymbols:
 
     def test_extract_template_variables(self):
         """Extracts template variables from {{ expr }}."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='<h1>{{ user.name }}</h1>\n<p>{{ posts }}</p>',
-            host_file="profile.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=2,
-            host_end_col=20,
-            trigger="file_extension",
+        region = jinja_region(
+            '<h1>{{ user.name }}</h1>\n<p>{{ posts }}</p>', host_file="profile.html"
         )
         symbols = extract_jinja_symbols(region)
         var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
@@ -1021,15 +983,9 @@ class TestExtractJinjaSymbols:
 
     def test_extract_block_definitions(self):
         """Extracts block names from {% block name %}."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='{% block content %}\n  <p>body</p>\n{% endblock %}\n{% block sidebar %}{% endblock %}',
+        region = jinja_region(
+            '{% block content %}\n  <p>body</p>\n{% endblock %}\n{% block sidebar %}{% endblock %}',
             host_file="layout.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=4,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_jinja_symbols(region)
         block_names = [s.name for s in symbols if any(h.strategy == "template_block" for h in s.link_hints)]
@@ -1038,15 +994,9 @@ class TestExtractJinjaSymbols:
 
     def test_extract_macro_definitions(self):
         """Extracts macro names from {% macro name() %}."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='{% macro render_field(field) %}\n  <div>{{ field.label }}</div>\n{% endmacro %}',
+        region = jinja_region(
+            '{% macro render_field(field) %}\n  <div>{{ field.label }}</div>\n{% endmacro %}',
             host_file="forms.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=3,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_jinja_symbols(region)
         macro_names = [s.name for s in symbols]
@@ -1054,15 +1004,9 @@ class TestExtractJinjaSymbols:
 
     def test_extract_for_loop_variables(self):
         """Extracts iterable variable from {% for x in items %}."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='{% for post in posts %}\n  <h2>{{ post.title }}</h2>\n{% endfor %}',
+        region = jinja_region(
+            '{% for post in posts %}\n  <h2>{{ post.title }}</h2>\n{% endfor %}',
             host_file="blog.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=3,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_jinja_symbols(region)
         var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
@@ -1070,15 +1014,8 @@ class TestExtractJinjaSymbols:
 
     def test_skip_jinja_builtins(self):
         """Does not extract Jinja2 built-in variables."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='{{ loop.index }}\n{{ range(10) }}\n{{ true }}',
-            host_file="tmpl.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=3,
-            host_end_col=0,
-            trigger="file_extension",
+        region = jinja_region(
+            '{{ loop.index }}\n{{ range(10) }}\n{{ true }}', host_file="tmpl.html"
         )
         symbols = extract_jinja_symbols(region)
         var_names = [s.name for s in symbols if s.kind == DslSymbolKind.TEMPLATE_VAR]
@@ -1088,16 +1025,7 @@ class TestExtractJinjaSymbols:
 
     def test_link_hints_for_template_var(self):
         """Template variables get template_var link hints."""
-        region = DslRegion(
-            dsl=DslKind.JINJA,
-            content='{{ user.name }}',
-            host_file="profile.html",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=1,
-            host_end_col=15,
-            trigger="file_extension",
-        )
+        region = jinja_region('{{ user.name }}', host_file="profile.html")
         symbols = extract_jinja_symbols(region)
         assert len(symbols) >= 1
         assert any(h.strategy == "template_var" for h in symbols[0].link_hints)
@@ -1278,8 +1206,6 @@ class TestJinjaDslDebugCommand:
 
     def test_dsl_debug_jinja(self, tmp_path):
         """dsl-debug --type jinja detects Jinja2 templates."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "template.html"
         f.write_text(
@@ -1287,7 +1213,6 @@ class TestJinjaDslDebugCommand:
             '  <h1>{{ title }}</h1>\n'
             '{% endblock %}\n'
         )
-        runner = CliRunner()
         result = runner.invoke(app, ["dsl-debug", str(f), "--type", "jinja"])
         assert result.exit_code == 0
         assert "title" in result.output or "header" in result.output
@@ -1373,15 +1298,9 @@ class TestExtractGraphqlSymbols:
 
     def test_extract_type_definitions(self):
         """Extracts type names from GraphQL schema."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  id: ID!\n  email: String!\n}\n\ntype Post {\n  title: String!\n}',
+        region = graphql_region(
+            'type User {\n  id: ID!\n  email: String!\n}\n\ntype Post {\n  title: String!\n}',
             host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=8,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_graphql_symbols(region)
         type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
@@ -1390,15 +1309,9 @@ class TestExtractGraphqlSymbols:
 
     def test_extract_field_definitions(self):
         """Extracts field names from GraphQL types."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  email: String!\n  posts: [Post!]!\n}',
+        region = graphql_region(
+            'type User {\n  email: String!\n  posts: [Post!]!\n}',
             host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=4,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_graphql_symbols(region)
         field_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
@@ -1407,15 +1320,9 @@ class TestExtractGraphqlSymbols:
 
     def test_extract_input_and_enum(self):
         """Extracts input and enum type definitions."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='input CreateUserInput {\n  name: String!\n}\n\nenum Role {\n  ADMIN\n  USER\n}',
+        region = graphql_region(
+            'input CreateUserInput {\n  name: String!\n}\n\nenum Role {\n  ADMIN\n  USER\n}',
             host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=8,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_graphql_symbols(region)
         type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
@@ -1424,15 +1331,9 @@ class TestExtractGraphqlSymbols:
 
     def test_extract_query_operations(self):
         """Extracts query/mutation operation names."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='query GetUser($id: ID!) {\n  user(id: $id) {\n    name\n  }\n}\n\nmutation CreateUser($input: CreateUserInput!) {\n  createUser(input: $input) {\n    id\n  }\n}',
+        region = graphql_region(
+            'query GetUser($id: ID!) {\n  user(id: $id) {\n    name\n  }\n}\n\nmutation CreateUser($input: CreateUserInput!) {\n  createUser(input: $input) {\n    id\n  }\n}',
             host_file="queries.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=11,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_graphql_symbols(region)
         op_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
@@ -1441,15 +1342,9 @@ class TestExtractGraphqlSymbols:
 
     def test_skip_builtin_types(self):
         """Does not extract GraphQL built-in types."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  name: String\n  age: Int\n  active: Boolean\n}',
+        region = graphql_region(
+            'type User {\n  name: String\n  age: Int\n  active: Boolean\n}',
             host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=5,
-            host_end_col=0,
-            trigger="file_extension",
         )
         symbols = extract_graphql_symbols(region)
         type_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_TYPE]
@@ -1459,16 +1354,7 @@ class TestExtractGraphqlSymbols:
 
     def test_link_hints_for_types(self):
         """Type symbols get graphql_type link hints with resolver name."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  id: ID!\n}',
-            host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=3,
-            host_end_col=0,
-            trigger="file_extension",
-        )
+        region = graphql_region('type User {\n  id: ID!\n}', host_file="schema.graphql")
         symbols = extract_graphql_symbols(region)
         user_types = [s for s in symbols if s.name == "User"]
         assert len(user_types) >= 1
@@ -1477,15 +1363,8 @@ class TestExtractGraphqlSymbols:
 
     def test_link_hints_for_fields(self):
         """Field symbols get graphql_field link hints with parent type."""
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  posts: [Post!]!\n}',
-            host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=3,
-            host_end_col=0,
-            trigger="file_extension",
+        region = graphql_region(
+            'type User {\n  posts: [Post!]!\n}', host_file="schema.graphql"
         )
         symbols = extract_graphql_symbols(region)
         fields = [s for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
@@ -1500,15 +1379,11 @@ class TestExtractGraphqlSymbols:
         """
         # Region starts at line 5: "type User {" is at offset 0 (line 5),
         # "  name: String!" is at offset 1 (line 6), "  email: String!" at offset 2 (line 7)
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  name: String!\n  email: String!\n}',
+        region = graphql_region(
+            'type User {\n  name: String!\n  email: String!\n}',
             host_file="schema.graphql",
-            host_start_line=5,
-            host_start_col=0,
-            host_end_line=8,
-            host_end_col=0,
-            trigger="file_extension",
+            start_line=5,
+            end_line=8,
         )
         symbols = extract_graphql_symbols(region)
         fields_by_name = {s.name: s for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD}
@@ -1530,15 +1405,8 @@ class TestExtractGraphqlSymbols:
         from being extracted as a user-defined type. But a *field* named 'id'
         is perfectly valid and must not be silently dropped.
         """
-        region = DslRegion(
-            dsl=DslKind.GRAPHQL,
-            content='type User {\n  id: ID!\n  name: String!\n}',
-            host_file="schema.graphql",
-            host_start_line=1,
-            host_start_col=0,
-            host_end_line=4,
-            host_end_col=0,
-            trigger="file_extension",
+        region = graphql_region(
+            'type User {\n  id: ID!\n  name: String!\n}', host_file="schema.graphql"
         )
         symbols = extract_graphql_symbols(region)
         field_names = [s.name for s in symbols if s.kind == DslSymbolKind.GRAPHQL_FIELD]
@@ -1711,12 +1579,9 @@ class TestGraphqlDslDebugCommand:
 
     def test_dsl_debug_graphql(self, tmp_path):
         """dsl-debug --type graphql detects GraphQL schemas."""
-        from typer.testing import CliRunner
-        from emend.cli import app
 
         f = tmp_path / "schema.graphql"
         f.write_text('type User {\n  id: ID!\n  name: String!\n}\n')
-        runner = CliRunner()
         result = runner.invoke(app, ["dsl-debug", str(f), "--type", "graphql"])
         assert result.exit_code == 0
         assert "User" in result.output

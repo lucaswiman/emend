@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from emend.errors import BUG_EXCEPTIONS
+
 if TYPE_CHECKING:
     from emend.policy import Policy, PolicyViolation
 
@@ -53,7 +55,10 @@ def run_sequence_check(
     violations: list[PolicyViolation] = []
     try:
         graph = FactGraph.build_from_project(project_path)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as exc:
+        logger.debug("Sequence check setup failed", exc_info=True)
         return [PolicyViolation(
             file_path="<project>",
             line=0, col=0,
@@ -64,12 +69,15 @@ def run_sequence_check(
         )]
 
     try:
-        result = compile_sequence_rule(graph, check)
+        result = compile_sequence_rule(graph, check, project_path=project_path)
         if result is None:
             return []
         query_str, step_data = result
         query_result = graph.run_query(query_str)
+    except BUG_EXCEPTIONS:
+        raise
     except Exception as exc:
+        logger.debug("Sequence check failed", exc_info=True)
         return [PolicyViolation(
             file_path="<project>",
             line=0, col=0,

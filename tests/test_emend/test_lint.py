@@ -13,21 +13,27 @@ from emend.lint import (
 )
 
 
-def _write_config(tmp_path, config_dict):
-    """Helper to write a YAML config file."""
-    config_file = tmp_path / ".emend" / "patterns.yaml"
+def _write_config(tmp_path, config_dict, name="patterns.yaml"):
+    """Helper to write a YAML config file under ``.emend/``."""
+    config_file = tmp_path / ".emend" / name
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(yaml.dump(config_dict))
     return config_file
 
 
 def _write_rules_config(tmp_path, config_dict):
-    """Helper to write unified rules.yaml config file."""
-    config_file = tmp_path / ".emend" / "rules.yaml"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(yaml.dump(config_dict))
-    return config_file
+    """Write the unified ``rules.yaml`` config file."""
+    return _write_config(tmp_path, config_dict, name="rules.yaml")
 
+
+def _no_print_rule(message="No print", **kwargs):
+    """Build the canonical no-print ``LintRule``, overriding fields as needed."""
+    return LintRule(
+        name="no-print",
+        find="print($...ARGS)",
+        message=message,
+        **kwargs,
+    )
 
 
 def test_load_rules_reads_deadcode_from_rule_block(tmp_path):
@@ -498,58 +504,28 @@ def test_lint_violation_fields(tmp_path):
 # --- parse_noqa_comments unit tests ---
 
 
-def test_parse_noqa_bare():
-    """Bare # noqa returns None (suppress all)."""
-    result = parse_noqa_comments("x = 1  # noqa\n")
-    assert result == {1: None}
-
-
-def test_parse_noqa_specific_emend_rule():
-    """# noqa: emend:rule-name extracts rule name."""
-    result = parse_noqa_comments("x = 1  # noqa: emend:no-print\n")
-    assert result == {1: {"no-print"}}
-
-
-def test_parse_noqa_multiple_emend_rules():
-    """# noqa: emend:r1, emend:r2 extracts both rules."""
-    result = parse_noqa_comments("x = 1  # noqa: emend:no-print, emend:no-assert\n")
-    assert result == {1: {"no-print", "no-assert"}}
-
-
-def test_parse_noqa_mixed_only_emend():
-    """# noqa: E501, emend:no-print only picks up emend-prefixed rules."""
-    result = parse_noqa_comments("x = 1  # noqa: E501, emend:no-print\n")
-    assert result == {1: {"no-print"}}
-
-
-def test_parse_noqa_non_emend_only():
-    """# noqa: E501 alone has no effect on emend (not in result)."""
-    result = parse_noqa_comments("x = 1  # noqa: E501\n")
-    assert result == {}
-
-
-def test_parse_noqa_inside_string():
-    """# noqa inside a string literal is NOT detected."""
-    result = parse_noqa_comments('x = "# noqa"\n')
-    assert result == {}
-
-
-def test_parse_noqa_case_insensitive():
-    """# NOQA and # Noqa work too."""
-    result = parse_noqa_comments("x = 1  # NOQA\n")
-    assert result == {1: None}
-
-    result2 = parse_noqa_comments("x = 1  # Noqa: emend:my-rule\n")
-    assert result2 == {1: {"my-rule"}}
-
-
-def test_parse_noqa_spacing_variations():
-    """Various spacing around noqa is handled."""
-    result = parse_noqa_comments("x = 1  #noqa\n")
-    assert result == {1: None}
-
-    result2 = parse_noqa_comments("x = 1  #  noqa:emend:r1\n")
-    assert result2 == {1: {"r1"}}
+@pytest.mark.parametrize("source, expected", [
+    # Bare # noqa suppresses all rules (None sentinel).
+    ("x = 1  # noqa\n", {1: None}),
+    # emend:rule-name extracts the rule name.
+    ("x = 1  # noqa: emend:no-print\n", {1: {"no-print"}}),
+    # Multiple emend rules.
+    ("x = 1  # noqa: emend:no-print, emend:no-assert\n", {1: {"no-print", "no-assert"}}),
+    # Only emend-prefixed rules are picked up from a mixed list.
+    ("x = 1  # noqa: E501, emend:no-print\n", {1: {"no-print"}}),
+    # A non-emend noqa has no effect.
+    ("x = 1  # noqa: E501\n", {}),
+    # noqa inside a string literal is not detected.
+    ('x = "# noqa"\n', {}),
+    # Case-insensitive keyword.
+    ("x = 1  # NOQA\n", {1: None}),
+    ("x = 1  # Noqa: emend:my-rule\n", {1: {"my-rule"}}),
+    # Spacing variations around the keyword and colon.
+    ("x = 1  #noqa\n", {1: None}),
+    ("x = 1  #  noqa:emend:r1\n", {1: {"r1"}}),
+])
+def test_parse_noqa_comments(source, expected):
+    assert parse_noqa_comments(source) == expected
 
 
 # --- Integration tests (find mode) ---

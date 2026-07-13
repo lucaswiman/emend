@@ -335,6 +335,17 @@ class TestRejectFileGlobs:
 
 
 class TestResolveFiles:
+    def test_resolve_many_files_uses_default_for_empty_paths(self, tmp_path):
+        from emend.cli_base import resolve_many_files
+
+        default_file = tmp_path / "default.py"
+        default_file.write_text("x = 1\n")
+
+        files, is_multi = resolve_many_files([], default=str(default_file))
+
+        assert files == [default_file]
+        assert not is_multi
+
     def test_resolve_directory(self, tmp_path):
         from emend.cli_base import resolve_files
         (tmp_path / "a.py").write_text("x = 1\n")
