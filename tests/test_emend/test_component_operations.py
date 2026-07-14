@@ -1,9 +1,4 @@
-"""YAML-parameterized tests for component operations (get/set/add/remove).
-
-Each YAML file in data/ defines test cases that run at both the raw API level
-(get_component, set_component, add_to_component, remove_component) and the
-CLI level (emend search, emend edit, emend add).
-"""
+"""Data-driven API and CLI tests for component operations."""
 
 import re
 from pathlib import Path
@@ -26,38 +21,21 @@ runner = CliRunner()
 DATA_DIR = Path(__file__).parent / "data"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def load_cases(filename: str) -> list[dict]:
-    """Load test cases from a YAML file in the data/ directory."""
-    with open(DATA_DIR / filename) as f:
+    with (DATA_DIR / filename).open() as f:
         return yaml.safe_load(f)
 
 
 def parse_selector(selector_str: str, file_path: str) -> ExtendedSelector:
-    """Parse a simplified selector string into an ExtendedSelector.
-
-    Examples:
-        "func[params]"             -> symbol_path=["func"], component="params"
-        "func[params][x]"          -> ..., accessor="x"
-        "func[params][1]"          -> ..., accessor=1
-        "func[params][-1]"         -> ..., accessor=-1
-        "MyClass.method[params]"   -> symbol_path=["MyClass", "method"], ...
-        "func[params]:KEYWORD_ONLY" -> ..., pseudo_class="KEYWORD_ONLY"
-        "func"                     -> symbol_path=["func"], component=None
-    """
+    """Parse the compact selectors used by the YAML fixtures."""
     pseudo_class = None
     remaining = selector_str
 
-    # Extract pseudo_class suffix (e.g. ":KEYWORD_ONLY")
     pseudo_match = re.search(r":([A-Z_]+)$", remaining)
     if pseudo_match:
         pseudo_class = pseudo_match.group(1)
         remaining = remaining[: pseudo_match.start()]
 
-    # Extract bracket contents
     brackets = re.findall(r"\[([^\]]*)\]", remaining)
     component = brackets[0] if len(brackets) >= 1 else None
 
@@ -69,7 +47,6 @@ def parse_selector(selector_str: str, file_path: str) -> ExtendedSelector:
         except ValueError:
             accessor = accessor_str
 
-    # Symbol path is everything before the first '['
     symbol_part = remaining.split("[")[0]
     symbol_path = symbol_part.split(".")
 
@@ -83,27 +60,38 @@ def parse_selector(selector_str: str, file_path: str) -> ExtendedSelector:
 
 
 def write_source(tmp_path, case):
-    """Write case source to a temp file, return path string."""
     test_file = tmp_path / "test.py"
     test_file.write_text(case["source"])
     return str(test_file)
 
 
 def case_id(case):
-    """Generate a readable test ID from a case dict."""
     return case["name"]
 
 
-# ---------------------------------------------------------------------------
-# GET tests
-# ---------------------------------------------------------------------------
+def assert_file_expectations(case, file_path: str) -> None:
+    content = Path(file_path).read_text()
+    assert content != case["source"]
+    for expected in case["expected_in_file"]:
+        assert expected in content, f"Expected {expected!r} in file:\n{content}"
+    for unexpected in case.get("not_in_file", []):
+        assert unexpected not in content, (
+            f"Did not expect {unexpected!r} in file:\n{content}"
+        )
+
+
+def assert_diff_expectations(case, diff: str, file_path: str) -> None:
+    assert diff.startswith(f"--- {file_path}\n+++ {file_path}\n")
+    assert "@@" in diff
+    for expected in case.get("expected_in_diff", []):
+        assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+
 
 get_cases = load_cases("component_get.yaml")
 
 
 @pytest.mark.parametrize("case", get_cases, ids=case_id)
 def test_get_api(case, tmp_path):
-    """get_component() returns the expected string."""
     file_path = write_source(tmp_path, case)
     selector = parse_selector(case["selector"], file_path)
     result = get_component(selector)
@@ -112,7 +100,6 @@ def test_get_api(case, tmp_path):
 
 @pytest.mark.parametrize("case", get_cases, ids=case_id)
 def test_get_cli(case, tmp_path):
-    """'emend search' stdout matches expected output."""
     file_path = write_source(tmp_path, case)
     result = runner.invoke(app, ["search", f"{file_path}::{case['selector']}"])
     assert result.exit_code == 0
@@ -123,39 +110,27 @@ def test_get_cli(case, tmp_path):
         assert result.stdout.strip() == case["expected"]
 
 
-# ---------------------------------------------------------------------------
-# SET tests
-# ---------------------------------------------------------------------------
-
 set_cases = load_cases("component_set.yaml")
 
 
 @pytest.mark.parametrize("case", set_cases, ids=case_id)
 def test_set_api(case, tmp_path):
-    """set_component() diff contains expected strings."""
     file_path = write_source(tmp_path, case)
     selector = parse_selector(case["selector"], file_path)
-    diff = set_component(selector, case["value"], apply=False)
-    for expected in case.get("expected_in_diff", []):
-        assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    diff = set_component(selector, case["value"], apply=True)
+    assert_diff_expectations(case, diff, file_path)
+    assert_file_expectations(case, file_path)
 
 
 @pytest.mark.parametrize("case", set_cases, ids=case_id)
 def test_set_cli(case, tmp_path):
-    """'emend edit' modifies file correctly."""
     file_path = write_source(tmp_path, case)
     result = runner.invoke(
         app, ["edit", f"{file_path}::{case['selector']}", case["value"], "--apply"]
     )
     assert result.exit_code == 0, f"exit_code={result.exit_code}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    content = Path(file_path).read_text()
-    for expected in case.get("expected_in_file", []):
-        assert expected in content, f"Expected {expected!r} in file:\n{content}"
+    assert_file_expectations(case, file_path)
 
-
-# ---------------------------------------------------------------------------
-# ADD tests
-# ---------------------------------------------------------------------------
 
 add_cases = load_cases("component_add.yaml")
 
@@ -166,7 +141,6 @@ def _has_before_after(case):
 
 @pytest.mark.parametrize("case", add_cases, ids=case_id)
 def test_add_api(case, tmp_path):
-    """add_to_component() diff contains expected strings."""
     file_path = write_source(tmp_path, case)
 
     if _has_before_after(case):
@@ -176,20 +150,19 @@ def test_add_api(case, tmp_path):
             value=case["value"],
             before=case.get("before"),
             after=case.get("after"),
-            apply=False,
+            apply=True,
         )
     else:
         selector = parse_selector(case["selector"], file_path)
         position = case.get("position", -1)
-        diff = add_to_component(selector, case["value"], position=position, apply=False)
+        diff = add_to_component(selector, case["value"], position=position, apply=True)
 
-    for expected in case.get("expected_in_diff", []):
-        assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    assert_diff_expectations(case, diff, file_path)
+    assert_file_expectations(case, file_path)
 
 
 @pytest.mark.parametrize("case", add_cases, ids=case_id)
 def test_add_cli(case, tmp_path):
-    """'emend add' modifies file correctly."""
     file_path = write_source(tmp_path, case)
     args = ["add", f"{file_path}::{case['selector']}", case["value"]]
 
@@ -203,51 +176,30 @@ def test_add_cli(case, tmp_path):
     args.append("--apply")
     result = runner.invoke(app, args)
     assert result.exit_code == 0, f"exit_code={result.exit_code}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    content = Path(file_path).read_text()
-    for expected in case.get("expected_in_file", []):
-        assert expected in content, f"Expected {expected!r} in file:\n{content}"
+    assert_file_expectations(case, file_path)
 
-
-# ---------------------------------------------------------------------------
-# REMOVE tests
-# ---------------------------------------------------------------------------
 
 remove_cases = load_cases("component_remove.yaml")
 
 
 @pytest.mark.parametrize("case", remove_cases, ids=case_id)
 def test_remove_api(case, tmp_path):
-    """remove_component() diff contains expected strings."""
     file_path = write_source(tmp_path, case)
     selector = parse_selector(case["selector"], file_path)
-    diff = remove_component(selector, apply=False)
-    for expected in case.get("expected_in_diff", []):
-        assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    diff = remove_component(selector, apply=True)
+    assert_diff_expectations(case, diff, file_path)
+    assert_file_expectations(case, file_path)
 
 
 @pytest.mark.parametrize("case", remove_cases, ids=case_id)
 def test_remove_cli(case, tmp_path):
-    """'emend edit --rm' modifies file correctly."""
     file_path = write_source(tmp_path, case)
-    selector_str = case["selector"]
-
-    # For remove, split selector to determine CLI args
-    # If there's an accessor, format is: edit <file>::sym[comp][acc] --rm --apply
-    # If no accessor, format is: edit <file>::sym[comp] --rm --apply
     result = runner.invoke(
-        app, ["edit", f"{file_path}::{selector_str}", "--rm", "--apply"]
+        app, ["edit", f"{file_path}::{case['selector']}", "--rm", "--apply"]
     )
     assert result.exit_code == 0, f"exit_code={result.exit_code}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    content = Path(file_path).read_text()
-    for expected in case.get("expected_in_file", []):
-        assert expected in content, f"Expected {expected!r} in file:\n{content}"
-    for not_expected in case.get("not_in_file", []):
-        assert not_expected not in content, f"Did NOT expect {not_expected!r} in file:\n{content}"
+    assert_file_expectations(case, file_path)
 
-
-# ---------------------------------------------------------------------------
-# ERROR tests
-# ---------------------------------------------------------------------------
 
 error_cases = load_cases("component_errors.yaml")
 
@@ -263,7 +215,6 @@ EXCEPTION_MAP = {
     ids=lambda c: c["name"],
 )
 def test_error_api(case, tmp_path):
-    """Operations raise expected exceptions."""
     if case.get("source") is not None:
         file_path = write_source(tmp_path, case)
     else:
@@ -287,7 +238,6 @@ def test_error_api(case, tmp_path):
 
 @pytest.mark.parametrize("case", error_cases, ids=lambda c: c["name"])
 def test_error_cli(case, tmp_path):
-    """CLI returns non-zero exit code with error message."""
     if case.get("source") is not None:
         file_path = write_source(tmp_path, case)
     else:
@@ -314,11 +264,6 @@ def test_error_cli(case, tmp_path):
         f"Expected non-zero exit for {case['name']}, got 0\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Behavioral / non-parameterized tests
-# ---------------------------------------------------------------------------
 
 
 def test_set_apply_writes_file(tmp_path):

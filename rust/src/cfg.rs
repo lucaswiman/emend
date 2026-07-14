@@ -1624,7 +1624,6 @@ fn collect_functions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::config_for_ext;
 
     #[test]
     fn test_field_level_defs() {

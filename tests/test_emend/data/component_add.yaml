@@ -217,7 +217,7 @@
   selector: "foo[params]:POSITIONAL_ONLY"
   value: "c"
   expected_in_file:
-    - "def foo(a, b, c):"
+    - "def foo(c, /, a, b):"
 
 - name: pseudo_class_keyword_only_no_args
   source: |
