@@ -17,6 +17,26 @@ from emend import ast_commands
 from emend.mcp.dispatch import mcp_app
 
 
+def _derive_module_path(file_path_str: str, proj_root: str, sep: str) -> str:
+    """Derive a dotted module path for *file_path_str* relative to *proj_root*.
+
+    Mirrors the CLI summary path (cli_find.py) so ``dicts_to_tree_symbols``
+    strips the module prefix consistently between the CLI and MCP surfaces.
+    """
+    from pathlib import Path
+
+    fp = Path(file_path_str)
+    try:
+        parts = list(fp.relative_to(proj_root).parts)
+    except ValueError:
+        return fp.stem
+    if parts and parts[0] == "src":
+        parts.pop(0)
+    if parts:
+        parts[-1] = fp.stem
+    return sep.join(parts) if parts else fp.stem
+
+
 @mcp_app.tool()
 def search(
     mode: Annotated[str, Field(description="Search mode: code, symbol, summary, or auto (legacy inference).")] = "code",
@@ -133,6 +153,16 @@ def search(
         if file_path_obj.is_dir() or "*" in file_for_summary or "?" in file_for_summary:
             files, _ = resolve_files(file_for_summary)
             from emend import emend_core
+            from emend.transform import _find_source_root
+            from emend.language_registry import get_module_separator
+
+            base_dir = (
+                file_for_summary
+                if file_path_obj.is_dir()
+                else str(file_path_obj.parent) or "."
+            )
+            proj_root = _find_source_root(base_dir)
+            sep = get_module_separator("python")
 
             file_strs = [str(fp) for fp in files]
             batch_results = emend_core.collect_symbols_batch(
@@ -141,7 +171,12 @@ def search(
             buf = io.StringIO()
             with redirect_stdout(buf):
                 for file_path_str, symbol_dicts in batch_results:
-                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
+                    module_path = _derive_module_path(
+                        file_path_str, proj_root, sep
+                    )
+                    symbols = ast_commands.dicts_to_tree_symbols(
+                        symbol_dicts, module_path, separator=sep
+                    )
                     print(f"\nModule: {file_path_str}")
                     if symbols:
                         if flat_output:

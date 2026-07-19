@@ -377,11 +377,23 @@ def _detect_exported_names_typescript(content: str) -> set[str]:
 
         # export [default] <keyword> <Name> ...
         rest = line[len("export "):].strip()
+        is_default = False
         if rest.startswith("default "):
+            is_default = True
             rest = rest[len("default "):].strip()
 
         # Skip re-exports that contain 'from'
         if " from " in rest:
+            continue
+
+        # ``export default <expr>`` exports the value under the name "default";
+        # only a *named declaration* (``export default class/function X``)
+        # introduces a real exported name. A bare identifier or expression
+        # (``export default foo;``) references an existing binding and must not
+        # be reported as a new export.
+        if is_default and not rest.startswith(
+            _TS_DECL_KEYWORDS + _TS_TYPE_KEYWORDS
+        ):
             continue
 
         name = _extract_name_after_keywords(rest)

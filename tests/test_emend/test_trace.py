@@ -750,6 +750,25 @@ def test_trace_exclude_paths_filters_files(tmp_path):
     assert str(migration_file) not in violation_files
 
 
+def test_trace_exclude_paths_does_not_overmatch_siblings():
+    """A directory-name exclusion must not match sibling files sharing a prefix.
+
+    Regression: ``_trace_path_is_excluded`` appended a bare ``*`` to each
+    pattern, so ``exclude_paths: ["tests"]`` turned into ``tests*`` and wrongly
+    matched ``tests_helper.py`` / ``tests_data/foo.py`` in addition to
+    ``tests/foo.py``.
+    """
+    from emend.trace import _trace_path_is_excluded
+
+    patterns = ["tests"]
+    # Files genuinely under the excluded directory.
+    assert _trace_path_is_excluded("tests/foo.py", patterns)
+    assert _trace_path_is_excluded("tests/sub/bar.py", patterns)
+    # Sibling files that merely share the prefix must NOT be excluded.
+    assert not _trace_path_is_excluded("tests_helper.py", patterns)
+    assert not _trace_path_is_excluded("tests_data/foo.py", patterns)
+
+
 def test_trace_cmd_file_path_resolves_to_parent_dir(tmp_path, capsys):
     """When given a file path, _trace_cmd_impl should use the parent dir as project_path."""
     import yaml

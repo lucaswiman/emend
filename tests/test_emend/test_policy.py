@@ -122,6 +122,31 @@ class TestLoadPolicies:
         assert isinstance(check, FlowCheck)
         assert check.not_through == "sanitize($X)"
 
+    def test_load_policies_block_flow_list_not_through(self, tmp_path):
+        """A ``policies:`` flow check with a list ``not_through`` must be
+        pipe-joined into a single pattern string, matching the ``rules:`` path.
+
+        Regression: ``_parse_flow_check`` passed the raw YAML list straight
+        through, so downstream ``find_pattern`` received a list and the
+        sanitizer was silently dropped (producing false-positive violations).
+        """
+        config = _write_policies(tmp_path, {
+            "policies": [{
+                "name": "test",
+                "severity": "error",
+                "checks": [{
+                    "type": "flow",
+                    "flows-from": "source($X)",
+                    "flows-to": "sink($X)",
+                    "not-through": ["escape($X)", "sanitize($X)"],
+                }],
+            }],
+        })
+        policies = load_policies(config)
+        check = policies[0].checks[0]
+        assert isinstance(check, FlowCheck)
+        assert check.not_through == "escape($X) | sanitize($X)"
+
     def test_load_unified_rules_yaml_as_policies(self, tmp_path):
         config_dir = tmp_path / ".emend"
         config_dir.mkdir(parents=True, exist_ok=True)

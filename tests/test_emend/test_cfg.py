@@ -717,6 +717,47 @@ class TestCliUnreachable:
         locs = re.findall(r"mod\.py:(\d+):", out)
         assert any(int(l) > 1 for l in locs), out
 
+    def test_unreachable_header_and_span_lines_agree(self, tmp_path):
+        """The ``file:line:`` header and the trailing ``(lines X-Y)`` span must
+        use the same 1-based convention.
+
+        Regression: the header was emitted as ``start_line + 1`` (1-based) while
+        the ``lines X-Y`` parenthetical used the raw 0-based ``start_line``,
+        making the two disagree by one.
+        """
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.py").write_text(textwrap.dedent("""\
+            def f(x):
+                if x:
+                    return 1
+                else:
+                    return 2
+                print("dead")
+                y = 3
+                return y
+        """))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["analyze", "cfg", str(project), "--unreachable"]
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        import re
+        rows = re.findall(r"mod\.py:(\d+): .*?lines (\d+)-(\d+)\)", out)
+        assert rows, out
+        for header_line, span_start, span_end in ((int(a), int(b), int(c)) for a, b, c in rows):
+            # Header line is the 1-based start of the block, which must equal
+            # the start of the reported span.
+            assert header_line == span_start, out
+        # The block covering the dead statements (print/y=3/return y) begins at
+        # source line 6 in 1-based terms.
+        assert any(int(b) == 6 for _, b, _ in rows), out
+
     def test_unreachable_json_has_real_line_numbers(self, tmp_path):
         """JSON output from the Datalog path must carry real line spans."""
         from typer.testing import CliRunner

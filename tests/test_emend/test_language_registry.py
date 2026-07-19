@@ -238,6 +238,22 @@ def test_detect_exported_names_ts_default_class():
     assert "Anonymous" in result
 
 
+def test_detect_exported_names_ts_default_identifier_not_included():
+    # `export default foo;` exports the *value* of foo under the name
+    # "default"; foo itself is not a newly-exported name. Regression: the
+    # bare identifier was wrongly extracted and added to the export set.
+    code = "const foo = 1;\nexport default foo;\n"
+    result = detect_exported_names(code, "typescript")
+    assert "foo" not in result
+
+
+def test_detect_exported_names_ts_default_function_still_included():
+    # A *named declaration* as the default export does introduce a name.
+    code = "export default function foo() {}\n"
+    result = detect_exported_names(code, "typescript")
+    assert "foo" in result
+
+
 def test_detect_exported_names_ts_abstract_class():
     code = "export abstract class AbstractFoo {}\n"
     result = detect_exported_names(code, "typescript")

@@ -151,6 +151,25 @@ def test_search_summary(tmp_path):
     assert "greet" in result
 
 
+def test_search_summary_directory(tmp_path):
+    # Regression: summary mode over a directory (or glob) hit the batch
+    # branch which called dicts_to_tree_symbols() without the required
+    # module_path argument, raising TypeError.
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    (tmp_path / "b.py").write_text("def beta():\n    return 2\n")
+
+    result = search(mode="summary", files=[str(tmp_path)], output="summary")
+    assert "alpha" in result
+    assert "beta" in result
+
+
+def test_search_summary_glob(tmp_path):
+    # Regression: glob path also routes through the batch branch.
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    result = search(mode="summary", files=[str(tmp_path / "*.py")], output="summary")
+    assert "alpha" in result
+
+
 def test_transform_replace_dry_run(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("print('hello')\n")

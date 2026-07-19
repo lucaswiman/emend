@@ -991,11 +991,18 @@ def cfg_cmd(
                     print("No unreachable blocks found.")
                 for r in results:
                     for blk in r["unreachable_blocks"]:
+                        start_line = blk.get("start_line")
+                        end_line = blk.get("end_line")
+                        # ``start_line``/``end_line`` are 0-based (from
+                        # cfg.get_blocks()); display them 1-based so the span
+                        # agrees with the ``file:line:`` header above.
+                        start_disp = start_line + 1 if isinstance(start_line, int) else "?"
+                        end_disp = end_line + 1 if isinstance(end_line, int) else "?"
                         print(
-                            f"{r['file']}:{blk.get('start_line', 0)+1}: "
+                            f"{r['file']}:{(start_line or 0)+1}: "
                             f"unreachable code in {r['function']} "
                             f"(block B{blk.get('id', blk.get('block_id', '?'))}, "
-                            f"lines {blk.get('start_line', '?')}-{blk.get('end_line', '?')})"
+                            f"lines {start_disp}-{end_disp})"
                         )
             raise typer.Exit(0)
 

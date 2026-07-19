@@ -892,6 +892,17 @@ def replace_pattern(
 
     source_code = file.read_text()
 
+    # Auto-detect language from the file extension when the caller used the
+    # default. ``find_pattern`` does the same internally, but the replacement
+    # validation below (``_is_valid_replacement``) uses this ``language`` value
+    # directly, so it must be resolved here too — otherwise a valid replacement
+    # in the file's real language is validated as Python and silently dropped.
+    if language == "python" and file_path:
+        from emend.language_registry import detect_language
+        detected = detect_language(file_path)
+        if detected:
+            language = detected
+
     # Find all matches using find_pattern (already migrated to tree-sitter fast paths)
     matches = find_pattern(
         pattern_str, file_path, scope=scope,

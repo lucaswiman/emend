@@ -191,7 +191,11 @@ def _parse_flow_check(raw: dict[str, Any]) -> FlowCheck:
     return FlowCheck(
         flows_from=flows_from,
         flows_to=flows_to,
-        not_through=yaml_key(raw, "not_through"),
+        # Pipe-join a list-valued ``not_through`` into a single pattern string,
+        # mirroring the ``rules:`` path (_build_unified_policy). Passing a raw
+        # list downstream to ``find_pattern`` would raise and silently drop the
+        # sanitizer, producing false-positive flow violations.
+        not_through=expand_not_through(yaml_key(raw, "not_through"), {}),
         label=yaml_key(raw, "label") or "",
     )
 

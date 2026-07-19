@@ -66,6 +66,28 @@ class TestReplacePattern:
         assert "logger.info('hello')" in diff
         assert count == 1
 
+    def test_replace_typescript_default_language(self, tmp_path):
+        """Regression: replace_pattern must validate the replacement against the
+        file's actual language, not the default ``python``.
+
+        ``find_pattern`` auto-detects the language from the extension, so matches
+        are found on a ``.ts`` file, but the replacement was validated with the
+        still-default ``language="python"``, silently rejecting replacements that
+        are valid TypeScript but not valid Python (e.g. ``const``)."""
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "test.ts"
+        test_file.write_text("if (a == b) {\n  foo();\n}\n")
+
+        # ``a === b`` is valid TS but not valid Python. With the bug, the
+        # replacement is validated as Python, rejected, and count stays 0.
+        diff, count = replace_pattern(
+            "$X == $Y", "$X === $Y", str(test_file), apply=False
+        )
+
+        assert count == 1
+        assert "a === b" in diff
+
     def test_replace_with_metavar(self, tmp_path):
         """Replace pattern with metavariable."""
         from emend.transform import replace_pattern

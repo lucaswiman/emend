@@ -684,11 +684,16 @@ def _trace_path_is_excluded(file_path: str, patterns: list[str]) -> bool:
     import fnmatch
 
     for pattern in patterns:
-        if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pattern + "*"):
+        # A directory-name pattern (e.g. ``tests``) should match files *under*
+        # that directory, so append ``/*`` rather than a bare ``*`` — the latter
+        # over-matches sibling files that merely share the prefix
+        # (``tests_helper.py``, ``tests_data/foo.py``).
+        pat = pattern.rstrip("/")
+        if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pat + "/*"):
             return True
         if "**" in pattern:
-            relaxed = pattern.replace("**", "*")
-            if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "*"):
+            relaxed = pattern.replace("**", "*").rstrip("/")
+            if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "/*"):
                 return True
     return False
 
