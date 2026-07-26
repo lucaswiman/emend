@@ -382,7 +382,7 @@ _SCHEMA_INIT = """\
 
 {:create entry_point_prefix { prefix: String }}
 
-{:create exported_symbol { qualified_name: String }}
+{:create exported_symbol { file_path: String, qualified_name: String }}
 
 {:create ref_by_block {
     file_path: String,
@@ -406,8 +406,37 @@ _SCHEMA_INIT = """\
 """
 
 
+# Relations whose column set changed after they shipped.  An on-disk
+# ``facts.db`` created by an older emend keeps the old shape, and `:create`
+# is a no-op once the relation exists — so queries written against the new
+# shape would silently fail.  Each entry maps a relation name to its current
+# column list; a mismatch drops and recreates the relation (the facts are
+# rebuilt from source on the next index).
+_MIGRATED_RELATIONS = {
+    "exported_symbol": ["file_path", "qualified_name"],
+}
+
+
+def _migrate_stale_relations(client: Any) -> None:
+    """Drop stored relations whose on-disk columns no longer match the schema."""
+    for relation, expected in _MIGRATED_RELATIONS.items():
+        try:
+            cols = [row[0] for row in client.run(f"::columns {relation}")["rows"]]
+        except Exception:
+            continue  # relation does not exist yet — `:create` will make it
+        if cols != expected:
+            logger.debug(
+                "Migrating stale relation %s: %s -> %s", relation, cols, expected
+            )
+            try:
+                client.run(f"::remove {relation}")
+            except Exception:
+                logger.debug("Failed to drop stale relation %s", relation, exc_info=True)
+
+
 def _init_schema(client: Any) -> None:
     """Create stored relations if they don't exist."""
+    _migrate_stale_relations(client)
     for stmt in _SCHEMA_INIT.strip().split("\n\n"):
         stmt = stmt.strip()
         if stmt:
@@ -852,12 +881,20 @@ class FactGraph:
         rows = [[f.name] for f in facts]
         self._put_batch("entry_point_name", "name", "name", rows)
 
-    def add_exported_symbols_batch(self, qns: list[str]) -> None:
-        """Bulk-insert exported symbol qualified names."""
-        if not qns:
+    def add_exported_symbols_batch(self, rows: list[tuple[str, str]]) -> None:
+        """Bulk-insert exported symbols as ``(file_path, qualified_name)`` pairs.
+
+        The file path is part of the key so that ``remove_files()`` and
+        re-indexing can drop a file's stale exports.
+        """
+        if not rows:
             return
-        rows = [[qn] for qn in qns]
-        self._put_batch("exported_symbol", "qualified_name", "qualified_name", rows)
+        self._put_batch(
+            "exported_symbol",
+            "file_path, qualified_name",
+            "file_path, qualified_name",
+            [list(r) for r in rows],
+        )
 
     # -- Post-processing ---------------------------------------------------
 
@@ -1343,24 +1380,27 @@ class FactGraph:
 
         String literal filtering stays as a Python post-filter (caller's responsibility).
         """
-        # Seed entry point facts if provided
-        setup_rules = []
-        if entry_point_decorators:
-            dec_rows = ", ".join(f'["{d}"]' for d in entry_point_decorators)
-            setup_rules.append(f"?[decorator] <- [{dec_rows}] :put entry_point_decorator {{decorator}}")
-        if entry_point_names:
-            name_rows = ", ".join(f'["{n}"]' for n in entry_point_names)
-            setup_rules.append(f"?[name] <- [{name_rows}] :put entry_point_name {{name}}")
-        if entry_point_prefixes:
-            pfx_rows = ", ".join(f'["{p}"]' for p in entry_point_prefixes)
-            setup_rules.append(f"?[prefix] <- [{pfx_rows}] :put entry_point_prefix {{prefix}}")
-
-        # Run setup rules if any
-        for rule in setup_rules:
-            try:
-                self._client.run(rule)
-            except Exception:
-                logger.debug("Entry point seed rule failed: %s", rule, exc_info=True)
+        # Entry points supplied by the caller are scoped to this single query.
+        # They are materialised as *inline* relations rather than `:put` into
+        # the stored `entry_point_*` relations: those relations are persisted
+        # in `facts.db`, so seeding them would make a one-off
+        # `--entry-point-name X` permanently hide `X` from every later run.
+        _ir = self._inline_relation
+        seed_rules = (
+            _ir("seed_ep_decorator", ["decorator"],
+                [(d,) for d in (entry_point_decorators or [])])
+            + _ir("seed_ep_name", ["name"],
+                  [(n,) for n in (entry_point_names or [])])
+            + _ir("seed_ep_prefix", ["prefix"],
+                  [(p,) for p in (entry_point_prefixes or [])])
+            # Union the persisted relations with the per-query seeds.
+            + "ep_decorator[decorator] := *entry_point_decorator[decorator]\n"
+            + "ep_decorator[decorator] := seed_ep_decorator[decorator]\n"
+            + "ep_name[name] := *entry_point_name[name]\n"
+            + "ep_name[name] := seed_ep_name[name]\n"
+            + "ep_prefix[prefix] := *entry_point_prefix[prefix]\n"
+            + "ep_prefix[prefix] := seed_ep_prefix[prefix]\n"
+        )
 
         # Build excluded-path filter clauses for CozoDB.
         # We need two variants: one using the variable "fp" (for the
@@ -1389,10 +1429,11 @@ class FactGraph:
             excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
         query = (
+            seed_rules
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
-            "live_ref[sq] := "
+            + "live_ref[sq] := "
             "*ref_by_block[fp, fq, bid, sq], "
             "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
@@ -1412,23 +1453,23 @@ class FactGraph:
             # Entry points: dynamic prefix rules (test_, Test, describe_, etc.)
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
-            '*entry_point_prefix[pfx], '
+            'ep_prefix[pfx], '
             'starts_with(name, pfx)\n'
 
             # Entry points: decorated symbols (case-insensitive for TS PascalCase)
             'entry_point[qn] := '
             '*decorator_on[qn, dec], '
-            '*entry_point_decorator[ep_dec], '
+            'ep_decorator[ep_dec], '
             'lowercase(dec) == lowercase(ep_dec)\n'
 
             # Entry points: named symbols
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
-            '*entry_point_name[name]\n'
+            'ep_name[name]\n'
 
             # Entry points: explicitly exported symbols
             'entry_point[qn] := '
-            '*exported_symbol[qn]\n'
+            '*exported_symbol[_, qn]\n'
 
             # Dead symbols: top-level only (parent == ""), no live reference, not entry point
             "dead[qn, fp, name, kind, line, end_line, parent] := "
@@ -2763,6 +2804,10 @@ class FactGraph:
                 "?[symbol_qn, file_path, line] := "
                 "*module_level_ref[symbol_qn, file_path, line], "
                 "file_path == $fp  :rm module_level_ref {symbol_qn, file_path, line}",
+                # exported_symbol
+                "?[file_path, qualified_name] := "
+                "*exported_symbol[file_path, qualified_name], "
+                "file_path == $fp  :rm exported_symbol {file_path, qualified_name}",
                 # import (uses importing_file, not file_path)
                 "?[importing_file, imported_module, imported_name, line] := "
                 "*import[importing_file, imported_module, imported_name, line, _], "
@@ -2791,7 +2836,7 @@ class FactGraph:
             "imports": ("import", "importing_file, imported_module, imported_name, line, alias", "importing_file, imported_module, imported_name, line => alias"),
             "ref_by_block": ("ref_by_block", "file_path, func_qn, block_id, symbol_qn", "file_path, func_qn, block_id, symbol_qn"),
             "module_level_refs": ("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line"),
-            "exported_qns": ("exported_symbol", "qualified_name", "qualified_name"),
+            "exported_qns": ("exported_symbol", "file_path, qualified_name", "file_path, qualified_name"),
         }
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows[key]

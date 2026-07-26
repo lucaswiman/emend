@@ -553,6 +553,8 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm reachable_block {fp, fq, bid}",
         "?[sq, fp, line] := *module_level_ref[sq, fp, line], "
         "fp == $fp  :rm module_level_ref {sq, fp, line}",
+        "?[fp, qn] := *exported_symbol[fp, qn], "
+        "fp == $fp  :rm exported_symbol {fp, qn}",
     ):
         try:
             fdb.run(query, {"fp": file_path})
@@ -720,7 +722,7 @@ def _extract_file_facts(
         if exported_names:
             for sf in sym_facts_for_file:
                 if sf.name in exported_names:
-                    result["exported_qns"].append([sf.qualified_name])
+                    result["exported_qns"].append([sf.file_path, sf.qualified_name])
 
     # -- Extract references (pre-computed or via Rust scope resolver)
     file_refs: list[tuple] = []
@@ -1177,8 +1179,8 @@ def _build_facts_db(
 
         if all_exported_qns:
             fdb.run(
-                "?[qualified_name] <- $rows "
-                ":replace exported_symbol {qualified_name}",
+                "?[file_path, qualified_name] <- $rows "
+                ":replace exported_symbol {file_path, qualified_name}",
                 {"rows": all_exported_qns},
             )
 

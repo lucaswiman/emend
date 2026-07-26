@@ -318,3 +318,142 @@ class TestDerivedQueriesAfterUpdate:
             f"foo->bar should be removed, got: {call_pairs_after}"
         assert any("foo" in c[0] and "baz" in c[1] for c in call_pairs_after), \
             f"foo->baz should be present, got: {call_pairs_after}"
+
+
+def _exported_qns(graph):
+    """Return the qualified names currently in the ``exported_symbol`` relation."""
+    rows = graph.run_query(
+        "?[qualified_name] := *exported_symbol[_, qualified_name]"
+    )["rows"]
+    return sorted(r[0] for r in rows)
+
+
+class TestExportedSymbolIncrementalUpdates:
+    """``exported_symbol`` rows must be scoped to their defining file.
+
+    ``dead_code_unified`` treats every row in ``exported_symbol`` as an entry
+    point, so a stale row permanently hides a symbol from dead-code analysis.
+    """
+
+    def test_update_files_drops_stale_exports(self, tmp_path):
+        """Un-exporting a symbol should remove it from ``exported_symbol``."""
+        a_ts = tmp_path / "a.ts"
+        a_ts.write_text("export function alpha() { return 1; }\n")
+
+        graph = FactGraph()
+        graph.update_files([(str(a_ts), a_ts.read_text())])
+        assert _exported_qns(graph) == ["a.alpha"]
+
+        # Re-index the same file with the export removed.
+        a_ts.write_text("function alpha() { return 1; }\n")
+        graph.update_files([(str(a_ts), a_ts.read_text())])
+
+        assert _exported_qns(graph) == [], \
+            "stale export should be dropped when the file is re-indexed"
+
+    def test_remove_files_deletes_exports(self, tmp_path):
+        """remove_files() should delete the file's ``exported_symbol`` rows."""
+        a_ts = tmp_path / "a.ts"
+        a_ts.write_text("export function alpha() { return 1; }\n")
+
+        graph = FactGraph()
+        graph.update_files([(str(a_ts), a_ts.read_text())])
+        assert _exported_qns(graph) == ["a.alpha"]
+
+        graph.remove_files([str(a_ts.resolve())])
+
+        assert _exported_qns(graph) == [], \
+            "exports should be removed along with the rest of the file's facts"
+
+    def test_remove_files_preserves_other_files_exports(self, tmp_path):
+        """Removing one file must not drop another file's exports."""
+        a_ts = tmp_path / "a.ts"
+        b_ts = tmp_path / "b.ts"
+        a_ts.write_text("export function alpha() { return 1; }\n")
+        b_ts.write_text("export function beta() { return 2; }\n")
+
+        graph = FactGraph()
+        graph.update_files([
+            (str(a_ts), a_ts.read_text()),
+            (str(b_ts), b_ts.read_text()),
+        ])
+        assert _exported_qns(graph) == ["a.alpha", "b.beta"]
+
+        graph.remove_files([str(a_ts.resolve())])
+
+        assert _exported_qns(graph) == ["b.beta"]
+
+
+class TestEntryPointSeedsAreNotPersisted:
+    """CLI-supplied entry points are per-invocation and must not leak.
+
+    ``dead_code_unified`` seeds ``entry_point_name`` / ``entry_point_decorator``
+    / ``entry_point_prefix`` from its arguments.  When the graph is backed by an
+    on-disk ``facts.db``, persisting those seeds means a single
+    ``--entry-point-name X`` run permanently hides ``X`` from every later run.
+    """
+
+    SOURCE = textwrap.dedent("""\
+        def unused_one():
+            pass
+
+        def unused_two():
+            pass
+    """)
+
+    def _dead_names(self, graph):
+        dead, _ = graph.dead_code_unified()
+        return sorted(s.name for s in dead)
+
+    def test_entry_point_names_do_not_persist(self, tmp_path):
+        a_py = tmp_path / "a.py"
+        a_py.write_text(self.SOURCE)
+
+        graph = FactGraph()
+        graph.update_files([(str(a_py), a_py.read_text())])
+
+        dead, _ = graph.dead_code_unified(entry_point_names=["unused_one"])
+        assert sorted(s.name for s in dead) == ["unused_two"]
+
+        # A subsequent call without the flag must see both symbols again.
+        assert self._dead_names(graph) == ["unused_one", "unused_two"], \
+            "entry_point_names seed leaked into a later query"
+
+    def test_entry_point_decorators_do_not_persist(self, tmp_path):
+        a_py = tmp_path / "a.py"
+        a_py.write_text(textwrap.dedent("""\
+            @route
+            def handler():
+                pass
+
+            def plain():
+                pass
+        """))
+
+        graph = FactGraph()
+        graph.update_files([(str(a_py), a_py.read_text())])
+
+        dead, _ = graph.dead_code_unified(entry_point_decorators=["route"])
+        assert sorted(s.name for s in dead) == ["plain"]
+
+        dead_after, _ = graph.dead_code_unified()
+        assert sorted(s.name for s in dead_after) == ["handler", "plain"], \
+            "entry_point_decorators seed leaked into a later query"
+
+    def test_entry_point_seeds_do_not_persist_across_instances(self, tmp_path):
+        """The leak is worst with an on-disk facts.db shared between runs."""
+        a_py = tmp_path / "a.py"
+        a_py.write_text(self.SOURCE)
+        db_path = str(tmp_path / "facts.db")
+
+        graph = FactGraph(db_path=db_path)
+        graph.update_files([(str(a_py), a_py.read_text())])
+        graph.dead_code_unified(entry_point_names=["unused_one"])
+        graph.close()
+
+        reopened = FactGraph(db_path=db_path)
+        try:
+            assert self._dead_names(reopened) == ["unused_one", "unused_two"], \
+                "entry point seed was persisted into facts.db"
+        finally:
+            reopened.close()
