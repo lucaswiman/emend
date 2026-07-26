@@ -746,3 +746,84 @@ class TestCliUnreachable:
         assert any(
             b["start_line"] > 0 or b["end_line"] > 0 for b in blocks
         ), result.output
+
+
+class TestUnreachableCliScoping:
+    """``analyze cfg <file> --unreachable`` must report only that file.
+
+    The Datalog branch used ``cfg_files`` only to look up line spans; the
+    result set came from an unfiltered project-wide query, and the span
+    lookup was keyed on the *basename*, so two same-named files in different
+    directories overwrote each other's spans.
+    """
+
+    @staticmethod
+    def _project(tmp_path):
+        project = tmp_path / "project"
+        (project / "pkg" / "sub").mkdir(parents=True)
+        (project / "pyproject.toml").write_text("[project]\nname='p'\n")
+        (project / "pkg" / "__init__.py").write_text("")
+        (project / "pkg" / "sub" / "__init__.py").write_text("")
+        # Same basename, same function name, dead code on different lines.
+        (project / "pkg" / "mod.py").write_text(textwrap.dedent("""\
+            def f():
+                return 1
+                dead()
+        """))
+        (project / "pkg" / "sub" / "mod.py").write_text(textwrap.dedent("""\
+            def g():
+                return 0
+
+
+            def f():
+                x = 1
+                y = 2
+                return x
+                dead()
+        """))
+        return project
+
+    def _run(self, project, target):
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        result = CliRunner().invoke(
+            app, ["analyze", "cfg", str(target), "--unreachable"]
+        )
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    def test_single_file_scope_excludes_other_files(self, tmp_path):
+        project = self._project(tmp_path)
+        out = self._run(project, project / "pkg" / "mod.py")
+
+        assert "pkg/mod.py" in out, out
+        assert "sub/mod.py" not in out, \
+            f"a file outside the requested scope was reported:\n{out}"
+
+    def test_span_is_not_borrowed_from_a_same_named_file(self, tmp_path):
+        project = self._project(tmp_path)
+        out = self._run(project, project / "pkg" / "sub" / "mod.py")
+
+        # The dead call is on source line 9 of pkg/sub/mod.py.
+        assert "lines 9-9" in out, out
+        assert "sub/mod.py:9:" in out, out
+
+    def test_location_prefix_and_span_agree(self, tmp_path):
+        """The ``file:N`` prefix and the trailing ``lines X-Y`` are both 1-based."""
+        import re
+
+        project = self._project(tmp_path)
+        out = self._run(project, project / "pkg" / "mod.py")
+
+        m = re.search(r":(\d+): unreachable code in \w+ \(block B\d+, lines (\d+)-", out)
+        assert m, out
+        assert m.group(1) == m.group(2), \
+            f"location prefix and span disagree: {out}"
+
+    def test_directory_scope_reports_both_files(self, tmp_path):
+        project = self._project(tmp_path)
+        out = self._run(project, project)
+
+        assert "pkg/mod.py:3:" in out, out
+        assert "sub/mod.py:9:" in out, out

@@ -2,6 +2,7 @@
 
 import json
 import pytest
+import pathlib
 from pathlib import Path
 from emend.component_selector import parse_extended_selector, ExtendedSelector
 from emend.transform import cmd_lookup, cmd_edit, cmd_add, _apply_matching_filter
@@ -56,6 +57,38 @@ class TestExtendedSelectorFileGlob:
         sel = ExtendedSelector(file_path=str(tmp_path / "**/*.py"), symbol_path=["x"])
         result = sel.expand_file_glob()
         assert len(result) == 2
+
+    def test_expand_file_glob_typescript(self, tmp_path):
+        """Non-Python globs must expand too.
+
+        ``expand_file_glob`` hard-defaulted to ``language="python"``, so every
+        ``*.ts::sym`` selector failed with "No files match".
+        """
+        (tmp_path / "a.ts").write_text("export function greet(){return 1;}\n")
+        (tmp_path / "b.ts").write_text("export function greet(){return 2;}\n")
+        (tmp_path / "c.txt").write_text("not source\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "*.ts"), symbol_path=["greet"])
+        result = sel.expand_file_glob()
+        assert len(result) == 2
+        assert all(f.endswith(".ts") for f in result)
+
+    def test_expand_file_glob_mixed_languages(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "a.rs").write_text("fn main() {}\n")
+        (tmp_path / "a.txt").write_text("nope\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "a.*"), symbol_path=["x"])
+        result = sel.expand_file_glob()
+        assert [pathlib.Path(f).suffix for f in result] == [".py", ".rs"]
+
+    def test_expand_file_glob_explicit_language_still_filters(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "a.ts").write_text("const x = 1;\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "a.*"), symbol_path=["x"])
+        assert [pathlib.Path(f).suffix
+                for f in sel.expand_file_glob(language="python")] == [".py"]
 
     def test_with_file_path(self):
         sel = ExtendedSelector(

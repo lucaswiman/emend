@@ -742,3 +742,57 @@ def test_collect_symbols_cache_key_includes_language(tmp_path):
     assert [s.name for s in py_syms] == ["foo"]
     # Parsed as TypeScript, ``def foo(): pass`` yields no function symbol.
     assert [s.name for s in ts_syms] == []
+
+
+# ---------------------------------------------------------------------------
+# Bug: _extract_params_from_signature ignored string literals
+# ---------------------------------------------------------------------------
+
+def test_extract_params_comma_inside_string_default():
+    """A comma inside a string default must not split the parameter."""
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature('(sep: str = ", ", end: str = "!") -> str')
+    assert params == ['sep: str = ", "', 'end: str = "!"']
+
+
+def test_extract_params_arrow_inside_string_default():
+    """A ``->`` inside a string default must not truncate the signature."""
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature('(label: str = "a -> b", n: int = 1) -> int')
+    assert params == ['label: str = "a -> b"', "n: int = 1"]
+
+
+def test_extract_params_bracket_inside_string_default():
+    """An unbalanced bracket inside a string must not corrupt depth tracking."""
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature('(fmt: str = "[{}", n: int = 1)')
+    assert params == ['fmt: str = "[{}"', "n: int = 1"]
+
+
+def test_extract_params_escaped_quote_in_default():
+    from emend.query import _extract_params_from_signature
+
+    params = _extract_params_from_signature('(q: str = "a\\"b", n: int = 1)')
+    assert params == ['q: str = "a\\"b"', "n: int = 1"]
+
+
+def test_has_param_finds_param_after_string_default(tmp_path, capsys):
+    """End-to-end: --has-param must see parameters that follow a string default."""
+    from emend.query import cmd_query
+
+    f = tmp_path / "s.py"
+    f.write_text(
+        'def joiner(sep: str = ", ", end: str = "!") -> str:\n'
+        "    return sep\n"
+        "\n"
+        'def arrow(label: str = "a -> b", n: int = 1) -> int:\n'
+        "    return n\n"
+    )
+
+    cmd_query(str(f), params=["n"])
+    out = capsys.readouterr().out
+    assert "arrow" in out
+    assert "joiner" not in out

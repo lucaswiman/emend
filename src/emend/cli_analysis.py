@@ -845,6 +845,10 @@ def facts_cmd(
                     parts = [f"{k}={v}" for k, v in item.items() if v is not None]
                     print("  ".join(parts))
             print(f"\n{min(len(results), limit)} of {len(results)} results.", file=sys.stderr)
+        elif json_output:
+            # An empty result set must still be valid JSON, as every sibling
+            # command does — printing prose here broke machine consumers.
+            emit_json([])
         else:
             print("No results found.")
 
@@ -940,27 +944,50 @@ def cfg_cmd(
                 # not carry line spans.  Resolve real spans from the freshly
                 # built CFGs (block ids are consistent between fact population
                 # and a plain build_cfgs pass, both come from cfg.get_blocks()).
-                import os
+                # Key spans on the resolved absolute path.  Keying on the
+                # basename let two files with the same name (``pkg/mod.py``
+                # and ``pkg/sub/mod.py``) overwrite each other's spans.
                 span_lookup: dict[tuple[str, str, int], tuple[int, int]] = {}
+                resolved_files = [str(Path(f).resolve()) for f in cfg_files]
+                span_lookup_files = set(resolved_files)
                 for i, cfg in enumerate(all_cfgs):
-                    base = os.path.basename(cfg_files[i])
                     for block in cfg.get_blocks():
-                        span_lookup[(base, cfg.func_name, block["id"])] = (
+                        span_lookup[(resolved_files[i], cfg.func_name, block["id"])] = (
                             block["start_line"],
                             block["end_line"],
                         )
+
+                from emend.transform.project_iter import _find_project_root
+                fact_root = Path(_find_project_root(path))
+
+                def _resolve_fact_path(fact_path: str) -> str | None:
+                    """Map a FactGraph path onto one of the requested files.
+
+                    Fact paths are relative to the project root while
+                    ``cfg_files`` come from ``resolve_files(path)``; anything
+                    that does not correspond to a requested file is out of
+                    scope and must not be reported.
+                    """
+                    p = Path(fact_path)
+                    candidate = str(
+                        (p if p.is_absolute() else fact_root / p).resolve()
+                    )
+                    return candidate if candidate in span_lookup_files else None
+
                 # Group by (file_path, func_qn)
                 from collections import defaultdict
                 grouped: dict[tuple[str, str], list] = defaultdict(list)
                 for blk in unr_blocks:
-                    grouped[(blk.file_path, blk.func_qn)].append(blk)
+                    resolved_fp = _resolve_fact_path(blk.file_path)
+                    if resolved_fp is None:
+                        continue  # outside the requested file/directory scope
+                    grouped[(resolved_fp, blk.func_qn)].append(blk)
                 for (fp, fq), blks in grouped.items():
                     short_name = fq.rsplit(".", 1)[-1] if "." in fq else fq
-                    base = os.path.basename(fp)
                     entries = []
                     for b in blks:
                         start_line, end_line = span_lookup.get(
-                            (base, short_name, b.block_id), (0, 0)
+                            (fp, short_name, b.block_id), (0, 0)
                         )
                         entries.append({
                             "id": b.block_id,
@@ -991,11 +1018,15 @@ def cfg_cmd(
                     print("No unreachable blocks found.")
                 for r in results:
                     for blk in r["unreachable_blocks"]:
+                        # Block spans are 0-based; the location prefix and the
+                        # trailing "lines X-Y" must agree after converting.
+                        start = blk.get("start_line", 0) + 1
+                        end = blk.get("end_line", blk.get("start_line", 0)) + 1
                         print(
-                            f"{r['file']}:{blk.get('start_line', 0)+1}: "
+                            f"{r['file']}:{start}: "
                             f"unreachable code in {r['function']} "
                             f"(block B{blk.get('id', blk.get('block_id', '?'))}, "
-                            f"lines {blk.get('start_line', '?')}-{blk.get('end_line', '?')})"
+                            f"lines {start}-{end})"
                         )
             raise typer.Exit(0)
 

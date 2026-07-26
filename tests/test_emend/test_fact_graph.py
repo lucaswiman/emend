@@ -1484,3 +1484,40 @@ class TestFactsCliTaintFlowsAlias:
     def test_trace_flows_still_accepted(self, tmp_path):
         result = self._run(tmp_path, "trace_flows")
         assert result.exit_code == 0, result.stdout
+
+
+class TestFactsCliJsonEmptyResult:
+    """``analyze facts --json`` must emit JSON even when nothing matches.
+
+    Every sibling command emits ``[]``; this one printed the prose
+    "No results found.", which broke machine consumers.
+    """
+
+    def _run(self, tmp_path, *extra):
+        from typer.testing import CliRunner
+        from emend.cli import app
+
+        (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
+        return CliRunner().invoke(
+            app, ["analyze", "facts", str(tmp_path), "--type", "symbols", *extra]
+        )
+
+    def test_empty_result_is_valid_json(self, tmp_path):
+        import json
+
+        result = self._run(tmp_path, "--name", "no_such_symbol_zzz", "--json")
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout) == []
+
+    def test_empty_result_without_json_is_still_prose(self, tmp_path):
+        result = self._run(tmp_path, "--name", "no_such_symbol_zzz")
+        assert result.exit_code == 0, result.stdout
+        assert "No results found." in result.stdout
+
+    def test_non_empty_result_is_still_json(self, tmp_path):
+        import json
+
+        result = self._run(tmp_path, "--name", "foo", "--json")
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout)
+        assert [d["name"] for d in data] == ["foo"]

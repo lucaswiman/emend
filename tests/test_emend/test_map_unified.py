@@ -247,3 +247,68 @@ def test_map_add_module_infers_subpath_from_repo_root(tmp_path, emend_cmd_list, 
     ])
     assert resolve_result.returncode == 0, resolve_result.stderr
     assert "src/package_name/worker.py::WorkerClass" in resolve_result.stdout
+
+
+def test_map_resolve_json_plain_module_path(tmp_path, emend_cmd_list, run_emend_cmd):
+    """``map resolve --json`` must not crash on a bare path result.
+
+    ``resolve_selector`` returns a bare path when the dotted name resolves to
+    a directory or a module file with no symbol suffix.  The --json branch fed
+    that to ``parse_extended_selector``, which requires ``::`` and raised.
+    """
+    import json
+
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+
+    external_root = tmp_path / "external_root"
+    (external_root / "payments").mkdir(parents=True)
+    (external_root / "payments" / "__init__.py").touch()
+    (external_root / "payments" / "models.py").write_text("class Invoice: pass\n")
+
+    store = MappingStore(str(proj))
+    store.add_module_mapping(ModuleMapping(
+        module_prefix="ext",
+        local_path=str(external_root),
+    ))
+
+    os.chdir(str(proj))
+
+    plain = run_emend_cmd(["map", "resolve", "ext.payments.models"])
+    assert plain.returncode == 0, plain.stderr
+
+    result = run_emend_cmd(["map", "resolve", "ext.payments.models", "--json"])
+    assert result.returncode == 0, result.stderr
+    assert "Unexpected token" not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["selector"] == plain.stdout.strip()
+    assert data["path"]
+
+
+def test_map_resolve_json_with_symbol_still_splits(tmp_path, emend_cmd_list, run_emend_cmd):
+    """The regression guard: a real ``file::Symbol`` result still reports the file."""
+    import json
+
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "pyproject.toml").touch()
+
+    external_root = tmp_path / "external_root"
+    external_root.mkdir()
+    (external_root / "module_a.py").write_text("class MySymbol: pass\n")
+
+    store = MappingStore(str(proj))
+    store.add_module_mapping(ModuleMapping(
+        module_prefix="ext",
+        local_path=str(external_root),
+    ))
+
+    os.chdir(str(proj))
+
+    result = run_emend_cmd(["map", "resolve", "ext.module_a.MySymbol", "--json"])
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["selector"].endswith("::MySymbol")
+    assert data["path"].endswith("module_a.py")
+    assert "::" not in data["path"]

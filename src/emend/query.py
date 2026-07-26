@@ -163,34 +163,52 @@ def _extract_params_from_signature(signature: str | None) -> list[str]:
     """Parse parameter strings from Rust signature like '(x: int, y, *args, **kwargs) -> str'."""
     if not signature:
         return []
-    # Strip return type
-    sig = signature
-    if " -> " in sig:
-        sig = sig[:sig.index(" -> ")]
-    # Strip parens
-    sig = sig.strip()
-    if sig.startswith("(") and sig.endswith(")"):
-        sig = sig[1:-1]
-    if not sig.strip():
-        return []
-    # Split on top-level commas only — a comma inside brackets/parens (e.g. in
-    # ``b: Dict[str, int]`` or a default like ``x=(1, 2)``) is part of a single
-    # parameter and must not split it.
+    # Scan once, tracking both bracket depth and string state.  Brackets and
+    # the ``->`` separator inside a string default (``sep: str = ", "``,
+    # ``label: str = "a -> b"``) are literal text: splitting on them dropped
+    # or mangled the surrounding parameters.
     params: list[str] = []
     depth = 0
+    quote: str | None = None
     current: list[str] = []
-    for ch in sig:
-        if ch in "([{":
-            depth += 1
+    i = 0
+    stripped_outer_paren = False
+    n = len(signature)
+    while i < n:
+        ch = signature[i]
+        if quote is not None:
             current.append(ch)
+            if ch == "\\" and i + 1 < n:
+                current.append(signature[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif ch in "([{":
+            # The outermost paren wraps the whole parameter list.
+            if depth == 0 and ch == "(" and not stripped_outer_paren and not current:
+                stripped_outer_paren = True
+            else:
+                current.append(ch)
+            depth += 1
         elif ch in ")]}":
             depth -= 1
+            if depth == 0 and ch == ")" and stripped_outer_paren:
+                break  # end of the parameter list; the return type follows
             current.append(ch)
-        elif ch == "," and depth == 0:
+        elif depth == 0 and signature.startswith(" -> ", i):
+            break
+        elif ch == "," and depth <= 1:
             params.append("".join(current))
             current = []
         else:
             current.append(ch)
+        i += 1
     if current:
         params.append("".join(current))
     return [p.strip() for p in params if p.strip()]
