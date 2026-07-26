@@ -157,9 +157,17 @@ def path_matches_rule_globs(file_path: str, globs: list[str] | None) -> bool:
     normalized = file_path.replace("\\", "/")
     path_obj = Path(normalized)
     for pattern in globs:
+        # ``full_match`` gives ``**`` its conventional meaning — zero or more
+        # path segments — so ``src/**/*.py`` also matches ``src/b.py``.
+        # ``fnmatch`` has no ``**`` at all and degrades it to ``*``, which
+        # still requires the intervening ``/``.
+        if path_obj.full_match(pattern):
+            return True
         if fnmatch(normalized, pattern) or path_obj.match(pattern):
             return True
         prefixed = pattern if pattern.startswith("**/") else f"**/{pattern}"
+        if path_obj.full_match(prefixed):
+            return True
         if fnmatch(normalized, prefixed) or path_obj.match(prefixed):
             return True
     return False

@@ -960,3 +960,42 @@ def test_lint_cmd_respects_language_for_file_resolution(tmp_path):
         )
     finally:
         _state["language"] = old_lang
+
+
+class TestRuleFilesGlobDoubleStar:
+    """``files:`` globs must give ``**`` its conventional meaning.
+
+    ``fnmatch`` has no ``**``, so it degraded to ``*`` — which still requires
+    the intervening ``/``. ``src/**/*.py`` therefore silently skipped files
+    sitting directly in ``src/``.
+    """
+
+    def test_double_star_matches_zero_directories(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert path_matches_rule_globs("src/b.py", ["src/**/*.py"])
+
+    def test_double_star_matches_one_directory(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert path_matches_rule_globs("src/a/b.py", ["src/**/*.py"])
+
+    def test_double_star_matches_many_directories(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert path_matches_rule_globs("src/a/b/c.py", ["src/**/*.py"])
+
+    def test_other_prefix_still_excluded(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert not path_matches_rule_globs("other/b.py", ["src/**/*.py"])
+
+    def test_extension_still_filters(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert not path_matches_rule_globs("src/b.ts", ["src/**/*.py"])
+
+    def test_no_globs_matches_everything(self):
+        from emend.checks.pattern_rules import path_matches_rule_globs
+
+        assert path_matches_rule_globs("anything/at/all.py", None)

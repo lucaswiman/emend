@@ -2237,3 +2237,62 @@ class TestSplitBalancedCrossLanguage:
     def test_union_respects_angle_brackets(self):
         result = _split_union("Promise<string> | null")
         assert result == ["Promise<string>", "null"]
+
+
+class TestTypeCheckRequiresAvailableOracle:
+    """A ``type`` policy check must report nothing when no oracle is available.
+
+    ``run_type_check`` compared all matches against the oracle-filtered
+    matches without checking ``is_available()``.  An unavailable adapter
+    infers nothing, so *every* match was reported as violating the
+    constraint — including symbols that plainly satisfy it.
+    """
+
+    def _check(self):
+        from emend.checks.types import TypeCheck
+
+        return TypeCheck(symbol_pattern="def $F()", expected_type="str")
+
+    def _policy(self):
+        from emend.policy import Policy
+
+        return Policy(name="t", description="t", severity="error", checks=[])
+
+    def test_unavailable_oracle_yields_no_violations(self, tmp_path, monkeypatch):
+        from emend.checks import types as types_mod
+
+        src = "def a() -> str:\n    return 'x'\n\ndef b() -> int:\n    return 1\n"
+        f = tmp_path / "mod.py"
+        f.write_text(src)
+
+        class _Unavailable:
+            def is_available(self):
+                return False
+
+        monkeypatch.setattr(
+            types_mod, "create_type_oracle", lambda **kw: _Unavailable(), raising=False,
+        )
+        monkeypatch.setattr(
+            "emend.type_oracle.create_type_oracle",
+            lambda **kw: _Unavailable(),
+        )
+
+        violations = types_mod.run_type_check(
+            self._check(), self._policy(), str(f), src, "python",
+            project_root=str(tmp_path),
+        )
+        assert violations == []
+
+    def test_missing_oracle_yields_no_violations(self, tmp_path):
+        """No project root means no oracle at all — still no violations."""
+        from emend.checks import types as types_mod
+
+        src = "def a() -> str:\n    return 'x'\n"
+        f = tmp_path / "mod.py"
+        f.write_text(src)
+
+        violations = types_mod.run_type_check(
+            self._check(), self._policy(), str(f), src, "python",
+            project_root=None,
+        )
+        assert violations == []

@@ -1340,12 +1340,22 @@ def _compile_dsl_find_pattern(pattern: str) -> re.Pattern[str]:
     regex_parts: list[str] = []
     group_names: list[str] = []
     for part in parts:
+        # A metavariable that appears more than once is a backreference — the
+        # same text must match at each occurrence, as it does everywhere else
+        # in emend's pattern syntax.  Emitting a second (?P<name>...) group
+        # instead raises re.PatternError.
         if part.startswith("$..."):
             name = part[4:]
+            if name in group_names:
+                regex_parts.append(f'(?P={name})')
+                continue
             group_names.append(name)
             regex_parts.append(f'(?P<{name}>.+?)')
         elif part.startswith("$"):
             name = part[1:]
+            if name in group_names:
+                regex_parts.append(f'(?P={name})')
+                continue
             group_names.append(name)
             regex_parts.append(f'(?P<{name}>\\w+(?:\\.\\w+)*(?:\\s*,\\s*\\w+(?:\\.\\w+)*)*)')
         else:

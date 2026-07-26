@@ -57,6 +57,15 @@ def run_type_check(
         except Exception:
             logger.debug("Could not create type oracle for type check", exc_info=True)
 
+    if type_oracle is None or not type_oracle.is_available():
+        # Without a working type checker nothing can be inferred, so
+        # ``typed_matches`` would be empty and *every* match would be reported
+        # as violating the constraint.  Report nothing instead.
+        logger.warning(
+            "Skipping type check %r: no type oracle is available", check.symbol_pattern,
+        )
+        return []
+
     typed_matches = find_pattern(
         augmented_pattern,
         file_path,

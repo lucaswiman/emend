@@ -71,3 +71,43 @@ def test_cli_resolve_reexport(tmp_path):
     data = json.loads(result.output)
     assert Path(data["file"]).name == "codes.py"
     assert data["line"] == 1
+
+
+def test_resolve_aliased_module_import_does_not_crash(tmp_path):
+    """``import pkg.sub as alias`` must not raise a TypeError.
+
+    ``get_imports`` reports ``name=None`` for a plain ``import`` node, but
+    ``resolve_through_reexports`` matched on the alias and then used that
+    ``None`` as the target symbol name, doing ``None + ".py"``.
+    """
+    from emend.ast_utils import resolve_through_reexports
+
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "sub" / "__init__.py").write_text("VALUE = 1\n")
+
+    main_py = tmp_path / "main.py"
+    main_py.write_text("import pkg.sub as sub\n")
+
+    def resolve_module(module, level, current_file):
+        candidate = tmp_path / Path(*module.split("."))
+        return str(candidate) if candidate.exists() else None
+
+    # Must not raise; resolving to the package __init__ is the correct answer.
+    result = resolve_through_reexports(str(main_py), "sub", resolve_module)
+    assert result is not None
+    assert Path(result[0]).name == "__init__.py"
+    assert Path(result[0]).parent.name == "sub"
+
+
+def test_resolve_aliased_module_import_unknown_module_returns_none(tmp_path):
+    """An alias that resolves to nothing returns None rather than raising."""
+    from emend.ast_utils import resolve_through_reexports
+
+    main_py = tmp_path / "main.py"
+    main_py.write_text("import nowhere.at_all as sub\n")
+
+    assert resolve_through_reexports(
+        str(main_py), "sub", lambda module, level, current_file: None,
+    ) is None
