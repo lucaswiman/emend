@@ -263,3 +263,72 @@ def test_move_dry_run(tmp_path, emend_cmd):
 
     dest_content = dest_file.read_text()
     assert dest_content == "# original\n"  # Not modified
+
+
+def test_move_recursive_symbol_does_not_self_import(tmp_path, emend_cmd):
+    """Moving a recursive symbol must not import it from its own origin.
+
+    The moved symbol is itself a top-level definition of the source file, and
+    a recursive call references its own name — so ``analyze_imports`` emitted
+    ``from <source_module> import <symbol>`` into the destination, an import
+    of the symbol from the file it was being removed from. Both files ended
+    up broken.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\n")
+    source_file = tmp_path / "src1.py"
+    source_file.write_text(
+        "def fact(n):\n"
+        "    if n <= 1:\n"
+        "        return 1\n"
+        "    return n * fact(n - 1)\n"
+    )
+    dest_file = tmp_path / "dest.py"
+    dest_file.write_text("")
+
+    result = subprocess.run(
+        [emend_cmd, "move", f"{source_file}::fact", str(dest_file), "--apply"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+
+    dest = dest_file.read_text()
+    assert "def fact(n):" in dest
+    assert "from src1 import fact" not in dest, \
+        f"destination imports the symbol from its origin:\n{dest}"
+
+    # The destination must actually be importable and correct.
+    check = subprocess.run(
+        [sys.executable, "-c", "import dest; print(dest.fact(5))"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert check.returncode == 0, check.stderr
+    assert check.stdout.strip() == "120"
+
+
+def test_move_still_imports_genuine_local_references(tmp_path, emend_cmd):
+    """The regression guard: real cross-references must still be imported."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='p'\n")
+    source_file = tmp_path / "src1.py"
+    source_file.write_text(
+        "HELPER = 1\n"
+        "\n"
+        "def other():\n"
+        "    return 2\n"
+        "\n"
+        "def mover(n):\n"
+        "    return n + HELPER + other()\n"
+    )
+    dest_file = tmp_path / "dest.py"
+    dest_file.write_text("")
+
+    result = subprocess.run(
+        [emend_cmd, "move", f"{source_file}::mover", str(dest_file), "--apply"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+
+    dest = dest_file.read_text()
+    assert "HELPER" in dest and "other" in dest, dest
+    assert "from src1 import" in dest, dest
+    assert "mover" not in dest.split("def mover")[0], \
+        f"the moved symbol must not be imported from its origin:\n{dest}"

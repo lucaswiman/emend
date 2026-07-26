@@ -504,10 +504,11 @@ def _resolve_relative_module(
 
     from .project_iter import _file_to_module
     src_module = _file_to_module(source_file, project_path)
-    # Compute the package that owns source_file.
-    if src_module.endswith(".__init__"):
-        # __init__.py IS the package.
-        package = src_module[: -len(".__init__")]
+    # Compute the package that owns source_file.  ``_file_to_module`` already
+    # collapses ``pkg/__init__.py`` to ``pkg``, so the module name *is* the
+    # package — stripping another component would resolve one level too high.
+    if Path(source_file).stem == "__init__":
+        package = src_module
     elif "." in src_module:
         package = src_module.rsplit(".", 1)[0]
     else:
@@ -524,6 +525,27 @@ def _resolve_relative_module(
     if module:
         base_parts.append(module)
     return ".".join(base_parts) if base_parts else module
+
+
+def _top_level_names_in(source: str, suffix: str) -> set[str]:
+    """Return the names defined at the top level of *source*.
+
+    Used to keep a symbol from being imported from the file it is moving out
+    of.  Parsing goes through the tree-sitter extension so this works for
+    every supported language.
+    """
+    from emend import emend_core
+
+    ext = suffix.lstrip(".") or "py"
+    try:
+        symbols = emend_core.collect_symbols_from_str(source, max_depth=1, ext=ext)
+    except Exception:
+        logger.debug("Could not collect top-level names from symbol source", exc_info=True)
+        return set()
+    return {
+        s["name"] for s in symbols
+        if s.get("name") and s.get("kind") not in ("reference",)
+    }
 
 
 def analyze_imports(
@@ -640,6 +662,13 @@ def analyze_imports(
                 remainder = qn[len(prefix):]
                 if "." not in remainder:
                     locally_defined.add(remainder)
+
+        # The symbol being moved is itself a top-level definition of
+        # source_file, so it shows up in ``locally_defined``.  A recursive
+        # symbol also references its own name, which would emit
+        # ``from <source_module> import <symbol>`` into the destination — an
+        # import of the symbol from the file it is being removed from.
+        locally_defined -= _top_level_names_in(symbol_source, source_path.suffix)
 
         local_refs_needed_runtime = sorted(
             n for n in locally_defined

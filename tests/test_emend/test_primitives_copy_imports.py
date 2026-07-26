@@ -350,3 +350,43 @@ def bar():
         if not imports or not imports.split('\n')[0]:
             content = Path(dest_file.name).read_text()
             assert "def bar():" in content
+
+
+class TestResolveRelativeModuleInPackageInit:
+    """Relative imports inside ``__init__.py`` must resolve to the package.
+
+    ``_file_to_module`` already collapses ``pkg/__init__.py`` to ``pkg``, so
+    the module name *is* the package. The old ``.__init__`` suffix check was
+    dead code and the generic branch stripped one component too many,
+    resolving ``from . import helpers`` in ``pkg/__init__.py`` to ``helpers``
+    instead of ``pkg.helpers`` — an unimportable name.
+    """
+
+    def _resolve(self, level, module, source_file):
+        from emend.transform.patterns import _resolve_relative_module
+
+        return _resolve_relative_module(level, module, source_file, ".")
+
+    def test_single_dot_in_package_init(self):
+        assert self._resolve(1, "helpers", "pkg/__init__.py") == "pkg.helpers"
+
+    def test_single_dot_in_nested_package_init(self):
+        assert self._resolve(1, "helpers", "pkg/sub/__init__.py") == "pkg.sub.helpers"
+
+    def test_single_dot_in_module_unchanged(self):
+        assert self._resolve(1, "helpers", "pkg/mod.py") == "pkg.helpers"
+
+    def test_single_dot_in_nested_module_unchanged(self):
+        assert self._resolve(1, "helpers", "pkg/sub/mod.py") == "pkg.sub.helpers"
+
+    def test_double_dot_from_nested_module(self):
+        assert self._resolve(2, "helpers", "pkg/sub/mod.py") == "pkg.helpers"
+
+    def test_double_dot_from_nested_package_init(self):
+        assert self._resolve(2, "helpers", "pkg/sub/__init__.py") == "pkg.helpers"
+
+    def test_bare_from_dot_import(self):
+        assert self._resolve(1, "", "pkg/mod.py") == "pkg"
+
+    def test_too_many_dots_falls_back(self):
+        assert self._resolve(5, "helpers", "pkg/mod.py") == "helpers"
