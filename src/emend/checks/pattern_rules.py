@@ -39,6 +39,7 @@ class LintRule:
     dsl: str | None = None
     files: list[str] | None = None
     language: str | list[str] | None = None
+    severity: str = "warning"
 
 
 @dataclass
@@ -232,6 +233,7 @@ def load_rules(
             dsl=rule_def.get("dsl"),
             files=rule_files,
             language=rule_language,
+            severity=str(rule_def.get("severity", "warning")),
         ))
 
     return rules, macros, deadcode_config

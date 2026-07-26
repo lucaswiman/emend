@@ -96,7 +96,8 @@ def _lint_violations_to_checks(
         else:
             rule = rules_by_name.get(violation.rule_name)
             kind = _lint_kind(rule) if rule is not None else "match"
-            severity = "warning"
+            # Honour ``severity:`` on the rule, as the policy engine does.
+            severity = rule.severity if rule is not None else "warning"
         witness = None
         if violation.witness is not None:
             witness = [
@@ -216,9 +217,10 @@ def run_checks(
             duplicate_code_config = None
 
         lint_rule_filter = None
-        if rule_name is not None and kind in ("deadcode", "duplicate-code"):
-            lint_rule_filter = rule_name
-        elif rule_name is not None and (selected_lint_rules or run_duplicates):
+        if rule_name is not None:
+            # Always forward the name, even when it selected no pattern rule:
+            # ``run_lint`` reads ``rule_filter is None`` as "no filter" and
+            # would otherwise fall through to a full dead-code pass.
             lint_rule_filter = rule_name
         elif kind == "deadcode":
             lint_rule_filter = "deadcode"

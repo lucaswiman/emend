@@ -440,3 +440,148 @@ class TestListSymbolsCompleteSignatures:
         assert "a: int" in output, f"Missing annotated param in: {output}"
         assert "key: str" in output, f"Missing annotated kwonly param in: {output}"
         assert "-> bool" in output, f"Missing return type in: {output}"
+
+
+# ---------------------------------------------------------------------------
+# Bug: string-literal patterns only matched single-quoted source
+# ---------------------------------------------------------------------------
+
+class TestStringLiteralQuoteStyle:
+    """A string literal in a pattern must match either quote style.
+
+    Patterns are compiled through Python's ``repr()``, which always emits
+    single quotes, but the matcher compared the raw source token — so
+    double-quoted source (the PEP8/black default) never matched.
+    """
+
+    def test_find_matches_double_quoted_source(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text('import logging\nlogging.warn("deprecated")\n')
+
+        matches = find_pattern('logging.warn("deprecated")', str(f))
+        assert [m.line for m in matches] == [2]
+
+    def test_find_matches_single_quoted_source(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("import logging\nlogging.warn('deprecated')\n")
+
+        matches = find_pattern('logging.warn("deprecated")', str(f))
+        assert [m.line for m in matches] == [2]
+
+    def test_triple_quoted_source_matches(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text('f("""abc""")\n')
+
+        assert [m.line for m in find_pattern('f("abc")', str(f))] == [1]
+
+    def test_different_content_still_does_not_match(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text('logging.warn("other")\n')
+
+        assert find_pattern('logging.warn("deprecated")', str(f)) == []
+
+    def test_bytes_prefix_is_not_matched_by_plain_string(self, tmp_path):
+        """The prefix is semantically meaningful, unlike the quote style."""
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text('f(b"x")\n')
+
+        assert find_pattern('f("x")', str(f)) == []
+
+    def test_replace_rewrites_double_quoted_source(self, tmp_path):
+        from emend.transform import replace_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text('import logging\nlogging.warn("deprecated")\n')
+
+        diff, count = replace_pattern(
+            'logging.warn("deprecated")', 'logging.warning("x")', str(f),
+        )
+        assert count == 1
+        assert 'logging.warning("x")' in diff
+
+
+# ---------------------------------------------------------------------------
+# Bug: a non-trailing $...ELLIPSIS bound the wrong span (silent data loss)
+# ---------------------------------------------------------------------------
+
+class TestEllipsisArgumentAnchoring:
+    """With one ellipsis the argument layout is fully determined.
+
+    ``match_args`` used to take the leftmost matching window, so in
+    ``f($...R, $X)`` the bare metavar ``$X`` always matched the *first*
+    argument and ``$R`` bound to nothing — rewriting then dropped every
+    remaining argument.
+    """
+
+    def test_leading_ellipsis_binds_the_prefix(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a, b, c)\n")
+
+        matches = find_pattern("f($...R, $X)", str(f))
+        assert len(matches) == 1
+        assert matches[0].captures["R"] == "a, b"
+        assert matches[0].captures["X"] == "c"
+
+    def test_leading_ellipsis_replace_preserves_arguments(self, tmp_path):
+        from emend.transform import replace_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a, b, c)\n")
+
+        diff, count = replace_pattern("f($...R, $X)", "g($X, $...R)", str(f))
+        assert count == 1
+        assert "g(c, a, b)" in diff
+
+    def test_trailing_ellipsis_binds_the_suffix(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a, b, c)\n")
+
+        matches = find_pattern("f($X, $...R)", str(f))
+        assert len(matches) == 1
+        assert matches[0].captures["X"] == "a"
+        assert matches[0].captures["R"] == "b, c"
+
+    def test_middle_ellipsis_matches_and_binds(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a, x, y, b)\nf(a, b)\n")
+
+        matches = sorted(find_pattern("f(a, $...R, b)", str(f)), key=lambda m: m.line)
+        assert [m.line for m in matches] == [1, 2]
+        assert matches[0].captures["R"] == "x, y"
+        assert matches[1].captures["R"] == ""
+
+    def test_ellipsis_absorbs_empty_span(self, tmp_path):
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a)\n")
+
+        matches = find_pattern("f($...R, $X)", str(f))
+        assert len(matches) == 1
+        assert matches[0].captures["R"] == ""
+        assert matches[0].captures["X"] == "a"
+
+    def test_non_matching_anchor_is_rejected(self, tmp_path):
+        """The anchored ends must actually match — no sliding to find a fit."""
+        from emend.transform import find_pattern
+
+        f = tmp_path / "m.py"
+        f.write_text("f(a, b, c)\n")
+
+        assert find_pattern("f($...R, zzz)", str(f)) == []

@@ -96,10 +96,17 @@ def _build_unified_policy(
 
     if "match" in rule_def or "find" in rule_def:
         pattern = rule_def.get("match", rule_def.get("find", ""))
+        # ``yaml_key`` accepts both the hyphen and underscore spellings, which
+        # is what the lint engine does; the scope constraints also take macro
+        # references, exactly like ``find``.  An unexpanded macro makes
+        # ``find_pattern`` raise, and the policy runner swallows that — so the
+        # whole check silently reports nothing.
+        inside = yaml_key(rule_def, "within", "inside")
+        not_inside = yaml_key(rule_def, "not_within", "not_inside")
         checks.append(StructuralCheck(
             pattern=expand_macros(pattern, macros),
-            inside=rule_def.get("within", rule_def.get("inside")),
-            not_inside=rule_def.get("not-within", rule_def.get("not-inside")),
+            inside=expand_macros(inside, macros) if inside else inside,
+            not_inside=expand_macros(not_inside, macros) if not_inside else not_inside,
             where=rule_def.get("where"),
         ))
 

@@ -665,3 +665,177 @@ class TestRunChecksEngine:
 
         with pytest.raises(ValueError):
             run_checks([str(test_file)], config=config_file, mode="bogus")
+
+
+class TestRulesOnlyDocPolicyParity:
+    """A ``rules:`` entry must behave the same under lint and policy.
+
+    ``_build_unified_policy`` synthesises a policy from each ``rules:`` entry,
+    so any config key it fails to read is silently dropped — the check then
+    reports matches the lint engine correctly suppresses.
+    """
+
+    SOURCE = "def debug_only():\n    print(1)\n\ndef real():\n    print(2)\n"
+
+    def test_underscore_not_inside_is_honoured(self, tmp_path):
+        """``not_inside`` (underscore) is accepted by lint and must be by policy."""
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {
+                "no-print": {
+                    "find": "print($X)",
+                    "not_inside": "def debug_only",
+                    "message": "No print",
+                },
+            },
+        })
+        app_py = tmp_path / "app.py"
+        app_py.write_text(self.SOURCE)
+
+        lint_v = run_checks([str(app_py)], config=config_file, mode="lint",
+                            project_path=str(tmp_path))
+        policy_v = run_checks([str(app_py)], config=config_file, mode="policy",
+                              project_path=str(tmp_path))
+
+        assert [v.line for v in lint_v] == [5]
+        assert [v.line for v in policy_v] == [5], \
+            "policy ignored the underscore spelling of not_inside"
+
+    def test_underscore_inside_is_honoured(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {
+                "no-print": {
+                    "find": "print($X)",
+                    "inside": "def debug_only",
+                    "message": "No print",
+                },
+            },
+        })
+        app_py = tmp_path / "app.py"
+        app_py.write_text(self.SOURCE)
+
+        policy_v = run_checks([str(app_py)], config=config_file, mode="policy",
+                              project_path=str(tmp_path))
+        assert [v.line for v in policy_v] == [2]
+
+    def test_macros_expand_in_not_inside(self, tmp_path):
+        """A macro reference in ``not-inside`` must be expanded.
+
+        Left unexpanded, ``find_pattern`` raises ``Unknown inside/not_inside
+        constraint``, which the policy runner swallows — so the check reports
+        nothing at all rather than failing loudly.
+        """
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "macros": {"dbg": "def debug_only"},
+            "rules": {
+                "no-print": {
+                    "find": "print($X)",
+                    "not-inside": "{dbg}",
+                    "message": "No print",
+                },
+            },
+        })
+        app_py = tmp_path / "app.py"
+        app_py.write_text(self.SOURCE)
+
+        policy_v = run_checks([str(app_py)], config=config_file, mode="policy",
+                              project_path=str(tmp_path))
+        assert [v.line for v in policy_v] == [5], \
+            "macro in not-inside was not expanded, so the check produced nothing"
+
+
+class TestRuleFilterSelectsNothing:
+    """``--rule NAME`` that matches no rule must run nothing.
+
+    ``run_lint`` treats ``rule_filter=None`` as 'no filter', so leaving it
+    unset made an unmatched ``--rule`` fall through to a full dead-code pass.
+    """
+
+    def _config(self, tmp_path):
+        return _write_rules(tmp_path, {
+            "deadcode": {"enabled": True},
+            "rules": {"no-print": {"find": "print($X)", "message": "No print"}},
+        })
+
+    def test_unknown_rule_name_reports_nothing(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = self._config(tmp_path)
+        app_py = tmp_path / "app.py"
+        app_py.write_text("def unused_helper():\n    return 1\n")
+
+        violations = run_checks(
+            [str(app_py)], config=config_file,
+            rule_name="nonexistent", project_path=str(tmp_path),
+        )
+        assert violations == [], \
+            f"unknown --rule fell back to a full run: {[v.rule_name for v in violations]}"
+
+    def test_deadcode_rule_name_still_selects_deadcode(self, tmp_path):
+        """The regression guard: ``--rule deadcode`` must still work."""
+        from emend.checks.engine import run_checks
+
+        config_file = self._config(tmp_path)
+        app_py = tmp_path / "app.py"
+        app_py.write_text("def unused_helper():\n    return 1\n")
+
+        violations = run_checks(
+            [str(app_py)], config=config_file,
+            rule_name="deadcode", project_path=str(tmp_path),
+        )
+        assert [v.kind for v in violations] == ["deadcode"]
+
+    def test_known_rule_name_still_selects_that_rule(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = self._config(tmp_path)
+        app_py = tmp_path / "app.py"
+        app_py.write_text("def unused_helper():\n    print(1)\n")
+
+        violations = run_checks(
+            [str(app_py)], config=config_file,
+            rule_name="no-print", project_path=str(tmp_path),
+        )
+        assert [v.rule_name for v in violations] == ["no-print"]
+
+
+class TestRuleSeverityIsHonoured:
+    """``severity:`` on a ``rules:`` entry must reach the reported violation.
+
+    The policy engine already reads it; lint hardcoded ``warning``, so the two
+    engines disagreed and severity could not be used to gate CI.
+    """
+
+    def test_lint_reports_configured_severity(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {
+                "no-eval": {"find": "eval($X)", "message": "no eval",
+                            "severity": "error"},
+            },
+        })
+        app_py = tmp_path / "app.py"
+        app_py.write_text("eval('1+1')\n")
+
+        violations = run_checks([str(app_py)], config=config_file, mode="lint",
+                                project_path=str(tmp_path))
+        assert [v.severity for v in violations] == ["error"]
+
+    def test_severity_defaults_to_warning(self, tmp_path):
+        from emend.checks.engine import run_checks
+
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {"find": "eval($X)", "message": "no eval"}},
+        })
+        app_py = tmp_path / "app.py"
+        app_py.write_text("eval('1+1')\n")
+
+        violations = run_checks([str(app_py)], config=config_file, mode="lint",
+                                project_path=str(tmp_path))
+        assert [v.severity for v in violations] == ["warning"]

@@ -1324,6 +1324,52 @@ fn node_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
 }
 
+/// Split a string-literal token into its `(prefix, content)` parts.
+///
+/// The prefix is the lowercased run of literal-prefix characters (`r`, `b`,
+/// `f`, `u`, …); the content is the text between the quotes, with the quote
+/// characters removed but escape sequences left as written.
+///
+/// String patterns are compiled from Python's `repr()`, which always emits
+/// single quotes, while real source overwhelmingly uses double quotes.
+/// Comparing the raw token text would therefore never match double-quoted
+/// source, so literals are compared on `(prefix, content)` instead — quote
+/// style is not semantically meaningful, but the prefix is.
+fn split_string_literal(s: &str) -> (String, &str) {
+    let prefix_len = s
+        .find(|c: char| !matches!(c, 'r' | 'R' | 'b' | 'B' | 'f' | 'F' | 'u' | 'U'))
+        .unwrap_or(s.len());
+    let (prefix, rest) = s.split_at(prefix_len);
+    let content = for_each_quote_style(rest);
+    (prefix.to_lowercase(), content)
+}
+
+/// Strip the surrounding quotes from an already-prefix-stripped literal.
+fn for_each_quote_style(rest: &str) -> &str {
+    for q in ["\"\"\"", "'''"] {
+        if rest.len() >= 2 * q.len() && rest.starts_with(q) && rest.ends_with(q) {
+            return &rest[q.len()..rest.len() - q.len()];
+        }
+    }
+    for q in ['"', '\''] {
+        if rest.len() >= 2 && rest.starts_with(q) && rest.ends_with(q) {
+            return &rest[1..rest.len() - 1];
+        }
+    }
+    rest
+}
+
+/// Compare a source string-literal token against a pattern's expected literal,
+/// ignoring quote style but respecting the literal prefix.
+fn string_literals_match(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let (actual_prefix, actual_content) = split_string_literal(actual);
+    let (expected_prefix, expected_content) = split_string_literal(expected);
+    actual_prefix == expected_prefix && actual_content == expected_content
+}
+
 fn glob_matches(pattern: &str, text: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == text;
@@ -1627,7 +1673,7 @@ fn matches_node<'a>(
             match v {
                 None => Some(node),
                 Some(expected) => {
-                    if node_text(node, source) == expected.as_str() {
+                    if string_literals_match(node_text(node, source), expected.as_str()) {
                         Some(node)
                     } else {
                         None
@@ -2616,6 +2662,35 @@ fn matches_node<'a>(
     }
 }
 
+/// Match a single argument pattern against a single call argument node.
+fn match_one_arg(
+    pattern: &ArgPattern,
+    node: Node,
+    source: &[u8],
+    captures: &mut HashMap<String, String>,
+    config: &LanguageConfig,
+) -> bool {
+    let (pnode, expected_kind) = match pattern {
+        ArgPattern::Pattern(pnode) => {
+            return matches_node(node, source, pnode, captures, config).is_some();
+        }
+        ArgPattern::Star(pnode) => (pnode, config.pattern_matching.list_splat.as_str()),
+        ArgPattern::DoubleStar(pnode) => {
+            (pnode, config.pattern_matching.dictionary_splat.as_str())
+        }
+        _ => return false,
+    };
+    if node.kind() != expected_kind {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let inner = node.children(&mut cursor).find(|n| n.is_named());
+    match inner {
+        Some(inner) => matches_node(inner, source, pnode, captures, config).is_some(),
+        None => false,
+    }
+}
+
 fn match_args(
     arg_patterns: &[ArgPattern],
     call_args: &[Node],
@@ -2696,6 +2771,51 @@ fn match_args(
         .collect();
 
     if non_ellipsis.is_empty() {
+        return true;
+    }
+
+    // With exactly one ellipsis the layout is fully determined: everything
+    // before it is anchored to the start of the argument list and everything
+    // after it to the end, with the ellipsis absorbing the span in between.
+    //
+    // Searching for the leftmost matching window instead (as the general case
+    // below does) is wrong whenever the ellipsis is not last: for
+    // `f($...R, $X)` against `f(a, b, c)` the window `start = 0` always wins
+    // because `$X` matches anything, binding `R` to nothing and `X` to `a` —
+    // so a rewrite to `g($X, $...R)` silently drops `b` and `c`.
+    let ellipsis_positions: Vec<usize> = arg_patterns
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a, ArgPattern::Ellipsis | ArgPattern::EllipsisMetavar(_)))
+        .map(|(i, _)| i)
+        .collect();
+
+    if ellipsis_positions.len() == 1 {
+        let k = ellipsis_positions[0];
+        let prefix = &arg_patterns[..k];
+        let suffix = &arg_patterns[k + 1..];
+        let mut temp_captures = captures.clone();
+
+        let suffix_start = call_args.len() - suffix.len();
+        let matched = prefix
+            .iter()
+            .enumerate()
+            .all(|(i, p)| match_one_arg(p, call_args[i], source, &mut temp_captures, config))
+            && suffix.iter().enumerate().all(|(i, p)| {
+                match_one_arg(p, call_args[suffix_start + i], source, &mut temp_captures, config)
+            });
+
+        if !matched {
+            return false;
+        }
+        if let ArgPattern::EllipsisMetavar(name) = &arg_patterns[k] {
+            let text: Vec<_> = call_args[prefix.len()..suffix_start]
+                .iter()
+                .map(|n| node_text(*n, source))
+                .collect();
+            temp_captures.insert(name.clone(), text.join(", "));
+        }
+        *captures = temp_captures;
         return true;
     }
 
@@ -3965,4 +4085,55 @@ fn node_to_ir<'a>(
     dict.set_item("type", "name").unwrap();
     dict.set_item("value", node_text(node, source)).unwrap();
     dict
+}
+
+#[cfg(test)]
+mod string_literal_tests {
+    use super::{split_string_literal, string_literals_match};
+
+    #[test]
+    fn test_split_plain_literals() {
+        assert_eq!(split_string_literal("'abc'"), (String::new(), "abc"));
+        assert_eq!(split_string_literal("\"abc\""), (String::new(), "abc"));
+        assert_eq!(split_string_literal("\"\"\"abc\"\"\""), (String::new(), "abc"));
+        assert_eq!(split_string_literal("'''abc'''"), (String::new(), "abc"));
+    }
+
+    #[test]
+    fn test_split_prefixed_literals() {
+        assert_eq!(split_string_literal("r'a\\n'"), ("r".to_string(), "a\\n"));
+        assert_eq!(split_string_literal("B\"x\""), ("b".to_string(), "x"));
+        assert_eq!(split_string_literal("rb'x'"), ("rb".to_string(), "x"));
+    }
+
+    #[test]
+    fn test_quote_style_is_not_significant() {
+        // Patterns are compiled via Python's repr(), which emits single
+        // quotes; real source is usually double-quoted.
+        assert!(string_literals_match("\"deprecated\"", "'deprecated'"));
+        assert!(string_literals_match("'deprecated'", "'deprecated'"));
+        assert!(string_literals_match("\"\"\"doc\"\"\"", "'doc'"));
+    }
+
+    #[test]
+    fn test_prefix_is_significant() {
+        assert!(!string_literals_match("b\"x\"", "'x'"));
+        assert!(!string_literals_match("f\"x\"", "'x'"));
+        assert!(string_literals_match("b\"x\"", "b'x'"));
+    }
+
+    #[test]
+    fn test_different_content_does_not_match() {
+        assert!(!string_literals_match("\"other\"", "'deprecated'"));
+        assert!(!string_literals_match("\"\"", "'x'"));
+    }
+
+    #[test]
+    fn test_empty_and_degenerate_inputs() {
+        assert_eq!(split_string_literal(""), (String::new(), ""));
+        // A lone quote is not a well-formed literal; content falls through.
+        assert_eq!(split_string_literal("'"), (String::new(), "'"));
+        // An all-prefix token has no quotes to strip.
+        assert_eq!(split_string_literal("rb"), ("rb".to_string(), ""));
+    }
 }
