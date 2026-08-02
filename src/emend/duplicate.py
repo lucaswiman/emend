@@ -34,7 +34,9 @@ from emend.duplicate_heuristics import (
 # Constants
 # ---------------------------------------------------------------------------
 
-DUP_CACHE_VERSION = "1"
+# Bumped to 2 when cached subtree payloads gained a ``symbol`` field; version 1
+# payloads lack it and would disable symbol-keyed suppression heuristics.
+DUP_CACHE_VERSION = "2"
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -457,6 +459,7 @@ def canonicalize_file_for_cache(
     Returns a list of dicts (one per non-trivial candidate subtree) with keys:
       ``start_line``, ``end_line``, ``root_kind``, ``node_count``,
       ``total_lines``, ``canonical_hash`` (hex str), ``score``,
+      ``symbol`` (containing symbol QN, ``""`` at module level),
       ``kind_seq`` (list of str), ``token_seq`` (list of str).
 
     Returns an empty list if the file cannot be parsed.
@@ -466,6 +469,7 @@ def canonicalize_file_for_cache(
         return []
 
     qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+    symbol_index = _build_symbol_index(content, ext="py")
 
     out: list[dict] = []
     for cand in _iter_candidates(tree):
@@ -500,6 +504,7 @@ def canonicalize_file_for_cache(
                 "total_lines": total_lines,
                 "canonical_hash": canon_hash.hex(),
                 "score": score,
+                "symbol": _find_containing_symbol(start_line, symbol_index),
                 "kind_seq": list(kind_seq),
                 "token_seq": list(token_seq),
             }
@@ -730,7 +735,7 @@ def _subtree_cands_from_cached(
             unique_non_kw = len(set(ts) - _PYTHON_KEYWORDS)
             hash_to_cands.setdefault(s["canonical_hash"], []).append({
                 "file": file_path,
-                "symbol": "",
+                "symbol": s.get("symbol", ""),
                 "start_line": s["start_line"] + 1,
                 "end_line": s["end_line"] + 1,
                 "node_count": s["node_count"],

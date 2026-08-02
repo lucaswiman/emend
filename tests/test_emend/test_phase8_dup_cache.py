@@ -20,6 +20,7 @@ from textwrap import dedent
 
 import pytest
 
+from emend.duplicate import DUP_CACHE_VERSION
 from emend.transform import warm_caches, _get_facts_db, _cache_db_dir, _compute_duplicate_payloads
 
 
@@ -101,7 +102,7 @@ def test_warm_caches_populates_dup_cache(tmp_path):
     # We have 2 Python files; each should produce a dup_cache entry.
     assert len(rows) >= 1, "Expected at least one dup_cache row"
     for _hash, version in rows:
-        assert version == "1", "Cache version should be '1'"
+        assert version == DUP_CACHE_VERSION, "Cache version should match the module constant"
 
 
 def test_warm_caches_dup_cache_data_valid(tmp_path):
@@ -243,7 +244,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "1"
+    assert version == DUP_CACHE_VERSION
 
     expected_hash = hashlib.md5(
         _SIMPLE_FUNC.encode(), usedforsecurity=False
@@ -408,3 +409,58 @@ def test_duplicate_module_near_duplicate_detection(tmp_path):
             "Structurally identical functions with renamed variables should "
             "produce the same canonical hash"
         )
+
+
+def test_canonicalize_file_for_cache_records_symbol(tmp_path):
+    """Cached payloads must carry the containing symbol.
+
+    Without it the cached read path reports members with no symbol name and,
+    worse, the dunder-boilerplate suppression heuristic (which keys off the
+    symbol name) silently stops applying once the cache is warm.
+    """
+    from emend.duplicate import canonicalize_file_for_cache
+    from emend import emend_core
+
+    source = dedent("""\
+        class Thing:
+            def __eq__(self, other):
+                return (self.alpha == other.alpha
+                        and self.beta == other.beta
+                        and self.gamma == other.gamma)
+    """)
+    file_path = str(tmp_path / "thing.py")
+    (tmp_path / "thing.py").write_text(source)
+
+    scope_resolver = emend_core.PyScopeResolver(str(tmp_path))
+    scope_resolver.index_file(file_path, source)
+
+    subtrees = canonicalize_file_for_cache(file_path, source, scope_resolver)
+    assert subtrees, "expected at least one candidate subtree"
+    assert all("symbol" in s for s in subtrees)
+    assert any("__eq__" in s["symbol"] for s in subtrees)
+
+
+def test_cached_and_uncached_duplicate_clusters_agree(tmp_path):
+    """Dunder boilerplate suppressed on a cold cache stays suppressed warm."""
+    from emend.duplicate import query_duplicates
+
+    for i in (1, 2, 3):
+        (tmp_path / f"mod{i}.py").write_text(dedent(f"""\
+            class Thing{i}:
+                def __eq__(self, other):
+                    return (self.alpha == other.alpha
+                            and self.beta == other.beta
+                            and self.gamma == other.gamma)
+        """))
+
+    cold = query_duplicates(str(tmp_path))
+    warm_caches(str(tmp_path), type_engine="none")
+    warm = query_duplicates(str(tmp_path))
+
+    def shape(clusters):
+        return sorted(
+            tuple(sorted((m.file, m.start_line, m.end_line) for m in c.members))
+            for c in clusters
+        )
+
+    assert shape(warm) == shape(cold)

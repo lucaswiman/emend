@@ -342,7 +342,12 @@ class PythonCommentHandler(CommentHandler):
                             # e.g. "# noqa: E501" with no emend: prefix → no effect
                         else:
                             result[srow] = None  # bare noqa suppresses all
-        except tokenize.TokenError:
+        except (tokenize.TokenError, SyntaxError):
+            # tokenize raises TokenError for unterminated constructs and
+            # IndentationError (a SyntaxError) for inconsistent dedents.
+            # Tree-sitter parses such files fine and can produce matches, so
+            # degrade to whatever noqa comments were read before the failure
+            # rather than aborting the caller's whole lint run.
             pass
         return result
 

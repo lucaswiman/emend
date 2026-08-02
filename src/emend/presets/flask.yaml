@@ -43,13 +43,15 @@ sinks:
   - pattern: "send_file($X)"
     label: file_path
     message: "Path traversal: file path in send_file()"
+  # XSS sinks -- labeled user_input so sources flow directly to them
+  # (matching the express/react presets; no source emits html_output).
   - pattern: "Markup($X)"
-    label: html_output
+    label: user_input
     message: "XSS: unescaped user input in Markup()"
 
 sanitizers:
   - {pattern: "escape($X)", label: user_input}
-  - {pattern: "bleach.clean($X)", label: html_output}
+  - {pattern: "bleach.clean($X)", label: user_input}
   - {pattern: "secure_filename($X)", label: file_path}
   - {pattern: "int($X)", label: user_input}
   - {pattern: "float($X)", label: user_input}

@@ -214,3 +214,33 @@ def test_ts_lint_multiple_violations(tmp_path):
     assert len(violations) == 3
     lines = [v.line for v in violations]
     assert len(set(lines)) == 3
+
+
+# --- noqa suppression ---
+
+
+def test_ts_lint_noqa_same_line(tmp_path):
+    """A noqa on the violating line suppresses it."""
+    ts_file = tmp_path / "app.ts"
+    ts_file.write_text('console.log("x");  // noqa: emend:no-console\n')
+
+    rule = LintRule(name="no-console", find="console.log($X)", message="No console.log")
+
+    violations = run_lint([rule], [str(ts_file)], language="typescript")
+    assert violations == []
+
+
+def test_ts_lint_noqa_covers_multiline_statement(tmp_path):
+    """A noqa on the first line of a multi-line statement covers the whole
+    statement, as it already does for Python."""
+    ts_file = tmp_path / "app.ts"
+    ts_file.write_text(
+        "const result = wrap(   // noqa: emend:no-console\n"
+        '    console.log("x"),\n'
+        ");\n"
+    )
+
+    rule = LintRule(name="no-console", find="console.log($X)", message="No console.log")
+
+    violations = run_lint([rule], [str(ts_file)], language="typescript")
+    assert violations == []

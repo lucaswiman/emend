@@ -714,3 +714,26 @@ class TestWalrusPatterns:
         assert len(matches) == 2
         captured_vars = {m_.captures["VAR"] for m_ in matches}
         assert captured_vars == {"val", "result"}
+
+
+class TestAnonymousWildcard:
+    """Tests for the `$_` wildcard, documented as matching any expression
+    without capturing (docs/patterns.rst)."""
+
+    def test_repeated_anonymous_wildcard_matches_differing_args(self, tmp_path):
+        """Each `$_` is independent -- it must not bind consistently."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("foo(1, 2)\nfoo(3, 3)\n")
+
+        matches = find_pattern("foo($_, $_)", str(test_file))
+        assert len(matches) == 2
+
+    def test_anonymous_wildcard_is_not_captured(self, tmp_path):
+        """`$_` matches but produces no capture entry."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("foo(1, 2)\n")
+
+        matches = find_pattern("foo($_, $X)", str(test_file))
+        assert len(matches) == 1
+        assert "_" not in matches[0].captures
+        assert matches[0].captures["X"] == "2"

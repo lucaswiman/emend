@@ -265,15 +265,27 @@ def impact(
         max_depth=max_depth,
     )
 
-    data = {
-        "changed_symbols": result.changed_symbols,
-        "impacted_symbols": result.impacted_symbols,
-        "impacted_tests": result.impacted_tests,
-        "edges": [
-            {"source": e.source, "target": e.target, "kind": e.kind}
-            for e in result.edges
-        ],
-    }
+    # Mirror the CLI's --output modes (cli_analysis.impact_cmd) rather than
+    # always returning the full graph.
+    if output == "tests":
+        data: dict = {"impacted_tests": result.impacted_tests}
+    elif output == "graph":
+        data = {
+            "edges": [
+                {"source": e.source, "target": e.target, "kind": e.kind}
+                for e in result.edges
+            ],
+        }
+    else:
+        data = {
+            "changed_symbols": result.changed_symbols,
+            "impacted_symbols": result.impacted_symbols,
+            "impacted_tests": result.impacted_tests,
+            "edges": [
+                {"source": e.source, "target": e.target, "kind": e.kind}
+                for e in result.edges
+            ],
+        }
     return json.dumps(data, indent=2)
 
 

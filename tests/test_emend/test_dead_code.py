@@ -951,6 +951,23 @@ class TestNoqaDeadcode:
         dead_names = {d.name for d in dead}
         assert "suppressed" not in dead_names
 
+    def test_unrelated_noqa_code_does_not_suppress(self, tmp_path):
+        """A noqa carrying only other tools' codes must not suppress deadcode."""
+        from emend.transform import find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        main_file = project / "main.py"
+        main_file.write_text(
+            "def unused_helper(x):  # noqa: E501\n"
+            "    return x\n"
+        )
+
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        dead_names = {d.name for d in dead}
+        assert "unused_helper" in dead_names
+
 
 class TestShowLastReference:
     """Tests for --show-last-reference."""

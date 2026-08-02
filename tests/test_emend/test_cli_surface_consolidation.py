@@ -76,3 +76,19 @@ def test_rm_alias_still_works_without_edit_prefix(tmp_path):
     assert alias.exit_code == 0
     assert file_via_group.read_text() == file_via_alias.read_text()
     assert "def old" not in file_via_alias.read_text()
+
+
+def test_parse_where_clause_ignores_blank_values():
+    """A blank --where must not become the scope filter [""].
+
+    Falling through to the scope branch produces a non-empty list, which
+    downstream `if scope is not None` checks treat as a real filter -- so
+    every match is discarded and e.g. `replace` silently rewrites nothing.
+    """
+    from emend.cli_base import parse_where_clause
+
+    assert parse_where_clause([""]) == {}
+    assert parse_where_clause(["   "]) == {}
+    assert parse_where_clause(["", "MyClass.method"]) == {
+        "scope": ["MyClass", "method"]
+    }

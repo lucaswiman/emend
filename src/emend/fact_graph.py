@@ -62,7 +62,7 @@ class ReferenceFact:
     file_path: str
     line: int
     col: int
-    ref_kind: Literal["read", "write", "call", "import"]
+    ref_kind: Literal["read", "write", "call", "import", "definition"]
     func_qn: str = ""      # containing function (empty for module-level)
     block_id: int = -1      # containing CFG block (-1 for module-level)
 
@@ -3074,7 +3074,7 @@ def _walk_symbols(
             _walk_symbols(out, dec_out, children, file_path, module_name, parent_qn=qn)
 
 
-def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import"]:
+def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import", "definition"]:
     """Map a Rust scope-resolver reference kind to our fact model."""
     if kind == "call":
         return "call"
@@ -3082,6 +3082,8 @@ def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import"]:
         return "write"
     if kind == "import":
         return "import"
+    if kind == "definition":
+        return "definition"
     return "read"
 
 

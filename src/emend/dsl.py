@@ -744,8 +744,11 @@ def _singularize(name: str) -> str:
     # "sses"/"xes"/"zes" → plural suffix is "es"; strip both chars
     if name.endswith("sses") or name.endswith("xes") or name.endswith("zes"):
         return name[:-2]
-    # "ses" (e.g. "buses") → strip "es"
-    if name.endswith("ses"):
+    # "ses" → only strip "es" when the singular itself ends in a sibilant
+    # ("bus"→"buses", "status"→"statuses").  The far more common case is a
+    # singular ending in "-se" ("case"→"cases", "purchase"→"purchases"), which
+    # falls through to the generic -s rule.  Mirrors the "-ches" split below.
+    if name.endswith("ses") and name[:-2].endswith(("us", "is", "ss")):
         return name[:-2]
     # "shes" (e.g. "dishes", "crashes") → strip "es"
     if name.endswith("shes"):

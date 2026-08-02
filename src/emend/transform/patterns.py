@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A metavar reference in a replacement template: `$NAME` or `$...NAME`.
+_METAVAR_REF_RE = re.compile(r"\$(?:\.\.\.)?([A-Za-z_][A-Za-z0-9_]*)")
+
+# Separator artifacts an empty ellipsis expansion can leave behind:
+# a comma right after an opening bracket, or a doubled comma.
+_COMMA_ARTIFACT_RE = re.compile(r"([(\[])\s*,\s*|,\s*,")
+
+
 @dataclass
 class PatternMatch:
     """Represents a match of a pattern in code."""
@@ -826,17 +834,47 @@ def _substitute_metavars(
     if content_failed:
         return None
 
-    # Second pass: substitute regular metavar references ($NAME, $...NAME).
-    # Sort by name length descending so that $XY is replaced before $X,
-    # preventing $X from partially matching inside $XY.
-    for name, code in sorted(captures.items(), key=lambda kv: len(kv[0]), reverse=True):
-        replacement_code = replacement_code.replace(f"$...{name}", code)
-        replacement_code = replacement_code.replace(f"${name}", code)
+    # Second pass: substitute regular metavar references ($NAME, $...NAME) in a
+    # single left-to-right scan.  Scanning once (rather than looping over the
+    # captures and calling str.replace) matters for correctness: text inserted
+    # for one metavar must never be rescanned for another, otherwise a captured
+    # `"$B"` string literal would be clobbered when $B is substituted.  The
+    # regex is greedy over the name, so $XY binds XY rather than X.
+    out: list[str] = []
+    pos = 0
+    # Offsets (in the assembled output) where an ellipsis metavar expanded to
+    # nothing.  Only these positions may be touched by the separator cleanup
+    # below -- everything else is either literal template text or captured code.
+    empty_offsets: list[int] = []
+    written = 0
+    for ref in _METAVAR_REF_RE.finditer(replacement_code):
+        name = ref.group(1)
+        if name not in captures:
+            # Unknown reference: leave it verbatim.
+            continue
+        literal = replacement_code[pos:ref.start()]
+        out.append(literal)
+        written += len(literal)
+        code = captures[name]
+        if not code.strip():
+            empty_offsets.append(written)
+        out.append(code)
+        written += len(code)
+        pos = ref.end()
+    out.append(replacement_code[pos:])
+    replacement_code = "".join(out)
 
-    # Clean up comma artifacts from empty ellipsis substitutions
-    replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r'(\[)\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r',\s*,', ',', replacement_code)
+    # Clean up separator artifacts left behind by empty ellipsis substitutions,
+    # e.g. `new($...ARGS, extra=True)` with ARGS empty -> `new(, extra=True)`.
+    # Restricted to spans that actually abut an empty expansion so that commas
+    # inside captured code (string literals in particular) are never rewritten.
+    if empty_offsets:
+        def _strip_artifact(m: re.Match) -> str:
+            if not any(m.start() <= off <= m.end() for off in empty_offsets):
+                return m.group(0)
+            return m.group(1) if m.group(1) else ","
+
+        replacement_code = _COMMA_ARTIFACT_RE.sub(_strip_artifact, replacement_code)
 
     return replacement_code
 

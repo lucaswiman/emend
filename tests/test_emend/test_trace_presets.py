@@ -283,6 +283,30 @@ class TestPresetIntegration:
         violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
+    def test_flask_markup_xss(self, tmp_path):
+        """Flask preset detects XSS through Markup().
+
+        The Markup sink must carry a label that some source actually emits,
+        otherwise taint can never reach it and the rule is inert.
+        """
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def view(request):\n"
+            "    name = request.args.get('name')\n"
+            "    return Markup(name)\n"
+        )
+        config = get_preset("flask")
+        violations = run_trace_analysis([str(test_file)], config)
+        assert len(violations) >= 1
+        assert any("Markup" in v.message for v in violations)
+
+    def test_flask_labels_all_have_sources(self):
+        """Every label used by a flask sink must be emitted by some source."""
+        config = get_preset("flask")
+        source_labels = {s.label for s in config.sources}
+        sink_labels = {s.label for s in config.sinks}
+        assert sink_labels <= source_labels
+
     def test_django_mark_safe_xss(self, tmp_path):
         """Django preset detects mark_safe XSS."""
         test_file = tmp_path / "views.py"

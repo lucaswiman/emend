@@ -83,15 +83,20 @@ class ExtendedSelector:
         """Check if file_path contains glob wildcards (* or ?)."""
         return '*' in self.file_path or '?' in self.file_path
 
-    def expand_file_glob(self, language: str = "python") -> list[str]:
+    def expand_file_glob(self, language: str | None = None) -> list[str]:
         """Expand file_path glob, returning matching source files.
 
         Args:
-            language: Source language to filter by (default: "python").
+            language: Source language to filter by.  Defaults to the language
+                implied by the selector's own file extension, so that a
+                ``src/*.ts`` glob expands to TypeScript files rather than
+                being filtered against Python.
 
         Raises FileNotFoundError if no files match.
         """
         from emend.language_registry import matches_language
+        if language is None:
+            language = self.language
         matches = [
             f for f in glob_mod.glob(self.file_path, recursive=True)
             if matches_language(f, language)

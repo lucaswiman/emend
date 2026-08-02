@@ -898,8 +898,14 @@ def find_dead_code(
                 _file_lines_cache[fp] = []
         lines = _file_lines_cache[fp]
         if 0 < line <= len(lines):
-            if _NOQA_RE.search(lines[line - 1]):
-                return True
+            m = _NOQA_RE.search(lines[line - 1])
+            if m is not None:
+                codes = m.group(1)
+                # A bare `# noqa` suppresses everything; a coded one only
+                # suppresses when it names deadcode.  Codes belonging to other
+                # tools (`# noqa: E501`) must not hide dead code.
+                if codes is None or 'deadcode' in codes:
+                    return True
         return False
 
     # Convert SymbolFact results to DeadSymbol, applying Python post-filters.

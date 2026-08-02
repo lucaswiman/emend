@@ -265,6 +265,11 @@ def parse_where_clause(values: list[str]) -> dict:
     """Parse --where values into internal API params."""
     result: dict = {}
     for value in values:
+        if not value.strip():
+            # An empty --where (e.g. from an unset shell variable) would
+            # otherwise fall through to the scope branch and produce the
+            # filter [""], which silently matches nothing.
+            continue
         if value.startswith("not "):
             result["not_inside"] = value[4:].strip()
         elif value.startswith("@"):

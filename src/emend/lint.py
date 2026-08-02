@@ -84,6 +84,18 @@ def load_duplicate_code_config(
 _extract_names_from_text = _extract_identifiers
 
 
+def _statement_line_map_for(file_path: str, source: str) -> dict[int, tuple[int, int]]:
+    """Build the noqa statement-range map using *file_path*'s own grammar.
+
+    ``get_statement_ranges`` both parses with and selects statement node kinds
+    for the given extension, so passing the default ``py`` for a ``.ts`` or
+    ``.rs`` file yields no usable ranges and multi-line noqa suppression
+    silently stops working for those languages.
+    """
+    ext = Path(file_path).suffix.lstrip(".") or "py"
+    return _build_statement_line_map(source, ext=ext)
+
+
 def _assignments_from_cfgs(
     source: str,
     file_path: str,
@@ -438,7 +450,7 @@ def run_lint(
                     noqa_comments = parse_noqa_comments(src, language=file_lang)
                     noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
                     if noqa_comments:
-                        line_map = _build_statement_line_map(src)
+                        line_map = _statement_line_map_for(file_path_str, src)
                         noqa_ranges_for_file = build_noqa_ranges(
                             noqa_comments, line_map
                         )
@@ -500,7 +512,7 @@ def run_lint(
                 noqa_ranges = []
                 noqa_comments = parse_noqa_comments(source, language=file_lang)
                 if noqa_comments:
-                    line_map = _build_statement_line_map(source)
+                    line_map = _statement_line_map_for(file_path, source)
                     noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
             # Build line-offset table on first match (once per file)
             if line_starts is None:
@@ -545,7 +557,7 @@ def run_lint(
         noqa_comments = parse_noqa_comments(source, language=file_lang)
         noqa_ranges: list[tuple[int, int, set[str] | None]] = []
         if noqa_comments:
-            line_map = _build_statement_line_map(source)
+            line_map = _statement_line_map_for(file_path, source)
             noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
 
         for rule in fix_rules:
@@ -621,7 +633,7 @@ def run_lint(
                 noqa_comments = parse_noqa_comments(source, language=file_lang)
                 noqa_ranges_for_file_flow: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
-                    line_map = _build_statement_line_map(source)
+                    line_map = _statement_line_map_for(file_path, source)
                     noqa_ranges_for_file_flow = build_noqa_ranges(
                         noqa_comments, line_map
                     )
@@ -705,7 +717,7 @@ def run_lint(
                 noqa_comments = parse_noqa_comments(source, language=file_lang)
                 noqa_ranges_for_dsl: list[tuple[int, int, set[str] | None]] = []
                 if noqa_comments:
-                    line_map = _build_statement_line_map(source)
+                    line_map = _statement_line_map_for(file_path, source)
                     noqa_ranges_for_dsl = build_noqa_ranges(
                         noqa_comments, line_map
                     )

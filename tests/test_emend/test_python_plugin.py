@@ -207,6 +207,23 @@ def test_python_comment_handler_find_noqa_empty():
     assert result == {}
 
 
+def test_python_comment_handler_find_noqa_bad_indentation():
+    """A file tree-sitter can still match must not crash the tokenizer path.
+
+    ``tokenize`` raises ``IndentationError`` (not ``TokenError``) on an
+    inconsistent dedent; lint should degrade to "no noqa comments" rather
+    than aborting the whole run.
+    """
+    handler = PythonCommentHandler()
+    source = (
+        "def f(x):\n"
+        "    if x:\n"
+        "        print('a')\n"
+        "      print('b')\n"
+    )
+    assert handler.find_noqa_comments(source) == {}
+
+
 # ---------------------------------------------------------------------------
 # PythonCommentHandler — rename_in_docstrings
 # ---------------------------------------------------------------------------

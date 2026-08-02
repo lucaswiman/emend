@@ -85,6 +85,24 @@ class TestNamingHelpers:
     def test_singularize_ses(self):
         assert _singularize("addresses") == "address"
         assert _singularize("buses") == "bus"
+        assert _singularize("statuses") == "status"
+
+    def test_singularize_se_stems(self):
+        """`-se` singulars only add `-s`, so only one char comes off.
+
+        Stripping "es" unconditionally from "-ses" mangles the very common
+        table names below (case→cas, purchase→purchas, ...), which breaks
+        ORM link resolution for those models.
+        """
+        assert _singularize("cases") == "case"
+        assert _singularize("purchases") == "purchase"
+        assert _singularize("responses") == "response"
+        assert _singularize("licenses") == "license"
+        assert _singularize("databases") == "database"
+        assert _singularize("releases") == "release"
+        assert _singularize("expenses") == "expense"
+        assert _singularize("courses") == "course"
+        assert _singularize("phases") == "phase"
 
     def test_singularize_xes_zes_sses(self):
         """Words ending in xes/zes/sses should strip 'es', not just 's'.

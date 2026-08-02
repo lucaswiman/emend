@@ -822,15 +822,23 @@ class TestEditorServerRPC:
 # ---------------------------------------------------------------------------
 
 
-def _has_pydantic():
+def _mcp_server_importable():
+    """Whether ``emend.mcp_server`` can actually be imported.
+
+    Checking for pydantic alone is not enough: pydantic can be present (pulled
+    in as a transitive dependency) while the ``mcp`` SDK is missing or, as on
+    Python 3.14t, unusable with the installed pydantic. Probe the real import.
+    """
     try:
-        import pydantic  # noqa: F401
+        import emend.mcp_server  # noqa: F401
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
-@pytest.mark.skipif(not _has_pydantic(), reason="pydantic not installed (MCP optional dep)")
+@pytest.mark.skipif(
+    not _mcp_server_importable(), reason="mcp SDK not usable (MCP optional dep)"
+)
 class TestMCPTools:
     def test_map_write_add_and_read_mapping(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

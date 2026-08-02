@@ -151,6 +151,32 @@ class TestLoadPolicies:
         assert isinstance(structural.checks[0], StructuralCheck)
         assert isinstance(flow.checks[0], FlowCheck)
 
+    def test_load_unified_rules_top_level_flow_keys(self, tmp_path):
+        """Top-level flows-from/flows-to (the form documented in
+        docs/linting.rst) must build a FlowCheck, exactly as the nested
+        ``flow:`` mapping does. The lint loader already accepts both."""
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "rules.yaml"
+        config_file.write_text(yaml.dump({
+            "rules": {
+                "sql-injection": {
+                    "flows-from": "request.args.get($X)",
+                    "flows-to": "cursor.execute($QUERY)",
+                    "not-through": "sanitize($X)",
+                    "message": "SQL injection",
+                },
+            },
+        }))
+
+        policies = load_policies(str(config_file))
+        assert [p.name for p in policies] == ["sql-injection"]
+        check = policies[0].checks[0]
+        assert isinstance(check, FlowCheck)
+        assert check.flows_from == "request.args.get($X)"
+        assert check.flows_to == "cursor.execute($QUERY)"
+        assert check.not_through == "sanitize($X)"
+
     def test_load_unified_rules_loads_rules_and_policies(self, tmp_path):
         config_path = _write_rules(tmp_path, {
             "macros": {"input": "request.args.get($X)"},

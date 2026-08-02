@@ -103,24 +103,31 @@ def _build_unified_policy(
             where=rule_def.get("where"),
         ))
 
+    # Flow predicates may be given either as top-level ``flows-from`` /
+    # ``flows-to`` / ``not-through`` keys (the form documented in
+    # docs/linting.rst) or nested under a ``flow:`` mapping.  Accept both,
+    # mirroring the lint engine (checks/pattern_rules.py).
     flow_def = rule_def.get("flow")
+    flow_from = yaml_key(rule_def, "flows_from")
+    flow_to = yaml_key(rule_def, "flows_to")
+    flow_not_through = yaml_key(rule_def, "not_through")
     if isinstance(flow_def, dict):
-        flow_from = yaml_key(flow_def, "from", "flows_from")
-        flow_to = yaml_key(flow_def, "to", "flows_to")
-        # Unwrap dict-form ``{pattern: ...}`` to the pattern string, mirroring
-        # the lint engine (checks/pattern_rules.py).
-        if isinstance(flow_from, dict):
-            flow_from = flow_from.get("pattern")
-        if isinstance(flow_to, dict):
-            flow_to = flow_to.get("pattern")
-        if flow_from and flow_to:
-            not_through = expand_not_through(yaml_key(flow_def, "not_through"), macros)
-            checks.append(FlowCheck(
-                flows_from=expand_macros(str(flow_from), macros),
-                flows_to=expand_macros(str(flow_to), macros),
-                not_through=not_through,
-                label=flow_def.get("label", name),
-            ))
+        flow_from = flow_from or yaml_key(flow_def, "from", "flows_from")
+        flow_to = flow_to or yaml_key(flow_def, "to", "flows_to")
+        flow_not_through = flow_not_through or yaml_key(flow_def, "not_through")
+    # Unwrap dict-form ``{pattern: ...}`` to the pattern string.
+    if isinstance(flow_from, dict):
+        flow_from = flow_from.get("pattern")
+    if isinstance(flow_to, dict):
+        flow_to = flow_to.get("pattern")
+    if flow_from and flow_to:
+        label_source = flow_def if isinstance(flow_def, dict) else rule_def
+        checks.append(FlowCheck(
+            flows_from=expand_macros(str(flow_from), macros),
+            flows_to=expand_macros(str(flow_to), macros),
+            not_through=expand_not_through(flow_not_through, macros),
+            label=label_source.get("label", name),
+        ))
 
     deadcode_def = rule_def.get("deadcode")
     if isinstance(deadcode_def, bool):

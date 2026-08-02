@@ -1755,10 +1755,16 @@ class TestFindReferences:
 
         selector = sel(main_file, "my_func")
 
-        refs = find_references(selector, include_definition=False)
+        refs = list(find_references(selector, include_definition=False))
 
-        # Should only find the call, not the definition
+        # Should only find the call (line 4), not the definition (line 1).
         assert all(not ref.is_definition for ref in refs)
+        assert [r.line for r in refs] == [4]
+
+        # ...and with the definition included it is both present and flagged.
+        with_def = list(find_references(selector, include_definition=True))
+        assert sorted(r.line for r in with_def) == [1, 4]
+        assert [r.line for r in with_def if r.is_definition] == [1]
 
     def test_find_references_exclude_imports(self, tmp_path):
         """Find references excluding imports."""
@@ -2257,6 +2263,46 @@ class TestEllipsisMatching:
         # The ellipsis capture should contain cst.Arg nodes with keyword info
         # We just verify it captured something non-empty
         assert match.captures['ARGS']  # Should have captured args
+
+    def test_replace_does_not_rewrite_commas_inside_captured_string(self, tmp_path):
+        """Comma-artifact cleanup must not touch text that came from a capture.
+
+        The cleanup only exists to tidy up separators left behind when an
+        ellipsis metavar expands to nothing; it must never rewrite the
+        captured code itself.
+        """
+        test_file = tmp_path / "test.py"
+        test_file.write_text('log("(, hello)")\nlog("a,, b")\n')
+
+        from emend.transform import replace_pattern
+        _result, count = replace_pattern(
+            "log($MSG)",
+            "logger.info($MSG)",
+            str(test_file),
+            apply=True,
+        )
+
+        content = test_file.read_text()
+        assert count == 2
+        assert 'logger.info("(, hello)")' in content
+        assert 'logger.info("a,, b")' in content
+
+    def test_replace_does_not_resubstitute_inserted_text(self, tmp_path):
+        """Text inserted for one metavar must not be rescanned for another."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text('assert "$B" == 3\n')
+
+        from emend.transform import replace_pattern
+        _result, count = replace_pattern(
+            "assert $A == $B",
+            "assertEqual($A, $B)",
+            str(test_file),
+            apply=True,
+        )
+
+        content = test_file.read_text()
+        assert count == 1
+        assert 'assertEqual("$B", 3)' in content
 
 
 class TestTypeConstraints:

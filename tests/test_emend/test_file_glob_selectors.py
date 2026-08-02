@@ -57,6 +57,25 @@ class TestExtendedSelectorFileGlob:
         result = sel.expand_file_glob()
         assert len(result) == 2
 
+    def test_expand_file_glob_typescript(self, tmp_path):
+        """A .ts glob expands to TypeScript files, not an empty Python filter."""
+        (tmp_path / "a.ts").write_text("export function greet() {}\n")
+        (tmp_path / "b.ts").write_text("export function wave() {}\n")
+        (tmp_path / "c.py").write_text("x = 1\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "*.ts"), symbol_path=["greet"])
+        result = sel.expand_file_glob()
+        assert len(result) == 2
+        assert all(f.endswith(".ts") for f in result)
+
+    def test_expand_file_glob_rust(self, tmp_path):
+        """A .rs glob expands to Rust files."""
+        (tmp_path / "a.rs").write_text("pub fn greet() {}\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "*.rs"), symbol_path=["greet"])
+        result = sel.expand_file_glob()
+        assert [Path(f).name for f in result] == ["a.rs"]
+
     def test_with_file_path(self):
         sel = ExtendedSelector(
             file_path="**/*.py",
