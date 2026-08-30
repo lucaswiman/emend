@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import json
-from contextlib import redirect_stdout
 from typing import Annotated
 
 from pydantic import Field
@@ -13,15 +11,17 @@ from emend.component_selector import parse_extended_selector
 from emend.transform import (
     find_references,
     find_callers,
-    find_callees,
     generate_graph,
     find_dead_code,
     find_impact,
-    DeadBlock,
-    DeadModule,
+    dead_code_result_to_dict,
     semantic_context as _semantic_context,
 )
-from emend.checks.rules_config import resolve_rules_path
+from emend.checks.rules_config import (
+    DeadCodeConfig,
+    deadcode_engine_kwargs,
+    resolve_rules_path,
+)
 
 from emend.mcp.dispatch import mcp_app
 
@@ -167,9 +167,10 @@ def graph(
 
 def deadcode(
     path: Annotated[str, Field(description="File glob or directory to scan (e.g. 'src/**/*.py').")] = ".",
-    kind: Annotated[str | None, Field(description="Symbol kind filter: function, class, method, variable.")] = None,
-    include_private: Annotated[bool, Field(description="Include _private symbols.")] = False,
-    unused_modules: Annotated[bool, Field(description="Also report Python modules with no incoming imports.")] = False,
+    kind: Annotated[str | None, Field(description="Symbol kind filter: function or class.")] = None,
+    include_private: Annotated[bool | None, Field(description="Override whether _private symbols and methods are included.")] = None,
+    unused_modules: Annotated[bool | None, Field(description="Override whether unused Python modules are reported.")] = None,
+    include_test_references: Annotated[bool | None, Field(description="Override whether test references keep production code alive.")] = None,
     no_last_reference: Annotated[bool, Field(description="Don't show git last-reference info.")] = False,
     entry_point_decorators: Annotated[list[str] | None, Field(description="Decorators that mark entry points (not dead even if unreferenced). E.g. ['app.route', 'celery.task'].")] = None,
     entry_point_names: Annotated[list[str] | None, Field(description="Function names that are entry points. E.g. ['main', 'cli'].")] = None,
@@ -179,66 +180,37 @@ def deadcode(
     """Find potentially dead (unreferenced) code. Returns JSON."""
     from emend.lint import load_rules
 
-    cfg_exclude_refs_from = None
-    cfg_strings_as_refs = True
-    cfg_ep_decorators = None
-    cfg_ep_names = None
-    cfg_excl_paths = None
+    deadcode_config = DeadCodeConfig()
 
     config_path = resolve_rules_path(config)
     if config_path.exists():
-        _, _, deadcode_config = load_rules(str(config_path))
-        if deadcode_config is not None:
-            cfg_exclude_refs_from = deadcode_config.exclude_references_from
-            cfg_strings_as_refs = deadcode_config.strings_count_as_references
-            cfg_ep_decorators = deadcode_config.entry_point_decorators
-            cfg_ep_names = deadcode_config.entry_point_names
-            cfg_excl_paths = deadcode_config.exclude_paths
+        _, _, loaded_config = load_rules(str(config_path))
+        if loaded_config is not None:
+            deadcode_config = loaded_config
+
+    kwargs = deadcode_engine_kwargs(
+        deadcode_config,
+        show_last_reference=not no_last_reference,
+    )
+    for key, value in (
+        ("kind", kind),
+        ("include_private", include_private),
+        ("unused_modules", unused_modules),
+        ("entry_point_decorators", entry_point_decorators),
+        ("entry_point_names", entry_point_names),
+        ("exclude_paths", exclude_paths),
+    ):
+        if value is not None:
+            kwargs[key] = value
+    if include_test_references is not None:
+        kwargs["exclude_test_references"] = not include_test_references
 
     results = find_dead_code(
         project_path=path,
-        kind=kind,
-        include_private=include_private,
-        exclude_references_from=cfg_exclude_refs_from,
-        strings_count_as_references=cfg_strings_as_refs,
-        show_last_reference=not no_last_reference,
         all_files=False,
-        entry_point_decorators=entry_point_decorators or cfg_ep_decorators,
-        entry_point_names=entry_point_names or cfg_ep_names,
-        exclude_paths=exclude_paths or cfg_excl_paths,
-        unused_modules=unused_modules,
+        **kwargs,
     )
-    data = []
-    for d in results:
-        if isinstance(d, DeadBlock):
-            entry = {
-                "file_path": d.file_path,
-                "func_qn": d.func_qn,
-                "kind": "unreachable_block",
-                "start_line": d.start_line,
-                "end_line": d.end_line,
-                "reason": "unreachable code",
-            }
-        elif isinstance(d, DeadModule):
-            entry = {
-                "file_path": d.file_path,
-                "name": d.name,
-                "module_name": d.module_name,
-                "kind": "module",
-                "reason": d.reason,
-            }
-        else:
-            entry = {
-                "file_path": d.file_path,
-                "name": d.name,
-                "kind": d.kind,
-                "line": d.line,
-                "selector": d.selector,
-                "reason": d.reason,
-            }
-            if d.last_reference_commit:
-                entry["last_reference_commit"] = d.last_reference_commit
-        data.append(entry)
+    data = [dead_code_result_to_dict(result) for result in results]
     return json.dumps(data, indent=2)
 
 
@@ -507,7 +479,9 @@ def analyze(
     transitive: Annotated[bool, Field(description="Enable transitive graph/caller expansion.")] = False,
     depth: Annotated[int | None, Field(description="Max depth for transitive graph expansion.")] = None,
     kind: Annotated[str | None, Field(description="Deadcode kind filter.")] = None,
-    include_private: Annotated[bool, Field(description="Include private names in deadcode mode.")] = False,
+    include_private: Annotated[bool | None, Field(description="Override private-name reporting in deadcode mode.")] = None,
+    unused_modules: Annotated[bool | None, Field(description="Override unused-module reporting in deadcode mode.")] = None,
+    include_test_references: Annotated[bool | None, Field(description="Override test-reference behavior in deadcode mode.")] = None,
     no_last_reference: Annotated[bool, Field(description="Disable git last-reference info in deadcode mode.")] = False,
     entry_point_decorators: Annotated[list[str] | None, Field(description="Entry-point decorators for deadcode mode.")] = None,
     entry_point_names: Annotated[list[str] | None, Field(description="Entry-point names for deadcode mode.")] = None,
@@ -543,6 +517,8 @@ def analyze(
             path=path or ".",
             kind=kind,
             include_private=include_private,
+            unused_modules=unused_modules,
+            include_test_references=include_test_references,
             no_last_reference=no_last_reference,
             entry_point_decorators=entry_point_decorators,
             entry_point_names=entry_point_names,

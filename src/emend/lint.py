@@ -18,6 +18,7 @@ from emend.transform import find_pattern, replace_pattern, extract_pattern_liter
 from emend.trace import _extract_identifiers
 from emend.rules_config import (
     DeadCodeConfig,
+    deadcode_engine_kwargs,
     load_rules_document,
     yaml_key,
     as_list,
@@ -753,27 +754,21 @@ def run_lint(
                 or rule_filter == deadcode_config.rule_name
                 or rule_filter in {"deadcode", "dead-code", "dead_code"}
             )):
-        from emend.transform import find_dead_code
+        from emend.transform import dead_code_result_details, find_dead_code
         dc_project = project_path or "."
         try:
             dead = find_dead_code(
                 project_path=dc_project,
-                kind=deadcode_config.kind,
-                include_private=deadcode_config.include_private,
-                exclude_references_from=deadcode_config.exclude_references_from,
-                strings_count_as_references=deadcode_config.strings_count_as_references,
-                show_last_reference=False,
-                entry_point_decorators=deadcode_config.entry_point_decorators,
-                entry_point_names=deadcode_config.entry_point_names,
-                exclude_paths=deadcode_config.exclude_paths,
+                **deadcode_engine_kwargs(deadcode_config),
             )
             for d in dead:
+                name, line, match_text, _reason = dead_code_result_details(d)
                 violations.append(LintViolation(
                     rule_name=deadcode_config.rule_name,
-                    message=f"{deadcode_config.message}: {d.name}",
+                    message=f"{deadcode_config.message}: {name}",
                     file_path=d.file_path,
-                    line=d.line,
-                    match_text=d.selector,
+                    line=line,
+                    match_text=match_text,
                 ))
         except BUG_EXCEPTIONS:
             raise

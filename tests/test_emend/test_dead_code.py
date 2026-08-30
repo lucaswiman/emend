@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from emend.component_selector import ExtendedSelector
+def make_project_dir(tmp_path) -> Path:
+    """Create an isolated project root with an explicit project marker."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        "[project]\nname = 'deadcode-fixture'\nversion = '0'\n"
+    )
+    return project
 
 
 def make_project(tmp_path, files: dict[str, str]) -> Path:
@@ -14,8 +21,7 @@ def make_project(tmp_path, files: dict[str, str]) -> Path:
     Keys are relative paths (subdirectories are created as needed); values
     are file contents.
     """
-    project = tmp_path / "project"
-    project.mkdir()
+    project = make_project_dir(tmp_path)
     for name, content in files.items():
         p = project / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -29,6 +35,34 @@ def dead_names(tmp_path, files: dict[str, str], **kwargs) -> set[str]:
 
     project = make_project(tmp_path, files)
     return {d.name for d in find_dead_code(str(project), **kwargs)}
+
+
+def dead_module_names(project: Path, **kwargs) -> set[str]:
+    """Return only unused-module qualified names for an existing project."""
+    from emend.transform import DeadModule, find_dead_code
+
+    return {
+        item.module_name
+        for item in find_dead_code(str(project), **kwargs)
+        if isinstance(item, DeadModule)
+    }
+
+
+def make_test_reference_project(
+    tmp_path,
+    *,
+    module: str = "lib",
+    function: str = "only_tested",
+) -> tuple[Path, Path]:
+    """Create a module referenced only by a conventional test file."""
+    project = make_project(tmp_path, {
+        f"{module}.py": f"def {function}():\n    return 42\n",
+        f"tests/test_{module}.py": (
+            f"from {module} import {function}\n\n"
+            f"def test_it():\n    assert {function}() == 42\n"
+        ),
+    })
+    return project, project / "tests"
 
 
 def load_deadcode_config(tmp_path, deadcode, *, filename="rules.yaml"):
@@ -53,8 +87,7 @@ class TestDeadCodeWarmPath:
         """Warm path should detect an unreferenced function."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             "def used():\n    return 1\n\n"
             "def unused():\n    return 2\n\n"
@@ -71,8 +104,7 @@ class TestDeadCodeWarmPath:
         """Warm path should skip test_, describe_, and dunder functions."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "tests.py").write_text(
             "def test_foo():\n    pass\n\n"
             "def describe_feature():\n    pass\n\n"
@@ -92,8 +124,7 @@ class TestDeadCodeWarmPath:
         """Warm path should exclude symbols listed in __all__."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             "__all__ = ['exported']\n\n"
             "def exported():\n    return 1\n\n"
@@ -110,8 +141,7 @@ class TestDeadCodeWarmPath:
         """Warm path should detect cross-file references."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "lib.py").write_text(
             "def helper():\n    return 1\n\n"
             "def orphan():\n    return 2\n"
@@ -131,8 +161,7 @@ class TestDeadCodeWarmPath:
         """Warm path: class instantiated within the same file should not be dead."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             "class Inner:\n"
             "    def run(self): return 1\n\n"
@@ -150,8 +179,7 @@ class TestDeadCodeWarmPath:
         """Warm path: class used only in a type annotation in the same file is not dead."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             "from __future__ import annotations\n\n"
             "class Client:\n"
@@ -170,8 +198,7 @@ class TestDeadCodeWarmPath:
         """Fact-dependent commands should materialize ``facts.db`` on first use."""
         from emend.transform import _cache_db_dir, _get_or_build_fact_graph
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text("def unused():\n    return 1\n")
 
         cache_dir = _cache_db_dir(str(project))
@@ -184,12 +211,47 @@ class TestDeadCodeWarmPath:
         assert facts_db.exists()
         graph.close()
 
+    def test_partial_scan_keeps_references_from_project_root(self, tmp_path):
+        """Scanning src/ must still count references from root entry scripts."""
+        from emend.transform import find_dead_code
+
+        project = make_project(tmp_path, {
+            "src/lib.py": "def used_from_root():\n    return 1\n",
+            "manage.py": "from src.lib import used_from_root\n\nused_from_root()\n",
+        })
+
+        names = {
+            item.name
+            for item in find_dead_code(
+                str(project / "src"),
+                show_last_reference=False,
+                unused_modules=False,
+            )
+        }
+        assert "used_from_root" not in names
+
+    def test_forced_rebuild_clears_removed_decorators(self, tmp_path):
+        """A full fact replacement must not preserve deleted decorators."""
+        from emend.fact_graph import FactGraph
+        from emend.transform import _cache_db_dir, warm_caches
+
+        project = make_project(tmp_path, {
+            "api.py": "@custom.route\ndef handler():\n    return 1\n",
+        })
+        warm_caches(str(project), type_engine="none")
+        (project / "api.py").write_text("def handler():\n    return 1\n")
+        warm_caches(str(project), type_engine="none", force_facts=True)
+
+        graph = FactGraph(db_path=str(_cache_db_dir(project) / "facts.db"))
+        rows = graph._client.run("?[qn, dec] := *decorator_on[qn, dec]")["rows"]
+        graph.close()
+        assert rows == []
+
     def test_warm_path_intra_file_function_call(self, tmp_path):
         """Warm path: helper function called only within the same file is not dead."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             "def normalize(s: str) -> str:\n"
             "    return s.strip().lower()\n\n"
@@ -203,23 +265,99 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
 
-    def test_warm_path_finds_unused_module_when_enabled(self, tmp_path):
-        """Unused modules are only reported when the feature flag is enabled."""
+    def test_cold_path_builds_only_deadcode_dependencies(self, tmp_path, monkeypatch):
+        """Cold deadcode startup skips type, FTS, and duplicate indexing."""
+        from emend.fact_graph import FactGraph, SymbolFact
+        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
+
+        project = make_project_dir(tmp_path)
+        (project / "mod.py").write_text("def unused():\n    return 1\n")
+        calls = []
+
+        def fake_warm_caches(path, **kwargs):
+            calls.append((path, kwargs))
+            cache_dir = _cache_db_dir(path)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            graph = FactGraph(db_path=str(cache_dir / "facts.db"))
+            graph.add_symbol(SymbolFact(
+                file_path="mod.py",
+                name="unused",
+                qualified_name="mod.unused",
+                kind="function",
+                line=1,
+                end_line=2,
+            ))
+            graph.close()
+            return {}
+
+        monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
+        graph = _get_or_build_fact_graph(str(project))
+
+        assert calls == [(str(project), {
+            "type_engine": "none",
+            "build_fts": False,
+            "build_duplicates": False,
+            "force_facts": True,
+        })]
+        graph.close()
+
+    def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):
+        """The fallback fact builder must not invoke a type engine for deadcode."""
+        from emend.fact_graph import FactGraph
+
+        project = make_project_dir(tmp_path)
+        (project / "mod.py").write_text("def unused():\n    return 1\n")
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("type inference should stay lazy")
+
+        monkeypatch.setattr("emend.type_oracle.create_type_oracle", fail_if_called)
+        graph = FactGraph.build_from_project(str(project), include_types=False)
+        graph.close()
+
+    def test_warm_path_reports_unused_module_by_default(self, tmp_path):
+        """Unused modules are reported by default and can be disabled."""
         from emend.transform import DeadModule, find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "used.py").write_text("VALUE = 1\n")
         (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
         (project / "orphan.py").write_text("VALUE = 2\n")
 
-        without_flag = list(find_dead_code(str(project), show_last_reference=False))
-        assert not any(isinstance(d, DeadModule) for d in without_flag)
-
-        with_flag = list(find_dead_code(str(project), show_last_reference=False, unused_modules=True))
-        dead_modules = {d.module_name for d in with_flag if isinstance(d, DeadModule)}
+        default_results = list(find_dead_code(str(project), show_last_reference=False))
+        dead_modules = {d.module_name for d in default_results if isinstance(d, DeadModule)}
         assert "orphan" in dead_modules
         assert "used" not in dead_modules
+
+        without_modules = list(find_dead_code(
+            str(project), show_last_reference=False, unused_modules=False,
+        ))
+        assert not any(isinstance(d, DeadModule) for d in without_modules)
+
+    def test_kind_filter_suppresses_other_result_kinds(self, tmp_path):
+        from emend.transform import DeadBlock, DeadModule, find_dead_code
+
+        project = make_project(tmp_path, {
+            "orphan.py": "def unused():\n    return 1\n",
+        })
+        results = list(find_dead_code(
+            str(project),
+            kind="function",
+            show_last_reference=False,
+        ))
+
+        assert not any(isinstance(item, (DeadBlock, DeadModule)) for item in results)
+
+    def test_relative_import_keeps_module_alive(self, tmp_path):
+        project = make_project(tmp_path, {
+            "pkg/__init__.py": "",
+            "pkg/foo.py": "VALUE = 1\n",
+            "pkg/bar.py": "from . import foo\n\nVALUE = foo.VALUE\n",
+        })
+
+        assert "pkg.foo" not in dead_module_names(
+            project, show_last_reference=False,
+        )
 
 
 class TestFindDeadCode:
@@ -305,8 +443,8 @@ class TestFindDeadCode:
         names = dead_names(tmp_path, {"main.py": "def main():\n    pass\n"})
         assert "main" not in names
 
-    def test_skips_private_by_default(self, tmp_path):
-        """Private symbols (_name) are skipped by default."""
+    def test_includes_private_by_default(self, tmp_path):
+        """Private symbols (_name) are checked by default."""
         names = dead_names(tmp_path, {"main.py":
             "def _private_helper():\n"
             "    return 1\n"
@@ -314,17 +452,17 @@ class TestFindDeadCode:
             "def public_unused():\n"
             "    return 2\n"
         })
-        assert "_private_helper" not in names
+        assert "_private_helper" in names
         assert "public_unused" in names
 
-    def test_include_private(self, tmp_path):
-        """With include_private=True, _private symbols are checked."""
+    def test_exclude_private(self, tmp_path):
+        """With include_private=False, _private symbols are skipped."""
         names = dead_names(
             tmp_path,
             {"main.py": "def _private_helper():\n    return 1\n"},
-            include_private=True,
+            include_private=False,
         )
-        assert "_private_helper" in names
+        assert "_private_helper" not in names
 
     def test_skips_all_exports(self, tmp_path):
         """Symbols listed in __all__ are not flagged."""
@@ -376,8 +514,7 @@ class TestFindDeadCode:
         """DeadSymbol has correct file_path, name, kind, line, selector."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -385,7 +522,7 @@ class TestFindDeadCode:
             "    return 42\n"
         )
 
-        dead = list(find_dead_code(str(project)))
+        dead = list(find_dead_code(str(project), unused_modules=False))
         assert len(dead) == 1
         d = dead[0]
         assert d.name == "orphan"
@@ -439,12 +576,148 @@ class TestFindDeadCode:
         assert "create_user" not in names
         assert "truly_unused" in names
 
+    @pytest.mark.parametrize(
+        ("import_line", "decorator"),
+        [
+            ("from fastapi import APIRouter as Factory", "api_route('/users')"),
+            ("from typer import Typer as Factory", "callback()"),
+            ("from fastapi import FastAPI as Factory", "exception_handler(Exception)"),
+            ("from flask import Flask as Factory", "before_request()"),
+        ],
+        ids=["fastapi-route", "typer-callback", "fastapi-hook", "flask-hook"],
+    )
+    def test_framework_entry_point_by_receiver_type(
+        self, tmp_path, import_line, decorator,
+    ):
+        names = dead_names(tmp_path, {"entry.py": (
+            f"{import_line}\n\nreceiver = Factory()\n\n"
+            f"@receiver.{decorator}\n"
+            "def registered():\n    return 1\n\n"
+            "def truly_unused():\n    return 2\n"
+        )})
+        assert "registered" not in names
+        assert "truly_unused" in names
+
+    def test_cached_type_identifies_decorator_receiver_without_inference(self, tmp_path):
+        from emend.transform import find_dead_code, warm_caches
+        from emend.transform.cache import _cache_db_dir
+        from emend.type_oracle import (
+            FileTypes,
+            TypeBinding,
+            TypeDescriptor,
+            _TypeOracleDiskCache,
+            _content_hash,
+        )
+
+        project = make_project_dir(tmp_path)
+        module = project / "api.py"
+        module.write_text(
+            "from fastapi import APIRouter\n"
+            "routes: APIRouter\n\n"
+            "@routes.api_route('/health', methods=['GET'])\n"
+            "def healthcheck():\n"
+            "    return {'ok': True}\n"
+        )
+        warm_caches(str(project), type_engine="none")
+
+        file_types = FileTypes(path=str(module), bindings=[TypeBinding(
+            name="routes",
+            line=2,
+            col_start=0,
+            col_end=6,
+            type_descriptor=TypeDescriptor.named("APIRouter"),
+            raw_type="APIRouter",
+            binding_kind="definition",
+        )])
+        file_types.build_index()
+        cache = _TypeOracleDiskCache(str(_cache_db_dir(project) / "parse.db"))
+        cache.put(_content_hash(module), file_types)
+
+        names = {
+            result.name
+            for result in find_dead_code(str(project), show_last_reference=False)
+        }
+        assert "healthcheck" not in names
+
+    def test_unknown_receiver_type_does_not_hide_callback(self, tmp_path):
+        """Typed decorator matching does not bless arbitrary same-named methods."""
+        names = dead_names(tmp_path, {"main.py":
+            "class Registry:\n"
+            "    def api_route(self, path):\n"
+            "        return lambda func: func\n"
+            "\n"
+            "registry = Registry()\n"
+            "\n"
+            "@registry.api_route('/users')\n"
+            "def not_a_framework_entry_point():\n"
+            "    return []\n"
+        })
+        assert "not_a_framework_entry_point" in names
+
+    def test_pyproject_script_target_is_an_entry_point(self, tmp_path):
+        names = dead_names(tmp_path, {
+            "pyproject.toml":
+                "[project]\n"
+                "name = 'sample'\n"
+                "version = '0'\n"
+                "[project.scripts]\n"
+                "sample = 'sample.cli:launch'\n",
+            "src/sample/__init__.py": "",
+            "src/sample/cli.py":
+                "def launch():\n"
+                "    return 0\n"
+                "\n"
+                "def old_command():\n"
+                "    return 1\n",
+        })
+        assert "launch" not in names
+        assert "old_command" in names
+        assert "cli" not in names
+
+    def test_main_guard_keeps_directly_executed_module_alive(self, tmp_path):
+        names = dead_names(tmp_path, {"runner.py":
+            "def launch():\n"
+            "    return 0\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    raise SystemExit(launch())\n"
+        })
+        assert "runner" not in names
+
+    def test_parenthesized_main_guard_keeps_module_alive(self, tmp_path):
+        project = make_project(tmp_path, {
+            "runner.py": (
+                "def launch():\n    return 0\n\n"
+                "if (__name__ == '__main__'):\n    raise SystemExit(launch())\n"
+            ),
+        })
+        assert "runner" not in dead_module_names(
+            project, show_last_reference=False,
+        )
+
+    def test_argparse_callback_in_dunder_main_is_followed(self, tmp_path):
+        names = dead_names(tmp_path, {"pkg/__main__.py":
+            "import argparse\n"
+            "\n"
+            "def serve(args):\n"
+            "    return args\n"
+            "\n"
+            "def unused_command(args):\n"
+            "    return args\n"
+            "\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.set_defaults(func=serve)\n"
+            "args = parser.parse_args()\n"
+            "args.func(args)\n"
+        })
+        assert "serve" not in names
+        assert "unused_command" in names
+
     def test_sorted_output(self, tmp_path):
         """Results are sorted by file path then line number."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         file_b = project / "b.py"
         file_b.write_text(
@@ -461,24 +734,107 @@ class TestFindDeadCode:
             "    pass\n"
         )
 
-        dead = list(find_dead_code(str(project)))
+        dead = list(find_dead_code(str(project), unused_modules=False))
         # Should be sorted: a.py first, then b.py, then by line within file
         assert len(dead) >= 3
         locations = [(d.file_path, d.line) for d in dead]
         assert locations == sorted(locations)
 
-    def test_only_top_level_symbols(self, tmp_path):
-        """Only top-level symbols are checked, not nested methods."""
+    def test_private_methods_are_checked_for_live_classes(self, tmp_path):
+        """Unreferenced private methods on otherwise-live classes are dead."""
         names = dead_names(tmp_path, {"main.py":
             "class MyClass:\n"
-            "    def unused_method(self):\n"
+            "    def _unused_method(self):\n"
+            "        pass\n"
+            "    def public_extension_hook(self):\n"
             "        pass\n"
             "\n"
             "obj = MyClass()\n"
         })
-        # unused_method is nested (depth > 1); MyClass is instantiated.
-        assert "unused_method" not in names
+        assert "_unused_method" in names
+        # Public methods remain conservative because protocols/subclasses may call them.
+        assert "public_extension_hook" not in names
         assert "MyClass" not in names
+
+    def test_referenced_private_method_is_not_dead(self, tmp_path):
+        names = dead_names(tmp_path, {"main.py":
+            "class MyClass:\n"
+            "    def run(self):\n"
+            "        return self._helper()\n"
+            "\n"
+            "    def _helper(self):\n"
+            "        return 1\n"
+            "\n"
+            "obj = MyClass()\n"
+            "obj.run()\n"
+        })
+        assert "_helper" not in names
+
+    def test_private_method_callback_reference_is_not_dead(self, tmp_path):
+        names = dead_names(tmp_path, {"main.py":
+            "class Service:\n"
+            "    def callbacks(self):\n"
+            "        return [self._helper]\n"
+            "\n"
+            "    def _helper(self):\n"
+            "        return 1\n"
+            "\n"
+            "Service().callbacks()\n"
+        })
+        assert "_helper" not in names
+
+    def test_private_method_name_suffix_does_not_count_as_reference(self, tmp_path):
+        names = dead_names(tmp_path, {"main.py":
+            "class Service:\n"
+            "    def run(self):\n"
+            "        return self.other_helper()\n"
+            "\n"
+            "    def _helper(self):\n"
+            "        return 1\n"
+            "\n"
+            "    def other_helper(self):\n"
+            "        return 2\n"
+            "\n"
+            "Service().run()\n"
+        })
+        assert "_helper" in names
+
+    def test_inherited_private_method_call_keeps_base_method_alive(self, tmp_path):
+        names = dead_names(tmp_path, {"main.py":
+            "class Base:\n"
+            "    def _helper(self):\n"
+            "        return 1\n"
+            "\n"
+            "class Child(Base):\n"
+            "    def run(self):\n"
+            "        return self._helper()\n"
+            "\n"
+            "Child().run()\n"
+        })
+        assert "_helper" not in names
+
+    def test_metadata_method_target_keeps_class_and_module_alive(self, tmp_path):
+        from emend.transform import DeadModule, find_dead_code
+
+        project = make_project(tmp_path, {
+            "pyproject.toml": (
+                "[project]\nname = 'sample'\nversion = '0'\n"
+                "[project.scripts]\nsample = 'sample.cli:App.run'\n"
+            ),
+            "src/sample/__init__.py": "",
+            "src/sample/cli.py": (
+                "class App:\n"
+                "    def run(self):\n"
+                "        return 0\n"
+            ),
+        })
+        results = list(find_dead_code(
+            str(project), show_last_reference=False,
+        ))
+        assert "App" not in {item.name for item in results}
+        assert "sample.cli" not in {
+            item.module_name for item in results if isinstance(item, DeadModule)
+        }
 
 
 class TestDeadCodeCLI:
@@ -486,8 +842,7 @@ class TestDeadCodeCLI:
 
     def test_cli_finds_dead_code(self, tmp_path, run_emend_cmd):
         """CLI command reports dead code."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -506,8 +861,7 @@ class TestDeadCodeCLI:
 
     def test_cli_json_output(self, tmp_path, run_emend_cmd):
         """CLI --json produces valid JSON output."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -525,8 +879,7 @@ class TestDeadCodeCLI:
 
     def test_cli_kind_filter(self, tmp_path, run_emend_cmd):
         """CLI --kind filters to specific symbol types."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -543,8 +896,7 @@ class TestDeadCodeCLI:
 
     def test_cli_no_dead_code(self, tmp_path, run_emend_cmd):
         """CLI reports 'No dead code found.' when everything is used."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -557,10 +909,9 @@ class TestDeadCodeCLI:
         result = run_emend_cmd(["deadcode", str(project)])
         assert "No dead code found" in result.stdout
 
-    def test_cli_include_private(self, tmp_path, run_emend_cmd):
-        """CLI --include-private flag includes private symbols."""
-        project = tmp_path / "project"
-        project.mkdir()
+    def test_cli_private_symbols_default_and_opt_out(self, tmp_path, run_emend_cmd):
+        """CLI reports private symbols unless --exclude-private is passed."""
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -568,31 +919,32 @@ class TestDeadCodeCLI:
             "    return 1\n"
         )
 
-        # Without --include-private
+        # Included by default
         result = run_emend_cmd(["deadcode", str(project)])
-        assert "_private_unused" not in result.stdout
-
-        # With --include-private
-        result = run_emend_cmd(["deadcode", str(project), "--include-private"])
         assert "_private_unused" in result.stdout
 
-    def test_cli_unused_modules(self, tmp_path, run_emend_cmd):
-        """CLI --unused-modules reports unimported module files."""
-        project = tmp_path / "project"
-        project.mkdir()
+        # Explicit opt-out
+        result = run_emend_cmd(["deadcode", str(project), "--exclude-private"])
+        assert "_private_unused" not in result.stdout
+
+    def test_cli_unused_modules_default_and_opt_out(self, tmp_path, run_emend_cmd):
+        """CLI reports unimported modules unless --no-unused-modules is passed."""
+        project = make_project_dir(tmp_path)
 
         (project / "used.py").write_text("VALUE = 1\n")
         (project / "main.py").write_text("from used import VALUE\nprint(VALUE)\n")
         (project / "orphan.py").write_text("VALUE = 2\n")
 
-        result = run_emend_cmd(["deadcode", str(project), "--unused-modules"])
+        result = run_emend_cmd(["deadcode", str(project)])
         assert "orphan (module)" in result.stdout
         assert "used (module)" not in result.stdout
 
+        result = run_emend_cmd(["deadcode", str(project), "--no-unused-modules"])
+        assert "orphan (module)" not in result.stdout
+
     def test_cli_unused_modules_json(self, tmp_path, run_emend_cmd):
         """CLI JSON includes module entries when --unused-modules is enabled."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "main.py").write_text("print('hi')\n")
         (project / "orphan.py").write_text("VALUE = 2\n")
 
@@ -609,149 +961,60 @@ class TestExcludeReferencesFrom:
         """References in excluded directories are ignored."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
-        tests_dir = project / "tests"
-        tests_dir.mkdir()
+        project, _tests_dir = make_test_reference_project(tmp_path)
 
-        lib_file = project / "lib.py"
-        lib_file.write_text(
-            "def only_tested():\n"
-            "    return 42\n"
-        )
-
-        test_file = tests_dir / "test_lib.py"
-        test_file.write_text(
-            "from lib import only_tested\n"
-            "\n"
-            "def test_it():\n"
-            "    assert only_tested() == 42\n"
-        )
-
-        # Without exclusion: not dead (test references it)
+        # Test references are excluded by default.
         dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
-        assert "only_tested" not in dead_names
-
-        # With exclusion: dead (test dir references are ignored)
-        dead = list(find_dead_code(
-            str(project),
-            exclude_references_from=[str(tests_dir)],
-            show_last_reference=False,
-        ))
         dead_names = {d.name for d in dead}
         assert "only_tested" in dead_names
 
-    def test_cli_exclude_references_from(self, tmp_path, run_emend_cmd):
-        """CLI --exclude-references-from works."""
-        project = tmp_path / "project"
-        project.mkdir()
-        tests_dir = project / "tests"
-        tests_dir.mkdir()
+        # Opting test references back in keeps the symbol alive.
+        dead = list(find_dead_code(
+            str(project),
+            exclude_test_references=False,
+            show_last_reference=False,
+        ))
+        dead_names = {d.name for d in dead}
+        assert "only_tested" not in dead_names
 
-        lib_file = project / "lib.py"
-        lib_file.write_text(
-            "def only_tested():\n"
-            "    return 42\n"
+    @pytest.mark.parametrize("exclude_tests", [False, True], ids=["included", "excluded"])
+    def test_cli_test_reference_controls(
+        self, tmp_path, run_emend_cmd, exclude_tests,
+    ):
+        project, tests_dir = make_test_reference_project(tmp_path)
+        args = [
+            "deadcode", str(project), "--include-test-references",
+            "--no-last-reference", "--no-unused-modules",
+        ]
+        if exclude_tests:
+            args.extend(["--exclude-references-from", str(tests_dir)])
+
+        result = run_emend_cmd(args)
+        assert ("only_tested" in result.stdout) is exclude_tests
+
+    @pytest.mark.parametrize(
+        ("excluded_dir", "expect_dead"),
+        [("legacy", False), ("tests", True)],
+    )
+    def test_excluded_references_affect_test_only_module(
+        self, tmp_path, excluded_dir, expect_dead,
+    ):
+        project, tests_dir = make_test_reference_project(
+            tmp_path, module="helper", function="do_it",
         )
+        excluded = tests_dir
+        if excluded_dir == "legacy":
+            excluded = project / "legacy"
+            excluded.mkdir()
+            (excluded / "old.py").write_text("X = 1\n")
 
-        test_file = tests_dir / "test_lib.py"
-        test_file.write_text(
-            "from lib import only_tested\n"
-            "\n"
-            "def test_it():\n"
-            "    assert only_tested() == 42\n"
+        modules = dead_module_names(
+            project,
+            show_last_reference=False,
+            exclude_references_from=[str(excluded)],
+            exclude_test_references=False,
         )
-
-        result = run_emend_cmd([
-            "deadcode", str(project),
-            "--exclude-references-from", str(tests_dir),
-            "--no-last-reference",
-        ])
-        assert "only_tested" in result.stdout
-
-    def test_unrelated_exclude_keeps_test_module_references(self, tmp_path):
-        """Excluding an unrelated path must not drop test-file references
-        in the unused-modules analysis.
-
-        A module imported only from a test file should still count as
-        referenced when ``--exclude-references-from`` targets an unrelated
-        directory (e.g. ``legacy/``), not the tests directory.
-        """
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-        (project / "pyproject.toml").write_text(
-            "[project]\nname = 'x'\nversion = '0'\n"
-        )
-
-        # helper.py is imported ONLY from a test file.
-        (project / "helper.py").write_text("def do_it():\n    return 1\n")
-
-        legacy = project / "legacy"
-        legacy.mkdir()
-        (legacy / "old.py").write_text("X = 1\n")
-
-        tests_dir = project / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test_helper.py").write_text(
-            "from helper import do_it\n"
-            "\n"
-            "def test_it():\n"
-            "    assert do_it() == 1\n"
-        )
-
-        # Excluding an unrelated directory (legacy/, not tests/) must leave
-        # the test-file import intact, so helper is NOT an unused module.
-        modules = {
-            m.module_name
-            for m in find_dead_code(
-                str(project),
-                show_last_reference=False,
-                unused_modules=True,
-                exclude_references_from=[str(legacy)],
-            )
-            if getattr(m, "kind", None) == "module" or m.__class__.__name__ == "DeadModule"
-        }
-        assert "helper" not in modules
-
-    def test_exclude_tests_reports_test_only_module(self, tmp_path):
-        """Excluding the tests directory *should* report a test-only module.
-
-        Complements the unrelated-exclude case: when the exclude pattern
-        actually matches the test file, its import stops counting and the
-        module is surfaced as unused.
-        """
-        from emend.transform import find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-        (project / "pyproject.toml").write_text(
-            "[project]\nname = 'x'\nversion = '0'\n"
-        )
-        (project / "helper.py").write_text("def do_it():\n    return 1\n")
-
-        tests_dir = project / "tests"
-        tests_dir.mkdir()
-        (tests_dir / "test_helper.py").write_text(
-            "from helper import do_it\n"
-            "\n"
-            "def test_it():\n"
-            "    assert do_it() == 1\n"
-        )
-
-        modules = {
-            m.module_name
-            for m in find_dead_code(
-                str(project),
-                show_last_reference=False,
-                unused_modules=True,
-                exclude_references_from=[str(tests_dir)],
-            )
-            if m.__class__.__name__ == "DeadModule"
-        }
-        assert "helper" in modules
+        assert ("helper" in modules) is expect_dead
 
 
 class TestStringsCountAsReferences:
@@ -761,8 +1024,7 @@ class TestStringsCountAsReferences:
         """String containing symbol name prevents dead-code flagging."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -792,8 +1054,7 @@ class TestStringsCountAsReferences:
         """Names <= 3 chars are not matched in strings to avoid noise."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -815,8 +1076,7 @@ class TestStringsCountAsReferences:
         """A name appearing only in a comment must NOT keep the symbol alive."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -841,8 +1101,7 @@ class TestStringsCountAsReferences:
         """A name appearing only in a comment in the same file stays dead."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -863,8 +1122,7 @@ class TestStringsCountAsReferences:
         """A name inside a genuine string literal still suppresses (cross-file)."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         mod_file = project / "mod.py"
         mod_file.write_text(
@@ -886,8 +1144,7 @@ class TestStringsCountAsReferences:
 
     def test_cli_no_strings(self, tmp_path, run_emend_cmd):
         """CLI --no-strings disables string-based reference detection."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -917,8 +1174,7 @@ class TestNoqaDeadcode:
         """# noqa: emend:deadcode on the definition line suppresses flagging."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -938,8 +1194,7 @@ class TestNoqaDeadcode:
         """A bare # noqa suppresses all rules including deadcode."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -959,8 +1214,7 @@ class TestShowLastReference:
         """With show_last_reference=False, no git info is attached."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -977,8 +1231,7 @@ class TestShowLastReference:
         import subprocess
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         env = {
             "HOME": str(tmp_path),
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -1013,10 +1266,9 @@ class TestDeadCodeLint:
 
     def test_lint_deadcode_config(self, tmp_path):
         """Lint config with deadcode section triggers dead code analysis."""
-        from emend.lint import load_rules, run_lint, DeadCodeConfig
+        from emend.lint import load_rules, run_lint
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -1051,6 +1303,9 @@ class TestDeadCodeLint:
         _, _, dc_config = load_deadcode_config(tmp_path, True)
         assert dc_config is not None
         assert dc_config.enabled is True
+        assert dc_config.include_private is True
+        assert dc_config.exclude_test_references is True
+        assert dc_config.unused_modules is True
 
     def test_lint_deadcode_with_options(self, tmp_path):
         """deadcode config supports all options."""
@@ -1059,21 +1314,24 @@ class TestDeadCodeLint:
             "kind": "function",
             "include-private": True,
             "exclude-references-from": ["tests/"],
+            "exclude-test-references": False,
             "strings-count-as-references": False,
+            "unused-modules": False,
             "message": "Custom dead code message",
         })
         assert dc_config.kind == "function"
         assert dc_config.include_private is True
         assert dc_config.exclude_references_from == ["tests/"]
+        assert dc_config.exclude_test_references is False
         assert dc_config.strings_count_as_references is False
+        assert dc_config.unused_modules is False
         assert dc_config.message == "Custom dead code message"
 
     def test_lint_deadcode_disabled(self, tmp_path):
         """deadcode: {enabled: false} does not run analysis."""
         from emend.lint import load_rules, run_lint
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -1101,8 +1359,7 @@ class TestDeadCodeLint:
         """# noqa: emend:deadcode suppresses lint violations too."""
         from emend.lint import load_rules, run_lint
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
         main_file.write_text(
@@ -1299,8 +1556,7 @@ class TestEntryPointConfig:
         """Lint engine passes entry-point-decorators to find_dead_code."""
         from emend.lint import load_rules, run_lint
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         (project / "mod.py").write_text(
             "def my_handler(f):\n"
@@ -1337,8 +1593,7 @@ class TestEntryPointConfig:
 
     def test_cli_entry_point_decorator(self, tmp_path, run_emend_cmd):
         """CLI --entry-point-decorator excludes decorated symbols."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         (project / "mod.py").write_text(
             "def my_handler(f):\n"
@@ -1362,8 +1617,7 @@ class TestEntryPointConfig:
 
     def test_cli_entry_point_name(self, tmp_path, run_emend_cmd):
         """CLI --entry-point-name excludes named symbols."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
 
         (project / "mod.py").write_text(
             "def plugin_init():\n"
@@ -1389,8 +1643,7 @@ class TestExcludePaths:
         """Symbols in excluded directories are not reported."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         scripts = project / "scripts"
         scripts.mkdir()
 
@@ -1438,8 +1691,7 @@ class TestExcludePaths:
 
     def test_cli_exclude_path(self, tmp_path, run_emend_cmd):
         """CLI --exclude-path excludes directories from analysis."""
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         scripts = project / "scripts"
         scripts.mkdir()
 
@@ -1464,8 +1716,7 @@ class TestExcludePaths:
         """Glob patterns like **/scripts/ work in exclude-paths."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         nested = project / "pkg" / "scripts"
         nested.mkdir(parents=True)
 
@@ -1491,8 +1742,7 @@ class TestExcludePaths:
         """Single * glob matches within one path segment."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         gen_a = project / "gen_alpha"
         gen_a.mkdir()
         lib = project / "lib"
@@ -1524,8 +1774,7 @@ class TestExcludeReferencesFromGlob:
         """Glob patterns in exclude-references-from work."""
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         nested_tests = project / "pkg" / "tests"
         nested_tests.mkdir(parents=True)
 
@@ -1540,8 +1789,11 @@ class TestExcludeReferencesFromGlob:
             "    assert only_tested() == 42\n"
         )
 
-        # Without exclusion: not dead
-        dead = list(find_dead_code(str(project), show_last_reference=False))
+        # Explicitly counting test references keeps the symbol alive.
+        dead = list(find_dead_code(
+            str(project), show_last_reference=False,
+            exclude_test_references=False,
+        ))
         dead_names = {d.name for d in dead}
         assert "only_tested" not in dead_names
 
@@ -1600,8 +1852,7 @@ class TestDeadCodeUnreachableBlocks:
         import textwrap
         from emend.transform import find_dead_code, DeadBlock
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def foo():
                 return 42
@@ -1619,8 +1870,7 @@ class TestDeadCodeUnreachableBlocks:
         import textwrap
         from emend.transform import find_dead_code, DeadBlock
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def bar():
                 raise ValueError("oops")
@@ -1636,8 +1886,7 @@ class TestDeadCodeUnreachableBlocks:
         import textwrap
         from emend.transform import find_dead_code, DeadBlock
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def baz():
                 x = 1
@@ -1656,8 +1905,7 @@ class TestDeadCodeUnreachableBlocks:
         from typer.testing import CliRunner
         from emend.cli import app
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def foo():
                 return 42
@@ -1687,8 +1935,7 @@ class TestDeadCodeUnreachableBlocks:
         import textwrap
         from emend.transform import find_dead_code, DeadSymbol
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def helper():
                 pass
@@ -1712,8 +1959,7 @@ class TestDeadCodeUnreachableBlocks:
         import textwrap
         from emend.transform import find_dead_code, DeadBlock
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "example.py").write_text(textwrap.dedent("""\
             def execute_with_retry():
                 for attempt in range(3):
@@ -1806,8 +2052,7 @@ class TestExtractAllExportsText:
         """
         from emend.transform import find_dead_code
 
-        project = tmp_path / "project"
-        project.mkdir()
+        project = make_project_dir(tmp_path)
         (project / "mod.py").write_text(
             '__all__ = (\n'
             '    "public_alpha",\n'

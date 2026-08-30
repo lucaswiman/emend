@@ -545,7 +545,8 @@ operations:
 
 ```
 deadcode src/
-deadcode src/ --kind function --include-private
+deadcode src/ --kind function --exclude-private
+deadcode src/ --include-test-references --no-unused-modules
 deadcode src/ --exclude-path "tests/**"
 deadcode src/ --entry-point-decorator "@app.route"
 deadcode src/ --no-strings --no-last-reference

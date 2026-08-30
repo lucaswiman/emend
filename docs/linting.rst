@@ -471,7 +471,9 @@ Full configuration
    deadcode:
      enabled: true
      kind: function                           # "function", "class", or omit for all
-     include-private: false                   # Include _private symbols
+     include-private: true                    # Include private symbols/methods
+     exclude-test-references: true            # Ignore test refs (default)
+     unused-modules: true                     # Report unimported modules (default)
      exclude-references-from:                 # Ignore refs from these dirs
        - tests/
        - "**/generated/"                       # Glob patterns supported
@@ -487,41 +489,46 @@ Full configuration
        - frontends/devtools/
        - "**/migrations/"                      # Glob patterns supported
 
-+---------------------------------+----------+-----------------------------------------------+
-| Field                           | Default  | Description                                   |
-+=================================+==========+===============================================+
-| ``enabled``                     | ``true`` | Enable/disable dead code detection            |
-+---------------------------------+----------+-----------------------------------------------+
-| ``kind``                        | (all)    | Filter: ``function`` or ``class``             |
-+---------------------------------+----------+-----------------------------------------------+
-| ``include-private``             | ``false``| Include ``_private`` symbols                  |
-+---------------------------------+----------+-----------------------------------------------+
-| ``exclude-references-from``     | (none)   | Directories to ignore when scanning for refs. |
-|                                 |          | Supports glob patterns (``*``, ``**``, ``?``).|
-+---------------------------------+----------+-----------------------------------------------+
-| ``strings-count-as-references`` | ``true`` | Treat string literals containing the symbol   |
-|                                 |          | name as references                            |
-+---------------------------------+----------+-----------------------------------------------+
-| ``message``                     | "Symbol  | Custom message prefix for violations          |
-|                                 | appears  |                                               |
-|                                 | to be    |                                               |
-|                                 | unused"  |                                               |
-+---------------------------------+----------+-----------------------------------------------+
-| ``entry-point-decorators``      | (none)   | Additional decorator names (or basenames)     |
-|                                 |          | that mark a symbol as an entry point.         |
-|                                 |          | Symbols with these decorators are never       |
-|                                 |          | flagged. Both full names (``pkg.deco``) and   |
-|                                 |          | basenames (``deco``) are matched.             |
-+---------------------------------+----------+-----------------------------------------------+
-| ``entry-point-names``           | (none)   | Additional function/class names to treat as   |
-|                                 |          | entry points. Symbols with these names are    |
-|                                 |          | never flagged as dead code.                   |
-+---------------------------------+----------+-----------------------------------------------+
-| ``exclude-paths``               | (none)   | Directories to exclude entirely from dead     |
-|                                 |          | code analysis. Symbols defined in these       |
-|                                 |          | paths are never reported. Supports glob       |
-|                                 |          | patterns (``*``, ``**``, ``?``).              |
-+---------------------------------+----------+-----------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 12 60
+
+   * - Field
+     - Default
+     - Description
+   * - ``enabled``
+     - ``true``
+     - Enable or disable dead-code detection.
+   * - ``kind``
+     - (all)
+     - Filter to ``function`` or ``class`` symbols.
+   * - ``include-private``
+     - ``true``
+     - Include private symbols and methods.
+   * - ``exclude-test-references``
+     - ``true``
+     - Ignore references originating in test files.
+   * - ``unused-modules``
+     - ``true``
+     - Report Python modules with no incoming import.
+   * - ``exclude-references-from``
+     - (none)
+     - Directories to ignore when scanning for references. Supports glob patterns (``*``, ``**``, ``?``).
+   * - ``strings-count-as-references``
+     - ``true``
+     - Treat string literals containing the symbol name as references.
+   * - ``message``
+     - ``"Symbol appears to be unused"``
+     - Custom message prefix for violations.
+   * - ``entry-point-decorators``
+     - (none)
+     - Additional decorator names, or basenames, that mark a symbol as an entry point. Both full names such as ``pkg.deco`` and basenames such as ``deco`` are matched.
+   * - ``entry-point-names``
+     - (none)
+     - Additional function or class names to treat as entry points.
+   * - ``exclude-paths``
+     - (none)
+     - Paths to exclude entirely from dead-code analysis. Supports glob patterns (``*``, ``**``, ``?``).
 
 How it works
 ~~~~~~~~~~~~
@@ -534,7 +541,7 @@ Dead code detection uses tree-sitter-based scope analysis for scope-aware analys
 
 It automatically detects ``src/`` layout projects (via ``pyproject.toml``) and computes correct qualified names.
 
-Automatic exclusions are the same as the ``emend analyze deadcode`` CLI command: dunders, test functions, decorated entry points, ``__all__`` members, and private symbols.  Use ``entry-point-decorators`` and ``entry-point-names`` to extend the built-in heuristics with project-specific exclusions.
+Automatic exclusions are the same as the ``emend analyze deadcode`` CLI command: dunders, test functions, decorated or packaged entry points, ``__all__`` members, and executable Python modules. Private symbols/methods and unused modules are included by default, while references from tests are ignored. Use ``entry-point-decorators`` and ``entry-point-names`` to extend the built-in heuristics with project-specific exclusions.
 
 Interaction with rules
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -566,11 +573,11 @@ Dead code detection is also available as a standalone command with additional op
 .. code-block:: bash
 
    emend analyze deadcode src/
-   emend analyze deadcode src/ --exclude-references-from tests/ --json
+   emend analyze deadcode src/ --include-test-references --json
    emend analyze deadcode . --entry-point-decorator my_framework.handler
    emend analyze deadcode . --entry-point-name plugin_init
    emend analyze deadcode . --exclude-path frontends/devtools/
-   emend analyze deadcode . --unused-modules
+   emend analyze deadcode . --exclude-private --no-unused-modules
 
 See :doc:`commands` for the full ``analyze deadcode`` command reference.
 

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Dead code
+
+- Made `emend deadcode` cold starts fact-only: type inference, editor FTS, and
+  duplicate-code caching stay lazy, and empty fact databases are rebuilt
+  instead of triggering the slow in-memory fallback.
+- Dead-code results now include unused Python modules and private symbols and
+  methods by default, while references from tests are ignored by default.
+  Use `--no-unused-modules`, `--exclude-private`, or
+  `--include-test-references` to opt out.
+- Added packaging-metadata and Python CLI entry-point recognition, plus
+  import/constructor and cached-type resolution for framework decorator
+  receivers such as FastAPI routers and Typer applications.
+
 ## 0.4.1 (2026-07-09)
 
 ### Performance

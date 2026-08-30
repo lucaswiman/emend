@@ -1,11 +1,12 @@
 """Dead code detection: symbols, blocks, modules, and safe deletion."""
 from __future__ import annotations
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
+import re as _re
 import time
 
 if TYPE_CHECKING:
@@ -46,6 +47,56 @@ class DeadModule:
     reason: str
 
 
+def dead_code_result_details(
+    result: DeadSymbol | DeadBlock | DeadModule,
+) -> tuple[str, int, str, str]:
+    """Return ``(name, line, witness, reason)`` for any dead-code result."""
+    if isinstance(result, DeadBlock):
+        return (
+            f"unreachable block in {result.func_qn}",
+            result.start_line,
+            f"{result.file_path}:{result.start_line}",
+            "unreachable code",
+        )
+    if isinstance(result, DeadModule):
+        return result.module_name, 1, result.file_path, result.reason
+    return result.name, result.line, result.selector, result.reason
+
+
+def dead_code_result_to_dict(
+    result: DeadSymbol | DeadBlock | DeadModule,
+) -> dict[str, object]:
+    """Serialize one dead-code result consistently across CLI and MCP."""
+    if isinstance(result, DeadBlock):
+        return {
+            "file_path": result.file_path,
+            "func_qn": result.func_qn,
+            "kind": "unreachable_block",
+            "start_line": result.start_line,
+            "end_line": result.end_line,
+            "reason": "unreachable code",
+        }
+    if isinstance(result, DeadModule):
+        return {
+            "file_path": result.file_path,
+            "name": result.name,
+            "module_name": result.module_name,
+            "kind": "module",
+            "reason": result.reason,
+        }
+    data: dict[str, object] = {
+        "file_path": result.file_path,
+        "name": result.name,
+        "kind": result.kind,
+        "line": result.line,
+        "selector": result.selector,
+        "reason": result.reason,
+    }
+    if result.last_reference_commit:
+        data["last_reference_commit"] = result.last_reference_commit
+    return data
+
+
 # Decorator prefixes that indicate a symbol is an entry point / framework hook.
 # These are kept as fallbacks; the config-driven path via _get_entry_point_config()
 # is the primary source.
@@ -80,6 +131,22 @@ _ENTRY_POINT_NAMES = frozenset({
     'setUpModule', 'tearDownModule',
 })
 
+# Receiver types whose methods register framework entry points.  The
+# config-driven copy in languages/python/config.toml is authoritative; this
+# fallback keeps plugin-less/unknown-language use conservative and useful.
+_ENTRY_POINT_DECORATOR_TYPE_METHODS = {
+    "fastapi.FastAPI": frozenset({
+        "api_route", "get", "post", "put", "delete", "patch", "head",
+        "options", "websocket", "websocket_route", "exception_handler",
+        "on_event", "middleware",
+    }),
+    "fastapi.APIRouter": frozenset({
+        "api_route", "get", "post", "put", "delete", "patch", "head",
+        "options", "websocket", "websocket_route",
+    }),
+    "typer.Typer": frozenset({"callback", "command"}),
+}
+
 
 @lru_cache(maxsize=8)
 def _get_entry_point_config(language: str = "python") -> dict:
@@ -91,6 +158,7 @@ def _get_entry_point_config(language: str = "python") -> dict:
         ``names``              — frozenset of conventional entry-point function names.
         ``name_prefixes``      — list of name prefixes that mark entry points.
         ``has_dunders``        — bool: whether dunder names are entry points.
+        ``decorator_type_methods`` — receiver type to registering methods.
 
     Falls back to the hardcoded Python frozensets for unknown languages.
     """
@@ -98,12 +166,19 @@ def _get_entry_point_config(language: str = "python") -> dict:
     config = load_config(language)
     dc = config.get("dead_code", {})
     if dc:
+        raw_type_methods = dc.get("entry_point_decorator_type_methods", {})
+        if not isinstance(raw_type_methods, dict):
+            raw_type_methods = {}
         return {
             "decorators": frozenset(dc.get("entry_point_decorators", [])),
             "decorator_basenames": frozenset(dc.get("entry_point_decorator_basenames", [])),
             "names": frozenset(dc.get("entry_point_names", [])),
             "name_prefixes": list(dc.get("entry_point_name_prefixes", [])),
             "has_dunders": bool(dc.get("has_dunders", False)),
+            "decorator_type_methods": {
+                str(type_name): frozenset(str(method) for method in methods)
+                for type_name, methods in raw_type_methods.items()
+            },
         }
     # Fallback for unknown languages: use Python defaults
     return {
@@ -112,6 +187,7 @@ def _get_entry_point_config(language: str = "python") -> dict:
         "names": _ENTRY_POINT_NAMES,
         "name_prefixes": ["test_", "Test", "describe_"],
         "has_dunders": True,
+        "decorator_type_methods": _ENTRY_POINT_DECORATOR_TYPE_METHODS,
     }
 
 
@@ -211,6 +287,7 @@ def _string_literal_filter(
     scan_root: str,
     all_files: bool,
     exclude_references_from: list[str] | None,
+    exclude_test_references: bool,
 ) -> list["DeadSymbol"]:
     """Filter out dead code candidates referenced inside string literals.
 
@@ -248,9 +325,19 @@ def _string_literal_filter(
                     pattern = pattern.rstrip("/") + "/*"
                 _exclude_globs.append(pattern)
             else:
-                _exclude_prefixes.append(str(Path(pattern).resolve()))
+                raw_path = Path(pattern)
+                _exclude_prefixes.append(str(
+                    raw_path.resolve()
+                    if raw_path.is_absolute()
+                    else (Path(scan_root) / raw_path).resolve()
+                ))
 
     def _is_excluded_ref(path: str) -> bool:
+        if exclude_test_references:
+            from .impact import _is_test_file
+
+            if _is_test_file(path):
+                return True
         if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
             return True
         if _exclude_globs:
@@ -308,8 +395,6 @@ def _string_literal_filter(
 
     return [d for d in candidates if d.name not in referenced_names]
 
-
-import re as _re
 
 # Caching decorators that may need invalidation on mutations
 _CACHE_DECORATORS = frozenset({
@@ -774,18 +859,291 @@ def semantic_context(
     )
 
 
+def _resolve_import_identity(name: str, imports: dict[str, str]) -> str:
+    """Resolve the leading name component through a file's import table."""
+    root, dot, suffix = name.partition(".")
+    imported = imports.get(root)
+    if imported is None:
+        return name
+    return f"{imported}.{suffix}" if dot else imported
+
+
+def _python_metadata_entry_points(project_root: str) -> set[str]:
+    """Read exact Python callable entry points from packaging metadata."""
+    targets: set[str] = set()
+
+    def _add(raw_target: object) -> None:
+        if isinstance(raw_target, dict):
+            raw_target = raw_target.get("callable")
+        if not isinstance(raw_target, str):
+            return
+        target = raw_target.strip().split(maxsplit=1)[0]
+        module, separator, symbol = target.partition(":")
+        if separator and module and symbol:
+            # A dotted callable (``pkg.cli:App.run``) also makes its owning
+            # class live. Module liveness is derived by qualified-name prefix.
+            symbol_parts = [part for part in symbol.split(".") if part]
+            for index in range(1, len(symbol_parts) + 1):
+                targets.add(f"{module}.{'.'.join(symbol_parts[:index])}")
+
+    pyproject = Path(project_root) / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+
+            with pyproject.open("rb") as handle:
+                config = tomllib.load(handle)
+            project = config.get("project", {})
+            if not isinstance(project, Mapping):
+                project = {}
+            for table_name in ("scripts", "gui-scripts"):
+                table = project.get(table_name, {})
+                if isinstance(table, dict):
+                    for value in table.values():
+                        _add(value)
+            groups = project.get("entry-points", {})
+            if isinstance(groups, dict):
+                for table in groups.values():
+                    if isinstance(table, dict):
+                        for value in table.values():
+                            _add(value)
+            tool = config.get("tool", {})
+            poetry = tool.get("poetry", {}) if isinstance(tool, Mapping) else {}
+            poetry_scripts = (
+                poetry.get("scripts", {}) if isinstance(poetry, Mapping) else {}
+            )
+            if isinstance(poetry_scripts, dict):
+                for value in poetry_scripts.values():
+                    _add(value)
+        except (OSError, ValueError, TypeError):
+            logger.debug("Could not read entry points from %s", pyproject, exc_info=True)
+
+    setup_cfg = Path(project_root) / "setup.cfg"
+    if setup_cfg.is_file():
+        try:
+            import configparser
+
+            config = configparser.ConfigParser()
+            config.read(setup_cfg)
+            if config.has_section("options.entry_points"):
+                for _group, definitions in config.items("options.entry_points"):
+                    for definition in definitions.splitlines():
+                        _name, separator, target = definition.partition("=")
+                        if separator:
+                            _add(target)
+        except (OSError, ValueError, configparser.Error):
+            logger.debug("Could not read entry points from %s", setup_cfg, exc_info=True)
+
+    return targets
+
+
+def _has_python_main_guard(file_path: Path) -> bool:
+    """Return whether a Python module has an executable ``__main__`` guard."""
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        if "__name__" not in source or "__main__" not in source:
+            return False
+        from .patterns import find_pattern
+
+        matches = find_pattern(
+            "if $COND:\n    $BODY", str(file_path), source_override=source,
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
+    except Exception:
+        logger.debug("Main-guard scan failed for %s", file_path, exc_info=True)
+        return False
+    for match in matches:
+        if match.col != 0:
+            continue
+        condition = match.captures.get("COND", "").replace(" ", "")
+        while condition.startswith("(") and condition.endswith(")"):
+            condition = condition[1:-1]
+        if condition in {
+            "__name__=='__main__'",
+            '__name__=="__main__"',
+            "'__main__'==__name__",
+            '"__main__"==__name__',
+        }:
+            return True
+    return False
+
+
+def _typed_decorator_entry_points(
+    graph,
+    project_root: str,
+    type_methods: dict[str, set[str] | frozenset[str]],
+) -> set[str]:
+    """Resolve decorated entry points by receiver type without inferring types.
+
+    Direct constructor assignments are followed through structured imports
+    using tree-sitter patterns.  If an explicit type index already exists, it
+    is consumed read-only; a cache miss never starts a type checker.
+    """
+    if not type_methods:
+        return set()
+
+    try:
+        decorator_rows = graph._client.run(
+            "?[qn, fp, dec] := *decorator_on[qn, dec], "
+            "*symbol[qn, fp, _, _, _, _, _]"
+        )["rows"]
+    except Exception:
+        logger.debug("Typed decorator fact query failed", exc_info=True)
+        return set()
+
+    registered_methods = {
+        method for methods in type_methods.values() for method in methods
+    }
+    decorated_by_file: dict[str, list[tuple[str, str]]] = {}
+    for qn, file_path, decorator in decorator_rows:
+        if "." not in decorator or decorator.rsplit(".", 1)[-1] not in registered_methods:
+            continue
+        decorated_by_file.setdefault(file_path, []).append((qn, decorator))
+    if not decorated_by_file:
+        return set()
+
+    relevant_files = set(decorated_by_file)
+    try:
+        import_rows = graph._client.run(
+            "?[fp, mod, name, alias] := *import[fp, mod, name, _, alias]"
+        )["rows"]
+        type_rows = graph._client.run(
+            "?[fp, qn, ts] := *type_binding[qn, fp, _, _, ts]"
+        )["rows"]
+    except Exception:
+        logger.debug("Typed decorator support-fact query failed", exc_info=True)
+        return set()
+
+    imports_by_file: dict[str, dict[str, str]] = {}
+    for file_path, module, imported_name, alias in import_rows:
+        if file_path not in relevant_files:
+            continue
+        file_imports = imports_by_file.setdefault(file_path, {})
+        if imported_name:
+            local_name = alias or imported_name
+            identity = f"{module}.{imported_name}".strip(".")
+        else:
+            local_name = alias or module.split(".", 1)[0]
+            identity = module if alias else local_name
+        if local_name:
+            file_imports[local_name] = identity
+
+    graph_types_by_file: dict[str, list[tuple[str, str]]] = {}
+    for file_path, qn, type_name in type_rows:
+        if file_path in relevant_files:
+            graph_types_by_file.setdefault(file_path, []).append((qn, type_name))
+
+    known_types = set(type_methods)
+    resolved_entry_points: set[str] = set()
+    root = Path(project_root).resolve()
+
+    for file_path, decorators in decorated_by_file.items():
+        imports = imports_by_file.get(file_path, {})
+        receivers = {decorator.rsplit(".", 1)[0] for _, decorator in decorators}
+        receiver_types: dict[str, str] = {}
+
+        # Consume types already present in facts.db.
+        for binding_qn, raw_type in graph_types_by_file.get(file_path, []):
+            binding_name = binding_qn.rsplit(".", 1)[-1]
+            if binding_name not in receivers:
+                continue
+            resolved_type = _resolve_import_identity(raw_type, imports)
+            if resolved_type in known_types:
+                receiver_types[binding_name] = resolved_type
+
+        abs_path = Path(file_path)
+        if not abs_path.is_absolute():
+            abs_path = root / abs_path
+        try:
+            source = abs_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # Read a prior type index if available, but never populate it here.
+        try:
+            import hashlib
+            from emend.type_oracle import load_cached_file_types, parse_type_string
+
+            cached_types = load_cached_file_types(
+                abs_path,
+                project_root=root,
+                content_hash=hashlib.md5(
+                    source.encode("utf-8"), usedforsecurity=False,
+                ).hexdigest(),
+            )
+            if cached_types is not None:
+                for receiver in receivers:
+                    for binding in cached_types.types_for_name(receiver):
+                        parsed = parse_type_string(binding.raw_type)
+                        resolved_type = _resolve_import_identity(parsed.name, imports)
+                        if resolved_type in known_types:
+                            receiver_types[receiver] = resolved_type
+                            break
+        except Exception:
+            logger.debug("Cached decorator type lookup failed for %s", abs_path, exc_info=True)
+
+        # Follow ``receiver = ImportedType(...)`` and simple aliases using
+        # structural tree-sitter patterns.  No source regex parsing is used.
+        try:
+            from .patterns import find_pattern
+
+            assignments = find_pattern(
+                "$TARGET = $VALUE", str(abs_path), source_override=source,
+                not_inside="def",
+            )
+            calls = find_pattern(
+                "$FACTORY($...ARGS)", str(abs_path), source_override=source,
+                not_inside="def",
+            )
+        except Exception:
+            logger.debug("Decorator receiver scan failed for %s", abs_path, exc_info=True)
+            assignments = []
+            calls = []
+
+        constructor_types = {}
+        for call in calls:
+            factory = call.captures.get("FACTORY", "").strip()
+            identity = _resolve_import_identity(factory, imports)
+            if identity in known_types:
+                constructor_types[call.matched_text] = identity
+
+        changed = True
+        while changed:
+            changed = False
+            for assignment in assignments:
+                target = assignment.captures.get("TARGET", "").strip()
+                value = assignment.captures.get("VALUE", "").strip()
+                if not target or target in receiver_types:
+                    continue
+
+                resolved_type = receiver_types.get(value) or constructor_types.get(value)
+                if resolved_type is not None:
+                    receiver_types[target] = resolved_type
+                    changed = True
+
+        for symbol_qn, decorator in decorators:
+            receiver, method = decorator.rsplit(".", 1)
+            receiver_type = receiver_types.get(receiver)
+            if receiver_type and method in type_methods[receiver_type]:
+                resolved_entry_points.add(symbol_qn)
+
+    return resolved_entry_points
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
-    include_private: bool = False,
+    include_private: bool = True,
     exclude_references_from: list[str] | None = None,
+    exclude_test_references: bool = True,
     strings_count_as_references: bool = True,
     show_last_reference: bool = True,
     all_files: bool = False,
     entry_point_decorators: list[str] | None = None,
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
-    unused_modules: bool = False,
+    unused_modules: bool = True,
 ) -> Iterator[DeadSymbol | DeadBlock | DeadModule]:
     """Find potentially dead (unreferenced) code in a project.
 
@@ -796,10 +1154,13 @@ def find_dead_code(
     Args:
         project_path: Project root directory.
         kind: Optional filter: 'function', 'class', or None for all.
-        include_private: If True, include _private symbols (excluded by default).
+        include_private: If True (default), include _private symbols and
+            unreferenced private methods on otherwise-live classes.
         exclude_references_from: Directories/globs to exclude when scanning for
             references (e.g. ``["tests/"]``).  Symbols are still collected from
             these paths but references *in* them are ignored.
+        exclude_test_references: If True (default), references from recognized
+            test files do not keep production symbols or modules alive.
         strings_count_as_references: If True (default), string literals that
             contain the symbol name are treated as references.  This reduces
             false positives from dynamic dispatch, serialization, and similar.
@@ -816,14 +1177,16 @@ def find_dead_code(
             never flagged as dead code.
         exclude_paths: Directories to exclude entirely from dead code analysis.
             Symbols defined in these paths are never reported.
-        unused_modules: If True, also report Python module files that have no
-            incoming imports from non-excluded project files.
+        unused_modules: If True (default), also report Python module files that
+            have no incoming imports from non-excluded project files.
 
     Yields:
         DeadBlock items for unreachable code blocks, then DeadSymbol objects
         sorted by file path and line number, then optional DeadModule objects.
     """
-    from emend import emend_core as _rust
+    if kind not in {None, "function", "class"}:
+        raise ValueError("kind must be 'function', 'class', or None")
+
     from .project_iter import _find_project_root, _file_to_module, _collect_source_files, detect_project_languages
     from .refs import _get_or_build_fact_graph
     from .impact import _is_test_file
@@ -840,12 +1203,15 @@ def find_dead_code(
     all_ep_basenames: list[str] = []
     all_ep_names: list[str] = []
     all_ep_prefixes: list[str] = []
+    all_ep_type_methods: dict[str, set[str]] = {}
     for lang in (detected_langs or ["python"]):
         ep = _get_entry_point_config(lang)
         all_ep_decorators.extend(ep["decorators"])
         all_ep_basenames.extend(ep["decorator_basenames"])
         all_ep_names.extend(ep["names"])
         all_ep_prefixes.extend(ep["name_prefixes"])
+        for type_name, methods in ep["decorator_type_methods"].items():
+            all_ep_type_methods.setdefault(type_name, set()).update(methods)
     # Add user-supplied overrides
     if entry_point_decorators:
         all_ep_decorators.extend(entry_point_decorators)
@@ -857,7 +1223,7 @@ def find_dead_code(
 
     project_root_resolved = str(Path(_find_project_root(project_path)).resolve())
 
-    # Convert exclude_references_from to relative paths for the fact graph
+    # Convert exclude_references_from to relative paths for the fact graph.
     excl_ref_paths: list[str] | None = None
     excl_ref_segments: list[str] | None = None  # For ** glob patterns
     if exclude_references_from:
@@ -872,12 +1238,37 @@ def find_dead_code(
             elif "*" in excl_path or "?" in excl_path:
                 continue  # Complex globs not supported in Datalog
             else:
-                resolved = str(Path(excl_path).resolve())
+                raw_path = Path(excl_path)
+                resolved = str(
+                    raw_path.resolve()
+                    if raw_path.is_absolute()
+                    else (Path(project_root_resolved) / raw_path).resolve()
+                )
                 try:
                     rel = str(Path(resolved).relative_to(project_root_resolved))
                 except ValueError:
                     rel = resolved
                 excl_ref_paths.append(rel)
+
+    # Test references are ignored by default, but exact file matching avoids
+    # broad directory-name guesses (e.g. a production ``contest/`` package).
+    excluded_test_files: list[str] = []
+    if exclude_test_references:
+        try:
+            ref_files = graph._client.run(
+                "?[fp] := *reference[_, fp, _, _, _, _, _]"
+            )["rows"]
+            excluded_test_files = sorted({
+                file_path for (file_path,) in ref_files
+                if _is_test_file(str(Path(project_root_resolved) / file_path))
+            })
+        except Exception:
+            logger.debug("Could not enumerate test reference files", exc_info=True)
+
+    exact_entry_points = _python_metadata_entry_points(project_root_resolved)
+    exact_entry_points.update(_typed_decorator_entry_points(
+        graph, project_root_resolved, all_ep_type_methods,
+    ))
 
     raw_dead, raw_unreachable = graph.dead_code_unified(
         entry_point_decorators=all_ep_decorators + all_ep_basenames,
@@ -885,6 +1276,8 @@ def find_dead_code(
         entry_point_prefixes=all_ep_prefixes,
         exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
         exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
+        exclude_reference_files=excluded_test_files or None,
+        entry_point_qualified_names=sorted(exact_entry_points) or None,
     )
 
     # Build file content cache for noqa checking
@@ -958,6 +1351,7 @@ def find_dead_code(
     if strings_count_as_references:
         dead_symbols = _string_literal_filter(
             dead_symbols, scan_root, all_files, exclude_references_from,
+            exclude_test_references,
         )
 
     dead_symbols.sort(key=lambda symbol: (symbol.file_path, symbol.line))
@@ -986,8 +1380,10 @@ def find_dead_code(
         # the configured exclude patterns. Test files are not special-cased:
         # excluding an unrelated directory (e.g. legacy/) must not silently
         # drop test-file imports and produce false-positive "unused module"
-        # reports. To ignore test references, target the tests directory
-        # explicitly (e.g. --exclude-references-from tests/).
+        # reports. Test references are handled separately by the default
+        # ``exclude_test_references`` policy.
+        if exclude_test_references and _is_test_file(file_path):
+            return True
         if not exclude_references_from:
             return False
         import fnmatch
@@ -1027,8 +1423,8 @@ def find_dead_code(
             if (fp, loc_id) in needed_loc_keys:
                 block_loc_index.setdefault((fp, loc_id), (line, end_line))
 
-    # Yield unreachable blocks first
-    for ub in raw_unreachable:
+    # Yield unreachable blocks first when the caller requested all result kinds.
+    for ub in (raw_unreachable if kind is None else []):
         abs_fp = (
             str(Path(project_root_resolved) / ub.file_path)
             if not Path(ub.file_path).is_absolute()
@@ -1054,17 +1450,21 @@ def find_dead_code(
     if show_last_reference and dead_symbols:
         from concurrent.futures import ThreadPoolExecutor
 
-        def _git_lookup(d: DeadSymbol) -> tuple[DeadSymbol, str | None]:
-            return d, _get_last_reference_commit(d.file_path, d.name)
-
+        history_keys = list(dict.fromkeys(
+            (symbol.file_path, symbol.name) for symbol in dead_symbols
+        ))
         with ThreadPoolExecutor() as pool:
-            for d, commit in pool.map(_git_lookup, dead_symbols):
-                d.last_reference_commit = commit
-                yield d
+            commits = dict(zip(
+                history_keys,
+                pool.map(lambda key: _get_last_reference_commit(*key), history_keys),
+            ))
+        for symbol in dead_symbols:
+            symbol.last_reference_commit = commits[(symbol.file_path, symbol.name)]
+            yield symbol
     else:
         yield from dead_symbols
 
-    if not unused_modules:
+    if kind is not None or not unused_modules:
         return
 
     source_files = _collect_source_files(
@@ -1072,34 +1472,68 @@ def find_dead_code(
         language="python",
         git_tracked_only=not all_files,
     )
-    from emend.fact_graph import _extract_imports
-
     imported_targets: set[str] = set()
-    for abs_file in source_files:
-        abs_path = Path(abs_file).resolve()
-        if not abs_path.exists():
-            continue
-        if _reference_file_is_excluded(str(abs_path)):
-            continue
-        try:
-            content = abs_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        for imp in _extract_imports(str(abs_path), content):
-            imported_targets.add(imp.imported_module)
-            if imp.imported_name:
-                imported_targets.add(f"{imp.imported_module}.{imp.imported_name}")
+
+    def _record_import(importing_path: Path, module: str, name: str = "") -> None:
+        if module.startswith("."):
+            level = len(module) - len(module.lstrip("."))
+            importing_module = _file_to_module(
+                str(importing_path), project_root_resolved,
+            )
+            package_parts = importing_module.split(".")
+            if importing_path.name != "__init__.py":
+                package_parts = package_parts[:-1]
+            if level > 1:
+                package_parts = package_parts[:max(0, len(package_parts) - level + 1)]
+            suffix = module[level:]
+            if suffix:
+                package_parts.extend(suffix.split("."))
+            module = ".".join(package_parts)
+        if module:
+            imported_targets.add(module)
+            if name:
+                imported_targets.add(f"{module}.{name}")
+
+    source_file_set = {str(Path(path).resolve()) for path in source_files}
+    try:
+        import_rows = graph._client.run(
+            "?[fp, mod, name] := *import[fp, mod, name, _, _]"
+        )["rows"]
+        for file_path, module, imported_name in import_rows:
+            importing_path = Path(file_path)
+            if not importing_path.is_absolute():
+                importing_path = Path(project_root_resolved) / importing_path
+            importing_path = importing_path.resolve()
+            if str(importing_path) not in source_file_set:
+                continue
+            if _reference_file_is_excluded(str(importing_path)):
+                continue
+            _record_import(importing_path, module, imported_name)
+    except Exception:
+        # Compatibility fallback for an older/incomplete facts database.
+        logger.debug("Import fact query failed; reparsing modules", exc_info=True)
+        from emend.fact_graph import _extract_imports
+
+        for abs_file in source_files:
+            abs_path = Path(abs_file).resolve()
+            if not abs_path.exists() or _reference_file_is_excluded(str(abs_path)):
+                continue
+            try:
+                content = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for imp in _extract_imports(str(abs_path), content):
+                _record_import(abs_path, imp.imported_module, imp.imported_name)
 
     candidate_modules: list[DeadModule] = []
     scan_root_path = Path(scan_root).resolve()
-
     for abs_file in source_files:
         abs_path = Path(abs_file).resolve()
         if not abs_path.exists():
             continue
         if not abs_path.is_relative_to(scan_root_path):
             continue
-        if abs_path.name in {"__init__.py", "__main__.py"}:
+        if abs_path.name in {"__init__.py", "__main__.py", "main.py"}:
             continue
         if _is_test_file(str(abs_path)):
             continue
@@ -1109,6 +1543,13 @@ def find_dead_code(
             continue
         module_name = _file_to_module(str(abs_path), project_root_resolved)
         if module_name in imported_targets:
+            continue
+        if any(
+            qualified_name.startswith(f"{module_name}.")
+            for qualified_name in exact_entry_points
+        ):
+            continue
+        if _has_python_main_guard(abs_path):
             continue
         candidate_modules.append(
             DeadModule(

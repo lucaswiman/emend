@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from emend.lint import LintViolation
+    from emend.checks.rules_config import DeadCodeConfig
 
 logger = logging.getLogger(__name__)
 
 from emend.checks.rules_config import (  # noqa: E402
-    DeadCodeConfig,
     load_rules_document,
     yaml_key,
-    as_list,
+    coerce_optional_str_list,
+    parse_deadcode_config,
     expand_macros,
     expand_pattern_macros,
     expand_not_through,
@@ -95,44 +94,6 @@ def is_noqa_suppressed(
             if rule_name in rules or f"emend:{rule_name}" in rules:
                 return True
     return False
-
-
-def coerce_optional_str_list(value: object) -> list[str] | None:
-    if value is None:
-        return None
-    values = [str(v) for v in as_list(value)]
-    return values or None
-
-
-def parse_deadcode_config(raw_dc: object, *, rule_name: str = "deadcode") -> DeadCodeConfig | None:
-    if raw_dc is None:
-        return None
-    if isinstance(raw_dc, bool):
-        return DeadCodeConfig(enabled=raw_dc)
-    if not isinstance(raw_dc, dict):
-        return None
-
-    entry_points = raw_dc.get("entry-points")
-    ep_decorators = yaml_key(raw_dc, "entry_point_decorators")
-    ep_names = yaml_key(raw_dc, "entry_point_names")
-    if isinstance(entry_points, dict):
-        ep_decorators = ep_decorators or entry_points.get("decorators")
-        ep_names = ep_names or entry_points.get("names")
-
-    return DeadCodeConfig(
-        enabled=raw_dc.get("enabled", True),
-        rule_name=rule_name,
-        kind=raw_dc.get("kind"),
-        include_private=raw_dc.get("include-private", False),
-        exclude_references_from=coerce_optional_str_list(
-            yaml_key(raw_dc, "exclude_references_from")
-        ),
-        strings_count_as_references=raw_dc.get("strings-count-as-references", True),
-        message=raw_dc.get("message", "Symbol appears to be unused"),
-        entry_point_decorators=coerce_optional_str_list(ep_decorators),
-        entry_point_names=coerce_optional_str_list(ep_names),
-        exclude_paths=coerce_optional_str_list(yaml_key(raw_dc, "exclude_paths")),
-    )
 
 
 def rule_matches_language(rule: LintRule, file_language: str) -> bool:
@@ -216,7 +177,7 @@ def load_rules(
         if isinstance(raw_language, str):
             rule_language: str | list[str] | None = raw_language
         elif isinstance(raw_language, list):
-            rule_language = [str(l) for l in raw_language]
+            rule_language = [str(language) for language in raw_language]
         else:
             rule_language = None
 

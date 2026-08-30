@@ -1329,7 +1329,9 @@ class FactGraph:
         entry_point_names: list[str] | None = None,
         exclude_reference_paths: list[str] | None = None,
         exclude_reference_segments: list[str] | None = None,
+        exclude_reference_files: list[str] | None = None,
         entry_point_prefixes: list[str] | None = None,
+        entry_point_qualified_names: list[str] | None = None,
     ) -> tuple[list[SymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
@@ -1383,12 +1385,30 @@ class FactGraph:
                 excl_parts.append(f'not str_includes(fp, "{seg}\\\\")')
                 excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}/")')
                 excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}\\\\")')
+        excluded_file_rules = ""
+        if exclude_reference_files:
+            excluded_file_rules = self._inline_relation(
+                "excluded_reference_file",
+                ["fp"],
+                [(file_path,) for file_path in exclude_reference_files],
+            )
+            excl_parts.append("not excluded_reference_file[fp]")
+            excl_parts_ref.append("not excluded_reference_file[ref_fp]")
         if excl_parts:
             excl_clauses = ", " + ", ".join(excl_parts)
         if excl_parts_ref:
             excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
+        exact_entry_rules = ""
+        if entry_point_qualified_names:
+            exact_entry_rules = self._inline_relation(
+                "configured_entry_point",
+                ["qn"],
+                [(qn,) for qn in entry_point_qualified_names],
+            ) + "entry_point[qn] := configured_entry_point[qn]\n"
+
         query = (
+            excluded_file_rules + exact_entry_rules +
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
@@ -1396,6 +1416,35 @@ class FactGraph:
             "*ref_by_block[fp, fq, bid, sq], "
             "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
+
+            # A reachable self/cls call keeps same-named private methods live.
+            # Exact method_call facts avoid suffix collisions. Name-level
+            # matching is intentionally conservative for inherited methods,
+            # whose defining class may differ from the caller class.
+            "live_private_method_name[method_name] := "
+            "*method_call[fp, fq, receiver, method_name, bid, _], "
+            "*reachable_block[fp, fq, bid], "
+            'receiver in ["self", "cls"]'
+            f"{excl_clauses}\n"
+
+            "live_ref[target_qn] := "
+            "live_private_method_name[method_name], "
+            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
+            'method_kind in ["method", "async_method"], '
+            'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
+
+            # Non-call uses such as ``callbacks = [self._helper]`` are not
+            # method_call facts. Match their exact final member segment while
+            # retaining the reachable-block and reference-file filters.
+            "live_ref[target_qn] := "
+            "*reference[sq, fp, _, _, ref_kind, fq, bid], "
+            "*reachable_block[fp, fq, bid], "
+            'ref_kind != "call", '
+            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
+            'method_kind in ["method", "async_method"], '
+            'starts_with(method_name, "_"), not starts_with(method_name, "__"), '
+            'ends_with(sq, concat(".", method_name))'
+            f"{excl_clauses}\n"
 
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
@@ -1430,10 +1479,28 @@ class FactGraph:
             'entry_point[qn] := '
             '*exported_symbol[qn]\n'
 
-            # Dead symbols: top-level only (parent == ""), no live reference, not entry point
+            # A private method is only actionable when its containing class is
+            # itself live or externally exposed. This avoids duplicating every
+            # method beneath an already-dead class.
+            'live_container[qn] := live_ref[qn]\n'
+            'live_container[qn] := entry_point[qn]\n'
+
+            # Dead top-level symbols.
             "dead[qn, fp, name, kind, line, end_line, parent] := "
             "*symbol[qn, fp, name, kind, line, end_line, parent], "
             'parent == "", '
+            "not live_ref[qn], "
+            "not entry_point[qn]\n"
+
+            # Private methods on live classes. Public methods stay conservative
+            # because frameworks, protocols, and subclasses commonly invoke
+            # them without a statically visible reference.
+            "dead[qn, fp, name, kind, line, end_line, parent] := "
+            "*symbol[qn, fp, name, kind, line, end_line, parent], "
+            'parent != "", '
+            'kind in ["method", "async_method"], '
+            'starts_with(name, "_"), not starts_with(name, "__"), '
+            "live_container[parent], "
             "not live_ref[qn], "
             "not entry_point[qn]\n"
 
@@ -2912,6 +2979,7 @@ class FactGraph:
         language: str | None = None,
         db_path: str | None = None,
         languages: list[str] | None = None,
+        include_types: bool = True,
     ) -> FactGraph:
         """Populate a fact graph by visiting all files in a project.
 
@@ -2976,41 +3044,43 @@ class FactGraph:
 
         # -- Type binding facts (via type oracle) ----------------------
         # Populate after all files are processed so the type oracle can
-        # see the full project.  Gracefully skips when no type checker is
-        # available.
-        try:
-            from emend.type_oracle import create_type_oracle, parse_type_string
+        # see the full project. Fact-only consumers (notably deadcode) keep
+        # this lazy because type inference is much slower than syntax/facts.
+        # Gracefully skips when no type checker is available.
+        if include_types:
+            try:
+                from emend.type_oracle import create_type_oracle, parse_type_string
 
-            oracle = create_type_oracle(engine="auto")
-            if oracle.is_available():
-                project_root_path = Path(project_root).resolve()
-                for abs_file_path in source_files:
-                    try:
-                        rel_path = str(Path(abs_file_path).relative_to(project_root_path))
-                    except ValueError:
-                        rel_path = abs_file_path
-                    try:
-                        file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
-                    except BUG_EXCEPTIONS:
-                        raise
-                    except Exception:
-                        logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
-                        continue
-                    type_facts: list[TypeFact] = []
-                    for binding in file_types.bindings:
-                        td = parse_type_string(binding.raw_type)
-                        type_facts.append(TypeFact(
-                            symbol_qn=binding.name,
-                            type_str=td.name,  # top-level constructor
-                            file_path=rel_path,
-                            line=binding.line,
-                            binding_kind=binding.binding_kind,
-                        ))
-                    graph.add_types_batch(type_facts)
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug("Could not populate type bindings", exc_info=True)
+                oracle = create_type_oracle(engine="auto")
+                if oracle.is_available():
+                    project_root_path = Path(project_root).resolve()
+                    for abs_file_path in source_files:
+                        try:
+                            rel_path = str(Path(abs_file_path).relative_to(project_root_path))
+                        except ValueError:
+                            rel_path = abs_file_path
+                        try:
+                            file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
+                        except BUG_EXCEPTIONS:
+                            raise
+                        except Exception:
+                            logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
+                            continue
+                        type_facts: list[TypeFact] = []
+                        for binding in file_types.bindings:
+                            td = parse_type_string(binding.raw_type)
+                            type_facts.append(TypeFact(
+                                symbol_qn=binding.name,
+                                type_str=td.name,  # top-level constructor
+                                file_path=rel_path,
+                                line=binding.line,
+                                binding_kind=binding.binding_kind,
+                            ))
+                        graph.add_types_batch(type_facts)
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
+                logger.debug("Could not populate type bindings", exc_info=True)
 
         return graph
 

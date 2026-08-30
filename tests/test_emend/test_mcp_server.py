@@ -219,6 +219,33 @@ def test_analyze_deadcode_mode(tmp_path):
     assert isinstance(data, list)
 
 
+def test_deadcode_config_can_disable_new_defaults(tmp_path):
+    from emend.mcp.analyze import deadcode
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        "[project]\nname = 'sample'\nversion = '0'\n"
+    )
+    (project / "orphan.py").write_text(
+        "def _private_unused():\n    return 1\n"
+    )
+    config = project / "rules.yaml"
+    config.write_text(
+        "deadcode:\n"
+        "  enabled: true\n"
+        "  include-private: false\n"
+        "  unused-modules: false\n"
+    )
+
+    data = json.loads(deadcode(
+        path=str(project),
+        config=str(config),
+        no_last_reference=True,
+    ))
+    assert data == []
+
+
 def test_trace_analysis_interprocedural_includes_engine(tmp_path):
     p = tmp_path / "example.py"
     p.write_text(

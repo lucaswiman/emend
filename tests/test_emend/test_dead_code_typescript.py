@@ -1,5 +1,4 @@
 """Tests for dead-code detection on TypeScript projects."""
-from pathlib import Path
 
 import pytest
 
@@ -270,24 +269,12 @@ class TestDeadCodeTypeScript:
         dead_names = {d.name for d in dead if isinstance(d, DeadSymbol)}
         assert "main" not in dead_names
 
-    def test_private_prefix_skipped_ts(self, tmp_path):
-        """Functions starting with _ are skipped by default (private prefix heuristic)."""
-        from emend.transform import DeadSymbol, find_dead_code
-
-        project = tmp_path / "project"
-        project.mkdir()
-        (project / "mod.ts").write_text(
-            "function _privateHelper(): number { return 1; }\n"
-            "function publicUnused(): number { return 2; }\n"
-        )
-
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead if isinstance(d, DeadSymbol)}
-        assert "_privateHelper" not in dead_names, "private-prefixed symbol excluded by default"
-        assert "publicUnused" in dead_names
-
-    def test_include_private_ts(self, tmp_path):
-        """With include_private=True, _private TypeScript symbols are checked."""
+    @pytest.mark.parametrize(
+        ("include_private", "expected"),
+        [(None, True), (True, True), (False, False)],
+    )
+    def test_include_private_ts(self, tmp_path, include_private, expected):
+        """Private TypeScript symbols are checked by default with an opt-out."""
         from emend.transform import DeadSymbol, find_dead_code
 
         project = tmp_path / "project"
@@ -296,9 +283,10 @@ class TestDeadCodeTypeScript:
             "function _privateHelper(): number { return 1; }\n"
         )
 
-        dead = list(find_dead_code(str(project), include_private=True, show_last_reference=False))
+        kwargs = {} if include_private is None else {"include_private": include_private}
+        dead = list(find_dead_code(str(project), show_last_reference=False, **kwargs))
         dead_names = {d.name for d in dead if isinstance(d, DeadSymbol)}
-        assert "_privateHelper" in dead_names
+        assert ("_privateHelper" in dead_names) is expected
 
     def test_empty_ts_project(self, tmp_path):
         """An empty TypeScript project returns no dead code."""

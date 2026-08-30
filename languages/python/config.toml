@@ -506,3 +506,59 @@ entry_point_names = [
 entry_point_name_prefixes = ["test_", "Test", "describe_"]
 # Whether dunder names (__init__, __str__, etc.) are always entry points.
 has_dunders = true
+
+# Decorator receiver types provide a precise fallback for registration
+# methods whose names are too generic to treat as entry points globally.
+# emend resolves imports and direct constructor assignments without running a
+# type checker, and also consumes type data when it is already cached.
+[dead_code.entry_point_decorator_type_methods]
+"fastapi.FastAPI" = [
+    "api_route", "get", "post", "put", "delete", "patch", "head",
+    "options", "websocket", "websocket_route", "exception_handler",
+    "on_event", "middleware",
+]
+"fastapi.applications.FastAPI" = [
+    "api_route", "get", "post", "put", "delete", "patch", "head",
+    "options", "websocket", "websocket_route", "exception_handler",
+    "on_event", "middleware",
+]
+"fastapi.APIRouter" = [
+    "api_route", "get", "post", "put", "delete", "patch", "head",
+    "options", "websocket", "websocket_route", "on_event",
+]
+"fastapi.routing.APIRouter" = [
+    "api_route", "get", "post", "put", "delete", "patch", "head",
+    "options", "websocket", "websocket_route", "on_event",
+]
+"typer.Typer" = ["callback", "command"]
+"typer.main.Typer" = ["callback", "command"]
+"click.Group" = ["command", "group", "result_callback"]
+"click.core.Group" = ["command", "group", "result_callback"]
+"flask.Flask" = [
+    "route", "get", "post", "put", "delete", "patch", "errorhandler",
+    "before_request", "after_request", "teardown_request", "context_processor",
+    "url_value_preprocessor", "url_defaults", "shell_context_processor",
+    "template_filter", "template_test", "template_global",
+]
+"flask.app.Flask" = [
+    "route", "get", "post", "put", "delete", "patch", "errorhandler",
+    "before_request", "after_request", "teardown_request", "context_processor",
+    "url_value_preprocessor", "url_defaults", "shell_context_processor",
+    "template_filter", "template_test", "template_global",
+]
+"flask.Blueprint" = [
+    "route", "get", "post", "put", "delete", "patch", "errorhandler",
+    "app_errorhandler", "before_request", "before_app_request", "after_request",
+    "after_app_request", "teardown_request", "teardown_app_request",
+    "context_processor", "app_context_processor", "url_value_preprocessor",
+    "url_defaults", "app_url_value_preprocessor", "app_url_defaults",
+    "record", "record_once",
+]
+"flask.blueprints.Blueprint" = [
+    "route", "get", "post", "put", "delete", "patch", "errorhandler",
+    "app_errorhandler", "before_request", "before_app_request", "after_request",
+    "after_app_request", "teardown_request", "teardown_app_request",
+    "context_processor", "app_context_processor", "url_value_preprocessor",
+    "url_defaults", "app_url_value_preprocessor", "app_url_defaults",
+    "record", "record_once",
+]

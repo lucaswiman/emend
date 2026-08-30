@@ -965,10 +965,16 @@ def _build_facts_db(
             ext = Path(abs_path).suffix.lstrip(".") or "py"
             file_contents.append((abs_path, rel_path, ext, content))
 
-        # Create a project-level scope resolver and index all files.
-        # Skip entirely when precomputed_refs covers all files (from warm_caches).
-        # Fall back to building one when called standalone.
-        if precomputed_refs is None and scope_resolver is None:
+        # Create a project-level scope resolver whenever precomputed references
+        # do not cover every discovered Python file.  ``warm_caches(src/)`` may
+        # legitimately provide only a subset while facts.db remains
+        # project-wide; missing files must still contribute references.
+        covered_paths = set(precomputed_refs) if precomputed_refs is not None else set()
+        needs_resolver = precomputed_refs is None or any(
+            ext == "py" and abs_path not in covered_paths
+            for abs_path, _rel, ext, _content in file_contents
+        )
+        if needs_resolver and scope_resolver is None:
             scope_resolver = _rust.PyScopeResolver(resolved_root)
             for abs_path, _rel, _ext, content in file_contents:
                 try:
@@ -986,7 +992,11 @@ def _build_facts_db(
         def _process_file(file_tuple):
             abs_path, rel_path, ext, content = file_tuple
             module_name = _file_to_module(abs_path, project_root)
-            file_refs = precomputed_refs.get(abs_path) if precomputed_refs else None
+            file_refs = (
+                precomputed_refs.get(abs_path)
+                if precomputed_refs is not None
+                else None
+            )
 
             # For files not covered by precomputed_refs, create a per-file
             # scope resolver with the correct extension so that TS/Rust
@@ -1088,12 +1098,11 @@ def _build_facts_db(
             {"rows": cozo_fg_sym},
         )
 
-        if dec_rows_list:
-            fdb.run(
-                "?[symbol_qn, decorator] <- $rows "
-                ":replace decorator_on {symbol_qn, decorator}",
-                {"rows": dec_rows_list},
-            )
+        fdb.run(
+            "?[symbol_qn, decorator] <- $rows "
+            ":replace decorator_on {symbol_qn, decorator}",
+            {"rows": dec_rows_list},
+        )
 
         fdb.run(
             "?[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id] <- $rows "
@@ -1175,12 +1184,11 @@ def _build_facts_db(
             {"rows": all_module_level_refs},
         )
 
-        if all_exported_qns:
-            fdb.run(
-                "?[qualified_name] <- $rows "
-                ":replace exported_symbol {qualified_name}",
-                {"rows": all_exported_qns},
-            )
+        fdb.run(
+            "?[qualified_name] <- $rows "
+            ":replace exported_symbol {qualified_name}",
+            {"rows": all_exported_qns},
+        )
 
     except BUG_EXCEPTIONS:
         raise

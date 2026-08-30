@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 from emend.errors import BUG_EXCEPTIONS
 from emend.rules_config import (
     DeadCodeConfig,
+    parse_deadcode_config,
     load_rules_document,
     expand_macros,
     expand_not_through,
     yaml_key,
-    as_list,
 )
 
 # Import check types from their canonical modules.
@@ -123,24 +123,9 @@ def _build_unified_policy(
             ))
 
     deadcode_def = rule_def.get("deadcode")
-    if isinstance(deadcode_def, bool):
-        if deadcode_def:
-            checks.append(DeadCodeCheck())
-    elif isinstance(deadcode_def, dict):
-        entry_points = deadcode_def.get("entry-points", {})
-        checks.append(DeadCodeCheck(
-            entry_point_decorators=[str(v) for v in as_list(
-                yaml_key(deadcode_def, "entry_point_decorators") or (
-                    entry_points.get("decorators") if isinstance(entry_points, dict) else None
-                )
-            )],
-            entry_point_names=[str(v) for v in as_list(
-                yaml_key(deadcode_def, "entry_point_names") or (
-                    entry_points.get("names") if isinstance(entry_points, dict) else None
-                )
-            )],
-            exclude_paths=[str(v) for v in as_list(yaml_key(deadcode_def, "exclude_paths"))],
-        ))
+    deadcode_check = parse_deadcode_config(deadcode_def)
+    if deadcode_check is not None and deadcode_check.enabled:
+        checks.append(deadcode_check)
 
     type_def = rule_def.get("type-check")
     if type_def is None:
@@ -224,11 +209,10 @@ def _parse_type_check(raw: dict[str, Any]) -> TypeCheck:
 
 
 def _parse_deadcode_check(raw: dict[str, Any]) -> DeadCodeCheck:
-    return DeadCodeCheck(
-        entry_point_decorators=_as_list(yaml_key(raw, "entry_point_decorators")),
-        entry_point_names=_as_list(yaml_key(raw, "entry_point_names")),
-        exclude_paths=_as_list(yaml_key(raw, "exclude_paths")),
-    )
+    parsed = parse_deadcode_config(raw)
+    if parsed is None:
+        raise ValueError("DeadCodeCheck requires a mapping")
+    return parsed
 
 
 def _parse_custom_check(raw: dict[str, Any]) -> CustomCheck:

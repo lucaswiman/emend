@@ -464,7 +464,7 @@ print("keep this")  # noqa: E501, emend:no-print  # mixed with other linters
 
 ### Dead code detection
 
-Dead code can be configured in `.emend/rules.yaml` and run either through `emend check` or directly through `emend analyze deadcode`:
+Configure dead-code rules for `emend check`/`emend lint` in `.emend/rules.yaml`. The standalone `emend analyze deadcode` command uses the equivalent CLI flags shown below:
 
 ```yaml
 # .emend/rules.yaml
@@ -474,8 +474,9 @@ deadcode: true
 deadcode:
   enabled: true
   kind: function                          # Only functions (or "class")
-  exclude-references-from: ["tests/"]     # Ignore refs from tests
-  include-private: false                  # Skip _private symbols
+  include-private: true                   # Default: include private symbols/methods
+  exclude-test-references: true           # Default: ignore refs from tests
+  unused-modules: true                    # Default: report unimported modules
   strings-count-as-references: true       # String literals count as refs
   message: "Symbol appears to be unused"
 ```
@@ -486,8 +487,8 @@ emend check src/
 
 # Or use the standalone command
 emend analyze deadcode src/
-emend analyze deadcode src/ --exclude-references-from tests/ --json
-emend analyze deadcode src/ --unused-modules
+emend analyze deadcode src/ --include-test-references --json
+emend analyze deadcode src/ --exclude-private --no-unused-modules
 ```
 
 Suppress false positives inline:

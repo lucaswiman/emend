@@ -1,7 +1,7 @@
 """Symbol index, QN cache, and venv index management."""
 from __future__ import annotations
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,6 +12,9 @@ import re
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
+
+if TYPE_CHECKING:
+    import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -1201,6 +1204,9 @@ def warm_caches(
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
     language: str = "python",
+    build_fts: bool = True,
+    build_duplicates: bool = True,
+    force_facts: bool = False,
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
@@ -1225,6 +1231,13 @@ def warm_caches(
             and PATH.
             ``"none"`` or ``None`` skips type indexing entirely.
             Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
+        build_fts: Rebuild the editor full-text index. Fact-only consumers can
+            disable this to return as soon as their analysis data is ready.
+        build_duplicates: Populate duplicate-code caches. Fact-only consumers
+            can disable this independent analysis phase.
+        force_facts: Rebuild ``facts.db`` even when the parse manifest is warm.
+            Use this after detecting that the persisted fact graph is empty or
+            invalid while parse/reference caches are still current.
 
     Returns:
         Dict with stats: ``{"files", "indexed", "qn_cached",
@@ -1413,26 +1426,28 @@ def warm_caches(
         )
 
     # Phase 4: rebuild FTS5 trigram index for fast symbol search.
-    if callback:
-        callback("phase", "Full-text search index")
-    try:
-        from emend.editor_search import rebuild_fts as _rebuild_fts
+    if build_fts:
+        if callback:
+            callback("phase", "Full-text search index")
+        try:
+            from emend.editor_search import rebuild_fts as _rebuild_fts
 
-        _fts_conn = _sqlite3.connect(db_path, timeout=30)
-        _fts_conn.execute("PRAGMA journal_mode=WAL")
-        _fts_conn.execute("PRAGMA synchronous=NORMAL")
-        t_fts = time.monotonic()
-        fts_count = _rebuild_fts(_fts_conn)
-        _fts_conn.close()
-        stats["fts_indexed"] = fts_count
-        logger.info(
-            "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
-            fts_count, time.monotonic() - t_fts,
-        )
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception as exc:
-        logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
+            t_fts = time.monotonic()
+            with closing(_sqlite3.connect(db_path, timeout=30)) as _fts_conn:
+                _fts_conn.execute("PRAGMA journal_mode=WAL")
+                _fts_conn.execute("PRAGMA synchronous=NORMAL")
+                fts_count = _rebuild_fts(_fts_conn)
+            stats["fts_indexed"] = fts_count
+            logger.info(
+                "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
+                fts_count, time.monotonic() - t_fts,
+            )
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception as exc:
+            logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
+            stats["fts_indexed"] = 0
+    else:
         stats["fts_indexed"] = 0
 
     # Phase 5: build CozoDB facts.db directly from source files.
@@ -1441,6 +1456,8 @@ def warm_caches(
     # indexing entirely (~34s saved on Django-sized projects).
     facts_path = cache_dir / "facts.db"
     facts_are_current = (
+        not force_facts
+        and
         bool(file_contents)
         and stats["skipped"] == len(file_contents)
         and facts_path.exists()
@@ -1452,17 +1469,23 @@ def warm_caches(
             callback("phase", "Facts database")
         try:
             t_facts = time.monotonic()
-            precomputed_refs: dict[str, list[tuple]] = {}
+            precomputed_refs: dict[str, list[tuple]] | None = {}
             try:
-                _ref_conn = _sqlite3.connect(db_path, timeout=30)
-                _ref_conn.execute("PRAGMA journal_mode=WAL")
-                for row in _ref_conn.execute(
-                    "SELECT file_path, target_qn, line, col, ref_kind "
-                    "FROM reference_index"
-                ):
-                    fp, tqn, line, col, kind = row
-                    precomputed_refs.setdefault(fp, []).append((tqn, line, col, kind))
-                _ref_conn.close()
+                with closing(_sqlite3.connect(db_path, timeout=30)) as _ref_conn:
+                    _ref_conn.execute("PRAGMA journal_mode=WAL")
+                    for row in _ref_conn.execute(
+                        "SELECT file_path, target_qn, line, col, ref_kind "
+                        "FROM reference_index"
+                    ):
+                        fp, tqn, line, col, kind = row
+                        normalized = str(Path(fp).resolve())
+                        precomputed_refs.setdefault(normalized, []).append(
+                            (tqn, line, col, kind)
+                        )
+                # An indexed file with zero references is still covered.  Empty
+                # lists distinguish it from files outside a partial scan root.
+                for file_path, _content in file_contents:
+                    precomputed_refs.setdefault(str(Path(file_path).resolve()), [])
                 logger.info(
                     "warm_caches: loaded %d pre-computed refs for %d files",
                     sum(len(v) for v in precomputed_refs.values()),
@@ -1470,9 +1493,9 @@ def warm_caches(
                 )
             except _sqlite3.Error:
                 logger.debug("warm_caches: pre-computed ref load failed", exc_info=True)
-                precomputed_refs = {}
+                precomputed_refs = None
 
-            if precomputed_refs:
+            if precomputed_refs is not None:
                 _build_facts_db(
                     project_root, precomputed_refs=precomputed_refs,
                 )
@@ -1498,22 +1521,25 @@ def warm_caches(
 
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
     # then materialize queryable facts into facts.db.
-    if callback:
-        callback("phase", "Duplicate analysis")
-    try:
-        t_dup = time.monotonic()
-        _compute_duplicate_payloads(db_path, project_root, file_contents)
-        stats["dup_cached"] = len(
-            [fc for fc in file_contents if fc[0].endswith(".py")]
-        )
-        logger.info(
-            "warm_caches: duplicate analysis done in %.3fs",
-            time.monotonic() - t_dup,
-        )
-    except BUG_EXCEPTIONS:
-        raise
-    except BaseException:
-        logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
+    if build_duplicates:
+        if callback:
+            callback("phase", "Duplicate analysis")
+        try:
+            t_dup = time.monotonic()
+            _compute_duplicate_payloads(db_path, project_root, file_contents)
+            stats["dup_cached"] = len(
+                [fc for fc in file_contents if fc[0].endswith(".py")]
+            )
+            logger.info(
+                "warm_caches: duplicate analysis done in %.3fs",
+                time.monotonic() - t_dup,
+            )
+        except BUG_EXCEPTIONS:
+            raise
+        except BaseException:
+            logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
+            stats["dup_cached"] = 0
+    else:
         stats["dup_cached"] = 0
 
     return stats
