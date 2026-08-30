@@ -171,6 +171,7 @@ class TestLoadPolicies:
                 },
                 "deadcode-check": {
                     "deadcode": {
+                        "kind": "function",
                         "entry-point-names": ["main"],
                     },
                     "message": "Dead code policy",
@@ -186,6 +187,7 @@ class TestLoadPolicies:
         assert isinstance(by_name["no-sqli"].checks[0], FlowCheck)
         assert by_name["no-sqli"].checks[0].flows_from == "request.args.get($X)"
         assert isinstance(by_name["deadcode-check"].checks[0], DeadCodeCheck)
+        assert by_name["deadcode-check"].checks[0].kind == "function"
 
     def test_load_unified_rules_flow_dict_form_pattern(self, tmp_path):
         """Dict-form ``from: {pattern: ...}`` / ``to: {pattern: ...}`` must be

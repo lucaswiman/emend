@@ -24,13 +24,81 @@ class DeadCodeConfig:
     enabled: bool = False
     rule_name: str = "deadcode"
     kind: str | None = None
-    include_private: bool = False
+    include_private: bool = True
     exclude_references_from: list[str] | None = None
+    exclude_test_references: bool = True
     strings_count_as_references: bool = True
+    unused_modules: bool = True
     message: str = "Symbol appears to be unused"
     entry_point_decorators: list[str] | None = None
     entry_point_names: list[str] | None = None
     exclude_paths: list[str] | None = None
+
+
+def coerce_optional_str_list(value: object) -> list[str] | None:
+    values = [str(item) for item in as_list(value)]
+    return values or None
+
+
+def parse_deadcode_config(
+    raw: object,
+    *,
+    rule_name: str = "deadcode",
+) -> DeadCodeConfig | None:
+    """Parse the canonical dead-code mapping used by lint and policy."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return DeadCodeConfig(enabled=raw, rule_name=rule_name)
+    if not isinstance(raw, dict):
+        return None
+
+    entry_points = raw.get("entry-points")
+    decorators = yaml_key(raw, "entry_point_decorators")
+    names = yaml_key(raw, "entry_point_names")
+    if isinstance(entry_points, dict):
+        decorators = decorators or entry_points.get("decorators")
+        names = names or entry_points.get("names")
+
+    return DeadCodeConfig(
+        enabled=raw.get("enabled", True),
+        rule_name=rule_name,
+        kind=raw.get("kind"),
+        include_private=raw.get("include-private", True),
+        exclude_references_from=coerce_optional_str_list(
+            yaml_key(raw, "exclude_references_from")
+        ),
+        exclude_test_references=raw.get(
+            "exclude-test-references",
+            not raw.get("include-test-references", False),
+        ),
+        strings_count_as_references=raw.get("strings-count-as-references", True),
+        unused_modules=raw.get("unused-modules", True),
+        message=raw.get("message", "Symbol appears to be unused"),
+        entry_point_decorators=coerce_optional_str_list(decorators),
+        entry_point_names=coerce_optional_str_list(names),
+        exclude_paths=coerce_optional_str_list(yaml_key(raw, "exclude_paths")),
+    )
+
+
+def deadcode_engine_kwargs(
+    config: DeadCodeConfig,
+    *,
+    show_last_reference: bool = False,
+) -> dict[str, Any]:
+    """Translate shared config into ``find_dead_code`` keyword arguments."""
+    return {
+        "kind": config.kind,
+        "include_private": config.include_private,
+        "exclude_references_from": config.exclude_references_from,
+        "exclude_test_references": config.exclude_test_references,
+        "strings_count_as_references": config.strings_count_as_references,
+        "show_last_reference": show_last_reference,
+        "entry_point_decorators": config.entry_point_decorators,
+        "entry_point_names": config.entry_point_names,
+        "exclude_paths": config.exclude_paths,
+        "unused_modules": config.unused_modules,
+    }
 
 
 def load_rules_document(

@@ -40,7 +40,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     Two paths:
     1. Load existing facts.db if it has data.
-    2. Build via warm_caches() (which calls _build_facts_db), then load.
+    2. Build the fact-only warm-cache profile, then load.
 
     The result is cached in-process by project root to avoid re-opening the
     CozoDB connection on every call (which is expensive).
@@ -68,6 +68,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
                 _fact_graph_cache[project_root] = graph
                 return graph
             logger.debug("facts.db has no symbol data, rebuilding")
+            graph.close()
         except BUG_EXCEPTIONS:
             raise
         except Exception:
@@ -75,24 +76,18 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     # Path 2: build via warm_caches, then load
     logger.info("Building index for %s (first run may be slow)", project_path)
-    from emend.type_oracle import TypeEngineUnavailableError
     try:
-        warm_caches(project_path)
-    except TypeEngineUnavailableError:
-        # Type engine unavailable (e.g. pyrefly not installed).  Retry without
-        # type indexing so facts.db is still built.  In tests the retry may
-        # also raise (monkeypatched warm_caches always raises), in which case
-        # we fall through to the in-memory fallback below.
-        logger.debug("Type engine unavailable, retrying warm_caches without type indexing")
-        try:
-            warm_caches(project_path, type_engine="none")
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug(
-                "warm_caches retry also failed, falling back to in-memory build",
-                exc_info=True,
-            )
+        warm_caches(
+            project_root,
+            type_engine="none",
+            build_fts=False,
+            build_duplicates=False,
+            force_facts=True,
+        )
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("warm_caches failed; falling back to in-memory build", exc_info=True)
     # Always attempt to load from facts.db — FactGraph(db_path=...) creates the
     # file on first open, so calling it unconditionally is intentional and is
     # what allows test_fact_graph_bootstrap_persists_facts_db to pass.
@@ -110,6 +105,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
                 logger.debug("Failed to resolve builtin refs", exc_info=True)
             _fact_graph_cache[project_root] = graph
             return graph
+        graph.close()
     except BUG_EXCEPTIONS:
         raise
     except Exception:
@@ -117,7 +113,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
 
     # Fallback: build in-memory (mainly for tests where warm_caches is mocked).
     # build_from_project already calls _resolve_builtin_refs internally.
-    graph = FactGraph.build_from_project(project_path)
+    graph = FactGraph.build_from_project(project_root, include_types=False)
     _fact_graph_cache[project_root] = graph
     return graph
 
@@ -345,5 +341,3 @@ def generate_graph(
             else:
                 lines.append(f"{caller} (no calls)")
         return "\n".join(lines)
-
-

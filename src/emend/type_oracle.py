@@ -993,7 +993,11 @@ def _content_hash(path: Path) -> str:
     return hashlib.md5(content, usedforsecurity=False).hexdigest()
 
 
-def _type_cache_db_path(project_root: Path | None = None) -> str | None:
+def _type_cache_db_path(
+    project_root: Path | None = None,
+    *,
+    create: bool = True,
+) -> str | None:
     """Return the path to the type-oracle disk cache (parse.db), or None.
 
     Type inference results are stored in the same SQLite database as the parse
@@ -1010,11 +1014,54 @@ def _type_cache_db_path(project_root: Path | None = None) -> str | None:
             root = project_root
         from emend.transform import _cache_db_dir, _ensure_cache_ignore_files
         cache_dir = _cache_db_dir(root)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        _ensure_cache_ignore_files(str(root))
+        if create:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            _ensure_cache_ignore_files(str(root))
         return str(cache_dir / "parse.db")
     except OSError:
         logger.debug("type cache db path unavailable", exc_info=True)
+        return None
+
+
+def load_cached_file_types(
+    path: Path,
+    *,
+    project_root: Path | None = None,
+    content_hash: str | None = None,
+) -> FileTypes | None:
+    """Return cached type information without starting a type engine.
+
+    This is the read-only counterpart to ``TypeOracle.infer_file`` for
+    latency-sensitive analyses.  A cache miss returns ``None``; it never
+    invokes pyrefly, pyright, ty, or another external checker.
+    """
+    import pickle
+    import sqlite3
+    import zlib
+
+    db_path = _type_cache_db_path(project_root, create=False)
+    if db_path is None or not Path(db_path).exists() or not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT data FROM type_cache WHERE hash = ?",
+                (content_hash or _content_hash(path),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        file_types = pickle.loads(zlib.decompress(row[0]))
+        if not isinstance(file_types, FileTypes):
+            return None
+        file_types.build_index()
+        return file_types
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("cached type read failed for %s", path, exc_info=True)
         return None
 
 

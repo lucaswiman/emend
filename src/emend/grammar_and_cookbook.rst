@@ -379,9 +379,10 @@ deadcode
 
 Find potentially dead (unreferenced) code::
 
-    emend analyze deadcode [PATH] [--kind function|class] [--include-private]
+    emend analyze deadcode [PATH] [--kind function|class] [--exclude-private]
                            [--exclude-references-from DIR] [--no-strings]
-                           [--no-last-reference] [--unused-modules] [--json]
+                           [--include-test-references] [--no-last-reference]
+                           [--no-unused-modules] [--json]
 
 Inline suppression: ``# noqa: emend:deadcode``.
 

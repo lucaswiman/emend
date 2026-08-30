@@ -178,8 +178,9 @@ Examples:
 
    emend analyze refs src/api.py::process_request --calls-only
    emend analyze graph src/app.py --format dot
-   emend analyze deadcode src/ --exclude-references-from tests/
-   emend analyze deadcode src/ --unused-modules
+   emend analyze deadcode src/
+   emend analyze deadcode src/ --include-test-references
+   emend analyze deadcode src/ --exclude-private --no-unused-modules
    emend analyze impact models.py::User --json
    emend analyze trace src/ --preset flask --interprocedural
    emend analyze facts --type references --symbol package.module.func --json

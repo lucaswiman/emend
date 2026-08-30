@@ -145,6 +145,8 @@ from .deadcode import (
     DeadBlock,
     DeadModule,
     DeadSymbol,
+    dead_code_result_details,
+    dead_code_result_to_dict,
     DeletePlan,
     _ENTRY_POINT_DECORATOR_BASENAMES,
     _ENTRY_POINT_DECORATORS,
@@ -249,6 +251,7 @@ __all__ = [
     "generate_graph",
     # deadcode
     "DeadBlock", "DeadModule", "DeadSymbol", "DeletePlan",
+    "dead_code_result_details", "dead_code_result_to_dict",
     "_ENTRY_POINT_DECORATOR_BASENAMES", "_ENTRY_POINT_DECORATORS", "_ENTRY_POINT_NAMES",
     "_get_entry_point_config", "_get_last_reference_commit", "_is_dunder",
     "_is_likely_entry_point", "_parse_decorator_name", "_string_literal_filter",

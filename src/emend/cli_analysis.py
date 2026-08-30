@@ -18,6 +18,7 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.transform import (
     DeadBlock,
     DeadModule,
+    dead_code_result_to_dict,
     find_callers,
     find_dead_code,
     find_impact,
@@ -401,12 +402,25 @@ def graph_cmd(
 def dead_code_cmd(
     path: Annotated[str, typer.Argument(help="Project directory to scan")] = ".",
     kind: Annotated[Optional[str], typer.Option("--kind", "-k", help="Symbol kind: function, class")] = None,
-    include_private: Annotated[bool, typer.Option("--include-private", help="Include _private symbols")] = False,
+    include_private: Annotated[
+        bool,
+        typer.Option(
+            "--include-private/--exclude-private",
+            help="Report _private symbols and private methods",
+        ),
+    ] = True,
     json_output: JsonFlag = False,
     exclude_references_from: Annotated[
         Optional[list[str]],
         typer.Option("--exclude-references-from", help="Directories to ignore when scanning for references (e.g. tests/)")
     ] = None,
+    include_test_references: Annotated[
+        bool,
+        typer.Option(
+            "--include-test-references",
+            help="Let references from tests keep production code alive",
+        ),
+    ] = False,
     no_strings: Annotated[bool, typer.Option("--no-strings", help="Don't count string literals as references")] = False,
     no_last_reference: Annotated[bool, typer.Option("--no-last-reference", help="Don't show git last-reference info")] = False,
     all_files: Annotated[bool, typer.Option("--all-files", help="Scan all Python files, not just git-tracked ones")] = False,
@@ -424,14 +438,17 @@ def dead_code_cmd(
     ] = None,
     unused_modules: Annotated[
         bool,
-        typer.Option("--unused-modules", help="Also report Python modules that are never imported")
-    ] = False,
+        typer.Option(
+            "--unused-modules/--no-unused-modules",
+            help="Report Python modules that are never imported",
+        ),
+    ] = True,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
-    Scans Python files and reports top-level symbols that have no
-    references outside their own definition. Uses scope-aware analysis
-    to avoid false positives from same-named symbols.
+    Scans source files and reports unreferenced top-level symbols, private
+    methods on live classes, and unused Python modules. Uses scope-aware
+    analysis to avoid false positives from same-named symbols.
 
     By default, only git-tracked files are scanned. Use --all-files
     to include untracked files (e.g. in non-git projects).
@@ -442,8 +459,12 @@ def dead_code_cmd(
     - Decorated entry points (@app.command, @pytest.fixture, etc.)
     - Symbols listed in __all__
     - Conventional entry points (main, setup, teardown)
-    - Private symbols (_name) unless --include-private is set
     - Symbols with # noqa: emend:deadcode on the definition line
+
+    References from test files are ignored by default. Use
+    --include-test-references to count them. Private symbols/methods and
+    unused modules are reported by default; use --exclude-private or
+    --no-unused-modules to opt out.
 
     Use --entry-point-decorator and --entry-point-name to add custom
     exclusions beyond the built-in heuristics.
@@ -455,13 +476,13 @@ def dead_code_cmd(
     Examples:
         emend deadcode src/
         emend deadcode . --kind function
-        emend deadcode . --include-private --json
-        emend deadcode src/ --exclude-references-from tests/
+        emend deadcode . --exclude-private --json
+        emend deadcode src/ --include-test-references
         emend deadcode . --no-strings --no-last-reference
         emend deadcode . --all-files
         emend deadcode . --entry-point-decorator my_framework.handler
         emend deadcode . --entry-point-name plugin_init
-        emend deadcode . --unused-modules
+        emend deadcode . --no-unused-modules
     """
     with cli_error_handler():
         results = find_dead_code(
@@ -469,6 +490,7 @@ def dead_code_cmd(
             kind=kind,
             include_private=include_private,
             exclude_references_from=exclude_references_from,
+            exclude_test_references=not include_test_references,
             strings_count_as_references=not no_strings,
             show_last_reference=not no_last_reference,
             all_files=all_files,
@@ -480,37 +502,7 @@ def dead_code_cmd(
 
         if json_output:
             # JSON mode: must collect all results before printing
-            data = []
-            for d in results:
-                if isinstance(d, DeadBlock):
-                    entry = {
-                        "file_path": d.file_path,
-                        "func_qn": d.func_qn,
-                        "kind": "unreachable_block",
-                        "start_line": d.start_line,
-                        "end_line": d.end_line,
-                        "reason": "unreachable code",
-                    }
-                elif isinstance(d, DeadModule):
-                    entry = {
-                        "file_path": d.file_path,
-                        "name": d.name,
-                        "module_name": d.module_name,
-                        "kind": "module",
-                        "reason": d.reason,
-                    }
-                else:
-                    entry = {
-                        "file_path": d.file_path,
-                        "name": d.name,
-                        "kind": d.kind,
-                        "line": d.line,
-                        "selector": d.selector,
-                        "reason": d.reason,
-                    }
-                    if d.last_reference_commit:
-                        entry["last_reference_commit"] = d.last_reference_commit
-                data.append(entry)
+            data = [dead_code_result_to_dict(result) for result in results]
             if not data:
                 print("[]")
             else:
