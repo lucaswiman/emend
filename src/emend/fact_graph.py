@@ -65,7 +65,7 @@ class ReferenceFact:
     file_path: str
     line: int
     col: int
-    ref_kind: Literal["read", "write", "call", "import"]
+    ref_kind: Literal["read", "write", "call", "import", "definition"]
     func_qn: str = ""      # containing function (empty for module-level)
     block_id: int = -1      # containing CFG block (-1 for module-level)
 
@@ -191,12 +191,19 @@ class EntryPointNameFact:
     name: str
 
 
+@dataclass(frozen=True)
+class ExportedSymbolFact:
+    """A symbol exported by a particular source file."""
+    file_path: str
+    qualified_name: str
+
+
 # Union of all fact types for generic queries.
 Fact = Union[
     SymbolFact, CallFact, ReferenceFact, TraceFlowFact, TypeFact,
     ImportFact, CfgEdgeFact, DefUseFact, MethodCallFact, CfgBlockFact,
     DecoratorOnFact, SourceLocFact, FuncSummaryFact,
-    EntryPointDecoratorFact, EntryPointNameFact,
+    EntryPointDecoratorFact, EntryPointNameFact, ExportedSymbolFact,
 ]
 
 
@@ -385,7 +392,10 @@ _SCHEMA_INIT = """\
 
 {:create entry_point_prefix { prefix: String }}
 
-{:create exported_symbol { qualified_name: String }}
+{:create exported_symbol {
+    file_path: String,
+    qualified_name: String
+}}
 
 {:create ref_by_block {
     file_path: String,
@@ -868,12 +878,32 @@ class FactGraph:
         rows = [[f.name] for f in facts]
         self._put_batch("entry_point_name", "name", "name", rows)
 
-    def add_exported_symbols_batch(self, qns: list[str]) -> None:
-        """Bulk-insert exported symbol qualified names."""
-        if not qns:
+    def add_exported_symbol(self, fact: ExportedSymbolFact) -> None:
+        """Add an exported symbol scoped to its defining file."""
+        self._client.run(
+            "?[file_path, qualified_name] <- [[$fp, $qn]] "
+            ":put exported_symbol {file_path, qualified_name}",
+            {"fp": fact.file_path, "qn": fact.qualified_name},
+        )
+
+    def add_exported_symbols_batch(
+        self, facts: list[ExportedSymbolFact | tuple[str, str]]
+    ) -> None:
+        """Bulk-insert exported symbols scoped to their defining files."""
+        if not facts:
             return
-        rows = [[qn] for qn in qns]
-        self._put_batch("exported_symbol", "qualified_name", "qualified_name", rows)
+        rows = [
+            [fact.file_path, fact.qualified_name]
+            if isinstance(fact, ExportedSymbolFact)
+            else [fact[0], fact[1]]
+            for fact in facts
+        ]
+        self._put_batch(
+            "exported_symbol",
+            "file_path, qualified_name",
+            "file_path, qualified_name",
+            rows,
+        )
 
     # -- Post-processing ---------------------------------------------------
 
@@ -1274,6 +1304,26 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def exported_symbols(
+        self,
+        file_path: str | None = None,
+        qualified_name: str | None = None,
+    ) -> list[ExportedSymbolFact]:
+        """Return exported symbols, optionally scoped by file or QN."""
+        clauses = ["*exported_symbol[fp, qn]"]
+        params: dict[str, Any] = {}
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        if qualified_name is not None:
+            clauses.append("qn == $qualified_name")
+            params["qualified_name"] = qualified_name
+        result = self._client.run("?[fp, qn] := " + ", ".join(clauses), params)
+        return [
+            ExportedSymbolFact(file_path=r[0], qualified_name=r[1])
+            for r in result["rows"]
+        ]
+
     def resolve_location(self, file_path: str, line: int) -> tuple[str, int]:
         """Resolve a line number to ``(func_qn, block_id)`` using stored facts.
 
@@ -1361,24 +1411,23 @@ class FactGraph:
 
         String literal filtering stays as a Python post-filter (caller's responsibility).
         """
-        # Seed entry point facts if provided
-        setup_rules = []
-        if entry_point_decorators:
-            dec_rows = ", ".join(f'["{d}"]' for d in entry_point_decorators)
-            setup_rules.append(f"?[decorator] <- [{dec_rows}] :put entry_point_decorator {{decorator}}")
-        if entry_point_names:
-            name_rows = ", ".join(f'["{n}"]' for n in entry_point_names)
-            setup_rules.append(f"?[name] <- [{name_rows}] :put entry_point_name {{name}}")
-        if entry_point_prefixes:
-            pfx_rows = ", ".join(f'["{p}"]' for p in entry_point_prefixes)
-            setup_rules.append(f"?[prefix] <- [{pfx_rows}] :put entry_point_prefix {{prefix}}")
-
-        # Run setup rules if any
-        for rule in setup_rules:
-            try:
-                self._client.run(rule)
-            except Exception:
-                logger.debug("Entry point seed rule failed: %s", rule, exc_info=True)
+        # Per-invocation seeds must remain query-local.  The stored relations
+        # contain only project configuration; putting CLI arguments into them
+        # makes one dead-code invocation affect all later invocations.
+        seed_rules = (
+            self._inline_relation(
+                "seed_ep_decorator", ["decorator"],
+                [(d,) for d in (entry_point_decorators or [])],
+            )
+            + self._inline_relation(
+                "seed_ep_name", ["name"],
+                [(n,) for n in (entry_point_names or [])],
+            )
+            + self._inline_relation(
+                "seed_ep_prefix", ["prefix"],
+                [(p,) for p in (entry_point_prefixes or [])],
+            )
+        )
 
         # Build excluded-path filter clauses for CozoDB.
         # We need two variants: one using the variable "fp" (for the
@@ -1424,7 +1473,7 @@ class FactGraph:
             ) + "entry_point[qn] := configured_entry_point[qn]\n"
 
         query = (
-            excluded_file_rules + exact_entry_rules +
+            seed_rules + excluded_file_rules + exact_entry_rules +
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
@@ -1476,21 +1525,32 @@ class FactGraph:
             '*symbol[qn, _, name, _, _, _, _], '
             '*entry_point_prefix[pfx], '
             'starts_with(name, pfx)\n'
+            'entry_point[qn] := '
+            '*symbol[qn, _, name, _, _, _, _], '
+            'seed_ep_prefix[pfx], '
+            'starts_with(name, pfx)\n'
 
             # Entry points: decorated symbols (case-insensitive for TS PascalCase)
             'entry_point[qn] := '
             '*decorator_on[qn, dec], '
             '*entry_point_decorator[ep_dec], '
             'lowercase(dec) == lowercase(ep_dec)\n'
+            'entry_point[qn] := '
+            '*decorator_on[qn, dec], '
+            'seed_ep_decorator[ep_dec], '
+            'lowercase(dec) == lowercase(ep_dec)\n'
 
             # Entry points: named symbols
             'entry_point[qn] := '
             '*symbol[qn, _, name, _, _, _, _], '
             '*entry_point_name[name]\n'
+            'entry_point[qn] := '
+            '*symbol[qn, _, name, _, _, _, _], '
+            'seed_ep_name[name]\n'
 
             # Entry points: explicitly exported symbols
             'entry_point[qn] := '
-            '*exported_symbol[qn]\n'
+            '*exported_symbol[_, qn]\n'
 
             # A private method is only actionable when its containing class is
             # itself live or externally exposed. This avoids duplicating every
@@ -2580,6 +2640,7 @@ class FactGraph:
             self._all_func_summaries,
             self._all_entry_point_decorators,
             self._all_entry_point_names,
+            self._all_exported_symbols,
         ]
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
@@ -2709,6 +2770,12 @@ class FactGraph:
             lambda r: EntryPointNameFact(name=r[0]),
         )
 
+    def _all_exported_symbols(self) -> list[ExportedSymbolFact]:
+        return self._query_all(
+            "exported_symbol", "file_path, qualified_name",
+            lambda r: ExportedSymbolFact(file_path=r[0], qualified_name=r[1]),
+        )
+
     # -- Serialization ----------------------------------------------------
 
     def to_json(self) -> str:
@@ -2743,6 +2810,7 @@ class FactGraph:
             "FuncSummaryFact": (FuncSummaryFact, graph.add_func_summary),
             "EntryPointDecoratorFact": (EntryPointDecoratorFact, graph.add_entry_point_decorator),
             "EntryPointNameFact": (EntryPointNameFact, graph.add_entry_point_name),
+            "ExportedSymbolFact": (ExportedSymbolFact, graph.add_exported_symbol),
         }
 
         for entry in json.loads(json_str):
@@ -2848,6 +2916,10 @@ class FactGraph:
                 "?[symbol_qn, file_path, line] := "
                 "*module_level_ref[symbol_qn, file_path, line], "
                 "file_path == $fp  :rm module_level_ref {symbol_qn, file_path, line}",
+                # exported_symbol is keyed by its defining file.
+                "?[file_path, qualified_name] := "
+                "*exported_symbol[file_path, qualified_name], "
+                "file_path == $fp  :rm exported_symbol {file_path, qualified_name}",
                 # import (uses importing_file, not file_path)
                 "?[importing_file, imported_module, imported_name, line] := "
                 "*import[importing_file, imported_module, imported_name, line, _], "
@@ -2877,7 +2949,10 @@ class FactGraph:
             "ref_by_block": ("ref_by_block", "file_path, func_qn, block_id, symbol_qn", "file_path, func_qn, block_id, symbol_qn"),
             "noncall_private_member_refs": ("noncall_private_member_ref", "file_path, func_qn, block_id, member_name", "file_path, func_qn, block_id, member_name"),
             "module_level_refs": ("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line"),
-            "exported_qns": ("exported_symbol", "qualified_name", "qualified_name"),
+            "exported_qns": (
+                "exported_symbol", "file_path, qualified_name",
+                "file_path, qualified_name",
+            ),
         }
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows[key]
@@ -3163,8 +3238,10 @@ def _walk_symbols(
             _walk_symbols(out, dec_out, children, file_path, module_name, parent_qn=qn)
 
 
-def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import"]:
+def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import", "definition"]:
     """Map a Rust scope-resolver reference kind to our fact model."""
+    if kind == "definition":
+        return "definition"
     if kind == "call":
         return "call"
     if kind == "write":

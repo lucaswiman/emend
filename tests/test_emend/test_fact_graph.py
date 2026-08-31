@@ -18,6 +18,7 @@ from emend.fact_graph import (
     DefUseFact,
     EntryPointDecoratorFact,
     EntryPointNameFact,
+    ExportedSymbolFact,
     FactGraph,
     FuncSummaryFact,
     ImportFact,
@@ -295,6 +296,24 @@ class TestSerialization:
         data = json.loads(g.to_json())
         assert isinstance(data, list)
         assert any(d["_type"] == "SymbolFact" for d in data)
+
+    def test_exported_symbols_are_file_owned_and_serialized(self):
+        g = FactGraph()
+        g.add_exported_symbols_batch([
+            ExportedSymbolFact("one.ts", "pkg.shared"),
+            ExportedSymbolFact("two.ts", "pkg.shared"),
+        ])
+
+        assert {
+            (fact.file_path, fact.qualified_name)
+            for fact in g.exported_symbols()
+        } == {("one.ts", "pkg.shared"), ("two.ts", "pkg.shared")}
+
+        roundtrip = FactGraph.from_json(g.to_json())
+        assert {
+            (fact.file_path, fact.qualified_name)
+            for fact in roundtrip.exported_symbols()
+        } == {("one.ts", "pkg.shared"), ("two.ts", "pkg.shared")}
 
 
 class TestGenericQuery:
