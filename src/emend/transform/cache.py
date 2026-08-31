@@ -15,13 +15,14 @@ from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "4"
+_SCHEMA_VERSION = "5"
 
-def _resolve_cache_root(project_root: str) -> Path:
-    """Return the main repo root for cache storage.
+def _resolve_shared_data_root(project_root: str) -> Path:
+    """Return the main checkout root for user-managed shared data.
 
-    In a git worktree, the cache lives in the main repo so all
-    worktrees share a single parse.db.
+    Cache databases are deliberately excluded: they describe one worktree's
+    mutable source snapshot and therefore live in that worktree. Only durable
+    user data such as mappings is shared with the main checkout.
     """
     root = Path(project_root).resolve()
     
@@ -56,9 +57,8 @@ def _resolve_cache_root(project_root: str) -> Path:
 
 
 def _cache_db_dir(project_root: str | Path) -> Path:
-    """Return the directory for the shared cache DB."""
-    main_root = _resolve_cache_root(str(project_root))
-    return main_root / ".emend" / "cache"
+    """Return the cache directory owned by this project worktree."""
+    return Path(project_root).resolve() / ".emend" / "cache"
 
 
 def _knowledge_db_dir(project_root: str | Path) -> Path:
@@ -68,7 +68,7 @@ def _knowledge_db_dir(project_root: str | Path) -> Path:
     recomputed, so they live directly in ``.emend/`` rather than
     ``.emend/cache/``.
     """
-    main_root = _resolve_cache_root(str(project_root))
+    main_root = _resolve_shared_data_root(str(project_root))
     return main_root / ".emend"
 
 
@@ -76,9 +76,7 @@ def _knowledge_db_dir(project_root: str | Path) -> Path:
 def _get_worktree_id(project_root: str) -> str:
     """Return a stable identifier for the current working tree.
 
-    This is the resolved absolute path of *project_root*.  Each worktree
-    gets its own manifest rows keyed by this ID, while sharing all
-    content-hashed cache data.
+    This is the resolved absolute path of *project_root*.
     """
     return str(Path(project_root).resolve())
 
@@ -306,8 +304,8 @@ def _get_disk_cache() -> "sqlite3.Connection | None":
 _facts_db_cache: dict[str, object] = {}  # project_root → CozoDB client
 _facts_db_lock = _threading.Lock()
 
-_FACTS_SCHEMA = """\
-{:ensure fact_symbol {
+_INDEX_FACTS_SCHEMA = """\
+{:create fact_symbol {
     fp: String,
     mqn: String
     =>
@@ -327,7 +325,7 @@ _FACTS_SCHEMA = """\
     has_noqa: Bool default false
 }}
 
-{:ensure fact_reference {
+{:create fact_reference {
     tqn: String,
     fp: String,
     line: Int,
@@ -336,122 +334,9 @@ _FACTS_SCHEMA = """\
     kind: String
 }}
 
-{:ensure fact_import {
+{:create fact_import {
     fp: String,
     mod: String
-}}
-
-{:ensure symbol {
-    qualified_name: String
-    =>
-    file_path: String,
-    name: String,
-    kind: String,
-    line: Int,
-    end_line: Int,
-    parent: String default ""
-}}
-
-{:ensure reference {
-    symbol_qn: String,
-    file_path: String,
-    line: Int,
-    col: Int
-    =>
-    ref_kind: String,
-    func_qn: String default "",
-    block_id: Int default -1
-}}
-
-{:ensure call {
-    caller_qn: String,
-    callee_qn: String,
-    file_path: String,
-    line: Int,
-    col: Int
-    =>
-    func_qn: String default "",
-    block_id: Int default -1
-}}
-
-{:ensure cfg_block {
-    file_path: String,
-    func_qn: String,
-    block_id: Int
-    =>
-    is_entry: Bool default false,
-    is_exit: Bool default false
-}}
-
-{:ensure cfg_edge {
-    file_path: String,
-    func_qn: String,
-    from_block: Int,
-    to_block: Int,
-    edge_kind: String,
-    from_line: Int,
-    to_line: Int
-}}
-
-{:ensure def_use {
-    file_path: String,
-    func_qn: String,
-    var_name: String,
-    kind: String default "write",
-    def_block: Int,
-    use_block: Int
-    =>
-    def_line: Int default 0,
-    def_col: Int default 0,
-    use_line: Int default 0,
-    use_col: Int default 0
-}}
-
-{:ensure method_call {
-    file_path: String,
-    func_qn: String,
-    receiver: String,
-    method: String,
-    block_id: Int,
-    line: Int
-}}
-
-{:ensure source_loc {
-    file_path: String,
-    loc_kind: String,
-    loc_id: String
-    =>
-    line: Int,
-    col: Int default 0,
-    end_line: Int default 0,
-    rel_line: Int default 0
-}}
-
-{:ensure import {
-    importing_file: String,
-    imported_module: String,
-    imported_name: String default "",
-    line: Int
-    =>
-    alias: String default ""
-}}
-
-{:ensure decorator_on {
-    symbol_qn: String,
-    decorator: String
-}}
-
-{:ensure ref_by_block {
-    file_path: String,
-    func_qn: String,
-    block_id: Int,
-    symbol_qn: String
-}}
-
-{:ensure reachable_block {
-    file_path: String,
-    func_qn: String,
-    block_id: Int
 }}
 """
 
@@ -459,20 +344,41 @@ _FACTS_SCHEMA = """\
 def _open_facts_db(db_path: str):
     """Open (or create) a CozoDB facts database at *db_path*.
 
-    Uses ``:ensure`` (not ``:create``) so that existing data is preserved
-    when the database is reopened.
+    Schema creation is idempotent: existing-relation conflicts are ignored,
+    while genuine schema errors propagate instead of producing a partial DB.
     """
-    from emend.fact_graph import _create_cozo_client
+    from emend.fact_graph import _create_cozo_client, _init_schema
 
     client = _create_cozo_client(db_path)
-    for stmt in _FACTS_SCHEMA.strip().split("\n\n"):
+    _init_schema(client)
+    for stmt in _INDEX_FACTS_SCHEMA.strip().split("\n\n"):
         stmt = stmt.strip()
         if stmt:
             try:
                 client.run(stmt)
-            except Exception:
-                logger.debug("facts schema statement failed (already exists?)", exc_info=True)
+            except Exception as exc:
+                if "conflicts with an existing one" not in str(exc):
+                    client.close()
+                    raise
     return client
+
+
+def _facts_schema_is_current(db_path: str | Path) -> bool:
+    """Return whether a persisted fact graph matches the current schema."""
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    client = _open_facts_db(str(path))
+    try:
+        rows = client.run(
+            '?[value] := *facts_meta["schema_version", value]'
+        )["rows"]
+        return rows == [[_SCHEMA_VERSION]]
+    except Exception:
+        logger.debug("facts schema version check failed", exc_info=True)
+        return False
+    finally:
+        client.close()
 
 
 def _get_facts_db(project_root: str | None = None):
@@ -503,8 +409,8 @@ def _get_facts_db(project_root: str | None = None):
         try:
             cache_dir = _cache_db_dir(project_root)
             db_path = cache_dir / "facts.db"
-            if not db_path.exists():
-                logger.debug("facts db not found at %s", db_path)
+            if not _facts_schema_is_current(db_path):
+                logger.debug("facts db missing or stale at %s", db_path)
                 return None
             client = _open_facts_db(str(db_path))
             _facts_db_cache[key] = client
@@ -549,6 +455,8 @@ def _delete_facts_for_file(fdb, file_path: str) -> None:
         "fp == $fp  :rm import {fp, im, iname, line => }",
         "?[fp, fq, bid, sq] := *ref_by_block[fp, fq, bid, sq], "
         "fp == $fp  :rm ref_by_block {fp, fq, bid, sq}",
+        "?[fp, fq, bid, member] := *noncall_private_member_ref[fp, fq, bid, member], "
+        "fp == $fp  :rm noncall_private_member_ref {fp, fq, bid, member}",
         "?[fp, fq, bid] := *reachable_block[fp, fq, bid], "
         "fp == $fp  :rm reachable_block {fp, fq, bid}",
         "?[sq, fp, line] := *module_level_ref[sq, fp, line], "
@@ -675,7 +583,8 @@ def _extract_file_facts(
         "dec": [], "cfg_blocks": [], "cfg_edges": [], "fg_refs": [],
         "calls": [], "calls_by_callee": [], "calls_by_file": [],
         "def_uses": [], "method_calls": [], "source_locs": [],
-        "imports": [], "ref_by_block": [], "module_level_refs": [],
+        "imports": [], "ref_by_block": [], "noncall_private_member_refs": [],
+        "module_level_refs": [],
         "exported_qns": [],
     }
 
@@ -835,6 +744,16 @@ def _extract_file_facts(
         # definition-site "references" to avoid inflating live_ref.
         if fq and bid >= 0 and (tqn, line) not in _sym_def_lines:
             result["ref_by_block"].append([rel_path, fq, bid, tqn])
+            member_name = tqn.rsplit(".", 1)[-1]
+            if (
+                kind != "call"
+                and "." in tqn
+                and member_name.startswith("_")
+                and not member_name.startswith("__")
+            ):
+                result["noncall_private_member_refs"].append([
+                    rel_path, fq, bid, member_name,
+                ])
         else:
             result["module_level_refs"].append([tqn, rel_path, line])
 
@@ -948,6 +867,14 @@ def _build_facts_db(
             return abs_path
 
     try:
+        # A fact graph is current only after every replacement succeeds.
+        # Clearing the marker first prevents a partial rebuild from being
+        # mistaken for a valid snapshot on the next invocation.
+        fdb.run(
+            '?[key] := *facts_meta[key, _], key == "schema_version" '
+            ':rm facts_meta {key => }'
+        )
+
         # Discover source files directly from the filesystem, for all
         # languages present in the project (auto-detected).
         from emend.file_collection import collect_all_source_files as _collect_all_source_files
@@ -1037,6 +964,7 @@ def _build_facts_db(
         all_source_locs: list[list] = []
         all_imports: list[list] = []
         all_ref_by_block: list[list] = []
+        all_noncall_private_member_refs: list[list] = []
         all_module_level_refs: list[list] = []
         all_exported_qns: list[list] = []
 
@@ -1049,6 +977,7 @@ def _build_facts_db(
             "calls_by_file": all_calls_by_file, "def_uses": all_def_uses,
             "method_calls": all_method_calls, "source_locs": all_source_locs,
             "imports": all_imports, "ref_by_block": all_ref_by_block,
+            "noncall_private_member_refs": all_noncall_private_member_refs,
             "module_level_refs": all_module_level_refs,
             "exported_qns": all_exported_qns,
         }
@@ -1173,6 +1102,12 @@ def _build_facts_db(
         )
 
         fdb.run(
+            "?[file_path, func_qn, block_id, member_name] <- $rows "
+            ":replace noncall_private_member_ref {file_path, func_qn, block_id, member_name}",
+            {"rows": all_noncall_private_member_refs},
+        )
+
+        fdb.run(
             "?[file_path, func_qn, block_id] <- $rows "
             ":replace reachable_block {file_path, func_qn, block_id}",
             {"rows": all_reachable},
@@ -1188,6 +1123,12 @@ def _build_facts_db(
             "?[qualified_name] <- $rows "
             ":replace exported_symbol {qualified_name}",
             {"rows": all_exported_qns},
+        )
+
+        fdb.run(
+            '?[key, value] <- $rows '
+            ':put facts_meta {key => value}',
+            {"rows": [["schema_version", _SCHEMA_VERSION]]},
         )
 
     except BUG_EXCEPTIONS:

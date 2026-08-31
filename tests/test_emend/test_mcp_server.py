@@ -180,42 +180,6 @@ def test_transform_edit_apply(tmp_path):
     assert "str | None" in p.read_text()
 
 
-def test_warm_caches_background_uses_daemon_thread(monkeypatch):
-    import emend.mcp.dispatch as dispatch
-
-    captured = {}
-
-    class FakeThread:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        def start(self):
-            captured["started"] = True
-
-    monkeypatch.setattr(dispatch.threading, "Thread", FakeThread)
-
-    dispatch._warm_caches_background()
-
-    assert captured["daemon"] is True
-    assert captured["started"] is True
-    assert callable(captured["target"])
-
-
-def test_warm_caches_worker_preserves_root_logging(monkeypatch):
-    import logging
-
-    import emend.mcp.dispatch as dispatch
-    import emend.transform
-
-    root_logger = logging.getLogger()
-    monkeypatch.setattr(root_logger, "handlers", [])
-    monkeypatch.setattr(emend.transform, "warm_caches", Mock())
-
-    dispatch._warm_caches_worker()
-
-    assert root_logger.handlers == []
-
-
 @pytest.mark.parametrize(
     ("transport", "expected"),
     [
@@ -226,14 +190,12 @@ def test_warm_caches_worker_preserves_root_logging(monkeypatch):
 def test_run_server_starts_v2_transport(monkeypatch, transport, expected):
     import emend.mcp.dispatch as dispatch
 
-    warm_caches = Mock()
-    monkeypatch.setattr(dispatch, "_warm_caches_background", warm_caches)
     run = Mock()
     monkeypatch.setattr(dispatch.mcp_app, "run", run)
 
+    assert not hasattr(dispatch, "_warm_caches_background")
     dispatch.run_server(transport=transport, port=8765)
 
-    warm_caches.assert_called_once_with()
     run.assert_called_once_with(**expected)
 
 

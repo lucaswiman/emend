@@ -719,7 +719,7 @@ class TestIndexStatus:
         assert info is not None
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
-        assert info["schema_version"] == "4"
+        assert info["schema_version"] == "5"
 
     def test_status_returns_none_without_index(self, tmp_path):
         """get_index_status returns None when no index exists."""

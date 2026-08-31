@@ -172,12 +172,11 @@ Caching and indexing
 
 emend maintains a cache at ``.emend/cache/parse.db`` (SQLite, WAL mode).
 The cache is content-addressed — almost every key is the MD5 of the file's
-source text — so switching branches or reverting edits naturally reuses
-earlier entries.  A ``.gitignore`` and ``.dockerignore`` are auto-generated
-inside ``.emend/cache/`` to prevent the database from being checked in.
-When running inside a git worktree the cache is stored in the **main repo's**
-``.emend/cache/`` so all worktrees share a single database (see
-`Git worktree support`_ below).
+source text — so reverting edits within a checkout naturally reuses earlier
+entries.  A ``.gitignore`` and ``.dockerignore`` are auto-generated inside
+``.emend/cache/`` to prevent the database from being checked in.  Each git
+worktree owns its cache because the manifest, editor projections, and fact
+graph describe one mutable source snapshot.
 
 Overview of cache tables
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -341,29 +340,19 @@ Git worktree support
 ~~~~~~~~~~~~~~~~~~~~
 
 When emend runs inside a `git worktree
-<https://git-scm.com/docs/git-worktree>`_, the cache is automatically shared
-with the main repository.  This means:
+<https://git-scm.com/docs/git-worktree>`_, ``parse.db`` and ``facts.db`` stay
+under that worktree's own ``.emend/cache/``.  Content hashes are safe to share,
+but the databases also contain mutable manifests, full-text projections, and a
+project-wide fact snapshot; sharing those structures lets one branch overwrite
+another branch's analysis.
 
-- Running ``emend tool index`` in **any** worktree populates the shared
-  ``parse.db``.  Other worktrees immediately benefit from the cached parse
-  trees, qualified-name indexes, type information, symbol definitions, and
-  reference data — all of which are keyed by content hash.
-- Each worktree maintains its own ``file_manifest`` rows (scoped by a
-  ``worktree_id`` derived from the worktree's absolute path), so stat-based
-  freshness checks are accurate per worktree.
-- Git HEAD tracking is per-worktree (``git_head:<worktree_id>`` keys in
-  ``index_meta``), so branch switches in one worktree don't invalidate
-  another.
+User-managed mappings are different: they are durable input rather than a
+recomputable snapshot.  For those files, emend follows the worktree's
+``commondir`` reference and stores the mapping data in the main checkout's
+``.emend/`` directory.
 
-The mechanism works by reading the ``.git`` file in the worktree root (which
-contains a ``gitdir:`` pointer) and following the ``commondir`` reference to
-locate the main repository.  ``_resolve_cache_root()`` in ``transform.py``
-performs this resolution and caches the result.  For non-worktree repos (and
-non-git projects), the project root is used directly — no behavior change.
-
-SQLite WAL mode ensures that concurrent access from multiple worktrees (or
-multiple emend processes) is safe: readers never block, and writes are
-serialized with a configurable timeout.
+SQLite WAL mode still protects concurrent readers and writers operating on the
+same worktree cache.
 
 Selector grammar
 ----------------

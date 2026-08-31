@@ -125,7 +125,7 @@ def build_indexed_project(
     )
     conn.execute(
         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-        ("schema_version", "4"),
+        ("schema_version", "5"),
     )
     conn.commit()
     conn.close()
@@ -250,5 +250,4 @@ def setup_trace_fixture(tmp_path, source=None):
     cfg = tmp_path / "rules.yaml"
     cfg.write_text(SQL_INJECTION_CONFIG_YAML)
     return src, cfg
-
 

@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import json
-import logging
 import sys
-import threading
 from typing import Any
 
 from mcp.server import MCPServer
-
-from emend.errors import BUG_EXCEPTIONS
-
-logger = logging.getLogger("emend.mcp")
 
 mcp_app = MCPServer(
     "emend",
@@ -34,27 +28,6 @@ Prefer the discriminated tools:
 - mappings(operation=read|write)
 """,
 )
-
-
-def _warm_caches_worker() -> None:
-    """Warm parse and QN-index caches in the background thread."""
-    try:
-        from emend.transform import warm_caches
-        warm_caches(".")
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("Background cache warming failed", exc_info=True)
-
-
-def _warm_caches_background() -> None:
-    """Start warming parse and QN-index caches without blocking startup."""
-    thread = threading.Thread(
-        target=_warm_caches_worker,
-        name="emend-cache-warm",
-        daemon=True,
-    )
-    thread.start()
 
 
 def _compress_schema(obj: object) -> object:
@@ -178,8 +151,6 @@ def run_server(
         raise ValueError(f"Unknown transport: {transport!r}. Use 'stdio' or 'sse'.")
 
     configure_profile(profile=profile, tools=tools)
-
-    _warm_caches_background()
 
     if transport == "sse":
         mcp_app.run(transport="sse", port=port)
