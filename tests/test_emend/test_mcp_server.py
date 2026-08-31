@@ -201,6 +201,21 @@ def test_warm_caches_background_uses_daemon_thread(monkeypatch):
     assert callable(captured["target"])
 
 
+def test_warm_caches_worker_preserves_root_logging(monkeypatch):
+    import logging
+
+    import emend.mcp.dispatch as dispatch
+    import emend.transform
+
+    root_logger = logging.getLogger()
+    monkeypatch.setattr(root_logger, "handlers", [])
+    monkeypatch.setattr(emend.transform, "warm_caches", Mock())
+
+    dispatch._warm_caches_worker()
+
+    assert root_logger.handlers == []
+
+
 @pytest.mark.parametrize(
     ("transport", "expected"),
     [

@@ -12,6 +12,8 @@ from mcp.server import MCPServer
 
 from emend.errors import BUG_EXCEPTIONS
 
+logger = logging.getLogger("emend.mcp")
+
 mcp_app = MCPServer(
     "emend",
     instructions="""\
@@ -36,14 +38,13 @@ Prefer the discriminated tools:
 
 def _warm_caches_worker() -> None:
     """Warm parse and QN-index caches in the background thread."""
-    logging.basicConfig(level=logging.WARNING)
     try:
         from emend.transform import warm_caches
         warm_caches(".")
     except BUG_EXCEPTIONS:
         raise
     except Exception:
-        logging.getLogger("emend.mcp").debug("Background cache warming failed", exc_info=True)
+        logger.debug("Background cache warming failed", exc_info=True)
 
 
 def _warm_caches_background() -> None:
