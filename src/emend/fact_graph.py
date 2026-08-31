@@ -394,6 +394,13 @@ _SCHEMA_INIT = """\
     symbol_qn: String
 }}
 
+{:create noncall_private_member_ref {
+    file_path: String,
+    func_qn: String,
+    block_id: Int,
+    member_name: String
+}}
+
 {:create reachable_block {
     file_path: String,
     func_qn: String,
@@ -404,6 +411,12 @@ _SCHEMA_INIT = """\
     symbol_qn: String,
     file_path: String,
     line: Int
+}}
+
+{:create facts_meta {
+    key: String
+    =>
+    value: String
 }}
 
 """
@@ -1402,42 +1415,6 @@ class FactGraph:
         if excl_parts_ref:
             excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
-        # Resolve non-call member references before the main dead-code query.
-        # Joining every reference to every private method through a dynamic
-        # ``ends_with`` predicate creates a Cartesian product on cold indexes
-        # (minutes on emend itself). Two linear scans plus an exact inline
-        # relation preserve the suffix semantics without that query shape.
-        noncall_refs = self._client.run(
-            excluded_file_rules
-            + "?[sq] := "
-            "*reference[sq, fp, _, _, ref_kind, fq, bid], "
-            "*reachable_block[fp, fq, bid], "
-            f'ref_kind != "call"{excl_clauses}'
-        )["rows"]
-        referenced_member_names = {
-            str(row[0]).rsplit(".", 1)[-1]
-            for row in noncall_refs
-            if "." in str(row[0])
-        }
-        private_method_targets: list[tuple[str]] = []
-        if referenced_member_names:
-            private_methods = self._client.run(
-                "?[qn, name] := "
-                "*symbol[qn, _, name, kind, _, _, _], "
-                'kind in ["method", "async_method"], '
-                'starts_with(name, "_"), not starts_with(name, "__")'
-            )["rows"]
-            private_method_targets = [
-                (str(qn),)
-                for qn, name in private_methods
-                if name in referenced_member_names
-            ]
-        noncall_private_rules = self._inline_relation(
-            "reachable_noncall_private_method",
-            ["qn"],
-            private_method_targets,
-        )
-
         exact_entry_rules = ""
         if entry_point_qualified_names:
             exact_entry_rules = self._inline_relation(
@@ -1447,7 +1424,7 @@ class FactGraph:
             ) + "entry_point[qn] := configured_entry_point[qn]\n"
 
         query = (
-            excluded_file_rules + exact_entry_rules + noncall_private_rules +
+            excluded_file_rules + exact_entry_rules +
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
@@ -1472,9 +1449,15 @@ class FactGraph:
             'method_kind in ["method", "async_method"], '
             'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
 
-            # Non-call uses such as ``callbacks = [self._helper]`` are not
-            # method_call facts. Their exact targets were precomputed above.
-            "live_ref[qn] := reachable_noncall_private_method[qn]\n"
+            # Non-call uses such as ``callbacks = [self._helper]`` join on a
+            # materialized member name, avoiding a suffix-based cross product.
+            "live_ref[target_qn] := "
+            "*noncall_private_member_ref[fp, fq, bid, method_name], "
+            "*reachable_block[fp, fq, bid], "
+            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
+            'method_kind in ["method", "async_method"], '
+            'starts_with(method_name, "_"), not starts_with(method_name, "__")'
+            f"{excl_clauses}\n"
 
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
@@ -2852,6 +2835,11 @@ class FactGraph:
                 "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
                 "file_path == $fp  :rm ref_by_block "
                 "{file_path, func_qn, block_id, symbol_qn}",
+                # noncall_private_member_ref (all keys)
+                "?[file_path, func_qn, block_id, member_name] := "
+                "*noncall_private_member_ref[file_path, func_qn, block_id, member_name], "
+                "file_path == $fp  :rm noncall_private_member_ref "
+                "{file_path, func_qn, block_id, member_name}",
                 # reachable_block (all keys)
                 "?[file_path, func_qn, block_id] := "
                 "*reachable_block[file_path, func_qn, block_id], "
@@ -2887,6 +2875,7 @@ class FactGraph:
             "source_locs": ("source_loc", "file_path, loc_kind, loc_id, line, col, end_line, rel_line", "file_path, loc_kind, loc_id => line, col, end_line, rel_line"),
             "imports": ("import", "importing_file, imported_module, imported_name, line, alias", "importing_file, imported_module, imported_name, line => alias"),
             "ref_by_block": ("ref_by_block", "file_path, func_qn, block_id, symbol_qn", "file_path, func_qn, block_id, symbol_qn"),
+            "noncall_private_member_refs": ("noncall_private_member_ref", "file_path, func_qn, block_id, member_name", "file_path, func_qn, block_id, member_name"),
             "module_level_refs": ("module_level_ref", "symbol_qn, file_path, line", "symbol_qn, file_path, line"),
             "exported_qns": ("exported_symbol", "qualified_name", "qualified_name"),
         }

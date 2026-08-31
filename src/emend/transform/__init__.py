@@ -19,7 +19,6 @@ from .cache import (
     _get_worktree_id,
     _init_cache_schema,
     _open_facts_db,
-    _resolve_cache_root,
     _build_facts_db,
     _build_fact_sym_rows,
     _extract_file_facts,
@@ -219,7 +218,7 @@ __all__ = [
     # cache
     "_SCHEMA_VERSION", "_cache_db_dir", "_knowledge_db_dir", "_delete_facts_for_file",
     "_get_disk_cache", "_get_facts_db", "_get_worktree_id", "_init_cache_schema",
-    "_open_facts_db", "_resolve_cache_root", "_build_facts_db", "_build_fact_sym_rows",
+    "_open_facts_db", "_build_facts_db", "_build_fact_sym_rows",
     "_extract_file_facts", "_facts_db_cache",
     # index
     "_NOQA_RE", "_compute_duplicate_payloads", "_ensure_cache_ignore_files",

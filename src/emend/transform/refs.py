@@ -47,19 +47,35 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     """
     from emend.fact_graph import FactGraph
     from .project_iter import _find_project_root
-    from .cache import _cache_db_dir
-    from .index import _ensure_cache_ignore_files, warm_caches
+    from .cache import _cache_db_dir, _facts_schema_is_current
+    from .index import (
+        _ensure_cache_ignore_files,
+        _ensure_index_fresh,
+        _scan_manifest,
+        warm_caches,
+    )
 
     project_root = _find_project_root(project_path)
-    if project_root in _fact_graph_cache:
-        return _fact_graph_cache[project_root]
     emend_dir = _cache_db_dir(project_root)
     emend_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
     facts_db = emend_dir / "facts.db"
 
+    cached = _fact_graph_cache.get(project_root)
+    if cached is not None:
+        scan = _scan_manifest(project_root)
+        if scan.changed or scan.new_files or scan.deleted:
+            _fact_graph_cache.pop(project_root).close()
+            cached = None
+
+    index_is_fresh = _ensure_index_fresh(project_root)
+    if cached is not None and index_is_fresh and _facts_schema_is_current(facts_db):
+        return cached
+    if cached is not None:
+        _fact_graph_cache.pop(project_root).close()
+
     # Path 1: load existing facts.db
-    if facts_db.exists():
+    if index_is_fresh and _facts_schema_is_current(facts_db):
         try:
             graph = FactGraph(db_path=str(facts_db))
             count = graph._client.run(
@@ -97,7 +113,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         count = graph._client.run(
             "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
         )["rows"][0][0]
-        if count > 0:
+        if count > 0 and _facts_schema_is_current(facts_db):
             try:
                 graph._resolve_builtin_refs()
             except BUG_EXCEPTIONS:

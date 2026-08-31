@@ -288,6 +288,10 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
+            graph.run_query(
+                '?[key, value] <- [["schema_version", "5"]] '
+                ':put facts_meta {key => value}'
+            )
             graph.close()
             return {}
 
@@ -302,19 +306,22 @@ class TestDeadCodeWarmPath:
         })]
         graph.close()
 
-    def test_cold_path_loads_facts_from_shared_worktree_cache(
+    def test_cold_path_keeps_facts_in_the_current_worktree(
         self, tmp_path, monkeypatch,
     ):
-        """A worktree must load the facts database that ``warm_caches`` built."""
+        """Mutable analysis facts must not be shared by divergent worktrees."""
         from emend.fact_graph import FactGraph, SymbolFact
         from emend.transform import _cache_db_dir, _get_or_build_fact_graph
-        from emend.transform import cache as cache_module
 
-        project = make_project_dir(tmp_path)
+        main = tmp_path / "main"
+        git_dir = main / ".git"
+        worktree_git_dir = git_dir / "worktrees" / "feature"
+        worktree_git_dir.mkdir(parents=True)
+        (worktree_git_dir / "commondir").write_text("../..\n")
+        project = tmp_path / "feature"
+        project.mkdir()
+        (project / ".git").write_text(f"gitdir: {worktree_git_dir}\n")
         (project / "mod.py").write_text("def unused():\n    return 1\n")
-        shared_root = tmp_path / "main"
-        shared_root.mkdir()
-        monkeypatch.setattr(cache_module, "_resolve_cache_root", lambda _path: shared_root)
 
         def fake_warm_caches(path, **_kwargs):
             cache_dir = _cache_db_dir(path)
@@ -328,18 +335,59 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
+            graph.run_query(
+                '?[key, value] <- [["schema_version", "5"]] '
+                ':put facts_meta {key => value}'
+            )
             graph.close()
 
         monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
         monkeypatch.setattr(
             FactGraph,
             "build_from_project",
-            Mock(side_effect=AssertionError("shared facts.db was not loaded")),
+            Mock(side_effect=AssertionError("worktree facts.db was not loaded")),
         )
 
         graph = _get_or_build_fact_graph(str(project))
 
         assert graph._client.run("?[count(qn)] := *symbol[qn, _, _, _, _, _, _]")["rows"] == [[1]]
+        assert (_cache_db_dir(project) / "facts.db").is_file()
+        assert not (main / ".emend" / "cache" / "facts.db").exists()
+        graph.close()
+
+    def test_cached_fact_graph_refreshes_after_source_changes(self, tmp_path):
+        """Long-lived clients must not keep serving a stale project snapshot."""
+        from emend.transform import _get_or_build_fact_graph
+
+        project = make_project_dir(tmp_path)
+        module = project / "mod.py"
+        module.write_text("def before():\n    return 1\n")
+
+        first = _get_or_build_fact_graph(str(project))
+        assert {symbol.name for symbol in first.symbols()} == {"before"}
+
+        module.write_text("def after_change():\n    return 2\n")
+        refreshed = _get_or_build_fact_graph(str(project))
+
+        assert {symbol.name for symbol in refreshed.symbols()} == {"after_change"}
+        refreshed.close()
+
+    def test_index_materializes_noncall_private_member_references(self, tmp_path):
+        """Dead-code joins should use an indexed member-name fact."""
+        from emend.transform import _get_or_build_fact_graph
+
+        project = make_project(tmp_path, {
+            "mod.py": "def callbacks(self):\n    return [self._helper]\n",
+        })
+        graph = _get_or_build_fact_graph(str(project))
+
+        rows = graph.run_query(
+            "?[member] := *noncall_private_member_ref[_, _, _, member]"
+        )["rows"]
+        assert rows == [["_helper"]]
+        assert graph.run_query(
+            '?[value] := *facts_meta["schema_version", value]'
+        )["rows"] == [["5"]]
         graph.close()
 
     def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):

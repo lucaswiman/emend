@@ -1210,8 +1210,8 @@ def warm_caches(
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
-    Designed to be called from the ``emend index`` CLI command or at MCP
-    server start-up.  Each file is parsed, then QualifiedNameProvider is
+    Designed to be called from the ``emend index`` CLI command or lazily by
+    an analysis operation. Each file is parsed, then QualifiedNameProvider is
     resolved to build the QN index, and finally type inference results are
     stored in the ``type_cache`` table.
 
@@ -1247,7 +1247,14 @@ def warm_caches(
     import time
     from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
     from emend import emend_core as _rust
-    from .cache import _cache_db_dir, _init_cache_schema, _build_facts_db, _get_worktree_id, _SCHEMA_VERSION
+    from .cache import (
+        _SCHEMA_VERSION,
+        _build_facts_db,
+        _cache_db_dir,
+        _facts_schema_is_current,
+        _get_worktree_id,
+        _init_cache_schema,
+    )
     from .project_iter import _find_project_root, _find_source_root, _collect_source_files_scandir
 
     project_root = _find_project_root(project_path)
@@ -1483,7 +1490,7 @@ def warm_caches(
         not force_facts
         and bool(file_contents)
         and stats["skipped"] == len(file_contents)
-        and facts_path.exists()
+        and _facts_schema_is_current(facts_path)
     )
     if facts_are_current:
         logger.info("warm_caches: facts db unchanged; skipping rebuild")
