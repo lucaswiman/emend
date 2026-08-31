@@ -10,13 +10,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -29,13 +31,15 @@ jobs:
   test-mcp:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -45,7 +49,7 @@ jobs:
   vim-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Neovim
         run: sudo apt-get update && sudo apt-get install -y neovim
