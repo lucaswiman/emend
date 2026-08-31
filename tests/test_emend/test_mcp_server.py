@@ -144,12 +144,44 @@ def test_search_symbol_lookup(tmp_path):
     assert "def greet" in result
 
 
-def test_search_summary(tmp_path):
-    p = tmp_path / "example.py"
-    p.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
+@pytest.mark.parametrize("scope", ["directory", "glob"])
+def test_search_summary_preserves_project_hierarchy(tmp_path, scope):
+    (tmp_path / "pyproject.toml").touch()
+    package = tmp_path / "pkg"
+    package.mkdir()
+    p = package / "example.py"
+    p.write_text("class Greeter:\n    def greet(self):\n        pass\n")
+    targets = {
+        "directory": tmp_path,
+        "glob": tmp_path / "**/*.py",
+    }
 
-    result = search(mode="summary", files=[str(p)], output="summary")
-    assert "greet" in result
+    result = search(mode="summary", files=[str(targets[scope])], output="summary")
+
+    assert "class Greeter" in result
+    assert "  def greet" in result
+
+
+def test_mcp_impact_routes_output_mode(monkeypatch):
+    from importlib import import_module
+    from emend.transform.impact import ImpactResult
+
+    analyze_module = import_module("emend.mcp.analyze")
+    monkeypatch.setattr(
+        analyze_module,
+        "find_impact",
+        lambda **_kwargs: ImpactResult([], [], ["test_a.py::test_changed"], []),
+    )
+
+    assert json.loads(analyze_module.impact(selector="a.py::changed", output="tests")) == {
+        "impacted_tests": ["test_a.py::test_changed"]
+    }
+
+
+def test_search_summary_empty_glob_returns_empty(tmp_path):
+    assert search(
+        mode="summary", files=[str(tmp_path / "*.py")], output="summary",
+    ) == ""
 
 
 def test_transform_replace_dry_run(tmp_path):

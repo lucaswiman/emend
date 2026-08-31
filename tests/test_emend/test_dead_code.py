@@ -288,9 +288,12 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
-            graph.run_query(
-                '?[key, value] <- [["schema_version", "5"]] '
-                ':put facts_meta {key => value}'
+            graph.client.run(
+                '?[key, value] <- $rows :put facts_meta {key => value}',
+                {"rows": [
+                    ["schema_version", "6"],
+                    ["project_root", str(Path(path).resolve())],
+                ]},
             )
             graph.close()
             return {}
@@ -335,9 +338,12 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
-            graph.run_query(
-                '?[key, value] <- [["schema_version", "5"]] '
-                ':put facts_meta {key => value}'
+            graph.client.run(
+                '?[key, value] <- $rows :put facts_meta {key => value}',
+                {"rows": [
+                    ["schema_version", "6"],
+                    ["project_root", str(Path(path).resolve())],
+                ]},
             )
             graph.close()
 
@@ -387,7 +393,7 @@ class TestDeadCodeWarmPath:
         assert rows == [["_helper"]]
         assert graph.run_query(
             '?[value] := *facts_meta["schema_version", value]'
-        )["rows"] == [["5"]]
+        )["rows"] == [["6"]]
         graph.close()
 
     def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):
@@ -1288,6 +1294,18 @@ class TestNoqaDeadcode:
         dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "suppressed" not in dead_names
+
+    def test_unrelated_noqa_tag_does_not_suppress(self, tmp_path):
+        from emend.transform import find_dead_code
+
+        project = make_project_dir(tmp_path)
+        (project / "main.py").write_text(
+            "def still_dead():  # noqa: E501\n"
+            "    return 1\n"
+        )
+
+        dead_names = {d.name for d in find_dead_code(str(project), show_last_reference=False)}
+        assert "still_dead" in dead_names
 
 
 class TestShowLastReference:

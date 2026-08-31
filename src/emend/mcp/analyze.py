@@ -17,6 +17,7 @@ from emend.transform import (
     dead_code_result_to_dict,
     semantic_context as _semantic_context,
 )
+from emend.transform.impact import IMPACT_OUTPUTS, impact_projection
 from emend.checks.rules_config import (
     DeadCodeConfig,
     deadcode_engine_kwargs,
@@ -224,6 +225,9 @@ def impact(
     """Compute transitive set of impacted symbols from a change."""
     if not selector and not diff:
         return json.dumps({"error": "Provide a selector or diff parameter."})
+    if output not in IMPACT_OUTPUTS:
+        choices = ", ".join(sorted(IMPACT_OUTPUTS))
+        return json.dumps({"error": f"Unknown impact output mode {output!r}; use: {choices}"})
 
     selectors_list = None
     if selector:
@@ -237,16 +241,7 @@ def impact(
         max_depth=max_depth,
     )
 
-    data = {
-        "changed_symbols": result.changed_symbols,
-        "impacted_symbols": result.impacted_symbols,
-        "impacted_tests": result.impacted_tests,
-        "edges": [
-            {"source": e.source, "target": e.target, "kind": e.kind}
-            for e in result.edges
-        ],
-    }
-    return json.dumps(data, indent=2)
+    return json.dumps(impact_projection(result, output), indent=2)
 
 
 def semantic_context(

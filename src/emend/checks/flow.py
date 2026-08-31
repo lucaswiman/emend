@@ -21,6 +21,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalise_sanitizers(value: list[str] | str | None) -> list[str]:
+    """Return independently executable not-through alternatives."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    return [pattern for pattern in value if pattern]
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -32,7 +41,7 @@ class FlowSpec:
     message: str
     sources: str          # pattern string for source matches
     sinks: str            # pattern string for sink matches
-    sanitizers: str | None = None   # not-through pattern
+    sanitizers: list[str] | str | None = None   # not-through alternatives
     through: str | None = None      # must-pass-through pattern
     severity: str = "warning"
     label: str = ""
@@ -77,7 +86,7 @@ def from_lint_rule(rule: "LintRule") -> FlowSpec:
         sources=rule.flows_from or "",
         sinks=rule.flows_to or "",
         sanitizers=rule.not_through,
-        severity="warning",
+        severity=rule.severity,
         label=rule.name,
     )
 
@@ -327,10 +336,13 @@ def _execute_via_datalog(
     # Resolve blocker (not-through) matches
     blocker_locs: list[tuple[str, str, str, int]] | None = None
     blocker_lines: dict[tuple[str, str, int], int] = {}
-    if spec.sanitizers:
-        san_matches = find_pattern(
-            spec.sanitizers, file_path, source_override=source, language=language,
-        )
+    sanitizers = _normalise_sanitizers(spec.sanitizers)
+    if sanitizers:
+        san_matches = []
+        for sanitizer in sanitizers:
+            san_matches.extend(find_pattern(
+                sanitizer, file_path, source_override=source, language=language,
+            ))
         if san_matches:
             blocker_locs = []
             for m in san_matches:

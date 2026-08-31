@@ -101,7 +101,7 @@ def test_warm_caches_populates_dup_cache(tmp_path):
     # We have 2 Python files; each should produce a dup_cache entry.
     assert len(rows) >= 1, "Expected at least one dup_cache row"
     for _hash, version in rows:
-        assert version == "1", "Cache version should be '1'"
+        assert version == "2"
 
 
 def test_warm_caches_dup_cache_data_valid(tmp_path):
@@ -125,6 +125,7 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
         for s in payload["subtrees"]:
             assert "start_line" in s
             assert "end_line" in s
+            assert "symbol" in s
             assert "canonical_hash" in s
             assert "score" in s
             assert isinstance(s["score"], float)
@@ -133,8 +134,6 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
             assert "function_qn" in seq
             assert "hashes" in seq
             assert len(seq["hashes"]) >= 2
-
-
 # ---------------------------------------------------------------------------
 # Test 2: incremental refresh on file edit
 # ---------------------------------------------------------------------------
@@ -234,6 +233,16 @@ def test_compute_duplicate_payloads_directly(tmp_path):
     py_file.write_text(_SIMPLE_FUNC)
 
     file_contents = [(str(py_file), _SIMPLE_FUNC)]
+    expected_hash = hashlib.md5(
+        _SIMPLE_FUNC.encode(), usedforsecurity=False
+    ).hexdigest()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",
+        (expected_hash, "1", b"stale"),
+    )
+    conn.commit()
+    conn.close()
 
     _compute_duplicate_payloads(str(db_path), str(tmp_path), file_contents)
 
@@ -243,16 +252,14 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "1"
+    assert version == "2"
 
-    expected_hash = hashlib.md5(
-        _SIMPLE_FUNC.encode(), usedforsecurity=False
-    ).hexdigest()
     assert content_hash == expected_hash
 
     payload = pickle.loads(zlib.decompress(data))
     assert "subtrees" in payload
     assert "sequences" in payload
+    assert all("symbol" in item for item in payload["subtrees"])
 
 
 def test_compute_duplicate_payloads_skips_non_python(tmp_path):

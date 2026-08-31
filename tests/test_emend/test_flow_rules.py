@@ -210,6 +210,35 @@ def test_flow_not_through_absent_still_reports(tmp_path):
     assert len(violations) >= 1
 
 
+def test_flow_any_not_through_alternative_blocks(tmp_path):
+    """Either configured sanitizer alternative blocks the source-to-sink flow."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(
+        "def first():\n"
+        "    raw = request.args.get('q')\n"
+        "    safe = escape(raw)\n"
+        "    cursor.execute(safe)\n"
+        "def second():\n"
+        "    raw = request.args.get('q')\n"
+        "    safe = sanitize(raw)\n"
+        "    cursor.execute(safe)\n"
+        "def unsafe():\n"
+        "    raw = request.args.get('q')\n"
+        "    cursor.execute(raw)\n"
+    )
+    rules = [LintRule(
+        name="sql-injection",
+        find="",
+        message="SQL injection",
+        flows_from="request.args.get($X)",
+        flows_to="cursor.execute($QUERY)",
+        not_through=["escape($X)", "sanitize($X)"],
+    )]
+
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
+
+
 # ---------------------------------------------------------------------------
 # Scoping: flow is intraprocedural only
 # ---------------------------------------------------------------------------

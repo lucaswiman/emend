@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -209,15 +211,147 @@ def expand_macros(pattern: str, macros: dict[str, str]) -> str:
     return expand_pattern_macros(pattern, macros) or ""
 
 
-def expand_not_through(not_through: Any, macros: dict[str, str]) -> str | None:
-    """Expand and join a ``not_through`` value (string or list) with macros.
+def _pattern_text(value: Any, macros: dict[str, str]) -> str:
+    """Extract and expand a pattern from scalar or ``{pattern: ...}`` data."""
+    if isinstance(value, dict):
+        value = value.get("pattern", "")
+    return expand_macros(str(value), macros) if value else ""
 
-    Returns a single pipe-joined pattern string, or ``None`` if *not_through*
-    is falsy.
+
+def normalize_pattern_list(value: Any, macros: dict[str, str] | None = None) -> list[str]:
+    """Normalize scalar/list pattern config without changing pattern syntax."""
+    macro_map = macros or {}
+    return [pattern for item in as_list(value) if (pattern := _pattern_text(item, macro_map))]
+
+
+def expand_not_through(
+    not_through: Any, macros: dict[str, str],
+) -> list[str] | str | None:
+    """Expand ``not_through`` into independent alternative patterns.
+
+    Each sanitizer is matched separately by the flow engine.  Joining values
+    with ``|`` changes the meaning for pattern languages that treat that text
+    literally, and also loses the distinction between configured alternatives.
     """
-    if not not_through:
+    patterns = normalize_pattern_list(not_through, macros)
+    if not patterns:
         return None
-    if isinstance(not_through, list):
-        expanded = [expand_macros(str(item), macros) for item in not_through]
-        return " | ".join(item for item in expanded if item) or None
-    return expand_macros(str(not_through), macros) or None
+    # Preserve the historical scalar API while keeping multiple alternatives
+    # as a list.  The flow executor normalizes both forms before matching.
+    return patterns[0] if not isinstance(not_through, list) else patterns
+
+
+def normalize_flow_definition(
+    raw: dict[str, Any], macros: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Normalize nested and legacy flow-rule spellings in one place.
+
+    The returned patterns are expanded, while endpoint dictionaries remain
+    available to callers through ``from_raw``/``to_raw`` for type metadata.
+    """
+    macro_map = macros or {}
+    nested = raw.get("flow")
+    flow = nested if isinstance(nested, dict) else raw
+    flow_from = yaml_key(flow, "from", "flows_from")
+    flow_to = yaml_key(flow, "to", "flows_to")
+    if flow_from is None:
+        flow_from = yaml_key(raw, "flows_from")
+    if flow_to is None:
+        flow_to = yaml_key(raw, "flows_to")
+
+    not_through = yaml_key(flow, "not_through")
+    if not_through is None:
+        not_through = yaml_key(raw, "not_through")
+    not_through_scope = yaml_key(flow, "not_through_scope", "scope_sanitizers")
+    if not_through_scope is None:
+        not_through_scope = yaml_key(raw, "not_through_scope", "scope_sanitizers")
+
+    return {
+        "flow": flow,
+        "from_raw": flow_from,
+        "to_raw": flow_to,
+        "from": _pattern_text(flow_from, macro_map),
+        "to": _pattern_text(flow_to, macro_map),
+        "not_through": expand_not_through(not_through, macro_map),
+        "not_through_scope": normalize_pattern_list(not_through_scope, macro_map),
+        "label": flow.get("label") or raw.get("label"),
+        "quantifier": flow.get("quantifier", "all_paths"),
+        "effect": flow.get("effect", ""),
+    }
+
+
+def _glob_matches(candidate: str, pattern: str) -> bool:
+    """Match slash-separated path components without letting ``*`` cross ``/``."""
+    path_parts = tuple(part for part in candidate.split("/") if part)
+    pattern_parts = tuple(part for part in pattern.split("/") if part)
+
+    @lru_cache(maxsize=None)
+    def matches(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        part = pattern_parts[pattern_index]
+        if part == "**":
+            return matches(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and matches(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatchcase(path_parts[path_index], part)
+            and matches(path_index + 1, pattern_index + 1)
+        )
+
+    return matches(0, 0)
+
+
+def path_matches_glob(
+    file_path: str | Path,
+    pattern: str | Path,
+    *,
+    project_root: str | Path | None = None,
+) -> bool:
+    """Match paths by components, with directory and ``**`` semantics.
+
+    A bare directory pattern (``tests``) matches that directory and all of its
+    descendants, but not similarly-prefixed files such as ``tests_helper.py``.
+    Relative patterns are evaluated from *project_root* when an absolute file
+    path is supplied.  ``**`` may match zero path components, so
+    ``src/**/*.py`` includes ``src/main.py``.
+    """
+    candidate = str(file_path).replace("\\", "/")
+    pat = str(pattern).replace("\\", "/")
+    candidate_path = Path(candidate)
+    pattern_path = Path(pat)
+
+    if candidate_path.is_absolute() and not pattern_path.is_absolute():
+        if project_root is not None:
+            try:
+                candidate = candidate_path.relative_to(Path(project_root).resolve()).as_posix()
+            except ValueError:
+                candidate = candidate_path.as_posix()
+        else:
+            candidate = candidate_path.as_posix()
+
+    # Plain directory patterns are intentionally component-aware.  This also
+    # handles absolute directory patterns without treating ``tests_helper.py``
+    # as a descendant of ``tests``.
+    if not any(char in pat for char in "*?["):
+        clean_pat = pat.strip("/")
+        clean_candidate = candidate.strip("/")
+        return clean_candidate == clean_pat or clean_candidate.startswith(clean_pat + "/")
+
+    # Unqualified globs (e.g. ``*.py``) match a basename at any depth.
+    if "/" not in pat and not pattern_path.is_absolute():
+        return any(fnmatchcase(part, pat) for part in candidate.split("/"))
+
+    # Preserve the established ``*/src/*.py`` spelling, where the leading
+    # component is intentionally an arbitrary absolute-path prefix.
+    if pat.startswith("*/"):
+        pat = "**/" + pat[2:]
+    variants = [candidate.strip("/")]
+    if not pattern_path.is_absolute():
+        # Absolute inputs are common even when config patterns are project-
+        # relative.  Try each path suffix so callers without an explicit root
+        # still get project-relative matching.
+        components = candidate.strip("/").split("/")
+        variants.extend("/".join(components[index:]) for index in range(1, len(components)))
+    return any(_glob_matches(variant, pat) for variant in variants)

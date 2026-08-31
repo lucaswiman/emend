@@ -88,6 +88,7 @@ def edit_set_cmd(
             apply=apply,
             returns_filter=returns,
             type_oracle=oracle,
+            language=_state["language"],
         )
         print(result, end='')
 
@@ -114,7 +115,9 @@ def remove_cmd(
         emend rm models.py::User[bases][OldMixin] --apply
     """
     with cli_error_handler():
-        result = cmd_edit(selector_str=selector, rm=True, apply=apply)
+        result = cmd_edit(
+            selector_str=selector, rm=True, apply=apply, language=_state["language"]
+        )
         print(result, end='')
 
 
@@ -258,6 +261,7 @@ def add(
             apply=apply,
             returns_filter=returns,
             type_oracle=oracle,
+            language=_state["language"],
         )
         print(result, end='')
 
@@ -344,9 +348,13 @@ def replace_cmd(
                 not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=_lang) if not_inside else None
                 if (inside is None or inside_ir is not None) and \
                    (not_inside is None or not_inside_ir is not None):
+                    from emend.language_registry import get_extensions
+
+                    extensions = get_extensions(_lang)
                     _t0 = _time.monotonic()
                     raw_matches = emend_core.find_pattern_in_files(
-                        list(file_contents), pattern_ir, inside_ir, not_inside_ir
+                        list(file_contents), pattern_ir, inside_ir, not_inside_ir,
+                        extension=extensions[0] if extensions else None,
                     )
                     candidate_files = {m[0] for m in raw_matches}
                     _logger.info("rust pre-filter: %d -> %d files with matches in %.3fs",
@@ -582,7 +590,8 @@ def batch_cmd(
                         f"Operation #{i+1} (edit): requires 'selector' and 'value'"
                     )
                 result = cmd_edit(
-                    selector_str=selector_str, value=value, apply=apply
+                    selector_str=selector_str, value=value, apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)
@@ -604,6 +613,7 @@ def batch_cmd(
                     after=after,
                     at=at,
                     apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)
@@ -615,7 +625,8 @@ def batch_cmd(
                         f"Operation #{i+1} (remove): requires 'selector'"
                     )
                 result = cmd_edit(
-                    selector_str=selector_str, rm=True, apply=apply
+                    selector_str=selector_str, rm=True, apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)
@@ -777,4 +788,3 @@ def saturate_cmd(
     except Exception as e:
         print(f"Error: {e!r}", file=sys.stderr)
         raise typer.Exit(1)
-

@@ -201,6 +201,12 @@ def test_python_comment_handler_find_noqa_non_emend_tag():
     assert 1 not in result
 
 
+def test_python_comment_handler_find_noqa_malformed_indentation():
+    handler = PythonCommentHandler()
+    source = "if True:\n  x = 1  # noqa\n    y = 2\n"
+    assert handler.find_noqa_comments(source) == {2: None}
+
+
 def test_python_comment_handler_find_noqa_empty():
     handler = PythonCommentHandler()
     result = handler.find_noqa_comments("x = 1\ny = 2\n")

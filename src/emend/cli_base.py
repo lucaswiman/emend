@@ -265,6 +265,9 @@ def parse_where_clause(values: list[str]) -> dict:
     """Parse --where values into internal API params."""
     result: dict = {}
     for value in values:
+        value = value.strip()
+        if not value:
+            raise ValueError("--where cannot be empty")
         if value.startswith("not "):
             result["not_inside"] = value[4:].strip()
         elif value.startswith("@"):
@@ -359,8 +362,7 @@ def _app_callback(
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
-    if language is not None:
-        _state["language"] = language
+    _state["language"] = language or "python"
 
 
 __all__ = [

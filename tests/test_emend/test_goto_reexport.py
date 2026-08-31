@@ -71,3 +71,20 @@ def test_cli_resolve_reexport(tmp_path):
     data = json.loads(result.output)
     assert Path(data["file"]).name == "codes.py"
     assert data["line"] == 1
+
+
+def test_aliased_module_reexport_does_not_crash(tmp_path):
+    from emend.ast_utils import resolve_through_reexports
+
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "sub" / "__init__.py").write_text("VALUE = 1\n")
+    main = tmp_path / "main.py"
+    main.write_text("import pkg.sub as sub\n")
+
+    def resolve(module, level, _current):
+        candidate = tmp_path.joinpath(*module.split("."))
+        return str(candidate) if candidate.exists() else None
+
+    result = resolve_through_reexports(str(main), "sub", resolve)
+    assert result and Path(result[0]).name == "__init__.py"

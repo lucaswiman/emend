@@ -283,6 +283,17 @@ class TestPresetIntegration:
         violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
+    def test_flask_markup_xss(self, tmp_path):
+        """The Flask preset's Markup sink is reachable from request input."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(
+            "def view(request):\n"
+            "    name = request.args.get('name')\n"
+            "    return Markup(name)\n"
+        )
+        violations = run_trace_analysis([str(test_file)], get_preset("flask"))
+        assert any("Markup" in violation.message for violation in violations)
+
     def test_django_mark_safe_xss(self, tmp_path):
         """Django preset detects mark_safe XSS."""
         test_file = tmp_path / "views.py"

@@ -263,3 +263,20 @@ def test_move_dry_run(tmp_path, emend_cmd):
 
     dest_content = dest_file.read_text()
     assert dest_content == "# original\n"  # Not modified
+
+
+def test_move_recursive_symbol_does_not_import_itself(tmp_path, emend_cmd):
+    source = tmp_path / "source.py"
+    source.write_text(
+        "def fact(n):\n"
+        "    return 1 if n <= 1 else n * fact(n - 1)\n"
+    )
+    dest = tmp_path / "dest.py"
+    result = subprocess.run(
+        [emend_cmd, "move", f"{source}::fact", str(dest), "--apply"],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "from source import fact" not in dest.read_text()
+    assert "def fact" in dest.read_text()
+    assert "def fact" not in source.read_text()

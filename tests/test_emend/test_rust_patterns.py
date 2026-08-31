@@ -824,3 +824,19 @@ class TestProjectBatchFastPath:
         by_file = {r.file_path: r.match for r in results}
         assert by_file[str(a)].captures.get("MSG") == '"hello"'
         assert by_file[str(b)].captures.get("MSG") == '"world"'
+
+    def test_batch_fast_path_honors_language_override(self, tmp_path, monkeypatch):
+        from emend.transform import find_pattern_in_project
+
+        files = [tmp_path / name for name in ("a.py", "b.py")]
+        for path in files:
+            path.write_text("const result = first == second;\n")
+        self._sabotage_fallback(monkeypatch)
+
+        results = find_pattern_in_project(
+            "$X == $Y", [str(path) for path in files], language="typescript",
+        )
+
+        assert {result.file_path for result in results} == {
+            str(path) for path in files
+        }

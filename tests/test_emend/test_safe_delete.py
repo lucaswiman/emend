@@ -127,7 +127,8 @@ class TestSafeDeleteCascade:
         """Create a project directory with a .git marker for root detection."""
         project = tmp_path / "project"
         project.mkdir()
-        (project / ".git").mkdir()  # marker for _find_project_root
+        (project / ".git").mkdir()
+        (project / ".git" / "HEAD").touch()  # marker for _find_project_root
         return project
 
     def _build_index(self, project_path: str):

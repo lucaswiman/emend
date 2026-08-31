@@ -376,8 +376,14 @@ def map_resolve_cmd(
     resolved_sel = store.resolve_selector(selector)
     if resolved_sel:
         if json_output:
-            sel = parse_extended_selector(resolved_sel)
-            emit_json({"selector": resolved_sel, "path": sel.file_path})
+            # ``resolve_selector`` may return a bare path for a module without
+            # a symbol suffix; parsing it as an extended selector would fail.
+            if "::" in resolved_sel:
+                sel = parse_extended_selector(resolved_sel)
+                file_path = sel.file_path
+            else:
+                file_path = resolved_sel
+            emit_json({"selector": resolved_sel, "path": file_path})
         else:
             print(resolved_sel)
         return

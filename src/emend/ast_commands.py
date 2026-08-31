@@ -153,14 +153,19 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
 
 
 def dicts_to_tree_symbols(dicts: list[dict], module_path: str, separator: str = ".") -> list[TreeSymbol]:
-    """Build a TreeSymbol hierarchy from flat definitions with paths."""
+    """Build a TreeSymbol hierarchy from flat or nested definitions."""
     root_symbols = []
     symbol_map = {} # path_tuple -> TreeSymbol
-    
+
+    def flatten(definitions: list[dict]):
+        for definition in definitions:
+            yield definition
+            yield from flatten(definition.get("children", []))
+
     mod_parts = tuple(module_path.split(separator))
 
     # First pass: create all symbols
-    for d in dicts:
+    for d in flatten(dicts):
         full_path = tuple(d.get("path", [d["name"]]))
         
         # Strip module path from the beginning if it matches
@@ -204,6 +209,40 @@ def dicts_to_tree_symbols(dicts: list[dict], module_path: str, separator: str = 
     return root_symbols
 
 
+def derive_module_path(
+    file: str | Path,
+    project_root: str | Path,
+    language: str = "python",
+) -> str:
+    """Derive the qualified module path used by collected symbol paths.
+
+    ``PyScopeResolver`` reports paths rooted at the project/module name.  Keep
+    the filesystem-to-qualified-name conversion in one place so CLI and MCP
+    summary output agree across languages and source layouts.
+    """
+    from emend.language_registry import get_module_separator
+
+    file_path = Path(file)
+    root = Path(project_root)
+    try:
+        relative = file_path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return file_path.stem
+
+    parts = list(relative.parts)
+    if parts and parts[0] == "src":
+        parts.pop(0)
+    if parts:
+        parts[-1] = file_path.stem
+
+    # These are conventional package entry files, not syntax parsing rules.
+    # Strip them so symbols are displayed below the package/module name.
+    if parts and parts[-1] in {"__init__", "index", "lib", "mod"}:
+        parts.pop()
+
+    return get_module_separator(language).join(parts) or file_path.stem
+
+
 def collect_symbols(
     file: str,
     tree_depth: int | None = None,
@@ -233,23 +272,7 @@ def collect_symbols(
         from emend.transform import _find_source_root
         root = _find_source_root(Path(file).parent, language=language)
 
-        # Crude module path derivation (matches derive_module_path in Rust)
-        try:
-            rel_path = Path(file).relative_to(root)
-            parts = list(rel_path.parts)
-            if parts and parts[0] == "src":
-                parts.pop(0)
-            if parts:
-                parts[-1] = rel_path.stem
-
-            # Handle package-root entry files (e.g. __init__.py, lib.rs, mod.rs, index.ts)
-            if parts and parts[-1] in ("__init__", "lib", "mod", "index"):
-                parts.pop()
-
-            module_path = sep.join(parts)
-        except ValueError:
-            # Not under root, use filename
-            module_path = Path(file).stem
+        module_path = derive_module_path(file, root, language)
 
         symbols = dicts_to_tree_symbols(result_dicts, module_path, separator=sep)
         

@@ -96,7 +96,7 @@ def _lint_violations_to_checks(
         else:
             rule = rules_by_name.get(violation.rule_name)
             kind = _lint_kind(rule) if rule is not None else "match"
-            severity = "warning"
+            severity = rule.severity if rule is not None else "warning"
         witness = None
         if violation.witness is not None:
             witness = [
@@ -216,9 +216,10 @@ def run_checks(
             duplicate_code_config = None
 
         lint_rule_filter = None
-        if rule_name is not None and kind in ("deadcode", "duplicate-code"):
-            lint_rule_filter = rule_name
-        elif rule_name is not None and (selected_lint_rules or run_duplicates):
+        if rule_name is not None:
+            # Always pass an explicit filter, including for an unknown name.
+            # Otherwise run_lint sees ``None`` and may execute configured
+            # project-wide checks such as deadcode as a side effect.
             lint_rule_filter = rule_name
         elif kind == "deadcode":
             lint_rule_filter = "deadcode"

@@ -131,21 +131,35 @@ def search(
         file_path_obj = Path(file_for_summary)
         lines: list[str] = []
         if file_path_obj.is_dir() or "*" in file_for_summary or "?" in file_for_summary:
-            files, _ = resolve_files(file_for_summary)
+            files, _ = resolve_files(file_for_summary, language=None)
             from emend import emend_core
+            from emend.language_registry import detect_language, get_module_separator
+            from emend.transform import _find_project_root, _find_source_root
 
             file_strs = [str(fp) for fp in files]
+            if not file_strs:
+                return ""
             batch_results = emend_core.collect_symbols_batch(
                 file_strs, max_depth=tree_depth, selector=selector_for_summary
             )
+            from os.path import commonpath
+            project_root = _find_project_root(commonpath(file_strs))
             buf = io.StringIO()
             with redirect_stdout(buf):
                 for file_path_str, symbol_dicts in batch_results:
-                    symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts)
+                    language = detect_language(file_path_str) or "python"
+                    source_root = _find_source_root(project_root, language=language)
+                    separator = get_module_separator(language)
+                    module_path = ast_commands.derive_module_path(
+                        file_path_str, source_root, language
+                    )
+                    symbols = ast_commands.dicts_to_tree_symbols(
+                        symbol_dicts, module_path, separator=separator
+                    )
                     print(f"\nModule: {file_path_str}")
                     if symbols:
                         if flat_output:
-                            ast_commands._print_symbol_flat(symbols)
+                            ast_commands._print_symbol_flat(symbols, separator=separator)
                         else:
                             ast_commands._print_symbol_tree(symbols, indent=1)
             return buf.getvalue()

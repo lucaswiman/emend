@@ -106,11 +106,17 @@ def resolve_through_reexports(
         if imp["name"] == symbol_name or (imp["asname"] and imp["asname"] == symbol_name):
             # If it was aliased, we're looking for the original name in the target module
             target_symbol = imp["name"] if imp["asname"] == symbol_name else symbol_name
+            # ``import pkg.sub as alias`` aliases a module, so the import
+            # record has no ``name``. Resolve the module itself rather than
+            # concatenating ``None`` with a filename below.
+            aliases_module = target_symbol is None
+            if aliases_module:
+                target_symbol = imp["module"].rsplit(".", 1)[-1]
             target_file = resolve_module_cb(imp["module"], imp["level"], file_path)
             
             if target_file:
                 # If target_file is a directory, check if the target_symbol matches a file or submodule.
-                is_module = False
+                is_module = aliases_module
                 if Path(target_file).is_dir():
                     candidate = Path(target_file) / (target_symbol + ".py")
                     if candidate.is_file():
@@ -172,7 +178,12 @@ def _rust_dict_to_nested_symbol(d: dict) -> NestedSymbol:
     )
 
 
-def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list[NestedSymbol]:
+def find_nested_definitions(
+    filepath: str,
+    max_depth: int | None = None,
+    *,
+    ext: str | None = None,
+) -> list[NestedSymbol]:
     """Walk source and find all class/function definitions with nesting info.
 
     Uses tree-sitter via the Rust extension for parsing.
@@ -180,7 +191,7 @@ def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list
     with open(filepath) as f:
         source = f.read()
 
-    ext = Path(filepath).suffix.lstrip('.') or 'py'
+    ext = ext or Path(filepath).suffix.lstrip('.') or 'py'
     rust_syms = emend_core.collect_symbols_from_str(
         source,
         max_depth=max_depth + 1 if max_depth is not None else None,

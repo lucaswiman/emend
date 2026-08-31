@@ -17,6 +17,7 @@ from emend.policy import (
     DeadCodeCheck,
     TypeCheck,
     _run_datalog_check,
+    _run_type_check,
     format_policy_violations,
     load_policies,
     run_policy_checks,
@@ -24,6 +25,42 @@ from emend.policy import (
 )
 
 runner = CliRunner()
+
+
+def _type_policy(check):
+    return Policy("typed", "Types must agree", "error", [check])
+
+
+def test_unavailable_type_oracle_only_fails_for_matching_symbols(tmp_path):
+    check = TypeCheck("target($X)", "str")
+    policy = _type_policy(check)
+
+    assert _run_type_check(check, policy, "app.py", "other(1)\n", "python") == []
+    violations = _run_type_check(check, policy, "app.py", "target(1)\n", "python")
+    assert len(violations) == 1
+    assert violations[0].check_name == "type:unavailable:has_type"
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "initialization"])
+def test_matching_type_check_reports_oracle_failure(tmp_path, monkeypatch, failure):
+    class UnavailableOracle:
+        def is_available(self):
+            return False
+
+    def create_type_oracle(**_kwargs):
+        if failure == "initialization":
+            raise RuntimeError("broken engine")
+        return UnavailableOracle()
+
+    monkeypatch.setattr("emend.type_oracle.create_type_oracle", create_type_oracle)
+    check = TypeCheck("target($X)", "str")
+
+    violations = _run_type_check(
+        check, _type_policy(check), "app.py", "target(1)\n", "python", str(tmp_path),
+    )
+
+    assert len(violations) == 1
+    assert "type oracle unavailable" in violations[0].message
 
 
 def _write_policies(tmp_path, policies_dict):
@@ -212,7 +249,7 @@ class TestLoadPolicies:
         assert check.flows_to == "cursor.execute($Q)"
 
     def test_load_unified_rules_flow_list_not_through(self, tmp_path):
-        """List-valued ``not-through`` must be pipe-joined, not stringified."""
+        """List-valued ``not-through`` remains a list of alternatives."""
         config_path = _write_rules(tmp_path, {
             "rules": {
                 "no-sqli": {
@@ -229,9 +266,20 @@ class TestLoadPolicies:
         policies = load_policies(config_path)
         check = next(p for p in policies if p.name == "no-sqli").checks[0]
         assert isinstance(check, FlowCheck)
-        # Must mirror checks/pattern_rules.py expand_not_through(): pipe-joined,
-        # never the python list repr "['escape($X)', 'sanitize($X)']".
-        assert check.not_through == "escape($X) | sanitize($X)"
+        assert check.not_through == ["escape($X)", "sanitize($X)"]
+        app = tmp_path / "app.py"
+        app.write_text(
+            "def safe():\n"
+            "    raw = request.args.get('q')\n"
+            "    escaped = escape(raw)\n"
+            "    cursor.execute(escaped)\n"
+            "def unsafe():\n"
+            "    raw = request.args.get('q')\n"
+            "    cursor.execute(raw)\n"
+        )
+        assert len(run_policy_checks(
+            [str(app)], policies, project_path=str(tmp_path),
+        )) == 1
 
     def test_load_unified_rules_top_level_deadcode(self, tmp_path):
         config_path = _write_rules(tmp_path, {
@@ -638,3 +686,15 @@ class TestRunChecksEngine:
         """An unrecognised mode must error, not silently return []."""
         with pytest.raises(ValueError):
             self._run_unified_rule(tmp_path, mode="bogus")
+
+    def test_unified_rule_preserves_lint_severity(self, tmp_path):
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {
+                "find": "eval($X)", "message": "no eval", "severity": "error",
+            }},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("eval('code')\n")
+        from emend.checks.engine import run_checks
+        violations = run_checks([str(test_file)], config=config_file, mode="lint")
+        assert violations[0].severity == "error"

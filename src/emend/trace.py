@@ -22,9 +22,9 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.transform import find_pattern, PatternMatch
 from emend.checks.rules_config import (
     as_list,
-    expand_macros,
     load_rules_document,
-    yaml_key,
+    normalize_flow_definition,
+    path_matches_glob,
 )
 
 if TYPE_CHECKING:
@@ -284,12 +284,10 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
         if rule_def.get("enabled") is False:
             continue
 
-        flow_def = rule_def.get("flow")
-        if not isinstance(flow_def, dict):
-            continue
-
-        flow_from = yaml_key(flow_def, "from", "flows_from")
-        flow_to = yaml_key(flow_def, "to", "flows_to")
+        normalized_flow = normalize_flow_definition(rule_def, macros)
+        flow_def = normalized_flow["flow"]
+        flow_from = normalized_flow["from_raw"]
+        flow_to = normalized_flow["to_raw"]
         if not flow_from or not flow_to:
             continue
 
@@ -298,18 +296,18 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
         to_type_constraint = ""
         if isinstance(flow_from, dict):
             from_type_constraint = str(flow_from.get("type_constraint", ""))
-            flow_from = flow_from.get("pattern", "")
+            flow_from = normalized_flow["from"]
         if isinstance(flow_to, dict):
             to_type_constraint = str(flow_to.get("type_constraint", ""))
-            flow_to = flow_to.get("pattern", "")
+            flow_to = normalized_flow["to"]
         if not flow_from or not flow_to:
             continue
 
         label = str(flow_def.get("label") or rule_def.get("label") or name)
         labels.append(label)
 
-        source_pattern = expand_macros(str(flow_from), macros)
-        sink_pattern = expand_macros(str(flow_to), macros)
+        source_pattern = normalized_flow["from"]
+        sink_pattern = normalized_flow["to"]
         # Per-endpoint type constraints override flow-level type_constraint.
         src_tc = from_type_constraint or str(flow_def.get("type_constraint", ""))
         sink_tc = to_type_constraint or str(flow_def.get("type_constraint", ""))
@@ -331,8 +329,7 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
             type_constraint=sink_tc,
         ))
 
-        for sanitizer in as_list(yaml_key(flow_def, "not_through")):
-            sanitizer_pattern = expand_macros(str(sanitizer), macros)
+        for sanitizer_pattern in as_list(normalized_flow["not_through"]):
             if sanitizer_pattern:
                 sanitizers.append(TraceSanitizer(
                     pattern=sanitizer_pattern,
@@ -341,8 +338,7 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
                     type_constraint=str(flow_def.get("type_constraint", "")),
                 ))
 
-        for scope_def in as_list(yaml_key(flow_def, "not_through_scope")):
-            scope_pattern = expand_macros(str(scope_def), macros)
+        for scope_pattern in normalized_flow["not_through_scope"]:
             if scope_pattern:
                 scope_sanitizers.append(TraceScopeSanitizer(
                     pattern=scope_pattern,
@@ -671,20 +667,16 @@ def _filter_by_receiver_type(
     return kept
 
 
-def _trace_path_is_excluded(file_path: str, patterns: list[str]) -> bool:
+def _trace_path_is_excluded(
+    file_path: str,
+    patterns: list[str],
+    project_root: str | Path | None = None,
+) -> bool:
     """Check whether *file_path* matches any exclusion glob in *patterns*."""
-    if not patterns:
-        return False
-    import fnmatch
-
-    for pattern in patterns:
-        if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pattern + "*"):
-            return True
-        if "**" in pattern:
-            relaxed = pattern.replace("**", "*")
-            if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "*"):
-                return True
-    return False
+    return any(
+        path_matches_glob(file_path, pattern, project_root=project_root)
+        for pattern in patterns
+    )
 
 
 def run_trace_analysis(
@@ -719,7 +711,10 @@ def run_trace_analysis(
             language = detected
 
     if config.exclude_paths:
-        paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
+        paths = [
+            p for p in paths
+            if not _trace_path_is_excluded(p, config.exclude_paths, project_path)
+        ]
         if not paths:
             return []
 
@@ -2581,7 +2576,10 @@ def run_interprocedural_trace(
             considered (no transitivity).
     """
     if config.exclude_paths:
-        paths = [p for p in paths if not _trace_path_is_excluded(p, config.exclude_paths)]
+        paths = [
+            p for p in paths
+            if not _trace_path_is_excluded(p, config.exclude_paths, project_path)
+        ]
         if not paths:
             return InterproceduralResult(violations=[], summaries={}, iterations=0)
     return _run_interprocedural_trace_datalog(

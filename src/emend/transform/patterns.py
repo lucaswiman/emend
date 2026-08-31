@@ -17,12 +17,26 @@ from ..pattern import (
 )
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
-from .components import _CONTENT_REF_RE, _extract_string_content_from_text
+from .components import _extract_string_content_from_text
 
 if TYPE_CHECKING:
     from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
+
+# Replacement-template references. Captured text is inserted as an opaque
+# value while scanning, so a ``$Y`` occurring inside a ``$X`` capture is never
+# interpreted as another template reference.
+_TEMPLATE_REF_RE = re.compile(
+    r"\$\{(?P<content>[A-Za-z_][A-Za-z0-9_]*)\.content\}"
+    r"|\$(?P<ellipsis>\.\.\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_EMPTY_ELLIPSIS = "\x00"
+_EMPTY_ELLIPSIS_SEPARATOR_RE = re.compile(
+    r"([\(\[])\s*\x00\s*,\s*"
+    r"|,\s*\x00\s*,"
+    r"|,\s*\x00\s*(?=[\)\]])"
+)
 
 @dataclass
 class PatternMatch:
@@ -206,7 +220,7 @@ def find_pattern(
     scope_local: bool = False,
     source_override: str | None = None,
     type_oracle: "TypeOracle | None" = None,
-    language: str = "python",
+    language: str | None = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -251,12 +265,12 @@ def find_pattern(
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
 
-    # Auto-detect language from file extension when caller used the default
-    if language == "python" and file_path:
+    # ``None`` is the auto-detection sentinel.  An explicit language must be
+    # honored even when the file extension suggests something else.
+    explicit_language = language is not None
+    if language is None:
         from emend.language_registry import detect_language
-        detected = detect_language(file_path)
-        if detected:
-            language = detected
+        language = detect_language(file_path) or "python"
 
     # Compile pattern and constraints to Rust IR
     rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
@@ -273,6 +287,10 @@ def find_pattern(
 
     # Find matches using Rust engine
     ext = Path(file_path).suffix.lstrip('.') if file_path else None
+    if explicit_language:
+        from emend.language_registry import get_extensions
+        extensions = get_extensions(language)
+        ext = extensions[0] if extensions else ext
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -295,7 +313,7 @@ def find_pattern(
     # Post-filter by scope if requested
     if scope is not None:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-        symbols = find_nested_definitions(file_path)
+        symbols = find_nested_definitions(file_path, ext=ext)
         target_sym = find_symbol_by_path(symbols, scope)
         if target_sym:
             matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
@@ -353,7 +371,7 @@ selector: ExtendedSelector, apply: bool = False) -> str:
 
     # Use tree-sitter symbols to find the target symbol's range
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path))
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
@@ -428,7 +446,7 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
 
     # Handle symbol-based selectors
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path))
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
@@ -505,9 +523,9 @@ def _resolve_relative_module(
     from .project_iter import _file_to_module
     src_module = _file_to_module(source_file, project_path)
     # Compute the package that owns source_file.
-    if src_module.endswith(".__init__"):
-        # __init__.py IS the package.
-        package = src_module[: -len(".__init__")]
+    if Path(source_file).stem == "__init__":
+        # ``_file_to_module`` already maps pkg/__init__.py to pkg.
+        package = src_module
     elif "." in src_module:
         package = src_module.rsplit(".", 1)[0]
     else:
@@ -563,7 +581,11 @@ def analyze_imports(
 
     from .project_iter import _find_project_root, _file_to_module
     # Use tree-sitter scope resolver to parse imports from source file.
-    proj_root = _find_project_root(project_path or source_file)
+    proj_root = (
+        str(Path(project_path).resolve())
+        if project_path is not None
+        else _find_project_root(source_file)
+    )
     resolver = _rust.PyScopeResolver(proj_root, "py")
     try:
         source_content = source_path.read_text()
@@ -640,6 +662,24 @@ def analyze_imports(
                 remainder = qn[len(prefix):]
                 if "." not in remainder:
                     locally_defined.add(remainder)
+
+        # Definitions nested in the symbol being moved move with it, so a
+        # recursive reference must not become an import from the old module.
+        from emend import emend_core
+        try:
+            moved_names = {
+                item["name"]
+                for item in emend_core.collect_symbols_from_str(
+                    symbol_source,
+                    max_depth=1,
+                    ext=source_path.suffix.lstrip(".") or "py",
+                )
+                if item.get("name") and item.get("kind") != "reference"
+            }
+        except Exception:
+            logger.debug("Could not collect moved symbol names", exc_info=True)
+            moved_names = set()
+        locally_defined -= moved_names
 
         local_refs_needed_runtime = sorted(
             n for n in locally_defined
@@ -801,44 +841,46 @@ def _substitute_metavars(
     Returns substituted string, or None if replacement cannot be resolved
     (e.g. ${NAME.content} on a non-string).
     """
-    replacement_code = replacement_str
-
-    # First pass: resolve ${NAME.content} references (string
-    # interpolation).  These extract the inner content of a string
-    # literal, stripping the surrounding quotes.  If any reference
-    # cannot be resolved (e.g. the captured node is not a string
-    # literal), skip the entire replacement to avoid producing
-    # nonsense output.
-    content_failed = False
-    for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
-        ref_name = ref_match.group(1)
-        captured = captures.get(ref_name)
+    out: list[str] = []
+    pos = 0
+    for ref in _TEMPLATE_REF_RE.finditer(replacement_str):
+        out.append(replacement_str[pos:ref.start()])
+        name = ref.group("content") or ref.group("name")
+        captured = captures.get(name)
         if captured is None:
-            content_failed = True
-            break
-        content = _extract_string_content_from_text(captured)
-        if content is None:
-            content_failed = True
-            break
-        replacement_code = replacement_code.replace(
-            ref_match.group(0), content
-        )
-    if content_failed:
-        return None
+            # Unknown regular references are intentionally left untouched.
+            # A missing content reference remains invalid, as before.
+            if ref.group("content"):
+                return None
+            out.append(ref.group(0))
+        elif ref.group("content"):
+            content = _extract_string_content_from_text(captured)
+            if content is None:
+                return None
+            out.append(content)
+        elif not captured.strip() and ref.group("ellipsis"):
+            # A sentinel confines separator cleanup to this expansion; captured
+            # code can contain arbitrary commas and string literals.
+            out.append(_EMPTY_ELLIPSIS)
+        else:
+            out.append(captured)
+        pos = ref.end()
+    out.append(replacement_str[pos:])
+    replacement_code = "".join(out)
 
-    # Second pass: substitute regular metavar references ($NAME, $...NAME).
-    # Sort by name length descending so that $XY is replaced before $X,
-    # preventing $X from partially matching inside $XY.
-    for name, code in sorted(captures.items(), key=lambda kv: len(kv[0]), reverse=True):
-        replacement_code = replacement_code.replace(f"$...{name}", code)
-        replacement_code = replacement_code.replace(f"${name}", code)
+    def _clean_separator(match: re.Match[str]) -> str:
+        # Preserve an opener for ``(empty,``; preserve one comma for doubled
+        # separators; remove a trailing comma before a closing delimiter.
+        if match.group(1):
+            return match.group(1)
+        if match.end() < len(match.string) and match.string[match.end()] in ")]":
+            return ""
+        return ","
 
-    # Clean up comma artifacts from empty ellipsis substitutions
-    replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r'(\[)\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r',\s*,', ',', replacement_code)
-
-    return replacement_code
+    replacement_code = _EMPTY_ELLIPSIS_SEPARATOR_RE.sub(
+        _clean_separator, replacement_code
+    )
+    return replacement_code.replace(_EMPTY_ELLIPSIS, "")
 
 
 def replace_pattern(
@@ -851,7 +893,7 @@ def replace_pattern(
     not_inside: str | None = None,
     where: str | None = None,
     type_oracle: TypeOracle | None = None,
-    language: str = "python",
+    language: str | None = None,
 ) -> tuple[str, int]:
     """Replace pattern matches with replacement template.
 
@@ -891,6 +933,10 @@ def replace_pattern(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     source_code = file.read_text()
+
+    if language is None:
+        from emend.language_registry import detect_language
+        language = detect_language(file_path) or "python"
 
     # Find all matches using find_pattern (already migrated to tree-sitter fast paths)
     matches = find_pattern(

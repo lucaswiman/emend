@@ -1206,7 +1206,6 @@ def find_dead_code(
     from .project_iter import _find_project_root, _file_to_module, _collect_source_files, detect_project_languages
     from .refs import _get_or_build_fact_graph
     from .impact import _is_test_file
-    from .index import _NOQA_RE
     t0 = time.monotonic()
     scan_root = str(Path(project_path).resolve())
 
@@ -1296,20 +1295,28 @@ def find_dead_code(
         entry_point_qualified_names=sorted(exact_entry_points) or None,
     )
 
-    # Build file content cache for noqa checking
-    _file_lines_cache: dict[str, list[str]] = {}
+    # Build a language-plugin-backed cache for noqa checking.  This keeps
+    # dead-code suppression aligned with lint and avoids treating arbitrary
+    # substrings (for example ``E501`` or ``notdeadcode``) as this rule.
+    _file_noqa_cache: dict[str, dict[int, set[str] | None]] = {}
 
     def _has_noqa(fp: str, line: int) -> bool:
-        if fp not in _file_lines_cache:
+        if fp not in _file_noqa_cache:
             try:
-                _file_lines_cache[fp] = Path(fp).read_text(errors="replace").splitlines()
+                from emend.language_plugins import load_plugin
+                from emend.language_registry import detect_language
+
+                source = Path(fp).read_text(errors="replace")
+                language = detect_language(fp) or "python"
+                _file_noqa_cache[fp] = (
+                    load_plugin(language).comment_handler.find_noqa_comments(source)
+                )
             except OSError:
-                _file_lines_cache[fp] = []
-        lines = _file_lines_cache[fp]
-        if 0 < line <= len(lines):
-            if _NOQA_RE.search(lines[line - 1]):
-                return True
-        return False
+                _file_noqa_cache[fp] = {}
+        if line not in _file_noqa_cache[fp]:
+            return False
+        tags = _file_noqa_cache[fp][line]
+        return tags is None or "deadcode" in tags
 
     # Convert SymbolFact results to DeadSymbol, applying Python post-filters.
     dead_symbols: list[DeadSymbol] = []

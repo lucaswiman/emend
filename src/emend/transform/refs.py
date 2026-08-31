@@ -69,13 +69,15 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
             cached = None
 
     index_is_fresh = _ensure_index_fresh(project_root)
-    if cached is not None and index_is_fresh and _facts_schema_is_current(facts_db):
+    if cached is not None and index_is_fresh and _facts_schema_is_current(
+        facts_db, project_root,
+    ):
         return cached
     if cached is not None:
         _fact_graph_cache.pop(project_root).close()
 
     # Path 1: load existing facts.db
-    if index_is_fresh and _facts_schema_is_current(facts_db):
+    if index_is_fresh and _facts_schema_is_current(facts_db, project_root):
         try:
             graph = FactGraph(db_path=str(facts_db))
             count = graph._client.run(
@@ -113,7 +115,7 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
         count = graph._client.run(
             "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
         )["rows"][0][0]
-        if count > 0 and _facts_schema_is_current(facts_db):
+        if count > 0 and _facts_schema_is_current(facts_db, project_root):
             try:
                 graph._resolve_builtin_refs()
             except BUG_EXCEPTIONS:

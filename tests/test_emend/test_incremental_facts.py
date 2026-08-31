@@ -12,6 +12,8 @@ from emend.fact_graph import (
     CallFact,
     CfgBlockFact,
     DefUseFact,
+    DecoratorOnFact,
+    ExportedSymbolFact,
     FactGraph,
     ImportFact,
     ReferenceFact,
@@ -52,6 +54,43 @@ def _modified_source_a():
         def welcome(name):
             return f"welcome {name}"
     """)
+
+
+def test_warm_caches_rebuilds_old_export_relation(tmp_path):
+    """A stale relation shape is replaced by a project-owned current snapshot."""
+    from emend.fact_graph import _create_cozo_client
+    from emend.transform import _cache_db_dir, warm_caches
+    from emend.transform.cache import _facts_schema_is_current
+
+    (tmp_path / "pyproject.toml").touch()
+    (tmp_path / "mod.py").write_text("def live():\n    return 1\n")
+    cache_dir = _cache_db_dir(tmp_path)
+    cache_dir.mkdir(parents=True)
+    db_path = cache_dir / "facts.db"
+    client = _create_cozo_client(str(db_path))
+    client.run("{:create exported_symbol { qualified_name: String }}")
+    client.run("{:create facts_meta { key: String => value: String }}")
+    client.run(
+        '?[key, value] <- [["schema_version", "6"]] '
+        ":put facts_meta {key => value}"
+    )
+    client.close()
+
+    assert not _facts_schema_is_current(db_path, tmp_path)
+
+    warm_caches(str(tmp_path), type_engine="none")
+
+    assert _facts_schema_is_current(db_path, tmp_path)
+    assert not _facts_schema_is_current(db_path, tmp_path / "other")
+
+
+def test_facts_schema_rejects_corrupt_database(tmp_path):
+    from emend.transform.cache import _facts_schema_is_current
+
+    db_path = tmp_path / "facts.db"
+    db_path.write_bytes(b"not a sqlite database")
+
+    assert not _facts_schema_is_current(db_path)
 
 
 # -- Test: update_files exists and populates facts --------------------------
@@ -124,6 +163,23 @@ class TestUpdateFiles:
         b_imports = [i for i in graph._all_imports() if i.importing_file == b_path]
         assert len(b_imports) >= 1, "b.py imports should still be present"
 
+    def test_entry_point_seeds_do_not_persist_between_queries(self):
+        cases = [
+            ({"entry_point_names": ["run"]}, "run"),
+            ({"entry_point_prefixes": ["serve_"]}, "serve_app"),
+            ({"entry_point_decorators": ["route"]}, "decorated"),
+        ]
+        for kwargs, name in cases:
+            graph = FactGraph()
+            graph.add_symbol(SymbolFact("app.py", name, f"app.{name}", "function", 1, 2))
+            if "entry_point_decorators" in kwargs:
+                graph.add_decorator_on(DecoratorOnFact(f"app.{name}", "route"))
+
+            dead, _ = graph.dead_code_unified(**kwargs)
+            assert name not in {symbol.name for symbol in dead}
+            dead_again, _ = graph.dead_code_unified()
+            assert name in {symbol.name for symbol in dead_again}
+
     def test_update_files_replaces_cfg_facts(self, tmp_path):
         """CFG block and edge facts should be replaced on update."""
         a_py = tmp_path / "a.py"
@@ -169,8 +225,30 @@ class TestUpdateFiles:
         greet_locs = [l for l in locs_after if "greet" in l.loc_id]
         assert len(greet_locs) == 0, "greet source locs should be gone"
 
+    def test_update_files_preserves_definition_reference_kind(self, tmp_path):
+        source = "def greet():\n    return 1\n\ngreet()\n"
+        path = tmp_path / "greet.py"
+        graph = FactGraph()
+        graph.update_files([(str(path), source)])
+
+        refs = graph.references_to("greet.greet")
+        assert {ref.ref_kind for ref in refs} == {"definition", "call"}
+
 
 class TestRemoveFiles:
+    def test_remove_files_deletes_file_owned_exports(self, tmp_path):
+        a_path = str((tmp_path / "a.ts").resolve())
+        b_path = str((tmp_path / "b.ts").resolve())
+        graph = FactGraph()
+        graph.add_exported_symbols_batch([
+            ExportedSymbolFact(a_path, "pkg.shared"),
+            ExportedSymbolFact(b_path, "pkg.shared"),
+        ])
+
+        graph.remove_files([a_path])
+
+        assert graph.exported_symbols() == [ExportedSymbolFact(b_path, "pkg.shared")]
+
     def test_remove_files_deletes_all_facts(self, tmp_path):
         """remove_files() should delete all facts for the given files."""
         a_py = tmp_path / "a.py"

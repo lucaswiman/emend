@@ -57,6 +57,23 @@ class TestExtendedSelectorFileGlob:
         result = sel.expand_file_glob()
         assert len(result) == 2
 
+    @pytest.mark.parametrize(
+        ("language", "expected"),
+        [
+            (None, {".py", ".ts", ".rs"}),
+            ("python", {".py"}),
+            ("typescript", {".ts"}),
+            ("rust", {".rs"}),
+        ],
+    )
+    def test_expand_file_glob_language_filter(self, tmp_path, language, expected):
+        for name in ("a.py", "b.ts", "c.rs", "notes.txt"):
+            (tmp_path / name).write_text("x = 1\n")
+
+        sel = ExtendedSelector(file_path=str(tmp_path / "*"), symbol_path=[])
+        result = sel.expand_file_glob(language=language)
+        assert {Path(path).suffix for path in result} == expected
+
     def test_with_file_path(self):
         sel = ExtendedSelector(
             file_path="**/*.py",

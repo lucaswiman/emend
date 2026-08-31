@@ -138,6 +138,7 @@ def test_set_api(case, tmp_path):
     diff = set_component(selector, case["value"], apply=False)
     for expected in case.get("expected_in_diff", []):
         assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    assert Path(file_path).read_text() == case["source"]
 
 
 @pytest.mark.parametrize("case", set_cases, ids=case_id)
@@ -185,6 +186,7 @@ def test_add_api(case, tmp_path):
 
     for expected in case.get("expected_in_diff", []):
         assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    assert Path(file_path).read_text() == case["source"]
 
 
 @pytest.mark.parametrize("case", add_cases, ids=case_id)
@@ -223,6 +225,35 @@ def test_remove_api(case, tmp_path):
     diff = remove_component(selector, apply=False)
     for expected in case.get("expected_in_diff", []):
         assert expected in diff, f"Expected {expected!r} in diff:\n{diff}"
+    assert Path(file_path).read_text() == case["source"]
+
+
+def test_add_rejects_position_below_append_sentinel(tmp_path):
+    test_file = tmp_path / "test.py"
+    source = "def func(a, b):\n    pass\n"
+    test_file.write_text(source)
+    selector = ExtendedSelector(
+        file_path=str(test_file), symbol_path=["func"], component="params"
+    )
+
+    with pytest.raises(ValueError, match="position must be -1"):
+        add_to_component(selector, "x", position=-2)
+    assert test_file.read_text() == source
+
+
+def test_diff_preserves_selector_path_spelling(tmp_path, monkeypatch):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    test_file = nested / "test.py"
+    test_file.write_text("def func() -> int:\n    pass\n")
+    monkeypatch.chdir(tmp_path)
+    selector = ExtendedSelector(
+        file_path="./nested/test.py", symbol_path=["func"], component="returns"
+    )
+
+    diff = set_component(selector, "str")
+
+    assert diff.startswith("--- ./nested/test.py\n+++ ./nested/test.py\n")
 
 
 @pytest.mark.parametrize("case", remove_cases, ids=case_id)
@@ -421,6 +452,23 @@ def test_edit_no_operation(tmp_path):
 
     with pytest.raises(ValueError, match="No operation"):
         cmd_edit(selector_str=f"{test_file}::foo[params]")
+
+
+def test_edit_explicit_language_overrides_file_extension(tmp_path):
+    test_file = tmp_path / "python_source.ts"
+    test_file.write_text("def foo():\n    return 1\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "--language", "python", "edit", "set",
+            f"{test_file}::foo[body]", "return 2", "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "return 2" in test_file.read_text()
+    assert "return 1" not in test_file.read_text()
 
 
 def test_remove_last_param_multiline_no_trailing_comma(tmp_path):

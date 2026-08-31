@@ -15,7 +15,10 @@ from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
+# Parse/index cache version remains shared with ``index.py``.  FactGraph has
+# its own marker because its Cozo relation shape can change independently.
 _SCHEMA_VERSION = "5"
+_FACTS_SCHEMA_VERSION = "6"
 
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
@@ -363,22 +366,46 @@ def _open_facts_db(db_path: str):
     return client
 
 
-def _facts_schema_is_current(db_path: str | Path) -> bool:
+def _facts_schema_is_current(
+    db_path: str | Path,
+    project_root: str | Path | None = None,
+) -> bool:
     """Return whether a persisted fact graph matches the current schema."""
     path = Path(db_path)
     if not path.is_file():
         return False
-    client = _open_facts_db(str(path))
+    client = None
     try:
+        client = _open_facts_db(str(path))
         rows = client.run(
             '?[value] := *facts_meta["schema_version", value]'
         )["rows"]
-        return rows == [[_SCHEMA_VERSION]]
+        if rows != [[_FACTS_SCHEMA_VERSION]]:
+            return False
+        if project_root is not None:
+            rows = client.run(
+                '?[value] := *facts_meta["project_root", value]'
+            )["rows"]
+            if rows != [[str(Path(project_root).resolve())]]:
+                return False
+        # Keep the relation invariant explicit as a guard against a manually
+        # edited/corrupt marker or a partially completed migration.
+        columns = client.run("::columns exported_symbol")["rows"]
+        return [row[0] for row in columns] == ["file_path", "qualified_name"]
     except Exception:
         logger.debug("facts schema version check failed", exc_info=True)
         return False
+    except BaseException as exc:
+        # PyO3 exposes a Rust panic as a non-Exception ``PanicException``.
+        # Cozo can raise it for a corrupt SQLite file before returning an
+        # ordinary database error, which should invalidate the cache.
+        if type(exc).__name__ != "PanicException":
+            raise
+        logger.debug("facts schema open panicked", exc_info=True)
+        return False
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def _get_facts_db(project_root: str | None = None):
@@ -409,7 +436,7 @@ def _get_facts_db(project_root: str | None = None):
         try:
             cache_dir = _cache_db_dir(project_root)
             db_path = cache_dir / "facts.db"
-            if not _facts_schema_is_current(db_path):
+            if not _facts_schema_is_current(db_path, project_root):
                 logger.debug("facts db missing or stale at %s", db_path)
                 return None
             client = _open_facts_db(str(db_path))
@@ -629,7 +656,7 @@ def _extract_file_facts(
         if exported_names:
             for sf in sym_facts_for_file:
                 if sf.name in exported_names:
-                    result["exported_qns"].append([sf.qualified_name])
+                    result["exported_qns"].append([rel_path, sf.qualified_name])
 
     # -- Extract references (pre-computed or via Rust scope resolver)
     file_refs: list[tuple] = []
@@ -847,7 +874,24 @@ def _build_facts_db(
 
     cache_dir = _cache_db_dir(project_root)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    facts_path = str(cache_dir / "facts.db")
+    facts_file = cache_dir / "facts.db"
+    facts_path = str(facts_file)
+
+    # A relation key/column change requires a complete rebuild.  Do this in
+    # the cache owner before opening the database: FactGraph's schema setup is
+    # deliberately idempotent and cannot alter an existing Cozo relation.
+    project_key = str(Path(project_root).resolve())
+    if facts_file.is_file() and not _facts_schema_is_current(facts_file, project_root):
+        stale_client = _facts_db_cache.pop(project_key, None)
+        if stale_client is not None:
+            try:
+                stale_client.close()
+            except Exception:
+                logger.debug("stale facts db close failed", exc_info=True)
+        try:
+            facts_file.unlink()
+        except OSError:
+            logger.debug("could not remove stale facts db at %s", facts_file, exc_info=True)
 
     try:
         fdb = _open_facts_db(facts_path)
@@ -1120,15 +1164,18 @@ def _build_facts_db(
         )
 
         fdb.run(
-            "?[qualified_name] <- $rows "
-            ":replace exported_symbol {qualified_name}",
+            "?[file_path, qualified_name] <- $rows "
+            ":replace exported_symbol {file_path, qualified_name}",
             {"rows": all_exported_qns},
         )
 
         fdb.run(
             '?[key, value] <- $rows '
             ':put facts_meta {key => value}',
-            {"rows": [["schema_version", _SCHEMA_VERSION]]},
+            {"rows": [
+                ["schema_version", _FACTS_SCHEMA_VERSION],
+                ["project_root", str(Path(project_root).resolve())],
+            ]},
         )
 
     except BUG_EXCEPTIONS:

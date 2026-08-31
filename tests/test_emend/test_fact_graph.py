@@ -18,6 +18,7 @@ from emend.fact_graph import (
     DefUseFact,
     EntryPointDecoratorFact,
     EntryPointNameFact,
+    ExportedSymbolFact,
     FactGraph,
     FuncSummaryFact,
     ImportFact,
@@ -295,6 +296,34 @@ class TestSerialization:
         data = json.loads(g.to_json())
         assert isinstance(data, list)
         assert any(d["_type"] == "SymbolFact" for d in data)
+
+    def test_exported_symbols_are_file_owned_and_serialized(self):
+        g = FactGraph()
+        g.add_exported_symbols_batch([
+            ExportedSymbolFact("one.ts", "pkg.shared"),
+            ExportedSymbolFact("two.ts", "pkg.shared"),
+        ])
+
+        assert {
+            (fact.file_path, fact.qualified_name)
+            for fact in g.exported_symbols()
+        } == {("one.ts", "pkg.shared"), ("two.ts", "pkg.shared")}
+
+        roundtrip = FactGraph.from_json(g.to_json())
+        assert {
+            (fact.file_path, fact.qualified_name)
+            for fact in roundtrip.exported_symbols()
+        } == {("one.ts", "pkg.shared"), ("two.ts", "pkg.shared")}
+
+    def test_legacy_export_inputs_and_json_remain_global(self):
+        g = FactGraph()
+        g.add_exported_symbols_batch(["pkg.public"])
+        legacy_json = '[{"qualified_name": "pkg.old", "_type": "ExportedSymbolFact"}]'
+
+        assert g.exported_symbols() == [ExportedSymbolFact("", "pkg.public")]
+        assert FactGraph.from_json(legacy_json).exported_symbols() == [
+            ExportedSymbolFact("", "pkg.old")
+        ]
 
 
 class TestGenericQuery:
@@ -1082,6 +1111,19 @@ class TestFlowRuleCheckDatalog:
         )
         assert len(violations) == 0
 
+    @pytest.mark.parametrize("required_block", [0, 2])
+    def test_through_at_flow_endpoint_satisfies_requirement(self, required_block):
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=2))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 0, 1, "fallthrough", 0, 0))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 1, 2, "fallthrough", 0, 0))
+
+        assert g.flow_rule_check_datalog(
+            sources=[("app.py", "app.main", "x", 0)],
+            sinks=[("app.py", "app.main", "x", 2)],
+            through=[("app.py", "app.main", "x", required_block)],
+        ) == []
+
     def test_empty_sources(self):
         g = FactGraph()
         violations = g.flow_rule_check_datalog(sources=[], sinks=[("a.py", "f", "x", 0)])
@@ -1477,10 +1519,20 @@ class TestFactsCliTaintFlowsAlias:
             app, ["analyze", "facts", str(tmp_path), "--type", fact_type]
         )
 
-    def test_taint_flows_alias_accepted(self, tmp_path):
-        result = self._run(tmp_path, "taint_flows")
+    @pytest.mark.parametrize("fact_type", ["taint_flows", "trace_flows"])
+    def test_trace_flow_spellings_are_accepted(self, tmp_path, fact_type):
+        result = self._run(tmp_path, fact_type)
         assert result.exit_code == 0, result.stdout
 
-    def test_trace_flows_still_accepted(self, tmp_path):
-        result = self._run(tmp_path, "trace_flows")
-        assert result.exit_code == 0, result.stdout
+    def test_facts_json_empty_result_is_array(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from emend.cli import app
+        from emend.fact_graph import FactGraph
+
+        monkeypatch.setattr(
+            FactGraph, "build_from_project", classmethod(lambda cls, _path: cls())
+        )
+        monkeypatch.setattr(FactGraph, "symbols", lambda self, **_kwargs: [])
+        result = CliRunner().invoke(app, ["analyze", "facts", str(tmp_path), "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == []

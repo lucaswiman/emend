@@ -130,8 +130,8 @@ def test_replace_list_ellipsis_empty(tmp_path):
     # Should insert 999 after FIRST in both lists
     assert count == 2
     assert "x = [1, 999, 2]" in diff
-    # REST is empty for second match, resulting in trailing comma
-    assert "y = [5, 999," in diff
+    # Empty REST does not leave a separator artifact.
+    assert "y = [5, 999]" in diff
 
 
 def test_replace_tuple_ellipsis(tmp_path):

@@ -35,6 +35,18 @@ def run_type_check(
     from emend.transform import find_pattern
     from emend.policy import PolicyViolation
 
+    def unavailable(reason: str) -> list[PolicyViolation]:
+        return [PolicyViolation(
+            file_path=file_path,
+            line=0,
+            col=0,
+            policy_name=policy.name,
+            check_name=f"type:unavailable:{check.kind}",
+            severity=policy.severity,
+            message=f"{policy.description}: type oracle unavailable ({reason})",
+            witness=[],
+        )]
+
     if check.kind == "returns":
         augmented_pattern = f"{check.symbol_pattern}:returns[{check.expected_type}]"
     else:
@@ -46,16 +58,22 @@ def run_type_check(
         source_override=source,
         language=language,
     )
+    if not all_matches:
+        return []
+    if not project_root:
+        return unavailable("no project root configured")
 
     type_oracle = None
-    if project_root:
-        try:
-            from emend.type_oracle import create_type_oracle
-            type_oracle = create_type_oracle(project_root=Path(project_root))
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug("Could not create type oracle for type check", exc_info=True)
+    try:
+        from emend.type_oracle import create_type_oracle
+        type_oracle = create_type_oracle(project_root=Path(project_root))
+        if not type_oracle.is_available():
+            return unavailable("configured engine is not installed")
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception as exc:
+        logger.debug("Could not create type oracle for type check", exc_info=True)
+        return unavailable(str(exc) or "engine initialization failed")
 
     typed_matches = find_pattern(
         augmented_pattern,

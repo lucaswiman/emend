@@ -1,3 +1,4 @@
+import json
 import pytest
 import os
 from pathlib import Path
@@ -176,6 +177,9 @@ def test_map_resolve_file_plain_module_path(tmp_path, emend_cmd_list, run_emend_
     assert result.returncode == 0
     assert "__init__.py" in result.stdout
     assert "Unexpected token" not in result.stderr
+    result = run_emend_cmd(["map", "resolve", "pkg.db", "--json"])
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["path"].endswith("/db")
 
 
 def test_map_resolve_directory(tmp_path, emend_cmd_list, run_emend_cmd):

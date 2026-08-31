@@ -217,7 +217,46 @@
   selector: "foo[params]:POSITIONAL_ONLY"
   value: "c"
   expected_in_file:
-    - "def foo(a, b, c):"
+    - "def foo(c, /, a, b):"
+
+- name: pseudo_class_positional_only_existing_separator
+  source: |
+    def foo(a, /, b):
+        pass
+  selector: "foo[params]:POSITIONAL_ONLY"
+  value: "c"
+  expected_in_file:
+    - "def foo(a, c, /, b):"
+
+- name: param_append_before_kwargs
+  source: |
+    def foo(a, **kwargs):
+        pass
+  selector: "foo[params]"
+  value: "b"
+  expected_in_diff:
+    - "def foo(a, **kwargs):"
+    - "def foo(a, b, **kwargs):"
+  expected_in_file:
+    - "def foo(a, b, **kwargs):"
+
+- name: param_append_after_keyword_only
+  source: |
+    def foo(a, *, existing):
+        pass
+  selector: "foo[params]"
+  value: "new"
+  expected_in_file:
+    - "def foo(a, *, existing, new):"
+
+- name: positional_or_keyword_before_kwargs
+  source: |
+    def foo(a, **kwargs):
+        pass
+  selector: "foo[params]:POSITIONAL_OR_KEYWORD"
+  value: "b"
+  expected_in_file:
+    - "def foo(a, b, **kwargs):"
 
 - name: pseudo_class_keyword_only_no_args
   source: |

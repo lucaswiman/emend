@@ -11,6 +11,13 @@ from emend.cli import app
 runner = CliRunner()
 
 
+def test_parse_where_rejects_empty_value():
+    from emend.cli_base import parse_where_clause
+
+    with pytest.raises(ValueError, match="--where cannot be empty"):
+        parse_where_clause(["  "])
+
+
 class TestFindCommand:
     """Tests for canonical 'find' pattern mode."""
 
@@ -489,6 +496,27 @@ class TestFindReplaceMultiFile:
         assert "new('file2')" in file2.read_text()
         # other.py should NOT be modified (doesn't match glob)
         assert "old('other')" in file3.read_text()
+
+    def test_replace_glob_honors_language_override(self, tmp_path):
+        files = [tmp_path / name for name in ("a.py", "b.py")]
+        for path in files:
+            path.write_text("const result = first == second;\n")
+
+        result = runner.invoke(app, [
+            "--language", "typescript", "replace", "$X == $Y", "$X === $Y",
+            *(str(path) for path in files), "--apply",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert all("first === second" in path.read_text() for path in files)
+
+        python_file = tmp_path / "default.py"
+        python_file.write_text("old(1)\n")
+        result = runner.invoke(app, [
+            "replace", "old($X)", "new($X)", str(python_file), "--apply",
+        ])
+        assert result.exit_code == 0, result.output
+        assert python_file.read_text() == "new(1)\n"
 
     def test_replace_directory(self, tmp_path):
         """Test replace with directory path modifies all .py files."""

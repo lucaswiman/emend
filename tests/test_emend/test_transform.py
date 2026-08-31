@@ -47,8 +47,64 @@ def assert_replace(tmp_path, source, pattern, replacement, count):
     return test_file.read_text()
 
 
+def test_generated_cache_directory_is_not_a_project_marker(tmp_path):
+    from emend.transform import _find_project_root
+
+    (tmp_path / ".emend" / "cache").mkdir(parents=True)
+    (tmp_path / ".git").mkdir()
+    project = tmp_path / "unrelated"
+    project.mkdir()
+
+    assert _find_project_root(str(project)) == str(project.resolve())
+
+
+@pytest.mark.parametrize("marker", [
+    ".git/HEAD",
+    ".emend/config.toml",
+    ".emend/rules.yaml",
+])
+def test_project_root_uses_valid_nearest_marker(tmp_path, marker):
+    from emend.transform import _find_project_root
+
+    marker_path = tmp_path / marker
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch()
+    nested = tmp_path / "pkg" / "nested"
+    nested.mkdir(parents=True)
+
+    assert _find_project_root(str(nested)) == str(tmp_path.resolve())
+
+
 class TestReplacePattern:
     """Tests for replace_pattern() function."""
+
+    @pytest.mark.parametrize("language, expected_count", [(None, 1), ("typescript", 1), ("python", 0)])
+    def test_replace_language_auto_and_explicit_override(self, tmp_path, language, expected_count):
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "example.ts"
+        test_file.write_text("const result = first == second;\n")
+
+        _, count = replace_pattern(
+            "$X == $Y", "$X === $Y", str(test_file), language=language
+        )
+
+        assert count == expected_count
+
+    def test_replace_explicit_language_controls_parser_and_scope(self, tmp_path):
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "typescript_source.py"
+        test_file.write_text(
+            "function f() {\n  const result = first == second;\n}\n"
+        )
+
+        _, count = replace_pattern(
+            "$X == $Y", "$X === $Y", str(test_file),
+            scope=["f"], language="typescript",
+        )
+
+        assert count == 1
 
     def test_replace_simple(self, tmp_path):
         """Replace simple pattern without metavariables."""
@@ -106,6 +162,29 @@ class TestReplacePattern:
 
         result = _substitute_metavars("$X + $XY", {"X": "a", "XY": "b"})
         assert result == "a + b", f"Expected 'a + b', got '{result}'"
+
+    @pytest.mark.parametrize(
+        ("template", "captures", "expected"),
+        [
+            ("$X $UNKNOWN", {"X": "a"}, "a $UNKNOWN"),
+            ("call($X, extra)", {"X": ""}, "call(, extra)"),
+            ("call($...ARGS, extra)", {"ARGS": ""}, "call(extra)"),
+        ],
+    )
+    def test_replacement_template_substitution_boundaries(
+        self, template, captures, expected
+    ):
+        """Unknown and empty captures retain their distinct semantics."""
+        from emend.transform import _substitute_metavars
+
+        assert _substitute_metavars(template, captures) == expected
+
+    def test_replacement_does_not_rescan_captured_text(self):
+        from emend.transform import _substitute_metavars
+
+        assert _substitute_metavars(
+            "wrap($X, $Y)", {"X": '"$Y"', "Y": "value"}
+        ) == 'wrap("$Y", value)'
 
     def test_replace_no_matches(self, tmp_path):
         """Replace pattern that doesn't match returns empty diff."""
@@ -2454,6 +2533,15 @@ class TestAnalyzeImports:
         imports = analyze_imports(source, str(test_file))
 
         assert imports == []
+
+    def test_relative_import_from_package_init_keeps_package(self, tmp_path):
+        from emend.transform import _resolve_relative_module
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        init_file = package / "__init__.py"
+        init_file.write_text("from .sibling import helper\n")
+        assert _resolve_relative_module(1, "sibling", str(init_file), str(tmp_path)) == "pkg.sibling"
 
 
 class TestFindPattern:
