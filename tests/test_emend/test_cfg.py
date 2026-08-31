@@ -746,3 +746,40 @@ class TestCliUnreachable:
         assert any(
             b["start_line"] > 0 or b["end_line"] > 0 for b in blocks
         ), result.output
+
+    def test_unreachable_scopes_same_basename_by_relative_path(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from emend.cli import app
+        from emend.fact_graph import CfgBlockFact
+        import emend.transform
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pyproject.toml").touch()
+        (project / "left").mkdir(parents=True)
+        (project / "right").mkdir()
+        (project / "left" / "mod.py").write_text(
+            "def f(x):\n    return 1\n    print('left')\n"
+        )
+        (project / "right" / "mod.py").write_text(
+            "\n\n\n\n\ndef f(x):\n    return 1\n    print('right')\n"
+        )
+        monkeypatch.setattr(
+            emend.transform,
+            "_get_or_build_fact_graph",
+            lambda _path: type("Graph", (), {
+                "unreachable_blocks_datalog": lambda _self, func_qn=None: [
+                    CfgBlockFact("left/mod.py", "left.mod.f", 2, False, False),
+                    CfgBlockFact("right/mod.py", "right.mod.f", 2, False, False),
+                ],
+            })(),
+        )
+
+        result = CliRunner().invoke(
+            app, ["analyze", "cfg", str(project), "--unreachable", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = {entry["file"]: entry for entry in json.loads(result.output)}
+        assert set(data) == {"left/mod.py", "right/mod.py"}
+        assert data["left/mod.py"]["unreachable_blocks"][0]["start_line"] < 6
+        assert data["right/mod.py"]["unreachable_blocks"][0]["start_line"] >= 8

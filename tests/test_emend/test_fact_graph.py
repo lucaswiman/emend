@@ -1503,3 +1503,16 @@ class TestFactsCliTaintFlowsAlias:
     def test_trace_flows_still_accepted(self, tmp_path):
         result = self._run(tmp_path, "trace_flows")
         assert result.exit_code == 0, result.stdout
+
+    def test_facts_json_empty_result_is_array(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from emend.cli import app
+        from emend.fact_graph import FactGraph
+
+        monkeypatch.setattr(
+            FactGraph, "build_from_project", classmethod(lambda cls, _path: cls())
+        )
+        monkeypatch.setattr(FactGraph, "symbols", lambda self, **_kwargs: [])
+        result = CliRunner().invoke(app, ["analyze", "facts", str(tmp_path), "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == []

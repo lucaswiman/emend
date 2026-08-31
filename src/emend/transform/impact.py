@@ -30,6 +30,41 @@ class ImpactResult:
     edges: list[ImpactEdge]  # witness edges
 
 
+IMPACT_OUTPUTS = frozenset(("symbols", "tests", "graph"))
+
+
+def impact_projection(
+    result: ImpactResult,
+    output: str = "symbols",
+    *,
+    dsl_impacts: list[tuple[str, str, str]] | None = None,
+) -> dict:
+    """Return the public JSON projection for an impact result."""
+    if output not in IMPACT_OUTPUTS:
+        choices = ", ".join(sorted(IMPACT_OUTPUTS))
+        raise ValueError(f"Unknown impact output mode {output!r}; use: {choices}")
+    if output == "tests":
+        return {"impacted_tests": result.impacted_tests}
+    edges = [
+        {"source": edge.source, "target": edge.target, "kind": edge.kind}
+        for edge in result.edges
+    ]
+    if output == "graph":
+        return {"edges": edges}
+    data: dict = {
+        "changed_symbols": result.changed_symbols,
+        "impacted_symbols": result.impacted_symbols,
+        "impacted_tests": result.impacted_tests,
+        "edges": edges,
+    }
+    if dsl_impacts:
+        data["dsl_impacts"] = [
+            {"file": file, "line": line, "reason": reason}
+            for file, line, reason in dsl_impacts
+        ]
+    return data
+
+
 def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
     """Parse unified diff output to extract changed file paths and line numbers.
 
@@ -456,5 +491,4 @@ def find_impact(
         impacted_tests=[],
         edges=[],
     )
-
 

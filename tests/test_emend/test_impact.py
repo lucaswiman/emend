@@ -270,6 +270,24 @@ class TestFindImpact:
         assert "impacted_tests" in parsed
         assert "edges" in parsed
 
+    def test_impact_projection_matches_requested_mode(self):
+        from emend.transform.impact import ImpactEdge, ImpactResult, impact_projection
+
+        result = ImpactResult(
+            changed_symbols=["a.py::changed"],
+            impacted_symbols=["b.py::caller"],
+            impacted_tests=["tests/test_a.py::test_changed"],
+            edges=[ImpactEdge("a.py::changed", "b.py::caller", "calls")],
+        )
+        assert impact_projection(result, "tests") == {
+            "impacted_tests": ["tests/test_a.py::test_changed"]
+        }
+        assert impact_projection(result, "graph") == {
+            "edges": [{"source": "a.py::changed", "target": "b.py::caller", "kind": "calls"}]
+        }
+        with pytest.raises(ValueError, match="Unknown impact output mode"):
+            impact_projection(result, "invalid")
+
 
 class TestParseDiffToChangedFiles:
     """Tests for diff parsing helper."""

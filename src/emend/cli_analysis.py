@@ -25,9 +25,19 @@ from emend.transform import (
     find_references,
     generate_graph,
 )
+from emend.transform.impact import IMPACT_OUTPUTS, impact_projection
 from emend.cli_output import emit_json
 
 logger = logging.getLogger("emend.cli.analysis")
+
+
+def _project_relative(file_path: str, project_root: Path) -> str:
+    """Normalize a filesystem path relative to the analysis project."""
+    candidate = Path(file_path).resolve()
+    try:
+        return candidate.relative_to(project_root).as_posix()
+    except ValueError:
+        return candidate.as_posix()
 
 
 def _extract_dsl_symbols(files, dsl_filter=None):
@@ -558,6 +568,9 @@ def impact_cmd(
     if not selector and not diff:
         print("Error: provide a selector argument or --diff option", file=sys.stderr)
         raise typer.Exit(2)
+    if output not in IMPACT_OUTPUTS:
+        print(f"Error: unknown impact output mode {output!r}", file=sys.stderr)
+        raise typer.Exit(2)
 
     with cli_error_handler():
         selectors_list = None
@@ -585,21 +598,7 @@ def impact_cmd(
                 logger.debug("DSL impact analysis failed", exc_info=True)
 
         if json_output:
-            data = {
-                "changed_symbols": result.changed_symbols,
-                "impacted_symbols": result.impacted_symbols,
-                "impacted_tests": result.impacted_tests,
-                "edges": [
-                    {"source": e.source, "target": e.target, "kind": e.kind}
-                    for e in result.edges
-                ],
-            }
-            if dsl_impacts:
-                data["dsl_impacts"] = [
-                    {"file": f, "line": l, "reason": r}
-                    for f, l, r in dsl_impacts
-                ]
-            emit_json(data)
+            emit_json(impact_projection(result, output, dsl_impacts=dsl_impacts))
         elif output == "tests":
             if not result.impacted_tests:
                 print("No impacted tests found.")
@@ -840,7 +839,10 @@ def facts_cmd(
                     print("  ".join(parts))
             print(f"\n{min(len(results), limit)} of {len(results)} results.", file=sys.stderr)
         else:
-            print("No results found.")
+            if json_output:
+                emit_json([])
+            else:
+                print("No results found.")
 
     except typer.Exit:
         raise
@@ -887,6 +889,11 @@ def cfg_cmd(
         _lang = _state["language"]
         resolved, _ = resolve_files(path, language=_lang)
         files = [str(f) for f in resolved]
+        from emend.transform import _find_project_root
+        project_root = Path(_find_project_root(path)).resolve()
+        requested_files = {
+            _project_relative(file_path, project_root) for file_path in files
+        }
 
         all_cfgs: list = []
         cfg_files: list[str] = []
@@ -920,7 +927,7 @@ def cfg_cmd(
             datalog_used = False
             try:
                 from emend.transform import _get_or_build_fact_graph
-                graph = _get_or_build_fact_graph(path)
+                graph = _get_or_build_fact_graph(str(project_root))
                 func_filter = function if function else None
                 unr_blocks = graph.unreachable_blocks_datalog(func_qn=func_filter)
                 datalog_used = True
@@ -934,12 +941,11 @@ def cfg_cmd(
                 # not carry line spans.  Resolve real spans from the freshly
                 # built CFGs (block ids are consistent between fact population
                 # and a plain build_cfgs pass, both come from cfg.get_blocks()).
-                import os
                 span_lookup: dict[tuple[str, str, int], tuple[int, int]] = {}
                 for i, cfg in enumerate(all_cfgs):
-                    base = os.path.basename(cfg_files[i])
+                    relative = _project_relative(cfg_files[i], project_root)
                     for block in cfg.get_blocks():
-                        span_lookup[(base, cfg.func_name, block["id"])] = (
+                        span_lookup[(relative, cfg.func_name, block["id"])] = (
                             block["start_line"],
                             block["end_line"],
                         )
@@ -947,25 +953,30 @@ def cfg_cmd(
                 from collections import defaultdict
                 grouped: dict[tuple[str, str], list] = defaultdict(list)
                 for blk in unr_blocks:
-                    grouped[(blk.file_path, blk.func_qn)].append(blk)
+                    relative = Path(str(blk.file_path).replace("\\", "/")).as_posix()
+                    if Path(relative).is_absolute():
+                        relative = _project_relative(relative, project_root)
+                    if relative in requested_files:
+                        grouped[(relative, blk.func_qn)].append(blk)
                 for (fp, fq), blks in grouped.items():
                     short_name = fq.rsplit(".", 1)[-1] if "." in fq else fq
-                    base = os.path.basename(fp)
                     entries = []
                     for b in blks:
-                        start_line, end_line = span_lookup.get(
-                            (base, short_name, b.block_id), (0, 0)
-                        )
+                        span = span_lookup.get((fp, short_name, b.block_id))
+                        if span is None:
+                            continue
+                        start_line, end_line = span
                         entries.append({
                             "id": b.block_id,
-                            "start_line": start_line,
-                            "end_line": end_line,
+                            "start_line": start_line + 1,
+                            "end_line": end_line + 1,
                         })
-                    results.append({
-                        "file": fp,
-                        "function": short_name,
-                        "unreachable_blocks": entries,
-                    })
+                    if entries:
+                        results.append({
+                            "file": fp,
+                            "function": short_name,
+                            "unreachable_blocks": entries,
+                        })
 
             # Fallback to per-CFG BFS
             if not datalog_used:
@@ -973,9 +984,16 @@ def cfg_cmd(
                     blocks = find_unreachable_blocks(cfg)
                     if blocks:
                         results.append({
-                            "file": cfg_files[i],
+                            "file": _project_relative(cfg_files[i], project_root),
                             "function": cfg.func_name,
-                            "unreachable_blocks": blocks,
+                            "unreachable_blocks": [
+                                {
+                                    **block,
+                                    "start_line": block["start_line"] + 1,
+                                    "end_line": block["end_line"] + 1,
+                                }
+                                for block in blocks
+                            ],
                         })
 
             if output_format == "json":
@@ -986,7 +1004,7 @@ def cfg_cmd(
                 for r in results:
                     for blk in r["unreachable_blocks"]:
                         print(
-                            f"{r['file']}:{blk.get('start_line', 0)+1}: "
+                            f"{r['file']}:{blk.get('start_line', 0)}: "
                             f"unreachable code in {r['function']} "
                             f"(block B{blk.get('id', blk.get('block_id', '?'))}, "
                             f"lines {blk.get('start_line', '?')}-{blk.get('end_line', '?')})"
