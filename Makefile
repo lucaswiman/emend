@@ -46,6 +46,7 @@ $(MCP_VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(MCP_VENV)/bin/ac
 	@mkdir -p $(@D) && touch $@
 
 test-mcp: $(MCP_VENV)/lib/emend_core
+	$(MCP_VENV)/bin/pytest --tb=short tests/test_emend/test_mcp_server.py
 	$(MCP_VENV)/bin/pytest --tb=short -k TestMCPTools tests/test_emend/test_knowledge.py
 
 deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core

@@ -1,16 +1,20 @@
-"""FastMCP app instance and server lifecycle helpers."""
+"""MCPServer app instance and server lifecycle helpers."""
 
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import threading
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from emend.errors import BUG_EXCEPTIONS
 
-mcp_app = FastMCP(
+logger = logging.getLogger("emend.mcp")
+
+mcp_app = MCPServer(
     "emend",
     instructions="""\
 emend is a Python refactoring tool. All write operations default to dry-run
@@ -32,23 +36,25 @@ Prefer the discriminated tools:
 )
 
 
+def _warm_caches_worker() -> None:
+    """Warm parse and QN-index caches in the background thread."""
+    try:
+        from emend.transform import warm_caches
+        warm_caches(".")
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("Background cache warming failed", exc_info=True)
+
+
 def _warm_caches_background() -> None:
-    """Warm parse and QN-index caches in a background process."""
-    import multiprocessing
-    import logging as _logging
-
-    def _worker() -> None:
-        _logging.basicConfig(level=_logging.WARNING)
-        try:
-            from emend.transform import warm_caches
-            warm_caches(".")
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            _logging.getLogger("emend.mcp").debug("Background cache warming failed", exc_info=True)
-
-    proc = multiprocessing.Process(target=_worker, daemon=True)
-    proc.start()
+    """Start warming parse and QN-index caches without blocking startup."""
+    thread = threading.Thread(
+        target=_warm_caches_worker,
+        name="emend-cache-warm",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _compress_schema(obj: object) -> object:
@@ -175,5 +181,7 @@ def run_server(
 
     _warm_caches_background()
 
-    mcp_app.settings.port = port
-    mcp_app.run(transport=transport)
+    if transport == "sse":
+        mcp_app.run(transport="sse", port=port)
+    else:
+        mcp_app.run(transport="stdio")
