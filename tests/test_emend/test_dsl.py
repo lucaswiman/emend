@@ -35,6 +35,20 @@ from emend.dsl import (
 runner = CliRunner()
 
 
+@pytest.fixture
+def dsl_ref_project(tmp_path):
+    model_file = tmp_path / "models.py"
+    model_file.write_text(
+        'class User:\n'
+        '    __tablename__ = "users"\n'
+        '    pass\n'
+    )
+    (tmp_path / "queries.py").write_text(
+        'QUERY = "SELECT name FROM users WHERE active = 1"\n'
+    )
+    return model_file
+
+
 def _region(
     dsl,
     content,
@@ -475,22 +489,11 @@ class TestSearchDslSymbols:
 class TestRefsDslSymbols:
     """Tests for automatic DSL reference discovery in refs."""
 
-    def test_refs_finds_sql_references(self, tmp_path):
+    def test_refs_finds_sql_references(self, dsl_ref_project):
         """refs surfaces SQL table references for ORM models."""
-
-        model_file = tmp_path / "models.py"
-        model_file.write_text(
-            'class User:\n'
-            '    __tablename__ = "users"\n'
-            '    pass\n'
-        )
-        query_file = tmp_path / "queries.py"
-        query_file.write_text(
-            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
-        )
         result = runner.invoke(app, [
-            "refs", str(model_file) + "::User",
-            "--project", str(tmp_path),
+            "refs", str(dsl_ref_project) + "::User",
+            "--project", str(dsl_ref_project.parent),
         ])
         assert result.exit_code == 0
         assert "queries.py" in result.output
@@ -506,21 +509,11 @@ class TestRefsDslSymbols:
         ])
         assert result.exit_code == 0
 
-    def test_refs_json_includes_dsl(self, tmp_path):
-        """refs --json includes DSL references."""
-        model_file = tmp_path / "models.py"
-        model_file.write_text(
-            'class User:\n'
-            '    __tablename__ = "users"\n'
-            '    pass\n'
-        )
-        query_file = tmp_path / "queries.py"
-        query_file.write_text(
-            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
-        )
+    def test_refs_json_is_single_valid_array_with_dsl(self, dsl_ref_project):
+        """refs --json emits one valid array containing DSL references."""
         result = runner.invoke(app, [
-            "refs", str(model_file) + "::User",
-            "--json", "--project", str(tmp_path),
+            "refs", str(dsl_ref_project) + "::User",
+            "--json", "--project", str(dsl_ref_project.parent),
         ])
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
@@ -531,26 +524,6 @@ class TestRefsDslSymbols:
             r["file_path"].endswith("queries.py") and not r["is_definition"]
             for r in data
         ), f"Expected a DSL reference from queries.py, got: {data}"
-
-    def test_refs_json_single_valid_json_with_dsl(self, tmp_path):
-        """refs --json should output a single valid JSON array, not two."""
-        model_file = tmp_path / "models.py"
-        model_file.write_text(
-            'class User:\n'
-            '    __tablename__ = "users"\n'
-            '    pass\n'
-        )
-        query_file = tmp_path / "queries.py"
-        query_file.write_text(
-            'QUERY = "SELECT name FROM users WHERE active = 1"\n'
-        )
-        result = runner.invoke(app, [
-            "refs", str(model_file) + "::User",
-            "--json", "--project", str(tmp_path),
-        ])
-        assert result.exit_code == 0
-        data = json.loads(result.stdout.strip())
-        assert isinstance(data, list), "Output should be a single JSON array"
 
 
 class TestGotoLocalDslFallback:

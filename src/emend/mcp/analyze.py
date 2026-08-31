@@ -330,6 +330,14 @@ def trace_analysis(
         TraceConfig, TraceSource, TraceSink, TraceSanitizer,
     )
     from emend.cli_base import resolve_files
+    from emend.trace_presets import get_preset, merge_configs
+
+    preset_config = None
+    if preset:
+        try:
+            preset_config = get_preset(preset)
+        except ValueError:
+            return json.dumps({"error": f"Unknown preset: {preset}"})
 
     if from_pattern and to_pattern:
         inline_label = label or "inline"
@@ -340,20 +348,11 @@ def trace_analysis(
             sanitizers=[TraceSanitizer(pattern=not_through, label=inline_label)] if not_through else [],
             scope_sanitizers=[],
         )
-        if preset:
-            from emend.trace_presets import get_preset, merge_configs
-            try:
-                preset_config = get_preset(preset)
-            except ValueError:
-                return json.dumps({"error": f"Unknown preset: {preset}"})
-            if preset_config:
-                trace_config = merge_configs(trace_config, preset_config)
+        if preset_config:
+            trace_config = merge_configs(trace_config, preset_config)
     elif preset:
-        from emend.trace_presets import get_preset
-        try:
-            trace_config = get_preset(preset)
-        except ValueError:
-            return json.dumps({"error": f"Unknown preset: {preset}"})
+        assert preset_config is not None
+        trace_config = preset_config
     else:
         config_path = resolve_rules_path(config)
         if not config_path.exists():

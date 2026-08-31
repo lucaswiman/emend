@@ -1788,6 +1788,13 @@ def detect_type_engine(
 # ---------------------------------------------------------------------------
 
 _ENGINE_NAMES = ("pyrefly", "pyright", "ty", "typescript", "rust-analyzer", "auto")
+_ENGINE_ADAPTERS: dict[str, type[TypeOracle]] = {
+    "pyrefly": PyreflyAdapter,
+    "pyright": PyrightAdapter,
+    "ty": TyAdapter,
+    "typescript": TypeScriptAdapter,
+    "rust-analyzer": RustAnalyzerAdapter,
+}
 
 
 def create_type_oracle(
@@ -1824,17 +1831,11 @@ def create_type_oracle(
     if "db_path" not in kwargs:
         kwargs["db_path"] = _type_cache_db_path(project_root)
 
-    if engine == "pyrefly":
-        return PyreflyAdapter(**kwargs)
-    if engine == "pyright":
-        return PyrightAdapter(**kwargs)
-    if engine == "ty":
-        return TyAdapter(**kwargs)
-    if engine == "typescript":
-        return TypeScriptAdapter(**kwargs)
-    if engine == "rust-analyzer":
-        return RustAnalyzerAdapter(**kwargs)
-    raise ValueError(
-        f"Unknown type inference engine: {engine!r}. "
-        f"Supported engines: {', '.join(_ENGINE_NAMES)}"
-    )
+    try:
+        adapter = _ENGINE_ADAPTERS[engine]
+    except KeyError:
+        raise ValueError(
+            f"Unknown type inference engine: {engine!r}. "
+            f"Supported engines: {', '.join(_ENGINE_NAMES)}"
+        ) from None
+    return adapter(**kwargs)

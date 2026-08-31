@@ -71,6 +71,16 @@ def indexed_project(tmp_path):
     return build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
 
 
+@pytest.fixture
+def fts_conn(indexed_project):
+    conn = sqlite3.connect(str(indexed_project / ".emend" / "cache" / "parse.db"))
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # FTS5 tests
 # ---------------------------------------------------------------------------
@@ -93,57 +103,42 @@ class TestFTS5:
         with pytest.raises(RuntimeError, match=r"FTS index rebuild failed.*parse\.db"):
             engine._ensure_fts()
 
-    def test_rebuild_fts_creates_table(self, indexed_project):
+    def test_rebuild_fts_creates_table(self, fts_conn):
         from emend.editor_search import rebuild_fts
 
-        db_path = indexed_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        count = rebuild_fts(conn)
+        count = rebuild_fts(fts_conn)
         assert count > 0
 
         # FTS tables should exist now
-        fts_count = conn.execute(
+        fts_count = fts_conn.execute(
             "SELECT COUNT(*) FROM symbol_fts"
         ).fetchone()[0]
-        file_fts_count = conn.execute(
+        file_fts_count = fts_conn.execute(
             "SELECT COUNT(*) FROM file_fts"
         ).fetchone()[0]
         assert fts_count + file_fts_count == count
         assert fts_count > 0
         assert file_fts_count > 0
-        conn.close()
 
-    def test_rebuild_fts_idempotent(self, indexed_project):
+    def test_rebuild_fts_idempotent(self, fts_conn):
         from emend.editor_search import rebuild_fts
 
-        db_path = indexed_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        count1 = rebuild_fts(conn)
-        count2 = rebuild_fts(conn)
+        count1 = rebuild_fts(fts_conn)
+        count2 = rebuild_fts(fts_conn)
         assert count1 == count2
-        conn.close()
 
-    def test_fts_trigram_substring_match(self, indexed_project):
+    def test_fts_trigram_substring_match(self, fts_conn):
         """FTS5 trigram should find 'greet' inside 'greet_loudly'."""
         from emend.editor_search import rebuild_fts
 
-        db_path = indexed_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
+        rebuild_fts(fts_conn)
 
-        rebuild_fts(conn)
-
-        rows = conn.execute(
+        rows = fts_conn.execute(
             'SELECT name FROM symbol_fts WHERE name MATCH \'"greet"\'',
         ).fetchall()
         names = [r[0] for r in rows]
         assert "greet" in names
         assert "greet_loudly" in names
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -907,27 +902,23 @@ class TestExtractImportNames:
     a submodule leaf shadow a real local name."""
 
     def test_plain_dotted_import_binds_top_level(self, tmp_path):
-        from emend.editor_search import EditorSearchEngine
-
         proj = build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
         f = proj / "uses.py"
         f.write_text("import os.path\n")
 
-        engine = EditorSearchEngine(str(proj))
-        names = engine._extract_import_names(str(f))
+        with _engine(proj) as engine:
+            names = engine._extract_import_names(str(f))
 
         assert "os" in names
         assert "path" not in names
 
     def test_aliased_import_still_binds_alias(self, tmp_path):
-        from emend.editor_search import EditorSearchEngine
-
         proj = build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
         f = proj / "uses.py"
         f.write_text("import a.b as c\n")
 
-        engine = EditorSearchEngine(str(proj))
-        names = engine._extract_import_names(str(f))
+        with _engine(proj) as engine:
+            names = engine._extract_import_names(str(f))
 
         assert "c" in names
         assert names["c"] == "a.b"
@@ -943,26 +934,20 @@ class TestSearchLiteralsWildcards:
     treated as a literal underscore, not a single-character wildcard."""
 
     def test_underscore_not_treated_as_wildcard(self, tmp_path):
-        from emend.editor_search import EditorSearchEngine
-
         proj = build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
-        engine = EditorSearchEngine(str(proj))
-        conn = engine._get_conn()
-        conn.execute(
-            "INSERT INTO reference_index "
-            "(content_hash, target_qn, file_path, line, col, ref_kind) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (b"h", "abc", "f.py", 1, 0, "read"),
-        )
-        conn.execute(
-            "INSERT INTO reference_index "
-            "(content_hash, target_qn, file_path, line, col, ref_kind) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (b"h", "a_c", "f.py", 2, 0, "read"),
-        )
-        conn.commit()
-
-        result = engine._search_literals(["a_c"])
+        with _engine(proj) as engine:
+            conn = engine._get_conn()
+            conn.executemany(
+                "INSERT INTO reference_index "
+                "(content_hash, target_qn, file_path, line, col, ref_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (b"h", "abc", "f.py", 1, 0, "read"),
+                    (b"h", "a_c", "f.py", 2, 0, "read"),
+                ],
+            )
+            conn.commit()
+            result = engine._search_literals(["a_c"])
         qns = {item["target_qn"] for item in result.items}
         assert "a_c" in qns
         assert "abc" not in qns

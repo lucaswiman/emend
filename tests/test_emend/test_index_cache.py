@@ -16,6 +16,13 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+def make_project_dir(tmp_path: Path) -> Path:
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".emend").mkdir()
+    return project
+
+
 def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
     """The progress display must not go silent during post-parse phases."""
     from typer.testing import CliRunner
@@ -29,11 +36,7 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
         callback("phase", "Full-text search index")
         callback("phase", "Facts database")
         callback("phase", "Duplicate analysis")
-        return {
-            "files": 1, "indexed": 1, "qn_cached": 1, "skipped": 0,
-            "sym_cached": 1, "ref_cached": 0, "type_cached": 1,
-            "type_engine": "pyrefly",
-        }
+        return {"files": 1, "indexed": 1, "qn_cached": 1}
 
     monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
     result = CliRunner().invoke(
@@ -61,11 +64,7 @@ def test_index_cli_defaults_to_pyrefly(monkeypatch, tmp_path):
 
     def fake_warm_caches(path, *, jobs, callback, type_engine):
         selected.append(type_engine)
-        return {
-            "files": 1, "indexed": 1, "qn_cached": 1, "skipped": 0,
-            "sym_cached": 1, "ref_cached": 0, "type_cached": 1,
-            "type_engine": "pyrefly",
-        }
+        return {"files": 1, "indexed": 1, "qn_cached": 1}
 
     monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
     result = CliRunner().invoke(app, ["tool", "index", str(tmp_path)])
@@ -163,8 +162,7 @@ class TestWarmCachesSkipped:
     """Integration tests for warm_caches skipped-file tracking."""
 
     def _make_project(self, tmp_path: Path) -> Path:
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
         (proj / "b.py").write_text("x = 1\n")
         return proj
@@ -189,9 +187,6 @@ class TestWarmCachesSkipped:
         from emend.transform import warm_caches
 
         project = self._make_project(tmp_path)
-        # Keep this fixture's cache isolated from any repository marker above
-        # the pytest temporary directory.
-        (project / ".emend").mkdir()
         attempts = []
         real_thread_pool = concurrent.futures.ThreadPoolExecutor
 
@@ -309,8 +304,7 @@ class TestTypeCacheWarming:
     """Verify that warm_caches populates the type_cache table."""
 
     def _make_project(self, tmp_path: Path) -> Path:
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text("def hello(x: int) -> str:\n    return str(x)\n")
         (proj / "b.py").write_text("y: float = 3.14\n")
         return proj
@@ -612,8 +606,7 @@ class TestFileManifest:
         """warm_caches populates the file_manifest table."""
         from emend.transform import warm_caches
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         warm_caches(str(proj), type_engine=None)
@@ -627,8 +620,7 @@ class TestFileManifest:
         import hashlib
         from emend.transform import warm_caches
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         warm_caches(str(proj), type_engine=None)
@@ -654,8 +646,7 @@ class TestScanManifest:
         """Unchanged files are correctly identified."""
         from emend.transform import warm_caches, _scan_manifest
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         warm_caches(str(proj), type_engine=None)
@@ -670,8 +661,7 @@ class TestScanManifest:
         """New files not in manifest are detected."""
         from emend.transform import warm_caches, _scan_manifest
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         warm_caches(str(proj), type_engine=None)
@@ -687,8 +677,7 @@ class TestScanManifest:
         import time
         from emend.transform import warm_caches, _scan_manifest
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         warm_caches(str(proj), type_engine=None)
@@ -708,8 +697,7 @@ class TestIndexStatus:
         """get_index_status returns useful information after indexing."""
         from emend.transform import warm_caches, get_index_status
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
         (proj / "b.py").write_text("class Foo:\n    pass\n")
 
@@ -725,6 +713,7 @@ class TestIndexStatus:
         """get_index_status returns None when no index exists."""
         from emend.transform import get_index_status
 
+        (tmp_path / ".emend").mkdir()
         info = get_index_status(str(tmp_path))
         assert info is None
 
@@ -735,8 +724,7 @@ class TestIndexStatus:
         import subprocess
         from emend.transform import warm_caches, get_index_status
 
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        proj = make_project_dir(tmp_path)
         (proj / "a.py").write_text(SOURCE)
 
         # Initialise a git repo so that indexing records a real HEAD sha.

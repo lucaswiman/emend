@@ -19,9 +19,12 @@ import posixpath
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, Union
 
 from emend.errors import BUG_EXCEPTIONS
+
+if TYPE_CHECKING:
+    from emend.policy import SequenceCheck
 
 logger = logging.getLogger(__name__)
 
@@ -3504,14 +3507,14 @@ def _resolve_cfg_func_qn(
     """
     func_name = cfg.func_name
     cfg_start = cfg.func_start_line + 1
-    for sf in sym_facts:
-        if sf.name == func_name and sf.file_path == rel_path:
-            if sf.line <= cfg_start <= (sf.end_line or sf.line):
-                return sf.qualified_name
-    for sf in sym_facts:
-        if sf.name == func_name and sf.file_path == rel_path:
+    matching = [
+        sf for sf in sym_facts
+        if sf.name == func_name and sf.file_path == rel_path
+    ]
+    for sf in matching:
+        if sf.line <= cfg_start <= (sf.end_line or sf.line):
             return sf.qualified_name
-    return f"{module_name}.{func_name}"
+    return matching[0].qualified_name if matching else f"{module_name}.{func_name}"
 
 
 def _bfs_reachable_blocks(
@@ -3747,8 +3750,6 @@ def _compile_sequence_query(
     Returns:
         A CozoScript query string, or ``None`` if no step locations were resolved.
     """
-    from emend.policy import SequenceCheck, SequenceStep
-
     steps = check.sequence
     if not steps or len(steps) < 2:
         return None
@@ -3961,12 +3962,9 @@ def _compile_sequence_query(
     # --- Step 4: Final violation query ---
     # Join all step locations with reachability and liveness constraints.
     join_clauses: list[str] = []
-    output_cols: list[str] = ["fp", "fq"]
-
     # First step
     first_step = steps[0]
     join_clauses.append(f'step_{first_step.bind}[fp, fq, block_0, line_0]')
-    output_cols.append("line_0")
 
     for i in range(1, len(steps)):
         step = steps[i]
@@ -3976,7 +3974,6 @@ def _compile_sequence_query(
 
         # Step location
         join_clauses.append(f'step_{step.bind}[fp, fq, {block_var}, {line_var}]')
-        output_cols.append(line_var)
 
         # Reachability from previous step
         join_clauses.append(f'{reach_name}[fp, fq, {block_var}]')
@@ -4000,11 +3997,6 @@ def _compile_sequence_query(
     # Rename first_line / last_line for the output
     first_line = "line_0"
     last_line = f"line_{len(steps) - 1}"
-
-    # Build the final query
-    all_output = ", ".join(output_cols)
-    # Alias first/last line in the output header
-    query_output = f"fp, fq, {first_line} as first_line, {last_line} as last_line"
 
     # CozoScript doesn't support "as" aliases in the output — use positional
     # We'll just output all step lines plus fp and fq
@@ -4039,8 +4031,6 @@ def compile_sequence_rule(
         Tuple of ``(cozoscript_query, step_data)`` where *step_data* is
         metadata about resolved steps, or ``None`` if no matches found.
     """
-    from emend.policy import SequenceCheck
-
     steps = check.sequence
     if not steps or len(steps) < 2:
         return None
@@ -4063,15 +4053,6 @@ def compile_sequence_rule(
         step.bind: [] for step in steps
     }
     blocker_locations: dict[tuple[str, str], dict[str, list[tuple[str, str, int]]]] = {}
-
-    # Collect CFG block ranges from the graph for block-id resolution
-    block_ranges_result = graph.run_query(
-        "?[fp, fq, bid, start_line, end_line] := "
-        "*source_loc[fp, lk, lid, start_line, _, end_line, _], "
-        'lk == "symbol", '
-        "*cfg_block[fp2, fq, bid, _, _], "
-        "fp == fp2"
-    )
 
     # Build block ranges from cfg_block + source_loc for line→block resolution
     # Fallback: use def_use facts to infer block line ranges

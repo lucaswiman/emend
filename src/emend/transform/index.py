@@ -1268,7 +1268,12 @@ def warm_caches(
         "files": len(file_contents), "indexed": 0, "qn_cached": 0,
         "skipped": 0, "sym_cached": 0, "import_cached": 0, "ref_cached": 0,
         "dsl_cached": 0, "type_cached": 0, "type_engine": "",
+        "fts_indexed": 0, "dup_cached": 0,
     }
+
+    def announce_phase(label: str) -> None:
+        if callback:
+            callback("phase", label)
 
     # Phase 2: parse + QN index in subprocesses.
     # Resolve the DB path and ensure the directory exists before spawning workers.
@@ -1434,8 +1439,7 @@ def warm_caches(
         all_paths = [Path(f) for f, _ in file_contents]
         project_root_path = Path(project_root)
 
-        if callback:
-            callback("phase", f"Type analysis ({engine_name})")
+        announce_phase(f"Type analysis ({engine_name})")
         t_type = time.monotonic()
         results = oracle.infer_batch(all_paths, project_root=project_root_path)
         stats["type_cached"] = len(results)
@@ -1450,8 +1454,7 @@ def warm_caches(
 
     # Phase 4: rebuild FTS5 trigram index for fast symbol search.
     if build_fts:
-        if callback:
-            callback("phase", "Full-text search index")
+        announce_phase("Full-text search index")
         try:
             from emend.editor_search import rebuild_fts as _rebuild_fts
 
@@ -1470,8 +1473,6 @@ def warm_caches(
         except Exception as exc:
             logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
             stats["fts_indexed"] = 0
-    else:
-        stats["fts_indexed"] = 0
 
     # Phase 5: build CozoDB facts.db directly from source files.
     # Read pre-computed references from parse.db (written by _index_batch
@@ -1480,16 +1481,14 @@ def warm_caches(
     facts_path = cache_dir / "facts.db"
     facts_are_current = (
         not force_facts
-        and
-        bool(file_contents)
+        and bool(file_contents)
         and stats["skipped"] == len(file_contents)
         and facts_path.exists()
     )
     if facts_are_current:
         logger.info("warm_caches: facts db unchanged; skipping rebuild")
     else:
-        if callback:
-            callback("phase", "Facts database")
+        announce_phase("Facts database")
         try:
             t_facts = time.monotonic()
             precomputed_refs: dict[str, list[tuple]] | None = {}
@@ -1545,8 +1544,7 @@ def warm_caches(
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
     # then materialize queryable facts into facts.db.
     if build_duplicates:
-        if callback:
-            callback("phase", "Duplicate analysis")
+        announce_phase("Duplicate analysis")
         try:
             t_dup = time.monotonic()
             _compute_duplicate_payloads(db_path, project_root, file_contents)
@@ -1562,8 +1560,6 @@ def warm_caches(
         except BaseException:
             logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
             stats["dup_cached"] = 0
-    else:
-        stats["dup_cached"] = 0
 
     return stats
 

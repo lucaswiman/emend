@@ -320,22 +320,16 @@ def _trace_config_from_unified_rules(config: dict[str, Any]) -> TraceConfig:
         ))
 
         sink_message = str(rule_def.get("message", "Traced value reaches sink"))
+        sink_effect = str(flow_def.get("effect", ""))
         if _EFFECT_PREDICATE_RE.match(sink_pattern):
-            sinks.append(TraceSink(
-                pattern="",
-                label=label,
-                message=sink_message,
-                effect=sink_pattern,
-                type_constraint=sink_tc,
-            ))
-        else:
-            sinks.append(TraceSink(
-                pattern=sink_pattern,
-                label=label,
-                message=sink_message,
-                effect=str(flow_def.get("effect", "")),
-                type_constraint=sink_tc,
-            ))
+            sink_pattern, sink_effect = "", sink_pattern
+        sinks.append(TraceSink(
+            pattern=sink_pattern,
+            label=label,
+            message=sink_message,
+            effect=sink_effect,
+            type_constraint=sink_tc,
+        ))
 
         for sanitizer in as_list(yaml_key(flow_def, "not_through")):
             sanitizer_pattern = expand_macros(str(sanitizer), macros)
