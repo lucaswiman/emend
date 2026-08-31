@@ -676,27 +676,15 @@ def test_query_smart_case_does_not_substring_match(tmp_path):
 # Bug: _extract_params_from_signature splits on commas inside brackets/parens
 # ---------------------------------------------------------------------------
 
-def test_extract_params_bracketed_annotation():
-    """A parameter whose annotation contains a comma inside ``[]`` must stay
-    intact (e.g. ``b: Dict[str, int]``), not be split on the inner comma."""
+@pytest.mark.parametrize(("signature", "expected"), [
+    ("(a: int, b: Dict[str, int]) -> None", ["a: int", "b: Dict[str, int]"]),
+    ("(x=(1, 2), y=3)", ["x=(1, 2)", "y=3"]),
+    ("(cb: Callable[[int], str])", ["cb: Callable[[int], str]"]),
+], ids=["bracketed_annotation", "paren_default", "nested_callable"])
+def test_extract_params_preserves_nested_commas(signature, expected):
     from emend.query import _extract_params_from_signature
 
-    params = _extract_params_from_signature("(a: int, b: Dict[str, int]) -> None")
-    assert params == ["a: int", "b: Dict[str, int]"]
-
-
-def test_extract_params_paren_default():
-    from emend.query import _extract_params_from_signature
-
-    params = _extract_params_from_signature("(x=(1, 2), y=3)")
-    assert params == ["x=(1, 2)", "y=3"]
-
-
-def test_extract_params_nested_callable():
-    from emend.query import _extract_params_from_signature
-
-    params = _extract_params_from_signature("(cb: Callable[[int], str])")
-    assert params == ["cb: Callable[[int], str]"]
+    assert _extract_params_from_signature(signature) == expected
 
 
 def test_query_has_param_with_bracketed_type(tmp_path):

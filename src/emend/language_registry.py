@@ -134,17 +134,18 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
     ext_to_lang: dict[str, str] = {}
     lang_to_exts: dict[str, list[str]] = {}
 
+    def register(name: str, extensions: list[str]) -> None:
+        lang_to_exts[name] = extensions
+        for extension in extensions:
+            ext_to_lang.setdefault(extension.lower(), name)
+
     lang_dir = _find_languages_dir()
     if lang_dir:
         for config_path in sorted(lang_dir.glob("*/config.toml")):
             result = _parse_toml_extensions(config_path)
             if result:
                 name, exts = result
-                lang_to_exts[name] = exts
-                for ext in exts:
-                    # Lookup keys are lowercased so extension matching is
-                    # case-insensitive (e.g. ``SCRIPT.PY`` resolves to python).
-                    ext_to_lang.setdefault(ext.lower(), name)
+                register(name, exts)
 
     # Discover languages from installed entry-point plugins.
     # These are loaded AFTER built-in languages so they cannot override them.
@@ -154,9 +155,7 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
         result = _parse_toml_extensions(config_dir / "config.toml")
         if result:
             name, exts = result
-            lang_to_exts[name] = exts
-            for ext in exts:
-                ext_to_lang.setdefault(ext.lower(), name)
+            register(name, exts)
 
     # Fill in any gaps from hardcoded builtins
     for lang, exts in _BUILTIN.items():

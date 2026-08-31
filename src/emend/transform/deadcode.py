@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
+import fnmatch
 import logging
 import re as _re
 import time
@@ -886,6 +887,11 @@ def _python_metadata_entry_points(project_root: str) -> set[str]:
             for index in range(1, len(symbol_parts) + 1):
                 targets.add(f"{module}.{'.'.join(symbol_parts[:index])}")
 
+    def _add_table_values(table: object) -> None:
+        if isinstance(table, dict):
+            for value in table.values():
+                _add(value)
+
     pyproject = Path(project_root) / "pyproject.toml"
     if pyproject.is_file():
         try:
@@ -897,24 +903,17 @@ def _python_metadata_entry_points(project_root: str) -> set[str]:
             if not isinstance(project, Mapping):
                 project = {}
             for table_name in ("scripts", "gui-scripts"):
-                table = project.get(table_name, {})
-                if isinstance(table, dict):
-                    for value in table.values():
-                        _add(value)
+                _add_table_values(project.get(table_name, {}))
             groups = project.get("entry-points", {})
             if isinstance(groups, dict):
                 for table in groups.values():
-                    if isinstance(table, dict):
-                        for value in table.values():
-                            _add(value)
+                    _add_table_values(table)
             tool = config.get("tool", {})
             poetry = tool.get("poetry", {}) if isinstance(tool, Mapping) else {}
             poetry_scripts = (
                 poetry.get("scripts", {}) if isinstance(poetry, Mapping) else {}
             )
-            if isinstance(poetry_scripts, dict):
-                for value in poetry_scripts.values():
-                    _add(value)
+            _add_table_values(poetry_scripts)
         except (OSError, ValueError, TypeError):
             logger.debug("Could not read entry points from %s", pyproject, exc_info=True)
 
@@ -935,6 +934,23 @@ def _python_metadata_entry_points(project_root: str) -> set[str]:
             logger.debug("Could not read entry points from %s", setup_cfg, exc_info=True)
 
     return targets
+
+
+def _path_is_excluded(file_path: str, patterns: list[str] | None) -> bool:
+    if not patterns:
+        return False
+    for pattern in patterns:
+        candidates = (pattern, pattern + "*")
+        if any(fnmatch.fnmatch(file_path, candidate) for candidate in candidates):
+            return True
+        if "**" in pattern:
+            relaxed = pattern.replace("**", "*")
+            if any(
+                fnmatch.fnmatch(file_path, candidate)
+                for candidate in (relaxed, relaxed + "*")
+            ):
+                return True
+    return False
 
 
 def _has_python_main_guard(file_path: Path) -> bool:
@@ -1315,20 +1331,8 @@ def find_dead_code(
             continue
 
         # Exclude paths filter
-        if exclude_paths:
-            import fnmatch
-            skip = False
-            for ep in exclude_paths:
-                if fnmatch.fnmatch(abs_fp, ep) or fnmatch.fnmatch(abs_fp, ep + "*"):
-                    skip = True
-                    break
-                if "**" in ep:
-                    pat_re = ep.replace("**", "*")
-                    if fnmatch.fnmatch(abs_fp, pat_re) or fnmatch.fnmatch(abs_fp, pat_re + "*"):
-                        skip = True
-                        break
-            if skip:
-                continue
+        if _path_is_excluded(abs_fp, exclude_paths):
+            continue
 
         # noqa suppression
         if _has_noqa(abs_fp, sym.line):
@@ -1361,20 +1365,6 @@ def find_dead_code(
         len(dead_symbols), time.monotonic() - t0,
     )
 
-    def _path_is_excluded(file_path: str, patterns: list[str] | None) -> bool:
-        if not patterns:
-            return False
-        import fnmatch
-
-        for pattern in patterns:
-            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(file_path, pattern + "*"):
-                return True
-            if "**" in pattern:
-                relaxed = pattern.replace("**", "*")
-                if fnmatch.fnmatch(file_path, relaxed) or fnmatch.fnmatch(file_path, relaxed + "*"):
-                    return True
-        return False
-
     def _reference_file_is_excluded(file_path: str) -> bool:
         # A reference file is excluded only when it actually matches one of
         # the configured exclude patterns. Test files are not special-cased:
@@ -1386,8 +1376,6 @@ def find_dead_code(
             return True
         if not exclude_references_from:
             return False
-        import fnmatch
-
         try:
             rel_path = str(Path(file_path).resolve().relative_to(project_root_resolved))
         except ValueError:

@@ -825,10 +825,10 @@ def _extract_file_facts(
     _sym_def_lines = {(sf.qualified_name, sf.line) for sf in sym_facts_for_file}
     _block_for_line: dict[int, tuple[str, int]] = {}
     for tqn, line, col, kind in file_refs:
-        block = _block_for_line.get(line)
-        if block is None:
-            block = _find_containing_block(content_block_ranges, line)
-            _block_for_line[line] = block
+        block = _block_for_line.get(line) or _find_containing_block(
+            content_block_ranges, line,
+        )
+        _block_for_line[line] = block
         fq, bid = block
         result["fg_refs"].append([tqn, rel_path, line, col, kind, fq, bid])
         # ref_by_block: only for refs with real block data, excluding

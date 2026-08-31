@@ -344,37 +344,15 @@ def add_to_component(
                  if pos_only_sep_idx != -1:
                       insert_idx = max(insert_idx, pos_only_sep_idx + 1)
 
-        # Insert at insert_idx
+        # Insert at insert_idx. Prepending and inserting between existing
+        # items use the same edit; only appending needs a different separator.
+        is_decorator = selector.component == "decorators"
         if insert_idx >= len(items_info):
-            # Append
-            last_item_end = items_info[-1][2]
-            sep = ", "
-            if selector.component == "decorators":
-                sep = "\n"
-                replacement = f"{sep}@{val_to_add}"
-            else:
-                replacement = f"{sep}{val_to_add}"
-            transform.insert_after(last_item_end, replacement)
-        elif insert_idx <= 0:
-            # Prepend
-            first_item_start = items_info[0][1]
-            sep = ", "
-            if selector.component == "decorators":
-                sep = "\n"
-                replacement = f"@{val_to_add}{sep}"
-            else:
-                replacement = f"{val_to_add}{sep}"
-            transform.insert_before(first_item_start, replacement)
+            replacement = f"\n@{val_to_add}" if is_decorator else f", {val_to_add}"
+            transform.insert_after(items_info[-1][2], replacement)
         else:
-            # Insert in between
-            target_start = items_info[insert_idx][1]
-            sep = ", "
-            if selector.component == "decorators":
-                sep = "\n"
-                replacement = f"@{val_to_add}{sep}"
-            else:
-                replacement = f"{val_to_add}{sep}"
-            transform.insert_before(target_start, replacement)
+            replacement = f"@{val_to_add}\n" if is_decorator else f"{val_to_add}, "
+            transform.insert_before(items_info[max(insert_idx, 0)][1], replacement)
 
     new_code = transform.apply()
     if new_code is None:
@@ -534,5 +512,4 @@ def _extract_string_content_from_text(text: str, ext: str = "py") -> str | None:
     """
     from emend import emend_core as _rust
     return _rust.parse_string_literal(text, ext)
-
 

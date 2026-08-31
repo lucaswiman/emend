@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+
+_BASIC_CONTROL_FLOW_KINDS = frozenset({
+    "if_statement", "for_statement", "while_statement",
+    "with_statement", "try_statement",
+})
+
+
 def is_abstract_stub(
     kind_seq: tuple[str, ...],
     token_seq: tuple[str, ...],
@@ -28,12 +35,7 @@ def is_abstract_stub(
     # Only suppress when the body is *tiny* (just the raise), not when
     # NotImplementedError appears as part of a larger meaningful body.
     raise_kinds = sum(1 for k in kind_seq if k == "raise_statement")
-    non_trivial_kinds = {
-        "if_statement",
-        "for_statement",
-        "while_statement",
-        "with_statement",
-        "try_statement",
+    non_trivial_kinds = _BASIC_CONTROL_FLOW_KINDS | {
         "match_statement",
         "assignment",
         "augmented_assignment",
@@ -85,9 +87,8 @@ def is_property_wrapper(
         return 0.0
 
     # Must be tiny: function_def + return + attribute = very few kinds
-    meaningful_kinds = {
-        "if_statement", "for_statement", "while_statement",
-        "with_statement", "try_statement", "assignment",
+    meaningful_kinds = _BASIC_CONTROL_FLOW_KINDS | {
+        "assignment",
         "augmented_assignment", "call",
     }
     if any(k in meaningful_kinds for k in kind_seq):
@@ -147,10 +148,7 @@ def is_init_self_assignment(
     if not (has_assignment and has_self):
         return 0.0
 
-    branching_kinds = {
-        "if_statement", "for_statement", "while_statement",
-        "with_statement", "try_statement", "match_statement",
-    }
+    branching_kinds = _BASIC_CONTROL_FLOW_KINDS | {"match_statement"}
     if any(k in branching_kinds for k in kind_seq):
         return 0.0
 
@@ -183,11 +181,7 @@ def is_dunder_boilerplate(
         return 0.0
 
     # Only penalise *small* dunder implementations — large ones may be interesting
-    meaningful_kinds = {
-        "if_statement", "for_statement", "while_statement",
-        "with_statement", "try_statement",
-    }
-    if any(k in meaningful_kinds for k in kind_seq):
+    if any(k in _BASIC_CONTROL_FLOW_KINDS for k in kind_seq):
         return 0.0
 
     return 400.0

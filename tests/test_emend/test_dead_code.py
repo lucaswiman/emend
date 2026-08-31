@@ -715,23 +715,17 @@ class TestFindDeadCode:
         assert "old_command" in names
         assert "cli" not in names
 
-    def test_main_guard_keeps_directly_executed_module_alive(self, tmp_path):
-        names = dead_names(tmp_path, {"runner.py":
-            "def launch():\n"
-            "    return 0\n"
-            "\n"
-            "if __name__ == '__main__':\n"
-            "    raise SystemExit(launch())\n"
-        })
-        assert "runner" not in names
-
-    def test_parenthesized_main_guard_keeps_module_alive(self, tmp_path):
-        project = make_project(tmp_path, {
-            "runner.py": (
-                "def launch():\n    return 0\n\n"
-                "if (__name__ == '__main__'):\n    raise SystemExit(launch())\n"
-            ),
-        })
+    @pytest.mark.parametrize(
+        "condition", ["__name__ == '__main__'", "(__name__ == '__main__')"],
+        ids=["plain", "parenthesized"],
+    )
+    def test_main_guard_keeps_directly_executed_module_alive(
+        self, tmp_path, condition,
+    ):
+        project = make_project(tmp_path, {"runner.py": (
+            "def launch():\n    return 0\n\n"
+            f"if {condition}:\n    raise SystemExit(launch())\n"
+        )})
         assert "runner" not in dead_module_names(
             project, show_last_reference=False,
         )
@@ -1888,39 +1882,24 @@ class TestDeadCodeUnreachableBlocks:
         from emend.transform import warm_caches
         warm_caches(project_path, type_engine="none")
 
-    def test_deadcode_reports_unreachable_after_return(self, tmp_path):
-        """Code after a return statement should be reported as unreachable dead code."""
-        import textwrap
+    @pytest.mark.parametrize(("func_name", "terminal", "trailing"), [
+        ("foo", "return 42", "x = 1\n    print(x)"),
+        ("bar", 'raise ValueError("oops")', "cleanup()"),
+    ], ids=["return", "raise"])
+    def test_deadcode_reports_unreachable_after_terminal_statement(
+        self, tmp_path, func_name, terminal, trailing,
+    ):
         from emend.transform import find_dead_code, DeadBlock
 
         project = make_project_dir(tmp_path)
-        (project / "example.py").write_text(textwrap.dedent("""\
-            def foo():
-                return 42
-                x = 1
-                print(x)
-        """))
+        (project / "example.py").write_text(
+            f"def {func_name}():\n    {terminal}\n    {trailing}\n"
+        )
         self._build_index(str(project))
         results = list(find_dead_code(str(project), show_last_reference=False))
         unreachable = [r for r in results if isinstance(r, DeadBlock)]
         assert len(unreachable) >= 1
-        assert any(b.func_qn.endswith("foo") for b in unreachable)
-
-    def test_deadcode_reports_unreachable_after_raise(self, tmp_path):
-        """Code after a raise statement should be reported as unreachable."""
-        import textwrap
-        from emend.transform import find_dead_code, DeadBlock
-
-        project = make_project_dir(tmp_path)
-        (project / "example.py").write_text(textwrap.dedent("""\
-            def bar():
-                raise ValueError("oops")
-                cleanup()
-        """))
-        self._build_index(str(project))
-        results = list(find_dead_code(str(project), show_last_reference=False))
-        unreachable = [r for r in results if isinstance(r, DeadBlock)]
-        assert len(unreachable) >= 1
+        assert any(block.func_qn.endswith(func_name) for block in unreachable)
 
     def test_deadcode_no_false_unreachable_for_normal_code(self, tmp_path):
         """Normal code should not be reported as unreachable."""

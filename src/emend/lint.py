@@ -85,6 +85,15 @@ def load_duplicate_code_config(
 _extract_names_from_text = _extract_identifiers
 
 
+def _build_noqa_ranges(
+    source: str, language: str,
+) -> list[tuple[int, int, set[str] | None]]:
+    comments = parse_noqa_comments(source, language=language)
+    if not comments:
+        return []
+    return build_noqa_ranges(comments, _build_statement_line_map(source))
+
+
 def _assignments_from_cfgs(
     source: str,
     file_path: str,
@@ -436,14 +445,9 @@ def run_lint(
                 if file_path_str not in noqa_ranges_cache:
                     src = all_file_contents.get(file_path_str, "")
                     file_lang = file_languages.get(file_path_str, language)
-                    noqa_comments = parse_noqa_comments(src, language=file_lang)
-                    noqa_ranges_for_file: list[tuple[int, int, set[str] | None]] = []
-                    if noqa_comments:
-                        line_map = _build_statement_line_map(src)
-                        noqa_ranges_for_file = build_noqa_ranges(
-                            noqa_comments, line_map
-                        )
-                    noqa_ranges_cache[file_path_str] = noqa_ranges_for_file
+                    noqa_ranges_cache[file_path_str] = _build_noqa_ranges(
+                        src, file_lang,
+                    )
 
                 if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
                     continue
@@ -498,11 +502,7 @@ def run_lint(
                 continue
             # First match for this file: build noqa ranges now
             if noqa_ranges is None:
-                noqa_ranges = []
-                noqa_comments = parse_noqa_comments(source, language=file_lang)
-                if noqa_comments:
-                    line_map = _build_statement_line_map(source)
-                    noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
+                noqa_ranges = _build_noqa_ranges(source, file_lang)
             # Build line-offset table on first match (once per file)
             if line_starts is None:
                 line_starts = [0]
@@ -543,11 +543,7 @@ def run_lint(
         if source is None:
             continue
         file_lang = file_languages.get(file_path, language)
-        noqa_comments = parse_noqa_comments(source, language=file_lang)
-        noqa_ranges: list[tuple[int, int, set[str] | None]] = []
-        if noqa_comments:
-            line_map = _build_statement_line_map(source)
-            noqa_ranges = build_noqa_ranges(noqa_comments, line_map)
+        noqa_ranges = _build_noqa_ranges(source, file_lang)
 
         for rule in fix_rules:
             if not _path_matches_rule_globs(file_path, rule.files):
@@ -619,14 +615,7 @@ def run_lint(
 
             # Build noqa ranges for this file (reuse cache if available)
             if file_path not in noqa_ranges_cache:
-                noqa_comments = parse_noqa_comments(source, language=file_lang)
-                noqa_ranges_for_file_flow: list[tuple[int, int, set[str] | None]] = []
-                if noqa_comments:
-                    line_map = _build_statement_line_map(source)
-                    noqa_ranges_for_file_flow = build_noqa_ranges(
-                        noqa_comments, line_map
-                    )
-                noqa_ranges_cache[file_path] = noqa_ranges_for_file_flow
+                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang)
 
             for rule in flow_rules:
                 if not _path_matches_rule_globs(file_path, rule.files):
@@ -703,14 +692,7 @@ def run_lint(
 
             # Build noqa ranges for this file
             if file_path not in noqa_ranges_cache:
-                noqa_comments = parse_noqa_comments(source, language=file_lang)
-                noqa_ranges_for_dsl: list[tuple[int, int, set[str] | None]] = []
-                if noqa_comments:
-                    line_map = _build_statement_line_map(source)
-                    noqa_ranges_for_dsl = build_noqa_ranges(
-                        noqa_comments, line_map
-                    )
-                noqa_ranges_cache[file_path] = noqa_ranges_for_dsl
+                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang)
 
             regions = detect_dsl_regions(file_path, source=source)
             if not regions:

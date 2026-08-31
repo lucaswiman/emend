@@ -37,16 +37,18 @@ def _extract_dsl_symbols(files, dsl_filter=None):
         extract_jinja_symbols, extract_graphql_symbols,
     )
 
+    extractors = {
+        DslKind.SQL: extract_sql_symbols,
+        DslKind.JINJA: extract_jinja_symbols,
+        DslKind.GRAPHQL: extract_graphql_symbols,
+    }
     all_symbols: list = []
     for file_path in files:
         regions = detect_dsl_regions(str(file_path), dsls=dsl_filter)
         for region in regions:
-            if region.dsl == DslKind.SQL:
-                all_symbols.extend(extract_sql_symbols(region))
-            elif region.dsl == DslKind.JINJA:
-                all_symbols.extend(extract_jinja_symbols(region))
-            elif region.dsl == DslKind.GRAPHQL:
-                all_symbols.extend(extract_graphql_symbols(region))
+            extractor = extractors.get(region.dsl)
+            if extractor:
+                all_symbols.extend(extractor(region))
     return all_symbols
 
 
@@ -57,15 +59,15 @@ def _resolve_dsl_links(symbols, project_root, orm="sqlalchemy"):
     )
 
     links: list = []
-    sql_syms = [s for s in symbols if s.dsl == DslKind.SQL]
-    jinja_syms = [s for s in symbols if s.dsl == DslKind.JINJA]
-    gql_syms = [s for s in symbols if s.dsl == DslKind.GRAPHQL]
-    if sql_syms:
-        links.extend(resolve_orm_links(sql_syms, project_root, orm=orm))
-    if jinja_syms:
-        links.extend(resolve_jinja_links(jinja_syms, project_root))
-    if gql_syms:
-        links.extend(resolve_graphql_links(gql_syms, project_root))
+    resolvers = (
+        (DslKind.SQL, resolve_orm_links, {"orm": orm}),
+        (DslKind.JINJA, resolve_jinja_links, {}),
+        (DslKind.GRAPHQL, resolve_graphql_links, {}),
+    )
+    for kind, resolver, kwargs in resolvers:
+        kind_symbols = [symbol for symbol in symbols if symbol.dsl == kind]
+        if kind_symbols:
+            links.extend(resolver(kind_symbols, project_root, **kwargs))
     return links
 
 

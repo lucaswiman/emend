@@ -693,7 +693,4 @@ class TestScopeSanitizerPathSensitive:
         config = _commit_scope_config(message="tainted value reached sink")
         from emend.trace import run_trace_analysis
         violations = run_trace_analysis([str(f)], config, project_path=None)
-        if expect_violation:
-            assert len(violations) >= 1
-        else:
-            assert len(violations) == 0
+        assert bool(violations) is expect_violation
