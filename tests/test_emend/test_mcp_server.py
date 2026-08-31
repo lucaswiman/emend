@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from unittest.mock import Mock
 
 import pytest
 
@@ -179,34 +180,80 @@ def test_transform_edit_apply(tmp_path):
     assert "str | None" in p.read_text()
 
 
+def test_warm_caches_background_uses_daemon_thread(monkeypatch):
+    import emend.mcp.dispatch as dispatch
+
+    captured = {}
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(dispatch.threading, "Thread", FakeThread)
+
+    dispatch._warm_caches_background()
+
+    assert captured["daemon"] is True
+    assert captured["started"] is True
+    assert callable(captured["target"])
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [
+        ("stdio", {"transport": "stdio"}),
+        ("sse", {"transport": "sse", "port": 8765}),
+    ],
+)
+def test_run_server_starts_v2_transport(monkeypatch, transport, expected):
+    import emend.mcp.dispatch as dispatch
+
+    warm_caches = Mock()
+    monkeypatch.setattr(dispatch, "_warm_caches_background", warm_caches)
+    run = Mock()
+    monkeypatch.setattr(dispatch.mcp_app, "run", run)
+
+    dispatch.run_server(transport=transport, port=8765)
+
+    warm_caches.assert_called_once_with()
+    run.assert_called_once_with(**expected)
+
+
 def test_references_refs_mode(tmp_path):
+    (tmp_path / ".emend").mkdir()
     p = tmp_path / "example.py"
     p.write_text("def greet():\n    pass\n\ngreet()\n")
 
-    result = references(kind="all", selector=f"{p}::greet")
+    result = references(kind="all", selector=f"{p}::greet", project=str(tmp_path))
     data = json.loads(result)
     assert len(data) >= 2
 
 
 def test_references_calls_mode(tmp_path):
+    (tmp_path / ".emend").mkdir()
     p = tmp_path / "example.py"
     p.write_text("def greet():\n    pass\n\ndef caller():\n    greet()\n")
 
-    result = references(kind="calls", selector=f"{p}::greet")
+    result = references(kind="calls", selector=f"{p}::greet", project=str(tmp_path))
     data = json.loads(result)
     assert isinstance(data, list)
 
 
 def test_analyze_graph_mode(tmp_path):
+    (tmp_path / ".emend").mkdir()
     p = tmp_path / "example.py"
     p.write_text("def foo():\n    bar()\n\ndef bar():\n    pass\n")
 
-    result = analyze(mode="graph", file_path=str(p), format="json")
+    result = analyze(mode="graph", file_path=str(p), format="json", project=str(tmp_path))
     data = json.loads(result)
     assert isinstance(data, dict)
 
 
 def test_analyze_deadcode_mode(tmp_path):
+    (tmp_path / ".emend").mkdir()
     p = tmp_path / "example.py"
     p.write_text("def used():\n    pass\n")
 
@@ -344,6 +391,7 @@ def test_check_file_scopes_use_common_parent_as_project(monkeypatch, tmp_path):
 
 def test_facts_query_guided_symbols(tmp_path):
     configure_profile(profile="expert")
+    (tmp_path / ".emend").mkdir()
     p = tmp_path / "example.py"
     p.write_text("def foo():\n    pass\n\ndef bar():\n    foo()\n")
 
