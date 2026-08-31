@@ -1289,6 +1289,18 @@ class TestNoqaDeadcode:
         dead_names = {d.name for d in dead}
         assert "suppressed" not in dead_names
 
+    def test_unrelated_noqa_tag_does_not_suppress(self, tmp_path):
+        from emend.transform import find_dead_code
+
+        project = make_project_dir(tmp_path)
+        (project / "main.py").write_text(
+            "def still_dead():  # noqa: E501\n"
+            "    return 1\n"
+        )
+
+        dead_names = {d.name for d in find_dead_code(str(project), show_last_reference=False)}
+        assert "still_dead" in dead_names
+
 
 class TestShowLastReference:
     """Tests for --show-last-reference."""

@@ -342,7 +342,7 @@ class PythonCommentHandler(CommentHandler):
                             # e.g. "# noqa: E501" with no emend: prefix → no effect
                         else:
                             result[srow] = None  # bare noqa suppresses all
-        except tokenize.TokenError:
+        except (tokenize.TokenError, IndentationError):
             pass
         return result
 

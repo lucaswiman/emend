@@ -20,6 +20,7 @@ from textwrap import dedent
 
 import pytest
 
+from emend.duplicate import DUP_CACHE_VERSION
 from emend.transform import warm_caches, _get_facts_db, _cache_db_dir, _compute_duplicate_payloads
 
 
@@ -101,7 +102,7 @@ def test_warm_caches_populates_dup_cache(tmp_path):
     # We have 2 Python files; each should produce a dup_cache entry.
     assert len(rows) >= 1, "Expected at least one dup_cache row"
     for _hash, version in rows:
-        assert version == "1", "Cache version should be '1'"
+        assert version == DUP_CACHE_VERSION, "Cache version should match the module constant"
 
 
 def test_warm_caches_dup_cache_data_valid(tmp_path):
@@ -125,6 +126,7 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
         for s in payload["subtrees"]:
             assert "start_line" in s
             assert "end_line" in s
+            assert "symbol" in s
             assert "canonical_hash" in s
             assert "score" in s
             assert isinstance(s["score"], float)
@@ -133,8 +135,6 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
             assert "function_qn" in seq
             assert "hashes" in seq
             assert len(seq["hashes"]) >= 2
-
-
 # ---------------------------------------------------------------------------
 # Test 2: incremental refresh on file edit
 # ---------------------------------------------------------------------------
@@ -243,7 +243,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "1"
+    assert version == DUP_CACHE_VERSION
 
     expected_hash = hashlib.md5(
         _SIMPLE_FUNC.encode(), usedforsecurity=False

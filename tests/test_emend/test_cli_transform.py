@@ -11,6 +11,13 @@ from emend.cli import app
 runner = CliRunner()
 
 
+def test_parse_where_rejects_empty_value():
+    from emend.cli_base import parse_where_clause
+
+    with pytest.raises(ValueError, match="--where cannot be empty"):
+        parse_where_clause(["  "])
+
+
 class TestFindCommand:
     """Tests for canonical 'find' pattern mode."""
 
