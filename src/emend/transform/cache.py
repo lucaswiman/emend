@@ -366,18 +366,28 @@ def _open_facts_db(db_path: str):
     return client
 
 
-def _facts_schema_is_current(db_path: str | Path) -> bool:
+def _facts_schema_is_current(
+    db_path: str | Path,
+    project_root: str | Path | None = None,
+) -> bool:
     """Return whether a persisted fact graph matches the current schema."""
     path = Path(db_path)
     if not path.is_file():
         return False
-    client = _open_facts_db(str(path))
+    client = None
     try:
+        client = _open_facts_db(str(path))
         rows = client.run(
             '?[value] := *facts_meta["schema_version", value]'
         )["rows"]
         if rows != [[_FACTS_SCHEMA_VERSION]]:
             return False
+        if project_root is not None:
+            rows = client.run(
+                '?[value] := *facts_meta["project_root", value]'
+            )["rows"]
+            if rows != [[str(Path(project_root).resolve())]]:
+                return False
         # Keep the relation invariant explicit as a guard against a manually
         # edited/corrupt marker or a partially completed migration.
         columns = client.run("::columns exported_symbol")["rows"]
@@ -385,8 +395,17 @@ def _facts_schema_is_current(db_path: str | Path) -> bool:
     except Exception:
         logger.debug("facts schema version check failed", exc_info=True)
         return False
+    except BaseException as exc:
+        # PyO3 exposes a Rust panic as a non-Exception ``PanicException``.
+        # Cozo can raise it for a corrupt SQLite file before returning an
+        # ordinary database error, which should invalidate the cache.
+        if type(exc).__name__ != "PanicException":
+            raise
+        logger.debug("facts schema open panicked", exc_info=True)
+        return False
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def _get_facts_db(project_root: str | None = None):
@@ -417,7 +436,7 @@ def _get_facts_db(project_root: str | None = None):
         try:
             cache_dir = _cache_db_dir(project_root)
             db_path = cache_dir / "facts.db"
-            if not _facts_schema_is_current(db_path):
+            if not _facts_schema_is_current(db_path, project_root):
                 logger.debug("facts db missing or stale at %s", db_path)
                 return None
             client = _open_facts_db(str(db_path))
@@ -862,7 +881,7 @@ def _build_facts_db(
     # the cache owner before opening the database: FactGraph's schema setup is
     # deliberately idempotent and cannot alter an existing Cozo relation.
     project_key = str(Path(project_root).resolve())
-    if facts_file.is_file() and not _facts_schema_is_current(facts_file):
+    if facts_file.is_file() and not _facts_schema_is_current(facts_file, project_root):
         stale_client = _facts_db_cache.pop(project_key, None)
         if stale_client is not None:
             try:
@@ -1153,7 +1172,10 @@ def _build_facts_db(
         fdb.run(
             '?[key, value] <- $rows '
             ':put facts_meta {key => value}',
-            {"rows": [["schema_version", _FACTS_SCHEMA_VERSION]]},
+            {"rows": [
+                ["schema_version", _FACTS_SCHEMA_VERSION],
+                ["project_root", str(Path(project_root).resolve())],
+            ]},
         )
 
     except BUG_EXCEPTIONS:

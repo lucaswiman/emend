@@ -267,6 +267,7 @@ def find_pattern(
 
     # ``None`` is the auto-detection sentinel.  An explicit language must be
     # honored even when the file extension suggests something else.
+    explicit_language = language is not None
     if language is None:
         from emend.language_registry import detect_language
         language = detect_language(file_path) or "python"
@@ -286,6 +287,10 @@ def find_pattern(
 
     # Find matches using Rust engine
     ext = Path(file_path).suffix.lstrip('.') if file_path else None
+    if explicit_language:
+        from emend.language_registry import get_extensions
+        extensions = get_extensions(language)
+        ext = extensions[0] if extensions else ext
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -308,7 +313,7 @@ def find_pattern(
     # Post-filter by scope if requested
     if scope is not None:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-        symbols = find_nested_definitions(file_path)
+        symbols = find_nested_definitions(file_path, ext=ext)
         target_sym = find_symbol_by_path(symbols, scope)
         if target_sym:
             matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
@@ -366,7 +371,7 @@ selector: ExtendedSelector, apply: bool = False) -> str:
 
     # Use tree-sitter symbols to find the target symbol's range
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path))
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
@@ -441,7 +446,7 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
 
     # Handle symbol-based selectors
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path))
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
@@ -576,7 +581,11 @@ def analyze_imports(
 
     from .project_iter import _find_project_root, _file_to_module
     # Use tree-sitter scope resolver to parse imports from source file.
-    proj_root = _find_project_root(project_path or source_file)
+    proj_root = (
+        str(Path(project_path).resolve())
+        if project_path is not None
+        else _find_project_root(source_file)
+    )
     resolver = _rust.PyScopeResolver(proj_root, "py")
     try:
         source_content = source_path.read_text()

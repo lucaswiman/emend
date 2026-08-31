@@ -362,8 +362,7 @@ def _app_callback(
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
-    if language is not None:
-        _state["language"] = language
+    _state["language"] = language or "python"
 
 
 __all__ = [

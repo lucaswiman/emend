@@ -315,6 +315,16 @@ class TestSerialization:
             for fact in roundtrip.exported_symbols()
         } == {("one.ts", "pkg.shared"), ("two.ts", "pkg.shared")}
 
+    def test_legacy_export_inputs_and_json_remain_global(self):
+        g = FactGraph()
+        g.add_exported_symbols_batch(["pkg.public"])
+        legacy_json = '[{"qualified_name": "pkg.old", "_type": "ExportedSymbolFact"}]'
+
+        assert g.exported_symbols() == [ExportedSymbolFact("", "pkg.public")]
+        assert FactGraph.from_json(legacy_json).exported_symbols() == [
+            ExportedSymbolFact("", "pkg.old")
+        ]
+
 
 class TestGenericQuery:
     def test_query_predicate(self):
@@ -1101,6 +1111,19 @@ class TestFlowRuleCheckDatalog:
         )
         assert len(violations) == 0
 
+    @pytest.mark.parametrize("required_block", [0, 2])
+    def test_through_at_flow_endpoint_satisfies_requirement(self, required_block):
+        g = FactGraph()
+        g.add_def_use(DefUseFact("app.py", "app.main", "x", def_block=0, use_block=2))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 0, 1, "fallthrough", 0, 0))
+        g.add_cfg_edge(CfgEdgeFact("app.py", "app.main", 1, 2, "fallthrough", 0, 0))
+
+        assert g.flow_rule_check_datalog(
+            sources=[("app.py", "app.main", "x", 0)],
+            sinks=[("app.py", "app.main", "x", 2)],
+            through=[("app.py", "app.main", "x", required_block)],
+        ) == []
+
     def test_empty_sources(self):
         g = FactGraph()
         violations = g.flow_rule_check_datalog(sources=[], sinks=[("a.py", "f", "x", 0)])
@@ -1496,12 +1519,9 @@ class TestFactsCliTaintFlowsAlias:
             app, ["analyze", "facts", str(tmp_path), "--type", fact_type]
         )
 
-    def test_taint_flows_alias_accepted(self, tmp_path):
-        result = self._run(tmp_path, "taint_flows")
-        assert result.exit_code == 0, result.stdout
-
-    def test_trace_flows_still_accepted(self, tmp_path):
-        result = self._run(tmp_path, "trace_flows")
+    @pytest.mark.parametrize("fact_type", ["taint_flows", "trace_flows"])
+    def test_trace_flow_spellings_are_accepted(self, tmp_path, fact_type):
+        result = self._run(tmp_path, fact_type)
         assert result.exit_code == 0, result.stdout
 
     def test_facts_json_empty_result_is_array(self, tmp_path, monkeypatch):

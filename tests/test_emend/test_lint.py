@@ -216,6 +216,8 @@ def test_unified_rule_files_scope_filters_matches(tmp_path):
     ("tests_helper.py", "tests", False),
     ("src/main.py", "src/**/*.py", True),
     ("src/pkg/main.py", "src/**/*.py", True),
+    ("src/pkg/main.py", "src/*.py", False),
+    ("foo/x/y/bar.py", "foo/*/bar.py", False),
     ("src/main.js", "src/**/*.py", False),
 ])
 def test_path_glob_is_component_aware(tmp_path, relative, pattern, expected):

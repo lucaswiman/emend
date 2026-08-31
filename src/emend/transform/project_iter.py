@@ -166,11 +166,15 @@ def find_pattern_in_project(
             if (inside is None or inside_ir is not None) and (
                 not_inside is None or not_inside_ir is not None
             ):
+                from emend.language_registry import get_extensions
+
+                extensions = get_extensions(language)
                 raw = None
                 try:
                     raw = _rust.find_pattern_in_files(
                         list(file_contents), pattern_ir,
                         inside_ir, not_inside_ir,
+                        extension=extensions[0] if extensions else None,
                     )
                 except Exception:
                     logger.debug("Rust batch path failed, falling back", exc_info=True)
@@ -305,7 +309,7 @@ def _read_and_filter_py(
 def _find_project_root(start_path: str) -> str:
     """Find project root by looking for markers.
 
-    Checks for language-agnostic markers (.git, .emend) first, then
+    Checks for a valid Git marker or an emend config file first, then
     language-specific project files for Python, TypeScript/JS, and Rust.
     """
     path = Path(start_path).resolve()
@@ -313,8 +317,9 @@ def _find_project_root(start_path: str) -> str:
         path = path.parent
 
     markers = [
-        '.git',
-        '.emend',
+        # Generated ``.emend/cache`` directories must not turn a shared
+        # ancestor (notably /tmp) into the project root for unrelated trees.
+        '.emend/config.toml', '.emend/rules.yaml', '.emend/mappings.yaml',
         # Python
         'pyproject.toml', 'setup.py', 'setup.cfg',
         # TypeScript / JavaScript
@@ -325,6 +330,9 @@ def _find_project_root(start_path: str) -> str:
 
     current = path
     while current != current.parent:
+        git_marker = current / ".git"
+        if git_marker.is_file() or (git_marker / "HEAD").is_file():
+            return str(current)
         for marker in markers:
             if (current / marker).exists():
                 return str(current)
@@ -696,5 +704,3 @@ def _add_import_text(
         file_path.write_text(new_code)
 
     return diff
-
-

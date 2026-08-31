@@ -887,15 +887,15 @@ class FactGraph:
         )
 
     def add_exported_symbols_batch(
-        self, facts: list[ExportedSymbolFact | tuple[str, str]]
+        self, facts: list[ExportedSymbolFact | tuple[str, str] | str]
     ) -> None:
-        """Bulk-insert exported symbols scoped to their defining files."""
+        """Bulk-insert exports; legacy bare QNs remain globally scoped."""
         if not facts:
             return
         rows = [
             [fact.file_path, fact.qualified_name]
             if isinstance(fact, ExportedSymbolFact)
-            else [fact[0], fact[1]]
+            else (["", fact] if isinstance(fact, str) else [fact[0], fact[1]])
             for fact in facts
         ]
         self._put_batch(
@@ -2501,13 +2501,15 @@ class FactGraph:
 
                 # Base case: source blocks can avoid required points
                 "avoids_required[fp, fq, block] := "
-                "flow_source[fp, fq, _, block]\n"
+                "flow_source[fp, fq, _, block], "
+                "not blocked_cfg[fp, fq, block]\n"
 
                 # Recursive: propagate along CFG edges, skipping blocked blocks
                 "avoids_required[fp, fq, to_block] := "
                 "avoids_required[fp, fq, from_block], "
                 "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
-                "not blocked_cfg[fp, fq, from_block]\n"
+                "not blocked_cfg[fp, fq, from_block], "
+                "not blocked_cfg[fp, fq, to_block]\n"
 
                 # through-violation: sink reachable while avoiding required point
                 "through_violation[fp, fq, src_var, sink_var] := "
@@ -2819,6 +2821,8 @@ class FactGraph:
                 logger.warning("Unknown fact type in JSON: %s", type_name)
                 continue
             fact_cls, adder = _TYPE_MAP[type_name]
+            if type_name == "ExportedSymbolFact":
+                entry.setdefault("file_path", "")
             adder(fact_cls(**entry))
         return graph
 

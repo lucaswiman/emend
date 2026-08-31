@@ -937,18 +937,15 @@ def cfg_cmd(
                 logger.debug("Datalog unreachable query failed, falling back", exc_info=True)
 
             if datalog_used:
-                # The Datalog facts identify unreachable blocks by id but do
-                # not carry line spans.  Resolve real spans from the freshly
-                # built CFGs (block ids are consistent between fact population
-                # and a plain build_cfgs pass, both come from cfg.get_blocks()).
-                span_lookup: dict[tuple[str, str, int], tuple[int, int]] = {}
-                for i, cfg in enumerate(all_cfgs):
-                    relative = _project_relative(cfg_files[i], project_root)
-                    for block in cfg.get_blocks():
-                        span_lookup[(relative, cfg.func_name, block["id"])] = (
-                            block["start_line"],
-                            block["end_line"],
-                        )
+                # Block locations are populated from the same CFG objects as
+                # the reachability facts.  Their IDs contain the full function
+                # QN, avoiding collisions between same-named nested methods.
+                span_lookup: dict[tuple[str, str], tuple[int, int]] = {}
+                for loc in graph.source_locs(loc_kind="block"):
+                    relative = Path(str(loc.file_path).replace("\\", "/")).as_posix()
+                    if Path(relative).is_absolute():
+                        relative = _project_relative(relative, project_root)
+                    span_lookup[(relative, loc.loc_id)] = (loc.line, loc.end_line)
                 # Group by (file_path, func_qn)
                 from collections import defaultdict
                 grouped: dict[tuple[str, str], list] = defaultdict(list)
@@ -962,14 +959,14 @@ def cfg_cmd(
                     short_name = fq.rsplit(".", 1)[-1] if "." in fq else fq
                     entries = []
                     for b in blks:
-                        span = span_lookup.get((fp, short_name, b.block_id))
+                        span = span_lookup.get((fp, f"{fq}:{b.block_id}"))
                         if span is None:
                             continue
                         start_line, end_line = span
                         entries.append({
                             "id": b.block_id,
-                            "start_line": start_line + 1,
-                            "end_line": end_line + 1,
+                            "start_line": start_line,
+                            "end_line": end_line,
                         })
                     if entries:
                         results.append({

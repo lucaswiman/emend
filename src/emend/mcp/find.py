@@ -134,22 +134,24 @@ def search(
             files, _ = resolve_files(file_for_summary, language=None)
             from emend import emend_core
             from emend.language_registry import detect_language, get_module_separator
-            from emend.transform import _find_source_root
+            from emend.transform import _find_project_root, _find_source_root
 
             file_strs = [str(fp) for fp in files]
+            if not file_strs:
+                return ""
             batch_results = emend_core.collect_symbols_batch(
                 file_strs, max_depth=tree_depth, selector=selector_for_summary
             )
+            from os.path import commonpath
+            project_root = _find_project_root(commonpath(file_strs))
             buf = io.StringIO()
             with redirect_stdout(buf):
                 for file_path_str, symbol_dicts in batch_results:
                     language = detect_language(file_path_str) or "python"
-                    project_root = _find_source_root(
-                        str(Path(file_path_str).parent), language=language
-                    )
+                    source_root = _find_source_root(project_root, language=language)
                     separator = get_module_separator(language)
                     module_path = ast_commands.derive_module_path(
-                        file_path_str, project_root, language
+                        file_path_str, source_root, language
                     )
                     symbols = ast_commands.dicts_to_tree_symbols(
                         symbol_dicts, module_path, separator=separator

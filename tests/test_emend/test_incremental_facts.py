@@ -56,12 +56,17 @@ def _modified_source_a():
     """)
 
 
-def test_facts_schema_rejects_old_export_relation_even_with_new_marker(tmp_path):
-    """A relation-shape change invalidates a snapshot before any query uses it."""
+def test_warm_caches_rebuilds_old_export_relation(tmp_path):
+    """A stale relation shape is replaced by a project-owned current snapshot."""
     from emend.fact_graph import _create_cozo_client
+    from emend.transform import _cache_db_dir, warm_caches
     from emend.transform.cache import _facts_schema_is_current
 
-    db_path = tmp_path / "facts.db"
+    (tmp_path / "pyproject.toml").touch()
+    (tmp_path / "mod.py").write_text("def live():\n    return 1\n")
+    cache_dir = _cache_db_dir(tmp_path)
+    cache_dir.mkdir(parents=True)
+    db_path = cache_dir / "facts.db"
     client = _create_cozo_client(str(db_path))
     client.run("{:create exported_symbol { qualified_name: String }}")
     client.run("{:create facts_meta { key: String => value: String }}")
@@ -70,6 +75,20 @@ def test_facts_schema_rejects_old_export_relation_even_with_new_marker(tmp_path)
         ":put facts_meta {key => value}"
     )
     client.close()
+
+    assert not _facts_schema_is_current(db_path, tmp_path)
+
+    warm_caches(str(tmp_path), type_engine="none")
+
+    assert _facts_schema_is_current(db_path, tmp_path)
+    assert not _facts_schema_is_current(db_path, tmp_path / "other")
+
+
+def test_facts_schema_rejects_corrupt_database(tmp_path):
+    from emend.transform.cache import _facts_schema_is_current
+
+    db_path = tmp_path / "facts.db"
+    db_path.write_bytes(b"not a sqlite database")
 
     assert not _facts_schema_is_current(db_path)
 

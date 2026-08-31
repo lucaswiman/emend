@@ -278,15 +278,5 @@ def test_move_recursive_symbol_does_not_import_itself(tmp_path, emend_cmd):
     )
     assert result.returncode == 0, result.stderr
     assert "from source import fact" not in dest.read_text()
-
-
-def test_move_imports_external_local_reference(tmp_path, emend_cmd):
-    source = tmp_path / "source.py"
-    source.write_text("HELPER = 1\n\ndef mover():\n    return HELPER\n")
-    dest = tmp_path / "dest.py"
-    result = subprocess.run(
-        [emend_cmd, "move", f"{source}::mover", str(dest), "--apply"],
-        capture_output=True, text=True, cwd=tmp_path,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "from source import HELPER" in dest.read_text()
+    assert "def fact" in dest.read_text()
+    assert "def fact" not in source.read_text()

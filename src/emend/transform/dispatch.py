@@ -33,7 +33,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
     if selector.line_start is not None and metadata:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_line
         file_path = Path(selector.file_path)
-        symbols = find_nested_definitions(str(file_path))
+        symbols = find_nested_definitions(str(file_path), ext=selector.extension)
         symbol = find_symbol_by_line(symbols, selector.line_start, selector.line_end)
 
         if symbol is None:
@@ -42,13 +42,14 @@ def _cmd_lookup_single_selector(  # noqa: C901
         selector = ExtendedSelector(
             file_path=selector.file_path,
             symbol_path=symbol.path,
+            language_override=selector.language_override,
         )
 
     # Handle metadata output
     if metadata:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
         file_path = Path(selector.file_path)
-        symbols = find_nested_definitions(str(file_path))
+        symbols = find_nested_definitions(str(file_path), ext=selector.extension)
         symbol = find_symbol_by_path(symbols, selector.symbol_path)
 
         if symbol is None:
@@ -114,7 +115,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
         if selector.has_wildcards():
             from emend.ast_utils import find_nested_definitions, expand_wildcard_path
             file_path = Path(selector.file_path)
-            symbols = find_nested_definitions(str(file_path))
+            symbols = find_nested_definitions(str(file_path), ext=selector.extension)
             matched_symbols = expand_wildcard_path(symbols, selector.symbol_path)
 
             if not matched_symbols:
@@ -128,6 +129,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
                     component=selector.component,
                     accessor=selector.accessor,
                     pseudo_class=selector.pseudo_class,
+                    language_override=selector.language_override,
                 )
                 try:
                     result = get_component(specific_selector)
@@ -149,7 +151,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
         if selector.has_wildcards():
             from emend.ast_utils import find_nested_definitions, expand_wildcard_path
             file_path = Path(selector.file_path)
-            symbols = find_nested_definitions(str(file_path))
+            symbols = find_nested_definitions(str(file_path), ext=selector.extension)
             matched_symbols = expand_wildcard_path(symbols, selector.symbol_path)
 
             if not matched_symbols:
@@ -160,6 +162,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
                 specific_selector = ExtendedSelector(
                     file_path=selector.file_path,
                     symbol_path=sym.path,
+                    language_override=selector.language_override,
                 )
                 try:
                     result = get_symbol_source(specific_selector, dedent=dedent)
@@ -294,7 +297,7 @@ def cmd_lookup(
 
     # Parse selector if provided
     if selector_str:
-        selector = parse_extended_selector(selector_str)
+        selector = parse_extended_selector(selector_str).with_language(language)
 
         # Reject line selectors with file globs
         if selector.has_file_glob() and selector.line_start is not None:
@@ -404,9 +407,14 @@ def _apply_matching_filter(
         # Try to parse as a selector path (file.py::Symbol.path format)
         if '::' in part:
             try:
-                sel = parse_extended_selector(part)
+                sel = parse_extended_selector(part).with_language(selector.language_override)
                 source = get_symbol_source(sel)
-                matches = find_pattern(matching_pattern, sel.file_path, source_override=source)
+                matches = find_pattern(
+                    matching_pattern,
+                    sel.file_path,
+                    source_override=source,
+                    language=sel.language,
+                )
                 if matches:
                     filtered_parts.append(part)
             except (ValueError, FileNotFoundError):
@@ -415,7 +423,12 @@ def _apply_matching_filter(
             # For source code output, check the whole result against the pattern
             for fpath in files:
                 try:
-                    matches = find_pattern(matching_pattern, fpath, source_override=lookup_result)
+                    matches = find_pattern(
+                        matching_pattern,
+                        fpath,
+                        source_override=lookup_result,
+                        language=selector.language,
+                    )
                     if matches:
                         return lookup_result
                 except (ValueError, FileNotFoundError):
@@ -504,6 +517,7 @@ def _expand_selector_with_returns_filter(
             component=selector.component,
             accessor=selector.accessor,
             pseudo_class=selector.pseudo_class,
+            language_override=selector.language_override,
         )
         result.append(concrete)
 
@@ -608,7 +622,7 @@ def cmd_edit(
     - If returns_filter or selector :returns[X] specified, only edit symbols
       whose return type matches (annotation first, then inferred via oracle)
     """
-    selector = parse_extended_selector(selector_str)
+    selector = parse_extended_selector(selector_str).with_language(language)
 
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)
@@ -663,7 +677,7 @@ def cmd_add(
     - If returns_filter or selector :returns[X] specified, only add to symbols
       whose return type matches (annotation first, then inferred via oracle)
     """
-    selector = parse_extended_selector(selector_str)
+    selector = parse_extended_selector(selector_str).with_language(language)
 
     # Merge selector type_filter into returns_filter
     returns_filter = _merge_type_filter(selector, returns_filter)

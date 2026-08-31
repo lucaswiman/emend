@@ -222,6 +222,9 @@ def test_flow_any_not_through_alternative_blocks(tmp_path):
         "    raw = request.args.get('q')\n"
         "    safe = sanitize(raw)\n"
         "    cursor.execute(safe)\n"
+        "def unsafe():\n"
+        "    raw = request.args.get('q')\n"
+        "    cursor.execute(raw)\n"
     )
     rules = [LintRule(
         name="sql-injection",
@@ -232,7 +235,8 @@ def test_flow_any_not_through_alternative_blocks(tmp_path):
         not_through=["escape($X)", "sanitize($X)"],
     )]
 
-    assert run_lint(rules, [str(test_file)]) == []
+    violations = run_lint(rules, [str(test_file)])
+    assert len(violations) == 1
 
 
 # ---------------------------------------------------------------------------

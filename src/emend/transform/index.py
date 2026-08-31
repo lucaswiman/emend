@@ -1490,7 +1490,7 @@ def warm_caches(
         not force_facts
         and bool(file_contents)
         and stats["skipped"] == len(file_contents)
-        and _facts_schema_is_current(facts_path)
+        and _facts_schema_is_current(facts_path, project_root)
     )
     if facts_are_current:
         logger.info("warm_caches: facts db unchanged; skipping rebuild")

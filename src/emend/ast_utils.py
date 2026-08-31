@@ -178,7 +178,12 @@ def _rust_dict_to_nested_symbol(d: dict) -> NestedSymbol:
     )
 
 
-def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list[NestedSymbol]:
+def find_nested_definitions(
+    filepath: str,
+    max_depth: int | None = None,
+    *,
+    ext: str | None = None,
+) -> list[NestedSymbol]:
     """Walk source and find all class/function definitions with nesting info.
 
     Uses tree-sitter via the Rust extension for parsing.
@@ -186,7 +191,7 @@ def find_nested_definitions(filepath: str, max_depth: int | None = None) -> list
     with open(filepath) as f:
         source = f.read()
 
-    ext = Path(filepath).suffix.lstrip('.') or 'py'
+    ext = ext or Path(filepath).suffix.lstrip('.') or 'py'
     rust_syms = emend_core.collect_symbols_from_str(
         source,
         max_depth=max_depth + 1 if max_depth is not None else None,

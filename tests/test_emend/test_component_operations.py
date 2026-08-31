@@ -454,6 +454,23 @@ def test_edit_no_operation(tmp_path):
         cmd_edit(selector_str=f"{test_file}::foo[params]")
 
 
+def test_edit_explicit_language_overrides_file_extension(tmp_path):
+    test_file = tmp_path / "python_source.ts"
+    test_file.write_text("def foo():\n    return 1\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "--language", "python", "edit", "set",
+            f"{test_file}::foo[body]", "return 2", "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "return 2" in test_file.read_text()
+    assert "return 1" not in test_file.read_text()
+
+
 def test_remove_last_param_multiline_no_trailing_comma(tmp_path):
     """Removing the last parameter in a multi-line list must also remove
     the preceding comma on the previous line."""

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fnmatch import fnmatch, translate as fnmatch_translate
+from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
-import re
 from typing import Any, Iterable
 
 import yaml
@@ -280,21 +280,27 @@ def normalize_flow_definition(
     }
 
 
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    """Compile a slash-separated glob with ``**`` matching zero segments."""
-    parts = [part for part in pattern.replace("\\", "/").split("/") if part]
-    pieces: list[str] = []
-    for index, part in enumerate(parts):
+def _glob_matches(candidate: str, pattern: str) -> bool:
+    """Match slash-separated path components without letting ``*`` cross ``/``."""
+    path_parts = tuple(part for part in candidate.split("/") if part)
+    pattern_parts = tuple(part for part in pattern.split("/") if part)
+
+    @lru_cache(maxsize=None)
+    def matches(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        part = pattern_parts[pattern_index]
         if part == "**":
-            pieces.append("(?:[^/]+/)*" if index < len(parts) - 1 else ".*")
-            continue
-        translated = fnmatch_translate(part)
-        if translated.endswith(("\\Z", "\\z")):
-            translated = translated[:-2]
-        pieces.append(translated)
-        if index < len(parts) - 1:
-            pieces.append("/")
-    return re.compile(r"^" + "".join(pieces) + r"$")
+            return matches(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and matches(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatchcase(path_parts[path_index], part)
+            and matches(path_index + 1, pattern_index + 1)
+        )
+
+    return matches(0, 0)
 
 
 def path_matches_glob(
@@ -312,7 +318,6 @@ def path_matches_glob(
     ``src/**/*.py`` includes ``src/main.py``.
     """
     candidate = str(file_path).replace("\\", "/")
-    raw_candidate = candidate
     pat = str(pattern).replace("\\", "/")
     candidate_path = Path(candidate)
     pattern_path = Path(pat)
@@ -336,13 +341,12 @@ def path_matches_glob(
 
     # Unqualified globs (e.g. ``*.py``) match a basename at any depth.
     if "/" not in pat and not pattern_path.is_absolute():
-        return any(_glob_regex(pat).match(part) for part in candidate.split("/"))
+        return any(fnmatchcase(part, pat) for part in candidate.split("/"))
 
     # Preserve the established ``*/src/*.py`` spelling, where the leading
     # component is intentionally an arbitrary absolute-path prefix.
-    if pat.startswith("*/") and (fnmatch(candidate, pat) or fnmatch(raw_candidate, pat)):
-        return True
-    matcher = _glob_regex(pat)
+    if pat.startswith("*/"):
+        pat = "**/" + pat[2:]
     variants = [candidate.strip("/")]
     if not pattern_path.is_absolute():
         # Absolute inputs are common even when config patterns are project-
@@ -350,4 +354,4 @@ def path_matches_glob(
         # still get project-relative matching.
         components = candidate.strip("/").split("/")
         variants.extend("/".join(components[index:]) for index in range(1, len(components)))
-    return any(matcher.match(variant) for variant in variants)
+    return any(_glob_matches(variant, pat) for variant in variants)

@@ -47,9 +47,6 @@ def run_type_check(
             witness=[],
         )]
 
-    if not project_root:
-        return unavailable("no project root configured")
-
     if check.kind == "returns":
         augmented_pattern = f"{check.symbol_pattern}:returns[{check.expected_type}]"
     else:
@@ -61,6 +58,10 @@ def run_type_check(
         source_override=source,
         language=language,
     )
+    if not all_matches:
+        return []
+    if not project_root:
+        return unavailable("no project root configured")
 
     type_oracle = None
     try:

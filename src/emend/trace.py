@@ -22,11 +22,9 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.transform import find_pattern, PatternMatch
 from emend.checks.rules_config import (
     as_list,
-    expand_macros,
     load_rules_document,
     normalize_flow_definition,
     path_matches_glob,
-    yaml_key,
 )
 
 if TYPE_CHECKING:

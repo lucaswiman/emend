@@ -336,9 +336,10 @@ def _execute_via_datalog(
     # Resolve blocker (not-through) matches
     blocker_locs: list[tuple[str, str, str, int]] | None = None
     blocker_lines: dict[tuple[str, str, int], int] = {}
-    if _normalise_sanitizers(spec.sanitizers):
+    sanitizers = _normalise_sanitizers(spec.sanitizers)
+    if sanitizers:
         san_matches = []
-        for sanitizer in _normalise_sanitizers(spec.sanitizers):
+        for sanitizer in sanitizers:
             san_matches.extend(find_pattern(
                 sanitizer, file_path, source_override=source, language=language,
             ))

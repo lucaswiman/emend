@@ -58,6 +58,7 @@ class ExtendedSelector:
     line_start: int | None = None
     line_end: int | None = None
     type_filter: str | None = None  # e.g. "returns[str]" or "type[Connection]"
+    language_override: str | None = None
 
     @property
     def language(self) -> str:
@@ -66,7 +67,17 @@ class ExtendedSelector:
         Defaults to 'python' if extension is unknown.
         """
         from emend.language_registry import detect_language
-        return detect_language(self.file_path) or "python"
+        return self.language_override or detect_language(self.file_path) or "python"
+
+    @property
+    def extension(self) -> str:
+        """Return the grammar extension selected for this file."""
+        if self.language_override:
+            from emend.language_registry import get_extensions
+            extensions = get_extensions(self.language_override)
+            if extensions:
+                return extensions[0]
+        return Path(self.file_path).suffix.lstrip(".") or "py"
 
     @property
     def line_range(self) -> tuple[int, int] | None:
@@ -93,16 +104,13 @@ class ExtendedSelector:
         Raises FileNotFoundError if no files match.
         """
         from emend.language_registry import is_source_file, matches_language
-        if language is None:
-            matches = [
-                f for f in glob_mod.glob(self.file_path, recursive=True)
-                if is_source_file(f)
-            ]
-        else:
-            matches = [
-                f for f in glob_mod.glob(self.file_path, recursive=True)
-                if matches_language(f, language)
-            ]
+        accepts = is_source_file if language is None else (
+            lambda path: matches_language(path, language)
+        )
+        matches = [
+            path for path in glob_mod.glob(self.file_path, recursive=True)
+            if accepts(path)
+        ]
         if not matches:
             raise FileNotFoundError(f"No files match: {self.file_path}")
         return sorted(matches)
@@ -110,6 +118,10 @@ class ExtendedSelector:
     def with_file_path(self, new_path: str) -> 'ExtendedSelector':
         """Return a copy with a different file_path."""
         return replace(self, file_path=new_path)
+
+    def with_language(self, language: str | None) -> 'ExtendedSelector':
+        """Return a copy carrying an explicit grammar override, when provided."""
+        return replace(self, language_override=language) if language else self
 
 
 class SelectorTransformer(Transformer):

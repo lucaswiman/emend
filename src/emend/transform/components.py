@@ -20,9 +20,7 @@ def _read_source(selector: ExtendedSelector) -> tuple[Path, str, str]:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    from .project_iter import _ext_from_path
-
-    return file_path, file_path.read_text(), _ext_from_path(file_path)
+    return file_path, file_path.read_text(), selector.extension
 
 
 def _finish_transform(

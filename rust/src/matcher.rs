@@ -3355,13 +3355,16 @@ fn find_pattern_in_tree(
 fn find_pattern_in_source(
     source: &str,
     file_path: &str,
+    extension: Option<&str>,
     pattern: &PatternNode,
     inside: Option<&PatternNode>,
     not_inside: Option<&PatternNode>,
     config: &LanguageConfig,
 ) -> Vec<(String, usize, usize, usize, usize, String, HashMap<String, String>)> {
     let path_buf = std::path::PathBuf::from(file_path);
-    let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = extension.unwrap_or_else(|| {
+        path_buf.extension().and_then(|e| e.to_str()).unwrap_or("")
+    });
     let tree = match crate::pattern::parse_by_extension(source, ext) {
         Some(t) => t,
         None => return vec![],
@@ -3407,6 +3410,7 @@ pub fn find_pattern_in_files(
                 find_pattern_in_source(
                     source,
                     path,
+                    extension,
                     &pattern,
                     inside.as_ref(),
                     not_inside.as_ref(),
@@ -3450,7 +3454,9 @@ pub fn find_multi_patterns_in_files(
                 .par_iter()
                 .map(|(path, source)| {
                     let path_buf = std::path::PathBuf::from(path);
-                    let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let ext = extension.unwrap_or_else(|| {
+                        path_buf.extension().and_then(|e| e.to_str()).unwrap_or("")
+                    });
                     let tree = match crate::pattern::parse_by_extension(source, ext) {
                         Some(t) => t,
                         None => return vec![],

@@ -19,7 +19,6 @@ from emend.checks.rules_config import (  # noqa: E402
     parse_deadcode_config,
     expand_macros,
     expand_pattern_macros,
-    expand_not_through,
     normalize_flow_definition,
     path_matches_glob,
 )

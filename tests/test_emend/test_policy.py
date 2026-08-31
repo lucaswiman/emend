@@ -17,6 +17,7 @@ from emend.policy import (
     DeadCodeCheck,
     TypeCheck,
     _run_datalog_check,
+    _run_type_check,
     format_policy_violations,
     load_policies,
     run_policy_checks,
@@ -24,6 +25,42 @@ from emend.policy import (
 )
 
 runner = CliRunner()
+
+
+def _type_policy(check):
+    return Policy("typed", "Types must agree", "error", [check])
+
+
+def test_unavailable_type_oracle_only_fails_for_matching_symbols(tmp_path):
+    check = TypeCheck("target($X)", "str")
+    policy = _type_policy(check)
+
+    assert _run_type_check(check, policy, "app.py", "other(1)\n", "python") == []
+    violations = _run_type_check(check, policy, "app.py", "target(1)\n", "python")
+    assert len(violations) == 1
+    assert violations[0].check_name == "type:unavailable:has_type"
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "initialization"])
+def test_matching_type_check_reports_oracle_failure(tmp_path, monkeypatch, failure):
+    class UnavailableOracle:
+        def is_available(self):
+            return False
+
+    def create_type_oracle(**_kwargs):
+        if failure == "initialization":
+            raise RuntimeError("broken engine")
+        return UnavailableOracle()
+
+    monkeypatch.setattr("emend.type_oracle.create_type_oracle", create_type_oracle)
+    check = TypeCheck("target($X)", "str")
+
+    violations = _run_type_check(
+        check, _type_policy(check), "app.py", "target(1)\n", "python", str(tmp_path),
+    )
+
+    assert len(violations) == 1
+    assert "type oracle unavailable" in violations[0].message
 
 
 def _write_policies(tmp_path, policies_dict):
@@ -230,6 +267,19 @@ class TestLoadPolicies:
         check = next(p for p in policies if p.name == "no-sqli").checks[0]
         assert isinstance(check, FlowCheck)
         assert check.not_through == ["escape($X)", "sanitize($X)"]
+        app = tmp_path / "app.py"
+        app.write_text(
+            "def safe():\n"
+            "    raw = request.args.get('q')\n"
+            "    escaped = escape(raw)\n"
+            "    cursor.execute(escaped)\n"
+            "def unsafe():\n"
+            "    raw = request.args.get('q')\n"
+            "    cursor.execute(raw)\n"
+        )
+        assert len(run_policy_checks(
+            [str(app)], policies, project_path=str(tmp_path),
+        )) == 1
 
     def test_load_unified_rules_top_level_deadcode(self, tmp_path):
         config_path = _write_rules(tmp_path, {

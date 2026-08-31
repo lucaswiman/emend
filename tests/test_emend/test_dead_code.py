@@ -288,9 +288,12 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
-            graph.run_query(
-                '?[key, value] <- [["schema_version", "5"]] '
-                ':put facts_meta {key => value}'
+            graph.client.run(
+                '?[key, value] <- $rows :put facts_meta {key => value}',
+                {"rows": [
+                    ["schema_version", "6"],
+                    ["project_root", str(Path(path).resolve())],
+                ]},
             )
             graph.close()
             return {}
@@ -335,9 +338,12 @@ class TestDeadCodeWarmPath:
                 line=1,
                 end_line=2,
             ))
-            graph.run_query(
-                '?[key, value] <- [["schema_version", "5"]] '
-                ':put facts_meta {key => value}'
+            graph.client.run(
+                '?[key, value] <- $rows :put facts_meta {key => value}',
+                {"rows": [
+                    ["schema_version", "6"],
+                    ["project_root", str(Path(path).resolve())],
+                ]},
             )
             graph.close()
 
@@ -387,7 +393,7 @@ class TestDeadCodeWarmPath:
         assert rows == [["_helper"]]
         assert graph.run_query(
             '?[value] := *facts_meta["schema_version", value]'
-        )["rows"] == [["5"]]
+        )["rows"] == [["6"]]
         graph.close()
 
     def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):

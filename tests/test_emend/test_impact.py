@@ -288,6 +288,30 @@ class TestFindImpact:
         with pytest.raises(ValueError, match="Unknown impact output mode"):
             impact_projection(result, "invalid")
 
+    @pytest.mark.parametrize("mode, keys", [
+        ("symbols", {"changed_symbols", "impacted_symbols", "impacted_tests", "edges"}),
+        ("tests", {"impacted_tests"}),
+        ("graph", {"edges"}),
+    ])
+    def test_cli_routes_impact_output_mode(self, monkeypatch, mode, keys):
+        from typer.testing import CliRunner
+        from emend.cli import app
+        from emend.transform.impact import ImpactEdge, ImpactResult
+
+        result = ImpactResult(
+            ["a.py::changed"], ["b.py::caller"], ["test_a.py::test_changed"],
+            [ImpactEdge("a.py::changed", "b.py::caller", "calls")],
+        )
+        monkeypatch.setattr("emend.cli_analysis.find_impact", lambda **_kwargs: result)
+        monkeypatch.setattr("emend.dsl.find_dsl_impact", lambda *_args: [])
+
+        output = CliRunner().invoke(
+            app, ["analyze", "impact", "a.py::changed", "--output", mode, "--json"]
+        )
+
+        assert output.exit_code == 0, output.output
+        assert set(json.loads(output.output)) == keys
+
 
 class TestParseDiffToChangedFiles:
     """Tests for diff parsing helper."""
