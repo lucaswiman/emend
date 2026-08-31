@@ -1,6 +1,7 @@
 """Tests for the dead-code detection command."""
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -299,6 +300,46 @@ class TestDeadCodeWarmPath:
             "build_duplicates": False,
             "force_facts": True,
         })]
+        graph.close()
+
+    def test_cold_path_loads_facts_from_shared_worktree_cache(
+        self, tmp_path, monkeypatch,
+    ):
+        """A worktree must load the facts database that ``warm_caches`` built."""
+        from emend.fact_graph import FactGraph, SymbolFact
+        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
+        from emend.transform import cache as cache_module
+
+        project = make_project_dir(tmp_path)
+        (project / "mod.py").write_text("def unused():\n    return 1\n")
+        shared_root = tmp_path / "main"
+        shared_root.mkdir()
+        monkeypatch.setattr(cache_module, "_resolve_cache_root", lambda _path: shared_root)
+
+        def fake_warm_caches(path, **_kwargs):
+            cache_dir = _cache_db_dir(path)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            graph = FactGraph(db_path=str(cache_dir / "facts.db"))
+            graph.add_symbol(SymbolFact(
+                file_path="mod.py",
+                name="unused",
+                qualified_name="mod.unused",
+                kind="function",
+                line=1,
+                end_line=2,
+            ))
+            graph.close()
+
+        monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
+        monkeypatch.setattr(
+            FactGraph,
+            "build_from_project",
+            Mock(side_effect=AssertionError("shared facts.db was not loaded")),
+        )
+
+        graph = _get_or_build_fact_graph(str(project))
+
+        assert graph._client.run("?[count(qn)] := *symbol[qn, _, _, _, _, _, _]")["rows"] == [[1]]
         graph.close()
 
     def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):

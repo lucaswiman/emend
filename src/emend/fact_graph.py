@@ -1399,6 +1399,42 @@ class FactGraph:
         if excl_parts_ref:
             excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
+        # Resolve non-call member references before the main dead-code query.
+        # Joining every reference to every private method through a dynamic
+        # ``ends_with`` predicate creates a Cartesian product on cold indexes
+        # (minutes on emend itself). Two linear scans plus an exact inline
+        # relation preserve the suffix semantics without that query shape.
+        noncall_refs = self._client.run(
+            excluded_file_rules
+            + "?[sq] := "
+            "*reference[sq, fp, _, _, ref_kind, fq, bid], "
+            "*reachable_block[fp, fq, bid], "
+            f'ref_kind != "call"{excl_clauses}'
+        )["rows"]
+        referenced_member_names = {
+            str(row[0]).rsplit(".", 1)[-1]
+            for row in noncall_refs
+            if "." in str(row[0])
+        }
+        private_method_targets: list[tuple[str]] = []
+        if referenced_member_names:
+            private_methods = self._client.run(
+                "?[qn, name] := "
+                "*symbol[qn, _, name, kind, _, _, _], "
+                'kind in ["method", "async_method"], '
+                'starts_with(name, "_"), not starts_with(name, "__")'
+            )["rows"]
+            private_method_targets = [
+                (str(qn),)
+                for qn, name in private_methods
+                if name in referenced_member_names
+            ]
+        noncall_private_rules = self._inline_relation(
+            "reachable_noncall_private_method",
+            ["qn"],
+            private_method_targets,
+        )
+
         exact_entry_rules = ""
         if entry_point_qualified_names:
             exact_entry_rules = self._inline_relation(
@@ -1408,7 +1444,7 @@ class FactGraph:
             ) + "entry_point[qn] := configured_entry_point[qn]\n"
 
         query = (
-            excluded_file_rules + exact_entry_rules +
+            excluded_file_rules + exact_entry_rules + noncall_private_rules +
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
@@ -1434,17 +1470,8 @@ class FactGraph:
             'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
 
             # Non-call uses such as ``callbacks = [self._helper]`` are not
-            # method_call facts. Match their exact final member segment while
-            # retaining the reachable-block and reference-file filters.
-            "live_ref[target_qn] := "
-            "*reference[sq, fp, _, _, ref_kind, fq, bid], "
-            "*reachable_block[fp, fq, bid], "
-            'ref_kind != "call", '
-            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
-            'method_kind in ["method", "async_method"], '
-            'starts_with(method_name, "_"), not starts_with(method_name, "__"), '
-            'ends_with(sq, concat(".", method_name))'
-            f"{excl_clauses}\n"
+            # method_call facts. Their exact targets were precomputed above.
+            "live_ref[qn] := reachable_noncall_private_method[qn]\n"
 
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
