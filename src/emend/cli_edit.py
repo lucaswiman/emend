@@ -88,6 +88,7 @@ def edit_set_cmd(
             apply=apply,
             returns_filter=returns,
             type_oracle=oracle,
+            language=_state["language"],
         )
         print(result, end='')
 
@@ -114,7 +115,9 @@ def remove_cmd(
         emend rm models.py::User[bases][OldMixin] --apply
     """
     with cli_error_handler():
-        result = cmd_edit(selector_str=selector, rm=True, apply=apply)
+        result = cmd_edit(
+            selector_str=selector, rm=True, apply=apply, language=_state["language"]
+        )
         print(result, end='')
 
 
@@ -258,6 +261,7 @@ def add(
             apply=apply,
             returns_filter=returns,
             type_oracle=oracle,
+            language=_state["language"],
         )
         print(result, end='')
 
@@ -582,7 +586,8 @@ def batch_cmd(
                         f"Operation #{i+1} (edit): requires 'selector' and 'value'"
                     )
                 result = cmd_edit(
-                    selector_str=selector_str, value=value, apply=apply
+                    selector_str=selector_str, value=value, apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)
@@ -604,6 +609,7 @@ def batch_cmd(
                     after=after,
                     at=at,
                     apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)
@@ -615,7 +621,8 @@ def batch_cmd(
                         f"Operation #{i+1} (remove): requires 'selector'"
                     )
                 result = cmd_edit(
-                    selector_str=selector_str, rm=True, apply=apply
+                    selector_str=selector_str, rm=True, apply=apply,
+                    language=_state["language"],
                 )
                 if result.strip():
                     all_output.append(result)

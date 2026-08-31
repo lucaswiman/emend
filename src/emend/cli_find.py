@@ -535,18 +535,7 @@ def search(
                         logging.getLogger("emend.cli").warning("Failed to index %s: %s", file_str, e)
                         continue
 
-                    # Derive module path
-                    try:
-                        rel_path = fp.relative_to(proj_root)
-                        parts = list(rel_path.parts)
-                        if parts and parts[0] == "src":
-                            parts.pop(0)
-                        if parts:
-                            parts[-1] = fp.stem
-                        module_path = sep.join(parts)
-                    except ValueError:
-                        module_path = fp.stem
-
+                    module_path = ast_commands.derive_module_path(fp, proj_root, _lang)
                     symbols = ast_commands.dicts_to_tree_symbols(symbol_dicts, module_path, separator=sep)
                     print(f"\nModule: {file_str}")
                     if symbols:
@@ -691,6 +680,7 @@ def search(
 
         use_paths_only = (effective_output == "selector") and not json_output and not count_output
         use_metadata = (effective_output == "metadata")
+        _lang = _state["language"]
 
         result = cmd_lookup(
             file_or_pattern=file_or_pattern,
@@ -712,6 +702,7 @@ def search(
             matching=lookup_matching,
             type_oracle=oracle,
             out=sys.stdout,
+            language=_lang,
         )
         if result:
             print(result, end='')

@@ -220,7 +220,7 @@ def find_pattern(
     scope_local: bool = False,
     source_override: str | None = None,
     type_oracle: "TypeOracle | None" = None,
-    language: str = "python",
+    language: str | None = None,
 ) -> list[PatternMatch]:
     """Find all matches of pattern in file.
 
@@ -265,12 +265,11 @@ def find_pattern(
             raise FileNotFoundError(f"File not found: {file_path}")
         source_code = file.read_text()
 
-    # Auto-detect language from file extension when caller used the default
-    if language == "python" and file_path:
+    # ``None`` is the auto-detection sentinel.  An explicit language must be
+    # honored even when the file extension suggests something else.
+    if language is None:
         from emend.language_registry import detect_language
-        detected = detect_language(file_path)
-        if detected:
-            language = detected
+        language = detect_language(file_path) or "python"
 
     # Compile pattern and constraints to Rust IR
     rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
@@ -885,7 +884,7 @@ def replace_pattern(
     not_inside: str | None = None,
     where: str | None = None,
     type_oracle: TypeOracle | None = None,
-    language: str = "python",
+    language: str | None = None,
 ) -> tuple[str, int]:
     """Replace pattern matches with replacement template.
 
@@ -925,6 +924,10 @@ def replace_pattern(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     source_code = file.read_text()
+
+    if language is None:
+        from emend.language_registry import detect_language
+        language = detect_language(file_path) or "python"
 
     # Find all matches using find_pattern (already migrated to tree-sitter fast paths)
     matches = find_pattern(

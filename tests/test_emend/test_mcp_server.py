@@ -152,6 +152,18 @@ def test_search_summary(tmp_path):
     assert "greet" in result
 
 
+@pytest.mark.parametrize("scope", ["directory", "glob"])
+def test_search_summary_directory_and_glob_preserve_hierarchy(tmp_path, scope):
+    p = tmp_path / "example.py"
+    p.write_text("class Greeter:\n    def greet(self):\n        pass\n")
+    target = str(tmp_path if scope == "directory" else tmp_path / "*.py")
+
+    result = search(mode="summary", files=[target], output="summary")
+
+    assert "Greeter" in result
+    assert "greet" in result
+
+
 def test_transform_replace_dry_run(tmp_path):
     p = tmp_path / "example.py"
     p.write_text("print('hello')\n")

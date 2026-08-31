@@ -50,6 +50,19 @@ def assert_replace(tmp_path, source, pattern, replacement, count):
 class TestReplacePattern:
     """Tests for replace_pattern() function."""
 
+    @pytest.mark.parametrize("language, expected_count", [(None, 1), ("typescript", 1), ("python", 0)])
+    def test_replace_language_auto_and_explicit_override(self, tmp_path, language, expected_count):
+        from emend.transform import replace_pattern
+
+        test_file = tmp_path / "example.ts"
+        test_file.write_text("const result = first == second;\n")
+
+        _, count = replace_pattern(
+            "$X == $Y", "$X === $Y", str(test_file), language=language
+        )
+
+        assert count == expected_count
+
     def test_replace_simple(self, tmp_path):
         """Replace simple pattern without metavariables."""
         from emend.transform import replace_pattern
