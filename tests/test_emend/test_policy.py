@@ -212,7 +212,7 @@ class TestLoadPolicies:
         assert check.flows_to == "cursor.execute($Q)"
 
     def test_load_unified_rules_flow_list_not_through(self, tmp_path):
-        """List-valued ``not-through`` must be pipe-joined, not stringified."""
+        """List-valued ``not-through`` remains a list of alternatives."""
         config_path = _write_rules(tmp_path, {
             "rules": {
                 "no-sqli": {
@@ -229,9 +229,7 @@ class TestLoadPolicies:
         policies = load_policies(config_path)
         check = next(p for p in policies if p.name == "no-sqli").checks[0]
         assert isinstance(check, FlowCheck)
-        # Must mirror checks/pattern_rules.py expand_not_through(): pipe-joined,
-        # never the python list repr "['escape($X)', 'sanitize($X)']".
-        assert check.not_through == "escape($X) | sanitize($X)"
+        assert check.not_through == ["escape($X)", "sanitize($X)"]
 
     def test_load_unified_rules_top_level_deadcode(self, tmp_path):
         config_path = _write_rules(tmp_path, {
@@ -638,3 +636,15 @@ class TestRunChecksEngine:
         """An unrecognised mode must error, not silently return []."""
         with pytest.raises(ValueError):
             self._run_unified_rule(tmp_path, mode="bogus")
+
+    def test_unified_rule_preserves_lint_severity(self, tmp_path):
+        config_file = _write_rules(tmp_path, {
+            "rules": {"no-eval": {
+                "find": "eval($X)", "message": "no eval", "severity": "error",
+            }},
+        })
+        test_file = tmp_path / "app.py"
+        test_file.write_text("eval('code')\n")
+        from emend.checks.engine import run_checks
+        violations = run_checks([str(test_file)], config=config_file, mode="lint")
+        assert violations[0].severity == "error"

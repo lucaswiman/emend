@@ -21,7 +21,8 @@ from emend.rules_config import (
     parse_deadcode_config,
     load_rules_document,
     expand_macros,
-    expand_not_through,
+    expand_pattern_macros,
+    normalize_flow_definition,
     yaml_key,
 )
 
@@ -46,7 +47,7 @@ class FlowCheck:
     """Taint-style flow check: value must not flow from source to sink."""
     flows_from: str
     flows_to: str
-    not_through: str | None = None
+    not_through: list[str] | str | None = None
     label: str = ""
 
 
@@ -98,28 +99,28 @@ def _build_unified_policy(
         pattern = rule_def.get("match", rule_def.get("find", ""))
         checks.append(StructuralCheck(
             pattern=expand_macros(pattern, macros),
-            inside=rule_def.get("within", rule_def.get("inside")),
-            not_inside=rule_def.get("not-within", rule_def.get("not-inside")),
+            inside=expand_pattern_macros(
+                yaml_key(rule_def, "within", "inside"), macros,
+            ),
+            not_inside=expand_pattern_macros(
+                yaml_key(rule_def, "not_within", "not_inside"), macros,
+            ),
             where=rule_def.get("where"),
         ))
 
     flow_def = rule_def.get("flow")
-    if isinstance(flow_def, dict):
-        flow_from = yaml_key(flow_def, "from", "flows_from")
-        flow_to = yaml_key(flow_def, "to", "flows_to")
+    if isinstance(flow_def, dict) or yaml_key(rule_def, "flows_from") is not None:
+        normalized_flow = normalize_flow_definition(rule_def, macros)
+        flow_from = normalized_flow["from"]
+        flow_to = normalized_flow["to"]
         # Unwrap dict-form ``{pattern: ...}`` to the pattern string, mirroring
         # the lint engine (checks/pattern_rules.py).
-        if isinstance(flow_from, dict):
-            flow_from = flow_from.get("pattern")
-        if isinstance(flow_to, dict):
-            flow_to = flow_to.get("pattern")
         if flow_from and flow_to:
-            not_through = expand_not_through(yaml_key(flow_def, "not_through"), macros)
             checks.append(FlowCheck(
-                flows_from=expand_macros(str(flow_from), macros),
-                flows_to=expand_macros(str(flow_to), macros),
-                not_through=not_through,
-                label=flow_def.get("label", name),
+                flows_from=flow_from,
+                flows_to=flow_to,
+                not_through=normalized_flow["not_through"],
+                label=normalized_flow["label"] or name,
             ))
 
     deadcode_def = rule_def.get("deadcode")
@@ -169,15 +170,16 @@ def _as_list(val: Any) -> list[str]:
 
 
 def _parse_flow_check(raw: dict[str, Any]) -> FlowCheck:
-    flows_from = yaml_key(raw, "flows_from")
-    flows_to = yaml_key(raw, "flows_to")
+    normalized = normalize_flow_definition(raw)
+    flows_from = normalized["from"]
+    flows_to = normalized["to"]
     if not flows_from or not flows_to:
         raise ValueError("FlowCheck requires 'flows_from' and 'flows_to'")
     return FlowCheck(
         flows_from=flows_from,
         flows_to=flows_to,
-        not_through=yaml_key(raw, "not_through"),
-        label=yaml_key(raw, "label") or "",
+        not_through=normalized["not_through"],
+        label=normalized["label"] or "",
     )
 
 
@@ -187,8 +189,8 @@ def _parse_structural_check(raw: dict[str, Any]) -> StructuralCheck:
         raise ValueError("StructuralCheck requires 'pattern'")
     return StructuralCheck(
         pattern=pattern,
-        inside=raw.get("inside"),
-        not_inside=yaml_key(raw, "not_inside"),
+        inside=yaml_key(raw, "inside", "within"),
+        not_inside=yaml_key(raw, "not_inside", "not_within"),
         where=raw.get("where"),
     )
 

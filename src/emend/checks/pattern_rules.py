@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +20,8 @@ from emend.checks.rules_config import (  # noqa: E402
     expand_macros,
     expand_pattern_macros,
     expand_not_through,
+    normalize_flow_definition,
+    path_matches_glob,
 )
 
 
@@ -34,10 +35,11 @@ class LintRule:
     replace: str | None = None
     flows_from: str | None = None
     flows_to: str | None = None
-    not_through: str | None = None
+    not_through: list[str] | str | None = None
     dsl: str | None = None
     files: list[str] | None = None
     language: str | list[str] | None = None
+    severity: str = "warning"
 
 
 @dataclass
@@ -111,16 +113,16 @@ def detect_file_language(file_path: str, fallback: str = "python") -> str:
     return detect_language(file_path) or fallback
 
 
-def path_matches_rule_globs(file_path: str, globs: list[str] | None) -> bool:
+def path_matches_rule_globs(
+    file_path: str,
+    globs: list[str] | None,
+    *,
+    project_root: str | Path | None = None,
+) -> bool:
     if not globs:
         return True
-    normalized = file_path.replace("\\", "/")
-    path_obj = Path(normalized)
     for pattern in globs:
-        if fnmatch(normalized, pattern) or path_obj.match(pattern):
-            return True
-        prefixed = pattern if pattern.startswith("**/") else f"**/{pattern}"
-        if fnmatch(normalized, prefixed) or path_obj.match(prefixed):
+        if path_matches_glob(file_path, pattern, project_root=project_root):
             return True
     return False
 
@@ -148,25 +150,13 @@ def load_rules(
                 deadcode_config = parsed_deadcode
             continue
 
-        flow_def = rule_def.get("flow")
-        flows_from = yaml_key(rule_def, "flows_from")
-        flows_to = yaml_key(rule_def, "flows_to")
-        not_through = yaml_key(rule_def, "not_through")
-        if isinstance(flow_def, dict):
-            flows_from = flows_from or flow_def.get("from")
-            flows_to = flows_to or flow_def.get("to")
-            not_through = not_through or yaml_key(flow_def, "not_through")
-
-        if isinstance(flows_from, dict):
-            flows_from = flows_from.get("pattern")
-        if isinstance(flows_to, dict):
-            flows_to = flows_to.get("pattern")
+        flow = normalize_flow_definition(rule_def, macros)
+        flows_from = flow["from"]
+        flows_to = flow["to"]
+        not_through = flow["not_through"]
 
         if flows_from and flows_to:
             find_pattern_str = rule_def.get("find", "")
-            flows_from = expand_macros(flows_from, macros)
-            flows_to = expand_macros(flows_to, macros)
-            not_through = expand_not_through(not_through, macros)
         else:
             match_pattern = rule_def.get("match", rule_def.get("find"))
             find_pattern_str = expand_macros(match_pattern, macros)
@@ -193,6 +183,7 @@ def load_rules(
             dsl=rule_def.get("dsl"),
             files=rule_files,
             language=rule_language,
+            severity=str(rule_def.get("severity", "warning")),
         ))
 
     return rules, macros, deadcode_config

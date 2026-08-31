@@ -15,4 +15,7 @@ from emend.checks.rules_config import (  # noqa: F401
     expand_pattern_macros,
     expand_macros,
     expand_not_through,
+    normalize_flow_definition,
+    normalize_pattern_list,
+    path_matches_glob,
 )

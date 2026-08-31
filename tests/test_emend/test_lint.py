@@ -11,6 +11,7 @@ from emend.lint import (
     run_lint,
     parse_noqa_comments,
 )
+from emend.checks.rules_config import path_matches_glob
 
 
 def _write_config(tmp_path, config_dict, name="patterns.yaml"):
@@ -208,6 +209,17 @@ def test_unified_rule_files_scope_filters_matches(tmp_path):
     violations = run_lint(rules, [str(allowed), str(blocked)])
     assert len(violations) == 1
     assert violations[0].file_path == str(allowed)
+
+
+@pytest.mark.parametrize("relative, pattern, expected", [
+    ("tests/unit.py", "tests", True),
+    ("tests_helper.py", "tests", False),
+    ("src/main.py", "src/**/*.py", True),
+    ("src/pkg/main.py", "src/**/*.py", True),
+    ("src/main.js", "src/**/*.py", False),
+])
+def test_path_glob_is_component_aware(tmp_path, relative, pattern, expected):
+    assert path_matches_glob(tmp_path / relative, pattern, project_root=tmp_path) is expected
 
 
 def test_lint_not_inside(tmp_path):

@@ -86,12 +86,13 @@ _extract_names_from_text = _extract_identifiers
 
 
 def _build_noqa_ranges(
-    source: str, language: str,
+    source: str, language: str, file_path: str | None = None,
 ) -> list[tuple[int, int, set[str] | None]]:
     comments = parse_noqa_comments(source, language=language)
     if not comments:
         return []
-    return build_noqa_ranges(comments, _build_statement_line_map(source))
+    ext = Path(file_path).suffix.lstrip(".") if file_path else "py"
+    return build_noqa_ranges(comments, _build_statement_line_map(source, ext=ext or "py"))
 
 
 def _assignments_from_cfgs(
@@ -161,12 +162,16 @@ def _check_flow_rule(
     all_sink_matches = find_pattern(
         rule.flows_to, file_path, source_override=source, language=language
     )
-    all_sanitizer_matches = None
-    if rule.not_through:
-        all_sanitizer_matches = find_pattern(
-            rule.not_through, file_path,
-            source_override=source, language=language
-        )
+    all_sanitizer_matches = []
+    sanitizers = (
+        [rule.not_through]
+        if isinstance(rule.not_through, str)
+        else (rule.not_through or [])
+    )
+    for sanitizer in sanitizers:
+        all_sanitizer_matches.extend(find_pattern(
+            sanitizer, file_path, source_override=source, language=language
+        ))
 
     # Intraprocedural flow analysis
     all_lines = source.splitlines()
@@ -366,7 +371,7 @@ def run_lint(
         literals = extract_pattern_literals(rule.find)
         matching: set[str] = set()
         for fpath, content in all_file_contents.items():
-            if not _path_matches_rule_globs(fpath, rule.files):
+            if not _path_matches_rule_globs(fpath, rule.files, project_root=project_path):
                 continue
             if not _rule_matches_language(rule, file_languages.get(fpath, language)):
                 continue
@@ -446,7 +451,7 @@ def run_lint(
                     src = all_file_contents.get(file_path_str, "")
                     file_lang = file_languages.get(file_path_str, language)
                     noqa_ranges_cache[file_path_str] = _build_noqa_ranges(
-                        src, file_lang,
+                        src, file_lang, file_path_str,
                     )
 
                 if is_noqa_suppressed(line, rule.name, noqa_ranges_cache[file_path_str]):
@@ -502,7 +507,7 @@ def run_lint(
                 continue
             # First match for this file: build noqa ranges now
             if noqa_ranges is None:
-                noqa_ranges = _build_noqa_ranges(source, file_lang)
+                noqa_ranges = _build_noqa_ranges(source, file_lang, file_path)
             # Build line-offset table on first match (once per file)
             if line_starts is None:
                 line_starts = [0]
@@ -543,10 +548,10 @@ def run_lint(
         if source is None:
             continue
         file_lang = file_languages.get(file_path, language)
-        noqa_ranges = _build_noqa_ranges(source, file_lang)
+        noqa_ranges = _build_noqa_ranges(source, file_lang, file_path)
 
         for rule in fix_rules:
-            if not _path_matches_rule_globs(file_path, rule.files):
+            if not _path_matches_rule_globs(file_path, rule.files, project_root=project_path):
                 continue
             if not _rule_matches_language(rule, file_lang):
                 continue
@@ -615,10 +620,10 @@ def run_lint(
 
             # Build noqa ranges for this file (reuse cache if available)
             if file_path not in noqa_ranges_cache:
-                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang)
+                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang, file_path)
 
             for rule in flow_rules:
-                if not _path_matches_rule_globs(file_path, rule.files):
+                if not _path_matches_rule_globs(file_path, rule.files, project_root=project_path):
                     continue
                 if not _rule_matches_language(rule, file_lang):
                     continue
@@ -692,14 +697,14 @@ def run_lint(
 
             # Build noqa ranges for this file
             if file_path not in noqa_ranges_cache:
-                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang)
+                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang, file_path)
 
             regions = detect_dsl_regions(file_path, source=source)
             if not regions:
                 continue
 
             for rule in dsl_rules:
-                if not _path_matches_rule_globs(file_path, rule.files):
+                if not _path_matches_rule_globs(file_path, rule.files, project_root=project_path):
                     continue
                 rule_dsl = rule.dsl.lower() if rule.dsl else ""
                 find_re = _compile_dsl_find_pattern(rule.find)
