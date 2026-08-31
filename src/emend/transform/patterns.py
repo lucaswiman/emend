@@ -17,12 +17,26 @@ from ..pattern import (
 )
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
-from .components import _CONTENT_REF_RE, _extract_string_content_from_text
+from .components import _extract_string_content_from_text
 
 if TYPE_CHECKING:
     from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
+
+# Replacement-template references. Captured text is inserted as an opaque
+# value while scanning, so a ``$Y`` occurring inside a ``$X`` capture is never
+# interpreted as another template reference.
+_TEMPLATE_REF_RE = re.compile(
+    r"\$\{(?P<content>[A-Za-z_][A-Za-z0-9_]*)\.content\}"
+    r"|\$(?P<ellipsis>\.\.\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
+_EMPTY_ELLIPSIS = "\x00"
+_EMPTY_ELLIPSIS_SEPARATOR_RE = re.compile(
+    r"([\(\[])\s*\x00\s*,\s*"
+    r"|,\s*\x00\s*,"
+    r"|,\s*\x00\s*(?=[\)\]])"
+)
 
 @dataclass
 class PatternMatch:
@@ -505,9 +519,9 @@ def _resolve_relative_module(
     from .project_iter import _file_to_module
     src_module = _file_to_module(source_file, project_path)
     # Compute the package that owns source_file.
-    if src_module.endswith(".__init__"):
-        # __init__.py IS the package.
-        package = src_module[: -len(".__init__")]
+    if Path(source_file).stem == "__init__":
+        # ``_file_to_module`` already maps pkg/__init__.py to pkg.
+        package = src_module
     elif "." in src_module:
         package = src_module.rsplit(".", 1)[0]
     else:
@@ -640,6 +654,24 @@ def analyze_imports(
                 remainder = qn[len(prefix):]
                 if "." not in remainder:
                     locally_defined.add(remainder)
+
+        # Definitions nested in the symbol being moved move with it, so a
+        # recursive reference must not become an import from the old module.
+        from emend import emend_core
+        try:
+            moved_names = {
+                item["name"]
+                for item in emend_core.collect_symbols_from_str(
+                    symbol_source,
+                    max_depth=1,
+                    ext=source_path.suffix.lstrip(".") or "py",
+                )
+                if item.get("name") and item.get("kind") != "reference"
+            }
+        except Exception:
+            logger.debug("Could not collect moved symbol names", exc_info=True)
+            moved_names = set()
+        locally_defined -= moved_names
 
         local_refs_needed_runtime = sorted(
             n for n in locally_defined
@@ -801,44 +833,46 @@ def _substitute_metavars(
     Returns substituted string, or None if replacement cannot be resolved
     (e.g. ${NAME.content} on a non-string).
     """
-    replacement_code = replacement_str
-
-    # First pass: resolve ${NAME.content} references (string
-    # interpolation).  These extract the inner content of a string
-    # literal, stripping the surrounding quotes.  If any reference
-    # cannot be resolved (e.g. the captured node is not a string
-    # literal), skip the entire replacement to avoid producing
-    # nonsense output.
-    content_failed = False
-    for ref_match in _CONTENT_REF_RE.finditer(replacement_code):
-        ref_name = ref_match.group(1)
-        captured = captures.get(ref_name)
+    out: list[str] = []
+    pos = 0
+    for ref in _TEMPLATE_REF_RE.finditer(replacement_str):
+        out.append(replacement_str[pos:ref.start()])
+        name = ref.group("content") or ref.group("name")
+        captured = captures.get(name)
         if captured is None:
-            content_failed = True
-            break
-        content = _extract_string_content_from_text(captured)
-        if content is None:
-            content_failed = True
-            break
-        replacement_code = replacement_code.replace(
-            ref_match.group(0), content
-        )
-    if content_failed:
-        return None
+            # Unknown regular references are intentionally left untouched.
+            # A missing content reference remains invalid, as before.
+            if ref.group("content"):
+                return None
+            out.append(ref.group(0))
+        elif ref.group("content"):
+            content = _extract_string_content_from_text(captured)
+            if content is None:
+                return None
+            out.append(content)
+        elif not captured.strip() and ref.group("ellipsis"):
+            # A sentinel confines separator cleanup to this expansion; captured
+            # code can contain arbitrary commas and string literals.
+            out.append(_EMPTY_ELLIPSIS)
+        else:
+            out.append(captured)
+        pos = ref.end()
+    out.append(replacement_str[pos:])
+    replacement_code = "".join(out)
 
-    # Second pass: substitute regular metavar references ($NAME, $...NAME).
-    # Sort by name length descending so that $XY is replaced before $X,
-    # preventing $X from partially matching inside $XY.
-    for name, code in sorted(captures.items(), key=lambda kv: len(kv[0]), reverse=True):
-        replacement_code = replacement_code.replace(f"$...{name}", code)
-        replacement_code = replacement_code.replace(f"${name}", code)
+    def _clean_separator(match: re.Match[str]) -> str:
+        # Preserve an opener for ``(empty,``; preserve one comma for doubled
+        # separators; remove a trailing comma before a closing delimiter.
+        if match.group(1):
+            return match.group(1)
+        if match.end() < len(match.string) and match.string[match.end()] in ")]":
+            return ""
+        return ","
 
-    # Clean up comma artifacts from empty ellipsis substitutions
-    replacement_code = re.sub(r'(\()\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r'(\[)\s*,\s*', r'\1', replacement_code)
-    replacement_code = re.sub(r',\s*,', ',', replacement_code)
-
-    return replacement_code
+    replacement_code = _EMPTY_ELLIPSIS_SEPARATOR_RE.sub(
+        _clean_separator, replacement_code
+    )
+    return replacement_code.replace(_EMPTY_ELLIPSIS, "")
 
 
 def replace_pattern(

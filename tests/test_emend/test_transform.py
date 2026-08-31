@@ -107,6 +107,29 @@ class TestReplacePattern:
         result = _substitute_metavars("$X + $XY", {"X": "a", "XY": "b"})
         assert result == "a + b", f"Expected 'a + b', got '{result}'"
 
+    @pytest.mark.parametrize(
+        ("template", "captures", "expected"),
+        [
+            ("$X $UNKNOWN", {"X": "a"}, "a $UNKNOWN"),
+            ("call($X, extra)", {"X": ""}, "call(, extra)"),
+            ("call($...ARGS, extra)", {"ARGS": ""}, "call(extra)"),
+        ],
+    )
+    def test_replacement_template_substitution_boundaries(
+        self, template, captures, expected
+    ):
+        """Unknown and empty captures retain their distinct semantics."""
+        from emend.transform import _substitute_metavars
+
+        assert _substitute_metavars(template, captures) == expected
+
+    def test_replacement_does_not_rescan_captured_text(self):
+        from emend.transform import _substitute_metavars
+
+        assert _substitute_metavars(
+            "wrap($X, $Y)", {"X": '"$Y"', "Y": "value"}
+        ) == 'wrap("$Y", value)'
+
     def test_replace_no_matches(self, tmp_path):
         """Replace pattern that doesn't match returns empty diff."""
         from emend.transform import replace_pattern
@@ -2454,6 +2477,15 @@ class TestAnalyzeImports:
         imports = analyze_imports(source, str(test_file))
 
         assert imports == []
+
+    def test_relative_import_from_package_init_keeps_package(self, tmp_path):
+        from emend.transform import _resolve_relative_module
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        init_file = package / "__init__.py"
+        init_file.write_text("from .sibling import helper\n")
+        assert _resolve_relative_module(1, "sibling", str(init_file), str(tmp_path)) == "pkg.sibling"
 
 
 class TestFindPattern:

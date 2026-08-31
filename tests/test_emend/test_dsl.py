@@ -594,6 +594,18 @@ class TestFindInDsl:
         assert len(matches) >= 1
         assert "users" in matches[0].captures.get("TABLE", "")
 
+    def test_repeated_metavar_is_a_backreference(self, tmp_path):
+        f = tmp_path / "app.py"
+        f.write_text(
+            'q1 = "SELECT id FROM users JOIN users ON users.id = users.id"\n'
+            'q2 = "SELECT id FROM users JOIN orders ON users.id = orders.id"\n'
+        )
+        matches = find_in_dsl(
+            "SELECT $COL FROM $TABLE JOIN $TABLE", str(f), dsl_type="sql"
+        )
+        assert len(matches) == 1
+        assert matches[0].captures["TABLE"] == "users"
+
     def test_find_no_match(self, tmp_path):
         """Returns empty when pattern doesn't match."""
         f = tmp_path / "app.py"

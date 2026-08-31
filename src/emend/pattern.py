@@ -312,6 +312,10 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
     if isinstance(node, _ast.Name):
         if node.id in metavar_map:
             metavar = metavar_map[node.id]
+            if metavar.name == "_":
+                # ``$_`` is an anonymous wildcard: each occurrence matches
+                # independently and is omitted from captures.
+                return {"type": "any_expr"}
             tc = metavar.type_constraint
             if tc in ("int", "str", "call", "float",
                       "identifier", "attr", "stmt"):

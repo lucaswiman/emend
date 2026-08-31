@@ -50,6 +50,12 @@ class TestCompilePattern:
         assert ir["type"] == "call"
         assert ir["args"][0] == {"type": "metavar", "name": "X"}
 
+    def test_compile_anonymous_metavar_uses_wildcard_ir(self):
+        from emend.pattern import compile_pattern_to_rust_ir
+
+        ir = compile_pattern_to_rust_ir("func($_)")
+        assert ir["args"][0] == {"type": "any_expr"}
+
     def test_compile_multiple_metavars(self):
         """Compile pattern with multiple metavariables."""
         from emend.pattern import compile_pattern_to_rust_ir
