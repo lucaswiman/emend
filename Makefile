@@ -12,13 +12,13 @@ export UV_CACHE_DIR := $(CURDIR)/.uv-cache
 export VIRTUAL_ENV := $(CURDIR)/$(VENV)
 export PATH := $(VIRTUAL_ENV)/bin:$(shell echo $$PATH)
 
-$(VENV)/bin/activate: pyproject.toml rust/Cargo.toml
+$(VENV)/bin/activate:
 	uv venv $(VENV) --python 3.14t
 	uv pip install --python $(VENV) maturin
 	touch $(VENV)/bin/activate
 
 # Rebuild Rust extension when source files change
-$(VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
+$(VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
 	$(VENV)/bin/maturin develop --extras dev
 	@mkdir -p $(@D) && touch $@
 
@@ -35,12 +35,12 @@ test-ci: $(VENV)/bin/activate $(VENV)/lib/emend_core
 PYTHON_VERSION ?= 3.14t
 MCP_VENV := .venv-mcp
 
-$(MCP_VENV)/bin/activate: pyproject.toml rust/Cargo.toml
+$(MCP_VENV)/bin/activate:
 	uv venv $(MCP_VENV) --python $(PYTHON_VERSION)
 	uv pip install --python $(MCP_VENV) maturin
 	@touch $@
 
-$(MCP_VENV)/lib/emend_core: $(RUST_SOURCES) rust/Cargo.toml | $(MCP_VENV)/bin/activate
+$(MCP_VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) rust/Cargo.toml | $(MCP_VENV)/bin/activate
 	VIRTUAL_ENV=$(CURDIR)/$(MCP_VENV) PATH=$(CURDIR)/$(MCP_VENV)/bin:$$PATH \
 		$(MCP_VENV)/bin/maturin develop --extras dev,mcp
 	@mkdir -p $(@D) && touch $@

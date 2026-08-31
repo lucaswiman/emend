@@ -36,7 +36,7 @@ jobs:
     name: Linux x86_64 (manylinux, 3.10–3.14)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -69,7 +69,7 @@ jobs:
       matrix:
         python-version: ['3.13t', '3.14t']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -82,7 +82,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build free-threaded wheels
@@ -107,7 +107,7 @@ jobs:
     name: Linux aarch64 (manylinux, 3.10–3.14)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -144,7 +144,7 @@ jobs:
       matrix:
         python-version: ['3.13t', '3.14t']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -157,7 +157,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build free-threaded aarch64 wheels
@@ -182,7 +182,7 @@ jobs:
     name: macOS arm64 (3.10–3.14)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -195,7 +195,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: |
             3.10
@@ -222,7 +222,7 @@ jobs:
       matrix:
         python-version: ['3.13t', '3.14t']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -235,7 +235,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build macOS arm64 free-threaded wheels
@@ -254,7 +254,7 @@ jobs:
     name: macOS x86_64 (3.10–3.14)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -267,7 +267,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: |
             3.10
@@ -295,7 +295,7 @@ jobs:
       matrix:
         python-version: ['3.13t', '3.14t']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -308,7 +308,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build macOS x86_64 free-threaded wheels
@@ -328,7 +328,7 @@ jobs:
     name: Windows x86_64 (3.10–3.14)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -341,7 +341,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: |
             3.10
@@ -368,7 +368,7 @@ jobs:
       matrix:
         python-version: ['3.13t', '3.14t']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
@@ -381,7 +381,7 @@ jobs:
           done
           grep '^version' rust/Cargo.toml rust/pyproject.toml
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Build Windows free-threaded wheels
@@ -400,7 +400,7 @@ jobs:
     name: Source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set version from release tag
         if: github.event_name == 'release'
         shell: bash
