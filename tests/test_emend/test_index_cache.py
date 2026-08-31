@@ -180,6 +180,49 @@ class TestWarmCachesSkipped:
         assert stats["indexed"] == 2
         assert stats["qn_cached"] == 2
 
+    def test_process_pool_permission_error_falls_back_to_threads(
+        self, tmp_path, monkeypatch
+    ):
+        """Indexing still works where multiprocessing is unavailable."""
+        import concurrent.futures
+
+        from emend.transform import warm_caches
+
+        project = self._make_project(tmp_path)
+        # Keep this fixture's cache isolated from any repository marker above
+        # the pytest temporary directory.
+        (project / ".emend").mkdir()
+        attempts = []
+        real_thread_pool = concurrent.futures.ThreadPoolExecutor
+
+        class ForbiddenProcessPool:
+            def __init__(self, *args, **kwargs):
+                attempts.append("process")
+
+            def map(self, *args, **kwargs):
+                raise PermissionError("multiprocessing is unavailable")
+
+            def shutdown(self, **kwargs):
+                pass
+
+        class TrackingThreadPool(real_thread_pool):
+            def __init__(self, *args, **kwargs):
+                attempts.append("thread")
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(
+            concurrent.futures, "ProcessPoolExecutor", ForbiddenProcessPool
+        )
+        monkeypatch.setattr(
+            concurrent.futures, "ThreadPoolExecutor", TrackingThreadPool
+        )
+
+        stats = warm_caches(str(project), type_engine=None)
+
+        assert attempts[:2] == ["process", "thread"]
+        assert stats["indexed"] == 2
+        assert stats["qn_cached"] == 2
+
     def test_warm_run_all_skipped(self, tmp_path):
         """Second run on unchanged project skips every file."""
         from emend.transform import warm_caches

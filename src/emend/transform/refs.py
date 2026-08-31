@@ -47,12 +47,13 @@ def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
     """
     from emend.fact_graph import FactGraph
     from .project_iter import _find_project_root
+    from .cache import _cache_db_dir
     from .index import _ensure_cache_ignore_files, warm_caches
 
     project_root = _find_project_root(project_path)
     if project_root in _fact_graph_cache:
         return _fact_graph_cache[project_root]
-    emend_dir = Path(project_root) / ".emend" / "cache"
+    emend_dir = _cache_db_dir(project_root)
     emend_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
     facts_db = emend_dir / "facts.db"

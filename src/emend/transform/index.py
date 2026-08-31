@@ -1245,7 +1245,7 @@ def warm_caches(
     """
     import multiprocessing
     import time
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
     from emend import emend_core as _rust
     from .cache import _cache_db_dir, _init_cache_schema, _build_facts_db, _get_worktree_id, _SCHEMA_VERSION
     from .project_iter import _find_project_root, _find_source_root, _collect_source_files_scandir
@@ -1295,12 +1295,9 @@ def warm_caches(
         chunk = file_contents[i : i + batch_size]
         batches.append((db_path, source_root, project_root, chunk))
 
-    t0 = time.monotonic()
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # TODO: Conditionally use ProcessPoolExecutor or ThreadPoolExecutor for GIL-python vs free-threaded.
-        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n, dsl_n) in enumerate(
-            executor.map(_index_batch, batches)
-        ):
+    def _fold_batch_results(results) -> None:
+        """Fold worker results into ``stats`` and report progress."""
+        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n, dsl_n) in enumerate(results):
             stats["indexed"] += parse_n
             stats["qn_cached"] += qn_n
             stats["skipped"] += skip_n
@@ -1308,11 +1305,37 @@ def warm_caches(
             stats["import_cached"] += import_n
             stats["ref_cached"] += ref_n
             stats["dsl_cached"] += dsl_n
-            # Report progress for all files in this batch
             if callback:
                 _db_path, _src, _proj, chunk = batches[batch_idx]
                 for py_file, _content in chunk:
                     callback("index", py_file)
+
+    t0 = time.monotonic()
+    process_pool = None
+    try:
+        process_pool = ProcessPoolExecutor(max_workers=max_workers)
+        batch_results = process_pool.map(_index_batch, batches)
+    except PermissionError as exc:
+        # Some sandboxes and embedded runtimes disallow the Unix socket used
+        # by multiprocessing's forkserver during task submission. Indexing is
+        # still safe with threads because each worker opens its own SQLite
+        # connection.
+        if process_pool is not None:
+            process_pool.shutdown(cancel_futures=True)
+        logger.debug("warm_caches: process pool unavailable; retrying with threads: %s", exc)
+        with ThreadPoolExecutor(max_workers=max_workers) as thread_pool:
+            _fold_batch_results(thread_pool.map(_index_batch, batches))
+    except BaseException:
+        if process_pool is not None:
+            process_pool.shutdown(cancel_futures=True)
+        raise
+    else:
+        try:
+            # Worker, result-consumption, and callback errors propagate rather
+            # than being mistaken for process-pool startup failures.
+            _fold_batch_results(batch_results)
+        finally:
+            process_pool.shutdown()
 
     logger.info(
         "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d, dsl=%d)",
