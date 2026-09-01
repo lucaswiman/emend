@@ -9,7 +9,7 @@ Two complementary systems: **structured edits** use selectors like `file.py::fun
 ### Using uv with free-threaded Python (recommended for best performance)
 
 ```bash
-uv tool install --python 3.13t emend
+uv tool install --python 3.14t emend
 ```
 
 Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
@@ -18,13 +18,12 @@ GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
 file scans with no lock contention — meaning `find`, `lint`, `analyze refs`, and
 `edit rename` across large codebases are significantly faster.
 
-We recommend **3.13t** for the free-threaded interpreter. The 3.14t variant also
-works for core emend commands, but the optional MCP server (`emend mcp`) depends on
-Pydantic which does not yet support Python 3.14t (as of February 28, 2026):
+We recommend **3.14t** for the latest free-threaded runtime. Python 3.13t remains
+supported, and both variants can run the optional MCP server:
 
 ```bash
-uv tool install --python 3.13t emend   # free-threaded 3.13 (recommended)
-uv tool install --python 3.14t emend   # free-threaded 3.14 (no MCP server support)
+uv tool install --python 3.14t emend   # latest free-threaded runtime
+uv tool install --python 3.13t emend   # free-threaded 3.13
 ```
 
 ### Using uv (standard Python)
@@ -55,8 +54,7 @@ emend mcp                              # stdio transport (default)
 emend mcp --transport sse --port 8080  # SSE transport
 ```
 
-**Note:** The MCP server requires Pydantic, which does not support Python 3.14t as
-of February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
+The optional extra installs MCP SDK v2 (`mcp>=2.0`).
 
 #### Adding emend to Claude Code
 
@@ -147,11 +145,12 @@ This parses every Python file and builds a qualified-name index, so subsequent
 cross-project operations (`analyze refs`, `edit rename`, `analyze graph`, `analyze deadcode`) are
 significantly faster. The cache is stored in `.emend/cache/parse.db` (automatically
 gitignored and dockerignored) and is keyed by file content hash, so it
-self-invalidates when files change. Git worktrees automatically share a single
-cache with the main repo. Re-run after large merges or branch switches.
+self-invalidates when files change. Each Git worktree keeps its own mutable
+`parse.db` and `facts.db` snapshots so switching branches cannot contaminate
+another worktree's analysis.
 
-When using the MCP server (`emend mcp`), indexing happens automatically in the
-background on startup.
+The MCP server (`emend mcp`) starts without eagerly indexing the whole project;
+analysis tools build or refresh the facts they need on demand.
 
 ## MCP Server
 
@@ -254,7 +253,7 @@ The public CLI is organized around a small set of top-level commands:
 - **`find`** — Search for patterns, selectors, symbols, or summaries.
 - **`edit`** — Code changes and refactors. Subcommands: `set`, `rm`, `delete`, `add`, `replace`, `cp`, `rename`, `mv`, `batch`, `saturate`.
 - **`analyze`** — Read-only analysis. Subcommands: `refs`, `graph`, `deadcode`, `impact`, `types`, `trace`, `facts`, `cfg`, `dsl`.
-- **`tool`** — Operational and debugging commands. Subcommands: `index`, `editor-search`, `editor-server`, `query`.
+- **`tool`** — Operational and debugging commands. Subcommands: `index`, `editor-search`, `editor-server`.
 - **`check`** — Unified project rules from `.emend/rules.yaml`.
 - **`lint`** / **`policy`** — Focused rule runners kept for compatibility and targeted workflows.
 - **`map`** — Identifier and module mappings.
@@ -523,7 +522,7 @@ emend can run as a [pre-commit](https://pre-commit.com/) hook. Add to your `.pre
 ```yaml
 repos:
   - repo: https://github.com/lucaswiman/emend
-    rev: v0.2.0  # replace with desired version tag
+    rev: v0.5.0  # replace with desired version tag
     hooks:
       - id: emend-lint
 ```

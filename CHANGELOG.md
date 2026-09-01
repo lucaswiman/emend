@@ -2,7 +2,22 @@
 
 ## Unreleased
 
-### Dead code
+## 0.5.0 (2026-09-01)
+
+### Upgrade notes
+
+- `emend analyze deadcode` now reports unused modules and private symbols and
+  methods by default, and ignores references from tests by default. Use
+  `--no-unused-modules`, `--exclude-private`, or `--include-test-references`
+  to restore the previous scope.
+- The optional MCP integration now requires `mcp>=2.0`. Reinstall or upgrade
+  with `pip install -U 'emend[mcp]'`; MCP mode now supports free-threaded
+  Python 3.14 as well as the other supported Python runtimes.
+- Mutable `parse.db` and `facts.db` analysis snapshots are now local to each
+  Git worktree. User-authored mappings remain shared, and stale analysis
+  databases are rebuilt automatically.
+
+### Dead code and indexing
 
 - Made `emend deadcode` cold starts fact-only: type inference, editor FTS, and
   duplicate-code caching stay lazy, and empty fact databases are rebuilt
@@ -14,6 +29,53 @@
 - Added packaging-metadata and Python CLI entry-point recognition, plus
   import/constructor and cached-type resolution for framework decorator
   receivers such as FastAPI routers and Typer applications.
+- Removed a non-indexable private-member query that could grow quadratically,
+  and fall back to threads when a runtime cannot create a process pool.
+- Made the FactGraph the single owner of its schema, refresh long-lived graphs
+  when the source manifest changes, and recover from stale or corrupt facts and
+  duplicate caches instead of leaking database errors.
+
+### MCP
+
+- Migrated the server to the MCP v2 `MCPServer` API and removed unused MCP CLI
+  dependencies.
+- Removed eager whole-project indexing during MCP startup. Tools now build or
+  refresh analysis data lazily when a request needs it.
+- Made MCP search summaries preserve project/module hierarchy, return cleanly
+  for empty globs, and honor the requested impact output projection.
+
+### Rules and analysis
+
+- Added list-valued `not-through` sanitizer alternatives for flow rules and
+  made required/sanitized path points work when they coincide with a source or
+  sink endpoint.
+- Fixed exact `# noqa` tag handling, slash-aware path globs, CFG identity and
+  line spans for same-named functions, exported-symbol ownership in incremental
+  facts, and unavailable type-oracle reporting.
+- Made `analyze impact --output tests|graph --json` return only the requested
+  projection, matching its text output and MCP behavior.
+
+### Editing and language support
+
+- Made the global `--language` override select the requested grammar throughout
+  single-file, multi-file, glob, and Rust-backed pattern operations, without
+  leaking that selection into later CLI invocations.
+- Enforced the complete Python parameter ordering invariant when adding
+  positional-only, positional-or-keyword, keyword-only, variadic, and defaulted
+  parameters.
+- Fixed one-pass replacement-template interpolation, anonymous `$_` captures,
+  alias re-exports, relative package imports, regex backreferences, and import
+  updates when moving symbols with local dependencies.
+
+### Reliability and maintenance
+
+- Centralized best-effort exception handling so environmental failures degrade
+  gracefully while programming errors and process-control exceptions remain
+  visible.
+- Simplified repeated source branches and compacted overlapping regression-test
+  setup, reducing both total code size and measured cyclomatic complexity.
+- Refreshed CI actions, isolated workflow concurrency by Git ref, and corrected
+  virtual-environment rebuild dependencies.
 
 ## 0.4.1 (2026-07-09)
 

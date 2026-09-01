@@ -16,6 +16,25 @@ Hidden compatibility aliases still exist.  For example, ``emend rm`` maps to
 ``emend edit rm``, and legacy read commands such as ``search``, ``grep``,
 ``show``, ``get``, and ``lookup`` route to ``emend find``.
 
+Global options
+--------------
+
+Global options must appear before the command name:
+
+- ``--language`` / ``-L`` -- select a source grammar explicitly. This is useful
+  for extensionless files or files whose suffix does not match their contents.
+  The override applies to single files, directories, and globs.
+- ``--version`` -- print the installed emend version and exit.
+- ``--verbose`` / ``-v`` -- enable informational logging; repeat as ``-vv``
+  for timestamped debug output.
+
+For example, this treats ``generated.py`` as TypeScript throughout the batch
+scan and replacement:
+
+.. code-block:: bash
+
+   emend --language typescript edit replace '$X == $Y' '$X === $Y' generated.py --apply
+
 
 find
 ----
@@ -182,6 +201,8 @@ Examples:
    emend analyze deadcode src/ --include-test-references
    emend analyze deadcode src/ --exclude-private --no-unused-modules
    emend analyze impact models.py::User --json
+   emend analyze impact models.py::User --output tests --json
+   emend analyze impact --diff HEAD --output graph
    emend analyze trace src/ --preset flask --interprocedural
    emend analyze facts --type references --symbol package.module.func --json
    emend analyze cfg src/module.py --format json
@@ -309,3 +330,7 @@ Profiles:
 - ``refactor`` -- alias for ``core``
 - ``expert`` -- ``refactor`` plus mappings
 - ``full`` -- canonical tools plus legacy compatibility tools
+
+Install the optional MCP SDK v2 dependency with ``pip install 'emend[mcp]'``.
+MCP mode supports the same standard and free-threaded Python versions as the
+core CLI.

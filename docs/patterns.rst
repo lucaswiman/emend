@@ -295,7 +295,7 @@ Match walrus operator (``:=``) in various contexts:
    emend find '[$X for $VAR in $ITER if ($TARGET := $EXPR)]' src/
 
 Replacements
------------
+------------
 
 In ``edit replace``, the replacement string can reference captured metavariables:
 
@@ -366,23 +366,26 @@ Only match names that are locally defined (excludes imports):
 
 Only match inside a particular kind of block. Accepts both keywords and patterns:
 
-+-------+-----------------------+
-| Str.  | Matches               |
-+=======+=======================+
-| ``def``  | Any function def. |
-+-------+-----------------------+
-| ``class`` | Any class def.    |
-+-------+-----------------------+
-| ``for`` | Any for loop      |
-+-------+-----------------------+
-| ``while`` | Any while loop    |
-+-------+-----------------------+
-| ``if`` | Any if/elif/else block |
-+-------+-----------------------+
-| ``try`` | Any try/except block |
-+-------+-----------------------+
-| ``with`` | Any with statement |
-+-------+-----------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - String
+     - Matches
+   * - ``def``
+     - Any function definition.
+   * - ``class``
+     - Any class definition.
+   * - ``for``
+     - Any ``for`` loop.
+   * - ``while``
+     - Any ``while`` loop.
+   * - ``if``
+     - Any ``if``/``elif``/``else`` block.
+   * - ``try``
+     - Any ``try``/``except`` block.
+   * - ``with``
+     - Any ``with`` statement.
 
 .. code-block:: bash
 
@@ -502,7 +505,7 @@ Output:
    }
 
 DSL patterns (``--dsl``)
------------------------
+------------------------
 
 The ``--dsl`` flag enables pattern matching inside embedded DSL regions
 (SQL strings, CSS, HTML) rather than host-language code. Metavariables work

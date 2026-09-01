@@ -237,7 +237,7 @@ Multi-step refactoring with batch
    emend edit batch refactor.yaml --apply
 
 Use the canonical find command
------------------------------
+------------------------------
 
 .. code-block:: bash
 

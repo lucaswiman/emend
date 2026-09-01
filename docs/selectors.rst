@@ -128,7 +128,7 @@ Wildcard patterns:
 Selector grammar (Lark)
 -----------------------
 
-.. code-block:: lark
+.. code-block:: text
 
    start: selector
 
