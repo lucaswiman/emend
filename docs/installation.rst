@@ -9,7 +9,7 @@ Using uv with free-threaded Python (recommended)
 
 .. code-block:: bash
 
-   uv tool install --python 3.13t emend
+   uv tool install --python 3.14t emend
 
 Python 3.13+ ships a **free-threaded** variant (``3.13t``, ``3.14t``) that removes
 the Global Interpreter Lock (GIL). emend's Rust core is already GIL-free, so on a
@@ -17,14 +17,13 @@ free-threaded interpreter it can parallelize file I/O and pattern-matching with 
 lock contention — giving substantially faster results on multi-file operations like
 ``find``, ``lint``, ``analyze refs``, and ``edit rename`` across large codebases.
 
-We recommend **3.13t** for the free-threaded interpreter. The ``3.14t`` variant also
-works for core emend commands, but the optional MCP server (``emend mcp``) depends on
-Pydantic which does not yet support Python 3.14t (as of February 28, 2026):
+We recommend **3.14t** for the latest free-threaded runtime. Python 3.13t remains
+supported, and both variants can run the optional MCP server:
 
 .. code-block:: bash
 
-   uv tool install --python 3.13t emend   # free-threaded 3.13 (recommended)
-   uv tool install --python 3.14t emend   # free-threaded 3.14 (no MCP server support)
+   uv tool install --python 3.14t emend   # latest free-threaded runtime
+   uv tool install --python 3.13t emend   # free-threaded 3.13
 
 Using uv (standard Python)
 --------------------------
@@ -57,10 +56,7 @@ Then start the server:
    emend mcp                              # stdio transport (default)
    emend mcp --transport sse --port 8080  # SSE transport
 
-.. note::
-
-   The MCP server requires Pydantic, which does not support Python 3.14t as of
-   February 28, 2026. Use Python 3.10–3.13 (including 3.13t) for MCP server mode.
+The optional extra installs MCP SDK v2 (``mcp>=2.0``).
 
 Adding emend to Claude Code
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -73,31 +73,40 @@ rules
 
 Each rule is a mapping with a unique key (the rule name) and the following fields:
 
-+-----------------+----------+-----------------------------------------------+
-| Field           | Required | Description                                   |
-+=================+==========+===============================================+
-| ``match``       | Yes*     | Pattern to search for (same syntax as          |
-|                 |          | ``emend find``). *Not required for flow        |
-|                 |          | rules that use ``flows-from``/``flows-to``.   |
-+-----------------+----------+-----------------------------------------------+
-| ``message``     | Yes      | Human-readable violation message               |
-+-----------------+----------+-----------------------------------------------+
-| ``not-within``  | No       | Scope constraint -- exclude matches inside     |
-|                 |          | this context (e.g., ``def``, ``class``,       |
-|                 |          | ``def test_*``)                               |
-+-----------------+----------+-----------------------------------------------+
-| ``fix``         | No       | Replacement pattern for auto-fix (same syntax  |
-|                 |          | as ``emend edit replace``)                    |
-+-----------------+----------+-----------------------------------------------+
-| ``flows-from``  | No       | Source pattern for flow rules (see below)      |
-+-----------------+----------+-----------------------------------------------+
-| ``flows-to``    | No       | Sink pattern for flow rules (see below)        |
-+-----------------+----------+-----------------------------------------------+
-| ``not-through`` | No       | Sanitizer pattern for flow rules (see below)   |
-+-----------------+----------+-----------------------------------------------+
-| ``dsl``         | No       | DSL type for embedded-language rules (see      |
-|                 |          | below): ``sql``, ``css``, ``html``            |
-+-----------------+----------+-----------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 12 68
+
+   * - Field
+     - Required
+     - Description
+   * - ``match``
+     - Yes, except flow rules
+     - Pattern to search for (same syntax as ``emend find``). Not required for
+       flow rules that use ``flows-from``/``flows-to``.
+   * - ``message``
+     - Yes
+     - Human-readable violation message.
+   * - ``not-within``
+     - No
+     - Scope constraint: exclude matches inside this context (for example,
+       ``def``, ``class``, or ``def test_*``).
+   * - ``fix``
+     - No
+     - Replacement pattern for auto-fix (same syntax as
+       ``emend edit replace``).
+   * - ``flows-from``
+     - No
+     - Source pattern for flow rules (see below).
+   * - ``flows-to``
+     - No
+     - Sink pattern for flow rules (see below).
+   * - ``not-through``
+     - No
+     - Sanitizer pattern or list of alternatives for flow rules (see below).
+   * - ``dsl``
+     - No
+     - Embedded-language type: ``sql``, ``css``, or ``html``.
 
 Patterns support the full emend pattern syntax including metavariables (``$X``, ``$...ARGS``), type constraints (``$X:str``), and all expression/statement forms. See :doc:`patterns` for the complete reference.
 
@@ -345,7 +354,9 @@ instead of ``match``:
      sql-injection:
        flows-from: "request.args.get($X)"
        flows-to: "cursor.execute($QUERY)"
-       not-through: "sanitize($X)"
+       not-through:
+         - "sanitize($X)"
+         - "escape($X)"
        message: "SQL injection: user input flows to cursor.execute()"
 
      no-eval-user-input:
@@ -353,17 +364,25 @@ instead of ``match``:
        flows-to: "eval($CODE)"
        message: "User input flows to eval()"
 
-+-----------------+----------+-----------------------------------------------+
-| Field           | Required | Description                                   |
-+=================+==========+===============================================+
-| ``flows-from``  | Yes      | Source pattern (introduces taint)              |
-+-----------------+----------+-----------------------------------------------+
-| ``flows-to``    | Yes      | Sink pattern (should not receive tainted data) |
-+-----------------+----------+-----------------------------------------------+
-| ``not-through`` | No       | Sanitizer pattern (removes taint)             |
-+-----------------+----------+-----------------------------------------------+
-| ``message``     | Yes      | Violation message                             |
-+-----------------+----------+-----------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 12 68
+
+   * - Field
+     - Required
+     - Description
+   * - ``flows-from``
+     - Yes
+     - Source pattern (introduces taint).
+   * - ``flows-to``
+     - Yes
+     - Sink pattern (should not receive tainted data).
+   * - ``not-through``
+     - No
+     - Sanitizer pattern or list of alternatives.
+   * - ``message``
+     - Yes
+     - Violation message.
 
 How it works
 ~~~~~~~~~~~~
@@ -375,8 +394,8 @@ For each function in the file, emend:
 3. Propagates taint through assignments: if a tainted variable appears on the RHS
    of an assignment, the LHS becomes tainted
 4. Checks if any tainted variable appears in a sink pattern match
-5. If a sanitizer (``not-through``) pattern matches between the source and sink,
-   the violation is suppressed
+5. If any configured sanitizer (``not-through``) matches on the source-to-sink
+   path, including at either endpoint, the violation is suppressed
 
 Analysis is intraprocedural (within each function body) and field-insensitive.
 
@@ -593,7 +612,7 @@ Add the following to your ``.pre-commit-config.yaml``:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.2.0  # replace with desired version tag
+       rev: v0.5.0  # replace with desired version tag
        hooks:
          - id: emend-lint
 
@@ -605,7 +624,7 @@ To use a custom config path:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.2.0
+       rev: v0.5.0
        hooks:
          - id: emend-lint
            args: ["--config", "custom/patterns.yaml"]
@@ -616,7 +635,7 @@ To also auto-fix violations:
 
    repos:
      - repo: https://github.com/lucaswiman/emend
-       rev: v0.2.0
+       rev: v0.5.0
        hooks:
          - id: emend-lint
            args: ["--fix"]

@@ -201,8 +201,8 @@ Overview of cache tables
      - (worktree_id, absolute path)
      - ``(mtime_ns, size, content_hash, indexed_at)``.  Bridges path-based
        queries to the content-hash caches and enables incremental re-indexing
-       via stat-only scans.  Scoped by ``worktree_id`` so each worktree
-       maintains its own stat cache while sharing content-hashed data.
+       via stat-only scans. The worktree identifier also keeps metadata valid
+       if a checkout is moved or reused.
    * - ``symbol_index``
      - (content_hash, file_path, name, ...)
      - One row per symbol definition (function, class, method).  Stores name,

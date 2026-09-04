@@ -17,12 +17,12 @@ cross-project operations (``analyze refs``, ``edit rename``, ``analyze graph``,
 ``analyze deadcode``)
 are significantly faster on subsequent runs.  The cache lives in
 ``.emend/cache/parse.db`` (automatically gitignored and dockerignored) and is
-keyed by file content hash, so it self-invalidates when files change.  Git
-worktrees automatically share a single cache with the main repo.  Re-run
-after large merges or branch switches.
+keyed by file content hash, so it self-invalidates when files change.  Each Git
+worktree owns its mutable ``parse.db`` and ``facts.db`` snapshots, preventing
+one branch's analysis from contaminating another worktree.
 
-When using the MCP server (``emend mcp``), indexing happens automatically in
-the background at startup.
+The MCP server (``emend mcp``) starts without eagerly indexing the whole
+project. Analysis tools build or refresh the facts they need on demand.
 
 Workflow
 --------

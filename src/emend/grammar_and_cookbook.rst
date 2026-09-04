@@ -427,7 +427,7 @@ Use the ``fact_type`` parameter to query: ``symbols``, ``calls``, ``references``
 
 
 Cookbook recipes
----------------
+----------------
 
 Migrate unittest to pytest
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
