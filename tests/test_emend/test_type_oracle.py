@@ -166,33 +166,25 @@ class TestParseTypeString:
 class TestSplitUnion:
     """Tests for _split_union()."""
 
-    def test_simple(self):
-        parts = _split_union("str | None")
-        assert parts == ["str", "None"]
-
-    def test_with_brackets(self):
-        parts = _split_union("list[str | int] | None")
-        assert parts == ["list[str | int]", "None"]
-
-    def test_with_parens(self):
-        parts = _split_union("(int, str) -> bool | None")
-        assert parts == ["(int, str) -> bool", "None"]
+    @pytest.mark.parametrize("raw, expected", [
+        ("str | None", ["str", "None"]),
+        ("list[str | int] | None", ["list[str | int]", "None"]),
+        ("(int, str) -> bool | None", ["(int, str) -> bool", "None"]),
+    ])
+    def test_split(self, raw, expected):
+        assert _split_union(raw) == expected
 
 
 class TestSplitParams:
     """Tests for _split_params()."""
 
-    def test_simple(self):
-        parts = _split_params("str, int")
-        assert parts == ["str", "int"]
-
-    def test_nested_brackets(self):
-        parts = _split_params("str, list[int, float]")
-        assert parts == ["str", "list[int, float]"]
-
-    def test_single(self):
-        parts = _split_params("int")
-        assert parts == ["int"]
+    @pytest.mark.parametrize("raw, expected", [
+        ("str, int", ["str", "int"]),
+        ("str, list[int, float]", ["str", "list[int, float]"]),
+        ("int", ["int"]),
+    ])
+    def test_split(self, raw, expected):
+        assert _split_params(raw) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -552,16 +544,23 @@ class TestFileTypeCache:
         cache.put("abc123", ft)
         assert cache.get("abc123") is ft
 
-    def test_eviction(self):
-        cache = _FileTypeCache(max_entries=4)
-        for i in range(4):
+    @pytest.mark.parametrize("capacity", [1, 2, 3, 4])
+    @pytest.mark.parametrize("disk", [False, True])
+    def test_eviction(self, capacity, disk, tmp_path):
+        db_path = str(tmp_path / "types.db") if disk else None
+        cache = _FileTypeCache(max_entries=capacity, db_path=db_path)
+        for i in range(capacity):
             cache.put(f"key{i}", FileTypes(path=f"test{i}.py"))
-
-        assert len(cache) == 4
-
-        # Adding one more triggers eviction of ~25% (1 entry)
-        cache.put("key4", FileTypes(path="test4.py"))
-        assert len(cache) <= 4  # evicted at least 1
+        cache.put("new", FileTypes(path="new.py"))
+        assert len(cache) <= capacity
+        assert "key0" not in cache._cache
+        assert cache.get("new").path == "new.py"
+        if disk:
+            cache = _FileTypeCache(max_entries=capacity, db_path=db_path)
+            for i in range(capacity):
+                assert cache.get(f"key{i}").path == f"test{i}.py"
+            assert cache.get("new").path == "new.py"
+            assert len(cache) <= capacity
 
     def test_clear(self):
         cache = _FileTypeCache(max_entries=10)
@@ -721,6 +720,10 @@ class TestAdapterCommon:
         ft1 = adapter.infer_file(test_file, project_root=tmp_path)
         ft2 = adapter.infer_file(test_file, project_root=tmp_path)
         assert ft1 is ft2  # same object from cache
+        assert adapter.type_at(test_file, 1, 1, tmp_path) is ft1.type_at(1, 1)
+        other_file = tmp_path / ("other" + ext)
+        other_file.write_text(source)
+        assert adapter.infer_file(other_file, tmp_path).path == str(other_file)
         adapter.clear_cache()
         ft3 = adapter.infer_file(test_file, project_root=tmp_path)
         assert ft3 is not ft1
@@ -929,6 +932,8 @@ class TestPyreflyAdapterIntegration:
         # Should be able to find Foo definition
         foo_bindings = ft.types_for_name("Foo")
         assert len(foo_bindings) > 0
+        binding = foo_bindings[0]
+        assert adapter.type_at(test_file, binding.line, binding.col_start, tmp_path) is binding
 
     def test_clear_cache(self, tmp_path):
         test_file = tmp_path / "clear.py"

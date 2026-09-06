@@ -2,6 +2,7 @@
 
 import json
 import pytest
+import yaml
 from pathlib import Path
 from typer.testing import CliRunner
 
@@ -109,18 +110,21 @@ class TestBatchJSON:
         assert "debug" not in content
         assert "user_id: int" in content
 
-    def test_batch_replace_operation(self, tmp_path):
-        """Batch replace a pattern."""
+    @pytest.mark.parametrize("replacement", ["logger.info($X)", ""])
+    @pytest.mark.parametrize("suffix", [".json", ".yaml", ".yml", ""])
+    def test_batch_replace_operation(self, tmp_path, replacement, suffix):
+        """Batch replacement supports deletion and each input format."""
         test_file = tmp_path / "api.py"
         test_file.write_text("print('hello')\nprint('world')\n")
 
-        ops_file = tmp_path / "ops.json"
-        ops_file.write_text(json.dumps({
+        ops_file = tmp_path / f"ops{suffix}"
+        serialize = json.dumps if suffix == ".json" else yaml.safe_dump
+        ops_file.write_text(serialize({
             "operations": [
                 {
                     "replace": {
                         "pattern": "print($X)",
-                        "replacement": "logger.info($X)",
+                        "replacement": replacement,
                         "path": str(test_file)
                     }
                 }
@@ -130,9 +134,9 @@ class TestBatchJSON:
         result = runner.invoke(app, ["batch", str(ops_file), "--apply"])
 
         assert result.exit_code == 0
-        content = test_file.read_text()
-        assert "logger.info('hello')" in content
-        assert "logger.info('world')" in content
+        assert test_file.read_text().strip() == (
+            "logger.info('hello')\nlogger.info('world')" if replacement else ""
+        )
 
     def test_batch_multiple_operations(self, tmp_path):
         """Batch applies multiple operations in order."""
@@ -247,26 +251,6 @@ class TestBatchYAML:
         assert result.exit_code == 0
         content = test_file.read_text()
         assert "-> str:" in content
-
-    def test_batch_yaml_replace(self, tmp_path):
-        """Batch YAML with replace operation."""
-        test_file = tmp_path / "api.py"
-        test_file.write_text("print('hello')\n")
-
-        ops_file = tmp_path / "ops.yml"
-        ops_file.write_text(
-            "operations:\n"
-            "  - replace:\n"
-            "      pattern: \"print($X)\"\n"
-            "      replacement: \"logger.info($X)\"\n"
-            f"      path: \"{test_file}\"\n"
-        )
-
-        result = runner.invoke(app, ["batch", str(ops_file), "--apply"])
-
-        assert result.exit_code == 0
-        content = test_file.read_text()
-        assert "logger.info('hello')" in content
 
     def test_batch_yaml_multiple_ops(self, tmp_path):
         """Batch YAML with multiple operations in sequence."""

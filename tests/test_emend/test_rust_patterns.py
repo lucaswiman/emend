@@ -146,16 +146,18 @@ class TestRustIRCompilation:
         assert ir is not None
         assert ir["op"] == "-"
 
-    def test_tuple(self):
-        ir = compile_pattern_to_rust_ir("($X, $Y)")
-        assert ir is not None
-        assert ir["type"] == "tuple"
-        assert len(ir["elements"]) == 2
-
-    def test_tuple_three(self):
-        ir = compile_pattern_to_rust_ir("($X, $Y, $Z)")
-        assert ir is not None
-        assert len(ir["elements"]) == 3
+    @pytest.mark.parametrize("pattern,kind,names", [
+        ("($X, $Y)", "tuple", "XY"),
+        ("($X, $Y, $Z)", "tuple", "XYZ"),
+        ("()", "tuple", ""),
+        ("[$X, $Y]", "list", "XY"),
+        ("{$X, $Y}", "set", "XY"),
+    ])
+    def test_container_elements(self, pattern, kind, names):
+        assert compile_pattern_to_rust_ir(pattern) == {
+            "type": kind,
+            "elements": [{"type": "metavar", "name": name} for name in names],
+        }
 
     def test_none_literal_in_call(self):
         """None in patterns should map to 'none_literal' type, not 'name'."""
@@ -192,12 +194,6 @@ class TestRustIRCompilation:
         ir = compile_pattern_to_rust_ir("[]")
         assert ir is not None
         assert ir["type"] == "empty_list"
-
-    def test_list_with_elements(self):
-        ir = compile_pattern_to_rust_ir("[$X, $Y]")
-        assert ir is not None
-        assert ir["type"] == "list"
-        assert len(ir["elements"]) == 2
 
     def test_integer(self):
         ir = compile_pattern_to_rust_ir("42")

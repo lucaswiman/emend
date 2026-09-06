@@ -10,9 +10,7 @@ from emend.flow_ir import (
     format_witness,
     from_flow_check,
     from_lint_rule,
-    _flow_witness_to_steps,
 )
-from emend.transform import PatternMatch
 
 
 # ---------------------------------------------------------------------------
@@ -100,25 +98,6 @@ class TestFormatWitness:
         assert lines == ["step L1"]
 
 
-class TestFlowWitnessToSteps:
-    def test_conversion(self):
-        from emend.lint import FlowWitness
-
-        fw = FlowWitness(
-            source_line=2,
-            source_text="request.args.get('q')",
-            sink_line=5,
-            sink_text="cursor.execute(raw)",
-            taint_chain=[(2, "raw"), (3, "data")],
-        )
-        steps = _flow_witness_to_steps(fw, "app.py")
-        assert len(steps) == 3  # source + 1 propagation (line 3) + sink
-        assert steps[0].kind == "source"
-        assert steps[0].line == 2
-        assert steps[1].kind == "propagation"
-        assert steps[1].line == 3
-        assert steps[2].kind == "sink"
-        assert steps[2].line == 5
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +110,8 @@ class TestExecuteFlowSpecPython:
         source = (
             "def handle():\n"
             "    user_input = request.args.get('name')\n"
-            "    cursor.execute(user_input)\n"
+            "    data = user_input\n"
+            "    cursor.execute(data)\n"
         )
         f = tmp_path / "app.py"
         f.write_text(source)
@@ -149,7 +129,9 @@ class TestExecuteFlowSpecPython:
         assert v.file_path == str(f)
         assert v.source_text
         assert v.sink_text
-        assert len(v.witness) >= 2  # at least source + sink
+        assert [(step.kind, step.line) for step in v.witness] == [
+            ("source", 2), ("propagation", 3), ("sink", 4),
+        ]
 
     def test_sanitizer_blocks(self, tmp_path):
         source = (
@@ -207,73 +189,22 @@ class TestFlowViolation:
 
 
 class TestExecuteFlowSpecDatalog:
-    def test_preserves_exact_match_locations(self, monkeypatch, tmp_path):
-        class _FakeGraph:
-            def symbols(self, **kwargs):
-                return []
-
-            def cfg_blocks(self, **kwargs):
-                return []
-
-            def source_locs(self, **kwargs):
-                return []
-
-            def flow_rule_check_datalog(self, **kwargs):
-                assert kwargs["include_locations"] is True
-                return [(str(src_file), "<module>", "raw", "raw", 0, 0)]
+    def test_preserves_exact_match_locations(self, tmp_path):
+        from emend.fact_graph import FactGraph
 
         src_file = tmp_path / "app.py"
-        source = (
-            "raw = request.args.get('name')\n"
-            "cursor.execute(raw)\n"
-        )
+        source = "def handle(raw):\n    read(raw)\n    sink(raw)\n"
         src_file.write_text(source)
-
-        spec = FlowSpec(
-            name="sql-injection",
-            message="SQL injection risk",
-            sources="request.args.get($X)",
-            sinks="cursor.execute($X)",
-        )
-
-        def _fake_find_pattern(pattern, file_path, **kwargs):
-            if pattern == "request.args.get($X)":
-                return [
-                    PatternMatch(
-                        node_text="request.args.get(raw)",
-                        captures={"X": "raw"},
-                        line=1,
-                        matched_text="request.args.get(raw)",
-                        col=7,
-                    )
-                ]
-            if pattern == "cursor.execute($X)":
-                return [
-                    PatternMatch(
-                        node_text="cursor.execute(raw)",
-                        captures={"X": "raw"},
-                        line=2,
-                        matched_text="cursor.execute(raw)",
-                        col=1,
-                    )
-                ]
-            return []
-
-        monkeypatch.setattr("emend.transform.find_pattern", _fake_find_pattern)
-
-        violations = execute_flow_spec(
-            spec,
-            str(src_file),
-            source,
-            "python",
-            fact_graph=_FakeGraph(),
-        )
+        graph = FactGraph.build_from_files([str(src_file)])
+        spec = FlowSpec(name="unsafe", message="Unsafe input",
+                        sources="read($X)", sinks="sink($X)")
+        violations = execute_flow_spec(spec, str(src_file), source, "python", graph)
 
         assert len(violations) == 1
         violation = violations[0]
-        assert violation.line == 2
-        assert violation.source_line == 1
-        assert violation.sink_text == "cursor.execute(raw)"
-        assert len(violation.witness) == 2
-        assert violation.witness[0].line == 1
-        assert violation.witness[1].line == 2
+        assert (violation.source_line, violation.line, violation.col) == (2, 3, 4)
+        assert violation.source_text == "read(raw)"
+        assert violation.sink_text == "sink(raw)"
+        assert [(s.kind, s.line, s.col) for s in violation.witness] == [
+            ("source", 2, 4), ("sink", 3, 4),
+        ]

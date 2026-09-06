@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from emend.errors import BUG_EXCEPTIONS
 
 if TYPE_CHECKING:
     from emend.fact_graph import FactGraph
-    from emend.lint import LintRule, FlowWitness
+    from emend.checks.pattern_rules import LintRule
     from emend.policy import FlowCheck
 
 logger = logging.getLogger(__name__)
@@ -134,42 +135,6 @@ def format_witness(steps: list[WitnessStep]) -> list[str]:
 # Execution engine
 # ---------------------------------------------------------------------------
 
-def _flow_witness_to_steps(
-    fw: "FlowWitness",
-    file_path: str,
-) -> list[WitnessStep]:
-    """Convert a lint ``FlowWitness`` to a list of ``WitnessStep``."""
-    steps: list[WitnessStep] = []
-    steps.append(WitnessStep(
-        file_path=file_path,
-        func_qn="",
-        block_id=0,
-        line=fw.source_line,
-        var_name=fw.source_text,
-        kind="source",
-    ))
-    for chain_line, chain_var in fw.taint_chain:
-        if chain_line == fw.source_line:
-            continue  # already covered by source step
-        steps.append(WitnessStep(
-            file_path=file_path,
-            func_qn="",
-            block_id=0,
-            line=chain_line,
-            var_name=chain_var,
-            kind="propagation",
-        ))
-    steps.append(WitnessStep(
-        file_path=file_path,
-        func_qn="",
-        block_id=0,
-        line=fw.sink_line,
-        var_name=fw.sink_text,
-        kind="sink",
-    ))
-    return steps
-
-
 def execute_flow_spec(
     spec: FlowSpec,
     file_path: str,
@@ -182,11 +147,36 @@ def execute_flow_spec(
     If *fact_graph* is provided, resolves matches via
     :class:`~emend.location_resolver.LocationResolver` and runs the Datalog
     ``flow_rule_check_datalog()`` engine.  Otherwise falls back to the Python
-    regex taint tracker in ``lint._check_flow_rule()``.
+    line-order taint tracker.
     """
     if fact_graph is not None:
         return _execute_via_datalog(spec, file_path, source, language, fact_graph)
     return _execute_via_python(spec, file_path, source, language)
+
+
+def _assignments_from_cfgs(
+    source: str,
+    file_path: str,
+    func_start: int,
+    func_end: int,
+) -> list[tuple[int, str, str]]:
+    """Find assignments via tree-sitter CFG block defs.
+
+    Returns list of ``(abs_line, target_name, rhs_text)`` for writes/aug_writes
+    within the given function's line range.
+    """
+    from emend.trace import _defs_from_cfgs, _extract_rhs_from_line
+
+    ext = Path(file_path).suffix.lstrip('.') or 'py'
+    source_lines = source.splitlines()
+    assignments: list[tuple[int, str, str]] = []
+
+    for abs_line, var_name in _defs_from_cfgs(source, func_start, func_end, ext=ext):
+        rhs = _extract_rhs_from_line(source_lines, abs_line)
+        if rhs is not None:
+            assignments.append((abs_line, var_name, rhs))
+
+    return sorted(assignments, key=lambda a: a[0])
 
 
 def _execute_via_python(
@@ -195,38 +185,181 @@ def _execute_via_python(
     source: str,
     language: str,
 ) -> list[FlowViolation]:
-    """Fallback: run flow check via lint.py's Python taint tracker."""
-    from emend.lint import LintRule, _check_flow_rule
+    """Check a flow-based lint rule within each function in the file.
 
-    rule = LintRule(
-        name=spec.name,
-        find="",
-        message=spec.message,
-        flows_from=spec.sources,
-        flows_to=spec.sinks,
-        not_through=spec.sanitizers,
+    For each function body, finds source and sink pattern matches, then
+    propagates taint using the intraprocedural flow analysis engine.
+    """
+    from emend import emend_core
+    from emend.ast_utils import _rust_dict_to_nested_symbol
+    from emend.trace import _extract_identifiers
+    from emend.transform import find_pattern
+
+    violations: list[FlowViolation] = []
+
+    # Get function definitions from source
+    ext = Path(file_path).suffix.lstrip('.') or 'py'
+    rust_syms = emend_core.collect_symbols_from_str(source, ext=ext)
+    symbols = [
+        _rust_dict_to_nested_symbol(d) for d in rust_syms
+        if d.get("kind") not in ("variable", "reference")
+    ]
+
+    # Flatten to get all functions (including nested methods)
+    def _all_functions(syms):
+        for sym in syms:
+            if sym.kind in ('function', 'async_function', 'method', 'async_method'):
+                yield sym
+            yield from _all_functions(sym.children)
+
+    # Hoist pattern matching and line splitting out of the per-function loop
+    all_source_matches = find_pattern(
+        spec.sources, file_path, source_override=source, language=language
     )
-    lint_violations = _check_flow_rule(rule, file_path, source, language)
-
-    results: list[FlowViolation] = []
-    for lv in lint_violations:
-        witness_steps: list[WitnessStep] = []
-        if lv.witness is not None:
-            witness_steps = _flow_witness_to_steps(lv.witness, file_path)
-
-        results.append(FlowViolation(
-            spec_name=spec.name,
-            message=lv.message or spec.message,
-            severity=spec.severity,
-            file_path=lv.file_path,
-            line=lv.line,
-            col=lv.col,
-            source_line=lv.witness.source_line if lv.witness else 0,
-            source_text=lv.witness.source_text if lv.witness else "",
-            sink_text=lv.witness.sink_text if lv.witness else "",
-            witness=witness_steps,
+    all_sink_matches = find_pattern(
+        spec.sinks, file_path, source_override=source, language=language
+    )
+    all_sanitizer_matches = []
+    sanitizers = (
+        [spec.sanitizers]
+        if isinstance(spec.sanitizers, str)
+        else (spec.sanitizers or [])
+    )
+    for sanitizer in sanitizers:
+        all_sanitizer_matches.extend(find_pattern(
+            sanitizer, file_path, source_override=source, language=language
         ))
-    return results
+
+    # Intraprocedural flow analysis
+    all_lines = source.splitlines()
+    total_lines = len(all_lines)
+
+    # Build the list of scopes to analyze.  When collect_symbols_from_str
+    # doesn't detect any functions (e.g. TypeScript arrow functions or
+    # top-level Rust code), fall back to analyzing the entire file as one
+    # scope so that source→sink pairs are still checked.
+    class _FakeScope:
+        def __init__(self, start: int, end: int):
+            self.line_start = start
+            self.line_end = end
+
+    function_scopes = list(_all_functions(symbols))
+    if not function_scopes and all_source_matches and all_sink_matches:
+        function_scopes = [_FakeScope(1, total_lines)]
+
+    for sym in function_scopes:
+        # Filter to matches within this function's line range
+        func_sources = [
+            m for m in all_source_matches
+            if m.line is not None and sym.line_start <= m.line <= sym.line_end
+        ]
+        func_sinks = [
+            m for m in all_sink_matches
+            if m.line is not None and sym.line_start <= m.line <= sym.line_end
+        ]
+
+        if not func_sources or not func_sinks:
+            continue
+
+        # Find assignments within the function via tree-sitter CFG defs.
+        assignments = _assignments_from_cfgs(
+            source, file_path,
+            func_start=sym.line_start,
+            func_end=sym.line_end,
+        )
+        # Build a line -> [var_name, ...] lookup for O(1) assignment queries.
+        assignments_lhs: dict[int, list[str]] = {}
+        for assign_line, target, _rhs in assignments:
+            assignments_lhs.setdefault(assign_line, []).append(target)
+
+        for src_match in func_sources:
+            src_line = src_match.line or 0
+            tainted: dict[str, int] = {}  # name -> line where it became tainted
+
+            for cap_name, cap_text in src_match.captures.items():
+                for name in _extract_identifiers(cap_text):
+                    tainted[name] = src_line
+
+            if src_match.matched_text:
+                # If this source line is an assignment, also taint the LHS variable.
+                # Uses tree-sitter CFG defs (already computed above) instead of regex.
+                for lhs_name in assignments_lhs.get(src_line, []):
+                    tainted[lhs_name] = src_line
+
+            taint_chain: list[tuple[int, str]] = [
+                (src_line, ', '.join(sorted(tainted.keys())))
+            ]
+
+            for assign_line, target, rhs in sorted(assignments, key=lambda a: a[0]):
+                if assign_line <= src_line:
+                    continue
+                rhs_names = _extract_identifiers(rhs)
+                if rhs_names & set(tainted.keys()):
+                    tainted[target] = assign_line
+                    taint_chain.append((assign_line, target))
+
+            for sink_match in func_sinks:
+                sink_line = sink_match.line or 0
+                if sink_line <= src_line:
+                    continue
+
+                sink_names: set[str] = set()
+                for cap_name, cap_text in sink_match.captures.items():
+                    sink_names |= _extract_identifiers(cap_text)
+                if sink_match.matched_text:
+                    sink_names |= _extract_identifiers(sink_match.matched_text or "")
+
+                tainted_at_sink = {
+                    name for name, line in tainted.items()
+                    if line <= sink_line
+                }
+
+                if not (sink_names & tainted_at_sink):
+                    continue
+
+                sanitized = False
+                if all_sanitizer_matches:
+                    for san_match in all_sanitizer_matches:
+                        san_line = san_match.line or 0
+                        if src_line <= san_line < sink_line:
+                            san_names: set[str] = set()
+                            for cap_name, cap_text in san_match.captures.items():
+                                san_names |= _extract_identifiers(cap_text)
+                            if san_match.matched_text:
+                                san_names |= _extract_identifiers(san_match.matched_text or "")
+                            if san_names & tainted_at_sink:
+                                sanitized = True
+                                break
+                            # If the sanitizer line is an assignment, check whether
+                            # the LHS variable is tainted — uses tree-sitter CFG defs.
+                            if any(
+                                lhs_name in tainted_at_sink
+                                for lhs_name in assignments_lhs.get(san_line, [])
+                            ):
+                                sanitized = True
+                                break
+
+                if sanitized:
+                    continue
+
+                src_text = (src_match.matched_text or "").strip()
+                sink_text = (sink_match.matched_text or "").strip()
+                witness = [
+                    WitnessStep(file_path=file_path, func_qn="", block_id=0,
+                                line=src_line, var_name=src_text, kind="source"),
+                    *[WitnessStep(file_path=file_path, func_qn="", block_id=0,
+                                  line=line, var_name=name, kind="propagation")
+                      for line, name in taint_chain if src_line < line <= sink_line],
+                    WitnessStep(file_path=file_path, func_qn="", block_id=0,
+                                line=sink_line, var_name=sink_text, kind="sink"),
+                ]
+                violations.append(FlowViolation(
+                    spec_name=spec.name, message=spec.message, severity=spec.severity,
+                    file_path=file_path, line=sink_line, source_line=src_line,
+                    source_text=src_text, sink_text=sink_text, witness=witness,
+                ))
+
+    return violations
 
 
 def _var_name_from_match(m: Any) -> str:
@@ -251,124 +384,31 @@ def _execute_via_datalog(
 
     resolver = LocationResolver.from_fact_graph(fact_graph, file_path)
 
-    def _remember_match(
-        store: dict[tuple[str, str, str, int], dict[str, object]],
-        fallback_store: dict[tuple[str, str, str], dict[str, object]],
-        *,
-        fp: str,
-        fq: str,
-        var_name: str,
-        block_id: int,
-        line: int,
-        col: int,
-        text: str,
-    ) -> None:
-        meta = {
-            "line": line,
-            "col": col,
-            "text": text,
-        }
-        store.setdefault((fp, fq, var_name, block_id), meta)
-        fallback_store.setdefault((fp, fq, var_name), meta)
+    def resolve_matches(patterns):
+        locations, lines, metadata, metadata_by_var = [], {}, {}, {}
+        for pattern in patterns:
+            for match in find_pattern(
+                pattern, file_path, source_override=source, language=language,
+            ):
+                if match.line is None:
+                    continue
+                loc = resolver.resolve(file_path, match.line, match.col or 0, match.captures)
+                var_name = _var_name_from_match(match)
+                key = (loc.file_path, loc.func_qn, var_name, loc.block_id)
+                locations.append(key)
+                lines.setdefault((loc.file_path, loc.func_qn, loc.block_id), match.line)
+                meta = {"line": match.line, "col": match.col or 0,
+                        "text": (match.matched_text or var_name).strip()}
+                metadata.setdefault(key, meta)
+                metadata_by_var.setdefault(key[:3], meta)
+        return locations, lines, metadata, metadata_by_var
 
-    # Resolve source matches
-    source_matches = find_pattern(
-        spec.sources, file_path, source_override=source, language=language,
-    )
-    sink_matches = find_pattern(
-        spec.sinks, file_path, source_override=source, language=language,
-    )
-
-    if not source_matches or not sink_matches:
+    source_locs, source_lines, source_meta, source_meta_by_var = resolve_matches([spec.sources])
+    sink_locs, sink_lines, sink_meta, sink_meta_by_var = resolve_matches([spec.sinks])
+    if not source_locs or not sink_locs:
         return []
-
-    # Build resolved location tuples for Datalog
-    source_locs: list[tuple[str, str, str, int]] = []
-    source_lines: dict[tuple[str, str, int], int] = {}
-    source_meta: dict[tuple[str, str, str, int], dict[str, object]] = {}
-    source_meta_by_var: dict[tuple[str, str, str], dict[str, object]] = {}
-    for m in source_matches:
-        if m.line is None:
-            continue
-        loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-        var_name = _var_name_from_match(m)
-        source_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
-        key = (loc.file_path, loc.func_qn, loc.block_id)
-        if key not in source_lines:
-            source_lines[key] = m.line
-        _remember_match(
-            source_meta,
-            source_meta_by_var,
-            fp=loc.file_path,
-            fq=loc.func_qn,
-            var_name=var_name,
-            block_id=loc.block_id,
-            line=m.line,
-            col=m.col or 0,
-            text=(m.matched_text or var_name).strip(),
-        )
-
-    sink_locs: list[tuple[str, str, str, int]] = []
-    sink_lines: dict[tuple[str, str, int], int] = {}
-    sink_meta: dict[tuple[str, str, str, int], dict[str, object]] = {}
-    sink_meta_by_var: dict[tuple[str, str, str], dict[str, object]] = {}
-    for m in sink_matches:
-        if m.line is None:
-            continue
-        loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-        var_name = _var_name_from_match(m)
-        sink_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
-        key = (loc.file_path, loc.func_qn, loc.block_id)
-        if key not in sink_lines:
-            sink_lines[key] = m.line
-        _remember_match(
-            sink_meta,
-            sink_meta_by_var,
-            fp=loc.file_path,
-            fq=loc.func_qn,
-            var_name=var_name,
-            block_id=loc.block_id,
-            line=m.line,
-            col=m.col or 0,
-            text=(m.matched_text or var_name).strip(),
-        )
-
-    # Resolve blocker (not-through) matches
-    blocker_locs: list[tuple[str, str, str, int]] | None = None
-    blocker_lines: dict[tuple[str, str, int], int] = {}
-    sanitizers = _normalise_sanitizers(spec.sanitizers)
-    if sanitizers:
-        san_matches = []
-        for sanitizer in sanitizers:
-            san_matches.extend(find_pattern(
-                sanitizer, file_path, source_override=source, language=language,
-            ))
-        if san_matches:
-            blocker_locs = []
-            for m in san_matches:
-                if m.line is None:
-                    continue
-                loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-                var_name = _var_name_from_match(m)
-                blocker_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
-                key = (loc.file_path, loc.func_qn, loc.block_id)
-                if key not in blocker_lines:
-                    blocker_lines[key] = m.line
-
-    # Resolve through matches
-    through_locs: list[tuple[str, str, str, int]] | None = None
-    if spec.through:
-        through_matches = find_pattern(
-            spec.through, file_path, source_override=source, language=language,
-        )
-        if through_matches:
-            through_locs = []
-            for m in through_matches:
-                if m.line is None:
-                    continue
-                loc = resolver.resolve(file_path, m.line, m.col or 0, m.captures)
-                var_name = _var_name_from_match(m)
-                through_locs.append((loc.file_path, loc.func_qn, var_name, loc.block_id))
+    blocker_locs, blocker_lines, _, _ = resolve_matches(_normalise_sanitizers(spec.sanitizers))
+    through_locs, _, _, _ = resolve_matches([spec.through] if spec.through else [])
 
     try:
         raw_violations = fact_graph.flow_rule_check_datalog(

@@ -397,7 +397,7 @@ class TestErrorFileCaching:
     def test_pyright_infer_file_caches_on_error(self, tmp_path):
         """PyrightAdapter.infer_file caches an empty result when a file errors."""
         import hashlib
-        from emend.type_oracle import PyrightAdapter, _content_hash
+        from emend.type_oracle import PyrightAdapter, _file_cache_key
 
         db_path = str(tmp_path / "parse.db")
         adapter = PyrightAdapter(db_path=db_path)
@@ -406,7 +406,7 @@ class TestErrorFileCaching:
         # Write non-UTF-8 bytes to trigger UnicodeDecodeError in read_text()
         py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
 
-        content_hash = _content_hash(py)
+        content_hash = _file_cache_key(py)
         # First call — should catch the error and cache an empty result
         ft = adapter.infer_file(py)
         assert ft.bindings == []
@@ -418,7 +418,7 @@ class TestErrorFileCaching:
 
     def test_ty_infer_file_caches_on_error(self, tmp_path):
         """TyAdapter.infer_file caches an empty result when a file errors."""
-        from emend.type_oracle import TyAdapter, _content_hash
+        from emend.type_oracle import TyAdapter, _file_cache_key
 
         db_path = str(tmp_path / "parse.db")
         adapter = TyAdapter(db_path=db_path)
@@ -426,7 +426,7 @@ class TestErrorFileCaching:
         py = tmp_path / "bad.py"
         py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
 
-        content_hash = _content_hash(py)
+        content_hash = _file_cache_key(py)
         ft = adapter.infer_file(py)
         assert ft.bindings == []
 
