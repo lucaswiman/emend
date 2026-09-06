@@ -64,7 +64,6 @@ from .project_iter import (
     _collect_source_files,
     _collect_source_files_scandir,
     _ext_from_path,
-    _file_list_cache,
     _file_to_module,
     _files_importing_module,
     _find_project_root,
@@ -229,7 +228,7 @@ __all__ = [
     "query_symbol_index", "warm_caches", "_build_venv_index",
     # project_iter
     "_SKIP_DIRS", "_add_import_text", "_collect_source_files", "_collect_source_files_scandir",
-    "_ext_from_path", "_file_list_cache", "_file_to_module", "_files_importing_module",
+    "_ext_from_path", "_file_to_module", "_files_importing_module",
     "_find_project_root", "_find_source_root", "_get_imports", "_index_prefilter",
     "_normalize_module_qn", "_read_and_filter_py", "detect_project_languages",
     "extract_pattern_literals", "find_pattern_in_project", "ProjectPatternMatch",

@@ -542,44 +542,32 @@ def _dispatch_with_returns_filter(
     *single_fn* is called with each concrete selector and should return a diff
     string (empty string = no change).
     """
-    if returns_filter:
-        files = (
-            selector.expand_file_glob(language=language)
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            for concrete in _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle
-            ):
-                try:
-                    result = single_fn(concrete)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    if not returns_filter and not selector.has_file_glob():
+        return single_fn(selector)
 
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob(language=language)
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
+    files = (
+        selector.expand_file_glob(language=language)
+        if selector.has_file_glob()
+        else [selector.file_path]
+    )
+    all_results = []
+    for fpath in files:
+        base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
+        selectors = (
+            _expand_selector_with_returns_filter(base, returns_filter, type_oracle)
+            if returns_filter else [base]
+        )
+        for concrete in selectors:
             try:
                 result = single_fn(concrete)
                 if result:
                     all_results.append(result)
             except (ValueError, FileNotFoundError):
                 continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return single_fn(selector)
+    if not all_results:
+        suffix = f" with --returns {returns_filter}" if returns_filter else ""
+        raise ValueError(f"No symbols found matching {selector_str}{suffix}")
+    return '\n'.join(all_results)
 
 
 def _cmd_edit_single(

@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING
 
 from emend.errors import BUG_EXCEPTIONS
 
+from emend.checks.violations import PolicyViolation
+
 if TYPE_CHECKING:
-    from emend.policy import Policy, PolicyViolation
+    from emend.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,6 @@ def run_sequence_check(
     """Run a temporal sequence check against the project's fact graph."""
     from emend.fact_graph import FactGraph, compile_sequence_rule
     from emend.checks.flow import WitnessStep, format_witness as _fmt_witness
-    from emend.policy import PolicyViolation
 
     violations: list[PolicyViolation] = []
     try:
