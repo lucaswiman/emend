@@ -307,6 +307,8 @@ class TestSequenceDuplicates:
                   "c": "".join(first.splitlines(keepends=True)[1:]) + tail,
                   "short": "".join(first.splitlines(keepends=True)[:3]),
                   "unrelated": "    obj.open()\n    obj.send()\n    obj.check()\n    obj.disconnect()\n"}
+        bodies.update({f"comments_{name}": f"    obj.{name}()\n" + "    # one\n    # two\n    # three\n    # four\n" + f"    obj.{name}()\n"
+                       for name in ("left", "right")})
         payloads = {}
         resolver = emend_core.PyScopeResolver(str(tmp_path))
         for name, body in bodies.items():
@@ -356,7 +358,7 @@ class TestSequenceDuplicates:
 
         _write_files(tmp_path, {
             "a.py": SEQUENCE_DUP_A,
-            "b.py": SEQUENCE_DUP_B,
+            "b.py": SEQUENCE_DUP_B.replace("\n    ", "\n    # explanation\n    "),
         })
 
         clusters = query_duplicates(
@@ -367,8 +369,8 @@ class TestSequenceDuplicates:
         # The shared initialization run spans both files.
         files = {m.file for m in seq[0].members}
         assert len(files) >= 2
-        assert all(m.stmt_count == 7 and (m.start_line, m.end_line) == (2, 8)
-                   for m in seq[0].members)
+        assert all(m.stmt_count == 7 for m in seq[0].members)
+        assert {(m.start_line, m.end_line) for m in seq[0].members} == {(2, 8), (3, 15)}
 
 
 # ---------------------------------------------------------------------------

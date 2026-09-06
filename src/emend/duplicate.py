@@ -37,7 +37,7 @@ from emend.duplicate_heuristics import (
 # Cached payloads include the containing function/class symbol. Bump this whenever
 # the payload shape changes so stale rows cannot produce different output from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "3"
+DUP_CACHE_VERSION = "4"
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -469,6 +469,8 @@ def build_statement_seqs_for_cache(
                                          binding_scope=(func_start, func_end), bound_map=bound_map)
 
                 for stmt in body.named_children():
+                    if stmt.kind == "comment":
+                        continue
                     try:
                         h = _stmt_canonical_hash(
                             stmt, func_start, func_end, qn_at, def_loc, bound_map
