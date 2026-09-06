@@ -1,7 +1,7 @@
 """Production duplicate code detection via AST canonicalization.
 
 - Exact canonical Merkle hashes (variable-renamed, literal-preserving)
-- Sibling-sequence duplicate runs (winnowing)
+- Contiguous sibling-statement duplicate runs
 - Boilerplate suppression via duplicate_heuristics
 
 Shared backend for CLI (``emend analyze dupes``), lint, and MCP.
@@ -34,10 +34,10 @@ from emend.duplicate_heuristics import (
 # Constants
 # ---------------------------------------------------------------------------
 
-# Cached subtree payloads include the containing symbol.  Bump this whenever
+# Cached payloads include the containing function/class symbol. Bump this whenever
 # the payload shape changes so stale rows cannot produce different output from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "2"
+DUP_CACHE_VERSION = "3"
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -51,8 +51,8 @@ _CONTROL_FLOW_KINDS: frozenset[str] = frozenset({
 import keyword as _keyword_mod
 _PYTHON_KEYWORDS: frozenset[str] = frozenset(_keyword_mod.kwlist) | {"self", "cls"}
 
-# Winnowing parameters
-WINNOW_W = 4   # window size
+# Minimum contiguous run; individual shared statements are not duplicates.
+MIN_SEQUENCE_STATEMENTS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -78,36 +78,6 @@ class DuplicateCluster:
     score: float
     members: list[DuplicateMember] = field(default_factory=list)
     explanation: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Raw Merkle hashing (bottom-up, per-node)
-# ---------------------------------------------------------------------------
-
-
-def _compute_raw_hashes(root) -> dict[tuple[int, int], bytes]:
-    """Post-order walk producing raw Merkle hash for every node.
-
-    Hash = blake2b(kind || field_name || H(child_1) || ... || H(child_n)).
-    Leaves hash their source text so distinct identifiers/operators differ.
-    """
-    hashes: dict[tuple[int, int], bytes] = {}
-
-    def walk(n) -> bytes:
-        h = blake2b(digest_size=16)
-        h.update(n.kind.encode())
-        if n.named_child_count > 0:
-            for field_name, child in n.named_children_with_fields():
-                h.update((field_name or "").encode("utf-8", errors="ignore"))
-                h.update(walk(child))
-        else:
-            h.update(n.text().encode("utf-8", errors="ignore"))
-        digest = h.digest()
-        hashes[(n.start_byte, n.end_byte)] = digest
-        return digest
-
-    walk(root)
-    return hashes
 
 
 # ---------------------------------------------------------------------------
@@ -226,67 +196,68 @@ def canonicalize_subtree(
     node,
     qn_at: dict[tuple[int, int], str],
     def_loc: dict[str, tuple[int, int]],
+    *,
+    binding_scope: tuple[int, int] | None = None,
+    bound_map: dict[str, str] | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Canonicalize a subtree with production rules.
 
     Production canonicalization:
-    - Alpha-rename variable bindings/usages (bound_i / free_i)
-    - Keep attribute names and method names literal
+    - Alpha-rename bindings/usages defined inside the subtree
+    - Keep free identifiers, attribute names and keyword names literal
     - Keep literal constants (strings, numbers, booleans, None)
-    - Ignore comments/trivia (via is_named filter)
+    - Preserve operators and punctuation; ignore comments/trivia
 
     Returns (kind_seq, token_seq) as pre-order sequences.
     """
-    subtree_start = node.start_point[0]
-    subtree_end = node.end_point[0]
+    subtree_start, subtree_end = binding_scope or (node.start_point[0], node.end_point[0])
 
-    bound_counter = iter(range(10000))
-    free_counter = iter(range(10000))
-    bound_map: dict[str, str] = {}
-    free_map: dict[str, str] = {}
+    if bound_map is None:
+        bound_map = {}
+    class_scopes: set[str] = set()
+
+    def record_class(n):
+        if n.kind == "class_definition":
+            name = n.child_by_field_name("name")
+            if name is not None and (qn := qn_at.get(name.start_point)):
+                class_scopes.add(qn)
+
+    def collect_classes(n):
+        record_class(n)
+        for child in n.named_children():
+            collect_classes(child)
+
+    collect_classes(node)
+    ancestor = node.parent()
+    while ancestor is not None:
+        record_class(ancestor)
+        ancestor = ancestor.parent()
 
     kind_seq: list[str] = []
     token_seq: list[str] = []
 
-    def walk(n, is_attribute: bool = False):
-        if not n.is_named:
+    def walk(n, preserve_name: bool = False):
+        if n.kind == "comment":
             return
 
         kind_seq.append(n.kind)
 
-        # String nodes: treat the whole node as a leaf token "str"
-        if n.kind == "string":
-            token_seq.append("str")
-            return
-
-        if n.named_child_count == 0:
-            # Leaf node
+        if n.child_count == 0:
             text = n.text()
-            if n.kind == "identifier" and not is_attribute:
-                pos = (n.start_point[0], n.start_point[1])
-                qn = qn_at.get(pos)
-                if qn and text not in _PYTHON_KEYWORDS:
-                    if _is_bound_inside(qn, def_loc, subtree_start, subtree_end):
-                        if qn not in bound_map:
-                            bound_map[qn] = f"bound_{next(bound_counter)}"
-                        token_seq.append(bound_map[qn])
-                    else:
-                        if qn not in free_map:
-                            free_map[qn] = f"free_{next(free_counter)}"
-                        token_seq.append(free_map[qn])
-                else:
-                    token_seq.append(text)
-            elif n.kind in ("integer", "float"):
-                # Numeric literals → canonical token "num"
-                token_seq.append("num")
-            else:
-                # Keywords, attribute names, booleans, None, operators as-is
-                token_seq.append(text)
+            if n.kind == "identifier" and not preserve_name:
+                qn = qn_at.get(n.start_point)
+                if (qn and qn.rpartition(".")[0] not in class_scopes
+                        and _is_bound_inside(qn, def_loc, subtree_start, subtree_end)):
+                    text = bound_map.setdefault(qn, f"bound_{len(bound_map)}")
+            token_seq.append(text)
         else:
-            for field_name, child in n.named_children_with_fields():
-                # Attribute names stay literal
-                is_attr = (n.kind == "attribute" and field_name == "attribute")
-                walk(child, is_attribute=is_attr or is_attribute)
+            # These names are labels, not variable references, even when the
+            # resolver reports a same-spelled local at their position.
+            label = n.child_by_field_name(
+                "attribute" if n.kind == "attribute" else "name"
+            ) if n.kind in ("attribute", "keyword_argument") else None
+            for child in n.children():
+                walk(child, label is not None and child.start_byte == label.start_byte)
 
     walk(node)
     return tuple(kind_seq), tuple(token_seq)
@@ -373,72 +344,12 @@ def _stmt_canonical_hash(
     func_end: int,
     qn_at: dict[tuple[int, int], str],
     def_loc: dict[str, tuple[int, int]],
+    bound_map: dict[str, str],
 ) -> bytes:
-    """Return a 16-byte canonical hash for a single statement.
-
-    The bound/free scope is taken from the enclosing function's line range
-    so sibling statements share consistent renaming context.
-    """
-    bound_map: dict[str, str] = {}
-    free_map: dict[str, str] = {}
-    bound_ctr = iter(range(10000))
-    free_ctr = iter(range(10000))
-
-    def assign(qn: str, text: str) -> str:
-        if text in _PYTHON_KEYWORDS:
-            return text
-        if _is_bound_inside(qn, def_loc, func_start, func_end):
-            if qn not in bound_map:
-                bound_map[qn] = f"bound_{next(bound_ctr)}"
-            return bound_map[qn]
-        else:
-            if qn not in free_map:
-                free_map[qn] = f"free_{next(free_ctr)}"
-            return free_map[qn]
-
-    def walk(n) -> bytes:
-        if n.kind == "string":
-            return blake2b(b"string|str", digest_size=16).digest()
-        if n.kind == "attribute":
-            obj = n.child_by_field_name("object")
-            attr = n.child_by_field_name("attribute")
-            h = blake2b(digest_size=16)
-            h.update(b"attribute")
-            if obj is not None:
-                h.update(walk(obj))
-            if attr is not None:
-                tok = attr.text()
-                leaf_h = blake2b(
-                    attr.kind.encode() + tok.encode(), digest_size=16
-                ).digest()
-                h.update(leaf_h)
-            return h.digest()
-        if n.child_count == 0:
-            if n.kind == "identifier":
-                pos = (n.start_point[0], n.start_point[1])
-                qn = qn_at.get(pos)
-                tok = assign(qn, n.text()) if qn else "free_unresolved"
-            elif n.kind in ("integer", "float"):
-                tok = "num"
-            elif n.kind in ("true", "false", "none", "True", "False", "None"):
-                tok = n.text()
-            else:
-                tok = n.text()
-            return blake2b(n.kind.encode() + tok.encode(), digest_size=16).digest()
-        h = blake2b(digest_size=16)
-        h.update(n.kind.encode())
-        for i in range(n.child_count):
-            c = n.child(i)
-            if c is None:
-                continue
-            if c.is_named:
-                h.update(walk(c))
-            else:
-                h.update(c.kind.encode())
-                h.update(c.text().encode())
-        return h.digest()
-
-    return walk(stmt)
+    """Hash a statement using the same semantics as exact subtree detection."""
+    return _canonical_hash(*canonicalize_subtree(
+        stmt, qn_at, def_loc, binding_scope=(func_start, func_end), bound_map=bound_map,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -536,40 +447,31 @@ def build_statement_seqs_for_cache(
 
     qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
 
-    def_line_to_qn: dict[int, str] = {}
-    try:
-        defs = scope_resolver.definitions_in_file(file_path)
-    except Exception:
-        logger.debug("definitions_in_file failed for %s", file_path, exc_info=True)
-        defs = []
-    for item in defs:
-        qn_d, line_d = item[0], item[1]
-        def_line_to_qn[line_d] = qn_d  # definitions_in_file lines are 0-indexed
+    symbol_index = _build_symbol_index(content)
 
     out: list[dict] = []
 
     def visit(node) -> None:
         if node.kind == "function_definition":
-            name_node = node.child_by_field_name("name")
             func_start = node.start_point[0]
             func_end = node.end_point[0]
-
-            func_qn = def_line_to_qn.get(func_start)
-            if func_qn is None and name_node is not None:
-                func_qn = name_node.text()
-            if func_qn is None:
-                func_qn = f"<unknown>@{func_start}"
+            func_qn = _find_containing_symbol(func_start, symbol_index)
 
             body = node.child_by_field_name("body")
             if body is not None:
                 hashes_list: list[str] = []
                 ranges_list: list[list[int]] = []
                 kinds_list: list[str] = []
+                bound_map: dict[str, str] = {}
+                parameters = node.child_by_field_name("parameters")
+                if parameters is not None:
+                    canonicalize_subtree(parameters, qn_at, def_loc,
+                                         binding_scope=(func_start, func_end), bound_map=bound_map)
 
                 for stmt in body.named_children():
                     try:
                         h = _stmt_canonical_hash(
-                            stmt, func_start, func_end, qn_at, def_loc
+                            stmt, func_start, func_end, qn_at, def_loc, bound_map
                         )
                     except BUG_EXCEPTIONS:
                         raise
@@ -814,18 +716,91 @@ def _query_exact_clusters(
 
 
 # ---------------------------------------------------------------------------
-# Sequence-duplicate detection (query layer, winnowing)
+# Sequence-duplicate detection (query layer)
 # ---------------------------------------------------------------------------
 
 
-def _winnow_fingerprints(hashes: list[bytes], w: int = WINNOW_W) -> set[bytes]:
-    """Return the set of winnowing fingerprints for a hash sequence."""
-    if not hashes:
-        return set()
-    fps: set[bytes] = set()
-    for i in range(max(0, len(hashes) - w + 1)):
-        fps.add(min(hashes[i: i + w]))
-    return fps
+def _repeated_statement_runs(all_seqs: list[dict], covered):
+    """Yield repeated substrings longest first using suffix-array LCP groups.
+
+    Unique sequence terminators prevent matches crossing function boundaries.
+    Prefix doubling and disjoint sets avoid materializing every substring.
+    """
+    tokens, locations = [], []
+    token_ids = {}
+    for i, seq in enumerate(all_seqs):
+        for pos, token in enumerate(seq["hashes"]):
+            tokens.append(token_ids.setdefault(token, len(token_ids)))
+            locations.append((i, pos))
+        tokens.append(-i - 1)
+        locations.append((i, len(seq["hashes"])))
+    size = len(tokens)
+    suffixes, ranks = list(range(size)), tokens[:]
+    width = 1
+    while width < size:
+        key = lambda i: (ranks[i], ranks[i + width] if i + width < size else -size - 1)
+        suffixes.sort(key=key)
+        updated = [0] * size
+        for a, b in zip(suffixes, suffixes[1:]):
+            updated[b] = updated[a] + (key(a) != key(b))
+        ranks = updated
+        if ranks[suffixes[-1]] == size - 1:
+            break
+        width *= 2
+    for rank, start in enumerate(suffixes):
+        ranks[start] = rank
+
+    # Kasai's algorithm computes adjacent longest-common-prefix lengths.
+    edges, length = [], 0
+    for start in range(size):
+        rank = ranks[start]
+        if rank == 0:
+            length = 0
+            continue
+        other = suffixes[rank - 1]
+        while start + length < size and other + length < size and tokens[start + length] == tokens[other + length]:
+            length += 1
+        if length >= MIN_SEQUENCE_STATEMENTS:
+            edges.append((length, rank - 1, rank))
+        length = max(0, length - 1)
+
+    parent = list(range(size))
+    members = [{pos} for pos in suffixes]
+    bounds = [{locations[pos][0]: (locations[pos][1], locations[pos][1])} for pos in suffixes]
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    from itertools import groupby
+    for length, equal_edges in groupby(sorted(edges, reverse=True), key=lambda edge: edge[0]):
+        touched = set()
+        for _, a, b in equal_edges:
+            a, b = find(a), find(b)
+            if a != b:
+                if len(members[a]) < len(members[b]):
+                    a, b = b, a
+                parent[b] = a
+                members[a].update(members[b])
+                members[b].clear()
+                for i, (start, end) in bounds[b].items():
+                    lo, hi = bounds[a].get(i, (start, end))
+                    bounds[a][i] = (min(start, lo), max(end, hi))
+                bounds[b].clear()
+            touched.add(a)
+        for root in {find(i) for i in touched}:
+            # A single-function group cannot contain two non-overlapping
+            # copies if even its outermost occurrences overlap.
+            if len(bounds[root]) == 1 and any(end - start < length for start, end in bounds[root].values()):
+                continue
+            # Prove containment from per-function occurrence bounds before
+            # sorting or constructing potentially thousands of clone members.
+            if all(any(left <= start and end + length <= right for left, right in covered[i])
+                   for i, (start, end) in bounds[root].items()):
+                continue
+            yield length, sorted(locations[pos] for pos in members[root])
 
 
 def _sequence_clusters_from_seqs(
@@ -833,76 +808,62 @@ def _sequence_clusters_from_seqs(
     min_lines: int,
     cross_file: bool | None,
 ) -> list[DuplicateCluster]:
-    """Build sibling-sequence clusters from a flat list of per-function seq dicts.
+    """Report maximal, non-overlapping copies of contiguous statement runs.
 
-    Each entry must have keys: ``file``, ``function_qn``, ``start_line``,
-    ``end_line``, ``hashes`` (hex strings), ``kinds``.
+    Sharing one statement (or different runs with a bridging function) does
+    not imply that whole function bodies are duplicates. Keep occurrences
+    attached to their shared run and report only its source ranges.
     """
-    if len(all_seqs) < 2:
-        return []
-
-    fp_to_idxs: dict[bytes, list[int]] = {}
-    for idx, seq in enumerate(all_seqs):
-        hashes = [bytes.fromhex(h) for h in seq.get("hashes", [])]
-        fps = _winnow_fingerprints(hashes)
-        for fp in fps:
-            fp_to_idxs.setdefault(fp, []).append(idx)
-
-    from emend.union_find import UnionFind
-    uf = UnionFind()
-    for i in range(len(all_seqs)):
-        uf.make_set(i)
-    for _fp, idxs in fp_to_idxs.items():
-        if len(idxs) < 2:
-            continue
-        for i in range(1, len(idxs)):
-            uf.union(idxs[0], idxs[i])
-
-    groups: dict[int, list[int]] = defaultdict(list)
-    for i in range(len(all_seqs)):
-        groups[uf.find(i)].append(i)
-
     clusters: list[DuplicateCluster] = []
-    for _root_idx, member_idxs in groups.items():
-        if len(member_idxs) < 2:
+    covered: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for length, occurrences in _repeated_statement_runs(all_seqs, covered):
+        nonoverlapping = []
+        last_end = {}
+        for i, pos in occurrences:
+            ranges = all_seqs[i]["line_ranges"]
+            if ranges[pos + length - 1][1] - ranges[pos][0] + 1 < min_lines:
+                continue
+            if pos >= last_end.get(i, 0):
+                nonoverlapping.append((i, pos))
+                last_end[i] = pos + length
+        if len(nonoverlapping) < 2:
             continue
-        seqs_in = [all_seqs[i] for i in member_idxs]
-        files = {s["file"] for s in seqs_in}
+        if all(any(start <= pos and pos + length <= end for start, end in covered[i])
+               for i, pos in nonoverlapping):
+            continue
+
+        members = []
+        kinds = set()
+        for i, pos in nonoverlapping:
+            s = all_seqs[i]
+            start_1 = s["line_ranges"][pos][0] + 1
+            end_1 = s["line_ranges"][pos + length - 1][1] + 1
+            kinds.update(s["kinds"][pos:pos + length])
+            members.append(DuplicateMember(
+                file=s["file"], symbol=s["function_qn"],
+                start_line=start_1, end_line=end_1, stmt_count=length,
+            ))
+        files = {m.file for m in members}
         if cross_file is True and len(files) < 2:
             continue
         if cross_file is False and len(files) > 1:
             continue
-
-        members = []
-        for s in seqs_in:
-            n_stmts = len(s.get("hashes", []))
-            start_1 = s["start_line"] + 1
-            end_1 = s["end_line"] + 1
-            if end_1 - start_1 + 1 < min_lines:
-                continue
-            members.append(DuplicateMember(
-                file=s["file"], symbol=s["function_qn"],
-                start_line=start_1, end_line=end_1, stmt_count=n_stmts,
-            ))
-        if len(members) < 2:
-            continue
-
-        avg_stmts = sum(m.stmt_count for m in members) / len(members)
-        distinct_kinds = len({k for s in seqs_in for k in s.get("kinds", [])})
-        score = avg_stmts * 10.0 + min(distinct_kinds * 3.0, 15.0)
+        score = length * 10.0 + min(len(kinds) * 3.0, 15.0)
         if len(files) > 1:
             score += 20.0
 
-        avg_nodes = int(avg_stmts * 5)
-        penalty = is_tiny_same_file_fragment(members, avg_nodes)
-        score = max(0.0, score - penalty)
-        if score <= 0.0:
-            continue
-
         clusters.append(DuplicateCluster(
             kind="sequence", score=score, members=members,
-            explanation=f"shared statement run ({int(avg_stmts)} stmts, winnowing)",
+            explanation=f"shared contiguous statement run ({length} stmts)",
         ))
+        for i, pos in nonoverlapping:
+            merged = []
+            for start, end in sorted([*covered[i], (pos, pos + length)]):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            covered[i] = merged
     return clusters
 
 
@@ -912,8 +873,7 @@ def _query_sequence_clusters(
     min_lines: int,
     cross_file,
 ) -> list[DuplicateCluster]:
-    """Find sibling-sequence duplicates using winnowing fingerprints."""
-    min_stmts = max(2, min_lines // 2)
+    """Find contiguous sibling-sequence duplicates."""
     all_seqs: list[dict] = []
     for file_path, (content, _tree, _qn_at, _def_loc, _symbol_index) in file_data.items():
         try:
@@ -924,8 +884,6 @@ def _query_sequence_clusters(
             logger.debug("build_statement_seqs_for_cache failed in %s", file_path, exc_info=True)
             continue
         for seq in seqs:
-            if len(seq.get("hashes", [])) < min_stmts:
-                continue
             all_seqs.append({"file": file_path, **seq})
     return _sequence_clusters_from_seqs(all_seqs, min_lines, cross_file)
 
@@ -1012,12 +970,9 @@ def _clusters_from_cached_sequences(
     cross_file: bool | None,
 ) -> list[DuplicateCluster]:
     """Build sequence-duplicate clusters from cached sequence payloads."""
-    min_stmts = max(2, min_lines // 2)
     all_seqs: list[dict] = []
     for file_path, payload in cached.items():
         for seq in payload.get("sequences", []):
-            if len(seq.get("hashes", [])) < min_stmts:
-                continue
             all_seqs.append({"file": file_path, **seq})
     return _sequence_clusters_from_seqs(all_seqs, min_lines, cross_file)
 

@@ -170,69 +170,50 @@ def _write_files(tmp_path: Path, files: dict[str, str]) -> None:
 class TestCanonicalization:
     """Test the production canonicalizer."""
 
-    def test_alpha_rename_variables(self, tmp_path):
-        """Variables are renamed to bound_i / free_i."""
-        from emend.duplicate import canonicalize_subtree, _build_qn_at, _iter_candidates
-
-        src = "def f(x):\n    y = x + 1\n    return y\n"
-        p = tmp_path / "test.py"
-        p.write_text(src)
-
+    @pytest.fixture
+    def canonical_form(self, tmp_path):
         from emend import emend_core
+        from emend.duplicate import canonicalize_subtree, _build_qn_at
+
         scope = emend_core.PyScopeResolver(str(tmp_path))
-        scope.index_file(str(p), src)
-        tree = emend_core.parse_source(src, "py")
-        assert tree is not None
-        qn_at, def_loc = _build_qn_at(str(p), scope)
-        candidates = list(_iter_candidates(tree))
-        assert len(candidates) > 0
-        kind_seq, token_seq = canonicalize_subtree(candidates[0], qn_at, def_loc)
-        has_bound = any("bound_" in t for t in token_seq)
-        assert has_bound
+        path = str(tmp_path / "sample.py")
 
-    def test_literals_preserved(self, tmp_path):
-        """Literal constants are preserved in production canonicalization.
+        def form(source, *, body=False):
+            scope.index_file(path, source)
+            node = emend_core.parse_source(source, "py").root.named_child(0)
+            if body:
+                node = node.child_by_field_name("body")
+            return canonicalize_subtree(node, *_build_qn_at(path, scope))
 
-        Production rule: string literals canonicalize to 'str', numeric to 'num'.
-        We verify these canonical tokens appear (not the raw literal text).
-        """
-        from emend.duplicate import canonicalize_subtree, _build_qn_at, _iter_candidates
+        return form
 
-        src = 'def f():\n    x = "hello"\n    y = 42\n    return x, y\n'
-        p = tmp_path / "test.py"
-        p.write_text(src)
+    @pytest.mark.parametrize("left,right,equal", [
+        ("y = x + 1; return y", "z = x + 1; return z", True),
+        ("return x + 1", "return x - 1", False),
+        ("return x + 1", "return x + 2", False),
+        ('return "one"', 'return "two"', False),
+        ("return len(x)", "return sum(x)", False),
+        ("return call(x=x)", "return call(y=x)", False),
+        ("y = x; return call(y=y)", "z = x; return call(z=z)", False),
+        ("return x.first", "return x.second", False),
+        ("return x + 1 # comment", "return x + 1", True),
+    ])
+    def test_semantic_equivalence(self, canonical_form, left, right, equal):
+        assert (canonical_form(f"def f(x):\n    {left}\n") ==
+                canonical_form(f"def g(x):\n    {right}\n")) == equal
 
-        from emend import emend_core
-        scope = emend_core.PyScopeResolver(str(tmp_path))
-        scope.index_file(str(p), src)
-        tree = emend_core.parse_source(src, "py")
-        assert tree is not None
-        qn_at, def_loc = _build_qn_at(str(p), scope)
-        candidates = list(_iter_candidates(tree))
-        assert len(candidates) > 0
-        kind_seq, token_seq = canonicalize_subtree(candidates[0], qn_at, def_loc)
-        # Production: strings -> "str", numbers -> "num"
-        assert "str" in token_seq or "num" in token_seq
-
-    def test_attribute_names_preserved(self, tmp_path):
-        """Attribute names (self.x) are kept literal."""
-        from emend.duplicate import canonicalize_subtree, _build_qn_at, _iter_candidates
-
-        src = "def f(self):\n    x = self.name\n    y = self.value\n    return x + y\n"
-        p = tmp_path / "test.py"
-        p.write_text(src)
-
-        from emend import emend_core
-        scope = emend_core.PyScopeResolver(str(tmp_path))
-        scope.index_file(str(p), src)
-        tree = emend_core.parse_source(src, "py")
-        assert tree is not None
-        qn_at, def_loc = _build_qn_at(str(p), scope)
-        candidates = list(_iter_candidates(tree))
-        assert len(candidates) > 0
-        kind_seq, token_seq = canonicalize_subtree(candidates[0], qn_at, def_loc)
-        # Attribute names like "name" and "value" should be preserved
-        assert "name" in token_seq or "value" in token_seq
+    @pytest.mark.parametrize("left,right,equal", [
+        ("class A:\n    x: int\n", "class B:\n    y: int\n", False),
+        ("class A:\n    def f(self): return 1\n", "class B:\n    def g(self): return 1\n", False),
+        ("class A:\n    def f(self, x): return x\n", "class B:\n    def f(self, y): return y\n", True),
+        ("def f(x):\n    def g(y): return x\n", "def f(x):\n    def g(x): return x\n", False),
+        ("def f(x):\n    def g(y): return x + y\n", "def f(a):\n    def g(b): return a + b\n", True),
+        ("def f(x, y): return x\n", "def f(x, y): return y\n", False),
+    ])
+    def test_scope_bindings(self, canonical_form, left, right, equal):
+        assert (canonical_form(left) == canonical_form(right)) == equal
+        if left.startswith("class"):
+            assert (canonical_form(left, body=True) == canonical_form(right, body=True)) == equal
 
 
 class TestExactDuplicates:
@@ -276,7 +257,97 @@ class TestExactDuplicates:
 
 
 class TestSequenceDuplicates:
+    @pytest.mark.parametrize("left,right,wrong_return", [
+        ("x = a\ny = b\nx = adjust(x)\nreturn x",
+         "u = c\nv = d\nu = adjust(u)\nreturn u", "v"),
+        ("record(a)\nrecord(b)\nfinish()\nreturn a",
+         "record(c)\nrecord(d)\nfinish()\nreturn c", "d"),
+    ])
+    def test_binding_relationships_across_statements(self, tmp_path, left, right, wrong_return):
+        from emend.duplicate import query_duplicates
+
+        for name, params, body in (("f", "a, b", left), ("g", "c, d", right)):
+            (tmp_path / f"{name}.py").write_text(
+                f"def {name}({params}):\n" + "\n".join(f"    {line}" for line in body.splitlines()) + "\n")
+        assert len(query_duplicates(str(tmp_path), mode="sequence")) == 1
+        path = tmp_path / "g.py"
+        path.write_text(path.read_text().rsplit("return ", 1)[0] + f"return {wrong_return}\n")
+        assert query_duplicates(str(tmp_path), mode="sequence") == []
+
     """Test sibling-sequence duplicate detection."""
+
+    @pytest.mark.parametrize("bodies, expected", [
+        (["a" * 10000] * 2, [10000]),
+        (["a" * 10000 + "Q", "a" * 10000 + "Z", "WXYZ"], [10000]),
+        (["a" * 10000], [5000]),
+        (["abcdWXYZ", "WXYZabcd"], [4, 4]),
+        (["abcdWXYZabcd"], [4]),
+    ])
+    def test_maximal_nonoverlapping_runs(self, bodies, expected):
+        from emend.duplicate import _sequence_clusters_from_seqs
+
+        sequences = [dict(file=str(i), function_qn=str(i), hashes=list(body),
+                          line_ranges=[[n, n] for n in range(len(body))], kinds=["call"] * len(body))
+                     for i, body in enumerate(bodies)]
+        clusters = _sequence_clusters_from_seqs(sequences, 3, None)
+        assert sorted(c.members[0].stmt_count for c in clusters) == expected
+        assert all(len(c.members) == 2 for c in clusters)
+        for cluster in clusters:
+            a, b = cluster.members
+            assert a.file != b.file or a.end_line < b.start_line
+
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_reports_only_shared_contiguous_runs(self, tmp_path, cached):
+        from emend import emend_core
+        from emend.duplicate import build_statement_seqs_for_cache, _clusters_from_cached_sequences, query_duplicates
+
+        first = "    obj.open()\n    obj.read()\n    obj.check()\n    obj.close()\n"
+        tail = "    obj.disconnect()\n"
+        bodies = {"a": first, "bridge": first + tail, "long": first + tail,
+                  "c": "".join(first.splitlines(keepends=True)[1:]) + tail,
+                  "short": "".join(first.splitlines(keepends=True)[:3]),
+                  "unrelated": "    obj.open()\n    obj.send()\n    obj.check()\n    obj.disconnect()\n"}
+        payloads = {}
+        resolver = emend_core.PyScopeResolver(str(tmp_path))
+        for name, body in bodies.items():
+            path = tmp_path / f"{name}.py"
+            source = f"def {name}(obj):\n{body}"
+            path.write_text(source)
+            resolver.index_file(str(path), source)
+            payloads[str(path)] = {"sequences": build_statement_seqs_for_cache(str(path), source, resolver)}
+        clusters = (_clusters_from_cached_sequences(payloads, 3, None) if cached
+                    else query_duplicates(str(tmp_path), mode="sequence"))
+        assert {frozenset(Path(m.file).stem for m in c.members) for c in clusters} == {
+            frozenset({"a", "bridge", "long"}), frozenset({"bridge", "long", "c"}),
+            frozenset({"bridge", "long"})}
+        assert all(m.stmt_count == (5 if len(c.members) == 2 else 4)
+                   for c in clusters for m in c.members)
+        assert all(m.symbol == Path(m.file).stem for c in clusters for m in c.members)
+        assert {(m.start_line, m.end_line) for c in clusters for m in c.members} == {(2, 5), (3, 6), (2, 6)}
+        long_runs = (_clusters_from_cached_sequences(payloads, 5, None) if cached
+                     else query_duplicates(str(tmp_path), mode="sequence", min_lines=5))
+        assert len(long_runs) == 1
+        assert all((m.start_line, m.end_line, m.stmt_count) == (2, 6, 5) for m in long_runs[0].members)
+
+    def test_min_lines_counts_source_lines_not_statements(self, tmp_path):
+        from emend.duplicate import query_duplicates
+
+        body = "".join(f"    obj.{name}(\n        value,\n    )\n" for name in ("open", "read", "check", "close"))
+        _write_files(tmp_path, {f"{name}.py": f"def {name}(obj, value):\n{body}" for name in ("a", "b")})
+        clusters = query_duplicates(str(tmp_path), mode="sequence", min_lines=10)
+        assert len(clusters) == 1
+        assert all((m.start_line, m.end_line, m.stmt_count) == (2, 13, 4) for m in clusters[0].members)
+
+    def test_short_occurrence_does_not_hide_overlapping_eligible_run(self):
+        from emend.duplicate import _sequence_clusters_from_seqs
+
+        ranges = [[(0, 0), (1, 1), (2, 2), (3, 3), (4, 13)],
+                  [(0, 3), (4, 7), (8, 11), (12, 15)]]
+        sequences = [dict(file=str(i), function_qn=str(i), hashes=["a"] * len(lines),
+                          line_ranges=lines, kinds=["call"] * len(lines)) for i, lines in enumerate(ranges)]
+        clusters = _sequence_clusters_from_seqs(sequences, 10, None)
+        assert len(clusters) == 1
+        assert {(m.start_line, m.end_line) for m in clusters[0].members} == {(2, 14), (1, 16)}
 
     def test_finds_shared_statement_runs(self, tmp_path):
         """Functions sharing a long initialization sequence are detected as a
@@ -296,6 +367,8 @@ class TestSequenceDuplicates:
         # The shared initialization run spans both files.
         files = {m.file for m in seq[0].members}
         assert len(files) >= 2
+        assert all(m.stmt_count == 7 and (m.start_line, m.end_line) == (2, 8)
+                   for m in seq[0].members)
 
 
 # ---------------------------------------------------------------------------
@@ -510,15 +583,10 @@ class TestProductionHeuristics:
         all_clusters = query_duplicates(
             str(tmp_path), mode="exact", min_lines=1, min_score=0.0,
         )
-        filtered = query_duplicates(
-            str(tmp_path), mode="exact", min_lines=1, min_score=250.0,
-        )
-        # The threshold sits between the strong and weak clusters, so it
-        # strictly reduces the count while keeping the strongest matches.
-        assert len(filtered) >= 1
-        assert len(filtered) < len(all_clusters)
-        assert all(c.score >= 250.0 for c in filtered)
-        assert any(c.score < 250.0 for c in all_clusters)
+        assert all_clusters
+        maximum = max(c.score for c in all_clusters)
+        assert query_duplicates(str(tmp_path), mode="exact", min_lines=1, min_score=maximum)
+        assert query_duplicates(str(tmp_path), mode="exact", min_lines=1, min_score=maximum + 1) == []
 
 
 # ---------------------------------------------------------------------------
@@ -706,38 +774,6 @@ class TestDuplicateCheckFirstMemberBug:
             "Expected a violation for linted.py but got none — "
             "run_duplicate_code_check only checks the first cluster member"
         )
-
-
-# ---------------------------------------------------------------------------
-# Bug: winnowing emits a fingerprint for sequences shorter than the window
-# ---------------------------------------------------------------------------
-
-
-class TestWinnowFingerprints:
-    """_winnow_fingerprints must follow standard winnowing semantics."""
-
-    def test_short_sequence_emits_no_fingerprints(self):
-        """A sequence shorter than the window produces no fingerprints."""
-        from emend.duplicate import _winnow_fingerprints, WINNOW_W
-
-        for length in range(1, WINNOW_W):
-            hashes = [bytes([i]) * 32 for i in range(length)]
-            assert _winnow_fingerprints(hashes, w=WINNOW_W) == set(), (
-                f"sequence of length {length} (< window {WINNOW_W}) "
-                "should yield no fingerprints"
-            )
-
-    def test_single_hash_emits_no_fingerprint(self):
-        from emend.duplicate import _winnow_fingerprints
-
-        assert _winnow_fingerprints([b"\x01" * 32], w=4) == set()
-
-    def test_full_window_emits_fingerprint(self):
-        """A sequence at least as long as the window produces fingerprints."""
-        from emend.duplicate import _winnow_fingerprints
-
-        hashes = [bytes([i]) * 32 for i in range(4)]
-        assert _winnow_fingerprints(hashes, w=4) == {min(hashes)}
 
 
 # ---------------------------------------------------------------------------
