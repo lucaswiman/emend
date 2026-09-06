@@ -1020,7 +1020,11 @@ class TestExtractJinjaSymbols:
 class TestResolveJinjaLinks:
     """Tests for Jinja2 template variable resolution."""
 
-    def test_resolve_template_var_to_render_call(self, tmp_path):
+    @pytest.mark.parametrize("template, confidence", [
+        ("profile.html", [0.85]), ("nested/profile.html", [0.85]),
+        ("profile.html/other.html", [0.7]), ("other.html", []),
+    ])
+    def test_resolve_template_var_to_render_call(self, tmp_path, template, confidence):
         """Resolves template variable to render_template() context."""
         views = tmp_path / "views.py"
         views.write_text(
@@ -1035,7 +1039,7 @@ class TestResolveJinjaLinks:
             name="user",
             kind=DslSymbolKind.TEMPLATE_VAR,
             dsl=DslKind.JINJA,
-            host_file=str(tmp_path / "profile.html"),
+            host_file=str(tmp_path / template),
             host_line=3,
             host_col=6,
             link_hints=[
@@ -1043,8 +1047,9 @@ class TestResolveJinjaLinks:
             ],
         )
         links = resolve_jinja_links([symbol], str(tmp_path))
-        assert len(links) >= 1
-        assert "render_template" in links[0].target_qualified_name
+        assert [(link.target_qualified_name, link.target_file, link.confidence) for link in links] == [
+            ("views.render_template", str(views), value) for value in confidence
+        ]
 
     def test_resolve_block_to_parent_template(self, tmp_path):
         """Resolves block to matching block in parent template."""

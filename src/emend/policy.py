@@ -311,31 +311,33 @@ def load_policies(config_path: str | Path | None = None) -> list[Policy]:
                 severity=raw_policy.get("severity", "warning"),
                 checks=checks,
             ))
-        return policies
+    else:
+        macros = data.get("macros", {}) or {}
+        for name, rule_def in (data.get("rules", {}) or {}).items():
+            if not isinstance(rule_def, dict):
+                continue
+            if rule_def.get("enabled") is False:
+                continue
+            policy = _build_unified_policy(name, rule_def, macros)
+            if policy is not None:
+                policies.append(policy)
 
-    macros = data.get("macros", {}) or {}
-    for name, rule_def in (data.get("rules", {}) or {}).items():
-        if not isinstance(rule_def, dict):
-            continue
-        if rule_def.get("enabled") is False:
-            continue
-        policy = _build_unified_policy(name, rule_def, macros)
-        if policy is not None:
-            policies.append(policy)
-
-    top_level_deadcode = data.get("deadcode")
-    if top_level_deadcode is not None and all(p.name != "deadcode" for p in policies):
-        deadcode_policy = _build_unified_policy(
-            "deadcode",
-            {
-                "deadcode": top_level_deadcode,
-                "message": "Dead code check",
-                "severity": "warning",
-            },
-            macros,
-        )
-        if deadcode_policy is not None:
-            policies.append(deadcode_policy)
+        top_level_deadcode = data.get("deadcode")
+        if top_level_deadcode is not None and all(p.name != "deadcode" for p in policies):
+            deadcode_policy = _build_unified_policy(
+                "deadcode",
+                {
+                    "deadcode": top_level_deadcode,
+                    "message": "Dead code check",
+                    "severity": "warning",
+                },
+                macros,
+            )
+            if deadcode_policy is not None:
+                policies.append(deadcode_policy)
+    errors = validate_policies(policies)
+    if errors:
+        raise ValueError("\n".join(errors))
     return policies
 
 

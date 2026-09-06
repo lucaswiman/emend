@@ -1326,6 +1326,8 @@ def find_dead_code(
             if not Path(sym.file_path).is_absolute()
             else sym.file_path
         )
+        if not Path(abs_fp).is_relative_to(scan_root):
+            continue
 
         # Kind filter
         if kind == "function" and sym.kind not in ("function", "async_function"):
@@ -1361,7 +1363,7 @@ def find_dead_code(
     # String-literal post-filter
     if strings_count_as_references:
         dead_symbols = _string_literal_filter(
-            dead_symbols, scan_root, all_files, exclude_references_from,
+            dead_symbols, project_root_resolved, all_files, exclude_references_from,
             exclude_test_references,
         )
 
@@ -1425,6 +1427,8 @@ def find_dead_code(
             if not Path(ub.file_path).is_absolute()
             else ub.file_path
         )
+        if not Path(abs_fp).is_relative_to(scan_root) or _path_is_excluded(abs_fp, exclude_paths):
+            continue
         loc = block_loc_index.get((ub.file_path, f"{ub.func_qn}:{ub.block_id}"))
         if loc is None:
             continue  # Skip blocks without line info

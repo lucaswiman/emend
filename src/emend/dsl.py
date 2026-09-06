@@ -1021,30 +1021,23 @@ def resolve_jinja_links(
                 for tpl_name, contexts in template_contexts.items():
                     # Match if template name matches the file name or ends with it
                     if tpl_basename == tpl_name or tpl_name.endswith(tpl_basename):
-                        for ctx_file, ctx_line, ctx_vars in contexts:
-                            if symbol.name in ctx_vars:
-                                links.append(DslLink(
-                                    dsl_symbol=symbol,
-                                    target_qualified_name=f"{Path(ctx_file).stem}.render_template",
-                                    target_file=ctx_file,
-                                    target_line=ctx_line,
-                                    strategy="template_var",
-                                    confidence=0.85,
-                                ))
-                                break
+                        confidence = 0.85
                     # Also check for partial path matches
                     elif tpl_name in str(symbol.host_file):
-                        for ctx_file, ctx_line, ctx_vars in contexts:
-                            if symbol.name in ctx_vars:
-                                links.append(DslLink(
-                                    dsl_symbol=symbol,
-                                    target_qualified_name=f"{Path(ctx_file).stem}.render_template",
-                                    target_file=ctx_file,
-                                    target_line=ctx_line,
-                                    strategy="template_var",
-                                    confidence=0.7,
-                                ))
-                                break
+                        confidence = 0.7
+                    else:
+                        continue
+                    for ctx_file, ctx_line, ctx_vars in contexts:
+                        if symbol.name in ctx_vars:
+                            links.append(DslLink(
+                                dsl_symbol=symbol,
+                                target_qualified_name=f"{Path(ctx_file).stem}.render_template",
+                                target_file=ctx_file,
+                                target_line=ctx_line,
+                                strategy="template_var",
+                                confidence=confidence,
+                            ))
+                            break
 
             elif hint.strategy == "template_block":
                 # Find matching blocks in other templates (parent or child)

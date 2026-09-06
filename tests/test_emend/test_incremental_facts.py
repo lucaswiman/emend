@@ -22,6 +22,29 @@ from emend.fact_graph import (
 )
 
 
+@pytest.mark.parametrize("caller,statement", [
+    ("pkg/sub/caller.py", "from ..helpers import live as alias"),
+    ("pkg/sub/__init__.py", "from ..helpers import live as alias"),
+    ("pkg/caller.py", "from .helpers import live as alias"),
+    ("pkg/__init__.py", "from .helpers import live as alias"),
+    ("pkg/caller.py", "from . import helpers as alias"),
+])
+def test_relative_import_facts_preserve_package(tmp_path, caller, statement):
+    path = tmp_path / caller
+    path.parent.mkdir(parents=True)
+    module_import = " import helpers " in statement
+    source = statement + "\ndef run():\n    " + ("alias.live()" if module_import else "alias()") + "\n"
+    graph = FactGraph()
+    graph.update_files([
+        (str(tmp_path / "pkg/helpers.py"), "def live():\n    return 1\ndef dead():\n    return 2\n"),
+        (str(path), source),
+    ], project_root=str(tmp_path), resolver_root=str(tmp_path))
+    assert any(ref.ref_kind == "call" for ref in graph.references_to("pkg.helpers.live"))
+    dead, _ = graph.dead_code_unified()
+    assert "live" not in {symbol.name for symbol in dead}
+    assert "dead" in {symbol.name for symbol in dead}
+
+
 # -- Helpers ----------------------------------------------------------------
 
 def _simple_source_a():
