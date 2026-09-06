@@ -16,7 +16,6 @@ from emend.ast_utils import (
     find_symbol_by_path,
     find_symbol_by_line,
     expand_wildcard_path,
-    get_symbol_source,
 )
 from emend.component_selector import (
     NestedSymbol,

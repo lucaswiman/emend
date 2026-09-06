@@ -120,6 +120,23 @@ class TraceViolation:
     trace: list[TraceStep] = field(default_factory=list)
     engine: str = ""  # "python" or "datalog" — which engine produced this violation
 
+    def to_dict(self, *, show_trace: bool = False) -> dict:
+        """Return the shared CLI/MCP representation of a violation."""
+        entry = {
+            "file": self.file_path, "line": self.line, "col": self.col,
+            "label": self.label, "sink_pattern": self.sink_pattern,
+            "message": self.message,
+        }
+        if self.engine:
+            entry["engine"] = self.engine
+        if show_trace:
+            entry["trace"] = [
+                {"file": s.file_path, "line": s.line, "col": s.col,
+                 "description": s.description, "variable": s.variable}
+                for s in self.trace
+            ]
+        return entry
+
 
 # ---------------------------------------------------------------------------
 # Type constraint evaluation
@@ -1393,42 +1410,6 @@ def _collect_function_descriptors(
     return result
 
 
-def _collect_module_level_ranges(
-    symbols: list,
-    total_lines: int,
-) -> list[tuple[int, int]]:
-    """Return true module-level line ranges outside top-level symbol bodies."""
-    if total_lines <= 0:
-        return []
-
-    top_level_spans = sorted(
-        (sym.line_start, sym.line_end)
-        for sym in symbols
-        if getattr(sym, "line_start", None) is not None
-        and getattr(sym, "line_end", None) is not None
-    )
-    if not top_level_spans:
-        return [(1, total_lines)]
-
-    merged_spans: list[tuple[int, int]] = []
-    for start, end in top_level_spans:
-        if not merged_spans or start > merged_spans[-1][1] + 1:
-            merged_spans.append((start, end))
-        else:
-            prev_start, prev_end = merged_spans[-1]
-            merged_spans[-1] = (prev_start, max(prev_end, end))
-
-    module_ranges: list[tuple[int, int]] = []
-    cursor = 1
-    for start, end in merged_spans:
-        if cursor < start:
-            module_ranges.append((cursor, start - 1))
-        cursor = max(cursor, end + 1)
-    if cursor <= total_lines:
-        module_ranges.append((cursor, total_lines))
-    return module_ranges
-
-
 def _format_interprocedural_qn(file_path: str, path: tuple[str, ...]) -> str:
     """Build a stable interprocedural summary key from a symbol path."""
     return f"{file_path}::{'::'.join(path)}"
@@ -1491,31 +1472,7 @@ def format_violations(
         Formatted string.
     """
     if json_output:
-        data = []
-        for v in violations:
-            entry: dict = {
-                "file": v.file_path,
-                "line": v.line,
-                "col": v.col,
-                "label": v.label,
-                "sink_pattern": v.sink_pattern,
-                "message": v.message,
-            }
-            if v.engine:
-                entry["engine"] = v.engine
-            if show_trace:
-                entry["trace"] = [
-                    {
-                        "file": s.file_path,
-                        "line": s.line,
-                        "col": s.col,
-                        "description": s.description,
-                        "variable": s.variable,
-                    }
-                    for s in v.trace
-                ]
-            data.append(entry)
-        return json.dumps(data, indent=2)
+        return json.dumps([v.to_dict(show_trace=show_trace) for v in violations], indent=2)
 
     lines: list[str] = []
     for v in violations:
@@ -1634,6 +1591,18 @@ def _collect_function_params(
     return params
 
 
+def _return_identifiers_by_line(matches, func_start: int, func_end: int) -> dict[int, set[str]]:
+    """Collect captured return-expression identifiers within a function."""
+    returns: dict[int, set[str]] = {}
+    for match in matches:
+        line = match.line or 0
+        if func_start <= line <= func_end:
+            for value in (match.captures or {}).values():
+                if value:
+                    returns.setdefault(line, set()).update(_extract_identifiers(value))
+    return returns
+
+
 def _compute_function_summary(
     file_path: str,
     source: str,
@@ -1679,21 +1648,10 @@ def _compute_function_summary(
         graph, file_path, func_qn, source, func_start, func_end,
     )
 
-    returns_by_line: dict[int, set[str]] = {}
     return_matches = _cached_find_pattern(
         pattern_cache, "return $X", file_path, source, language,
     )
-    for match in return_matches:
-        match_line = match.line or 0
-        if not (func_start <= match_line <= func_end):
-            continue
-        idents: set[str] = set()
-        if match.captures:
-            for _cap_name, _cap_val in match.captures.items():
-                if _cap_val:
-                    idents |= _extract_identifiers(_cap_val)
-        if idents:
-            returns_by_line.setdefault(match_line, set()).update(idents)
+    returns_by_line = _return_identifiers_by_line(return_matches, func_start, func_end)
 
     sinks_by_line: dict[int, list[tuple[TraceSink, set[str]]]] = {}
     for sink_def in config.sinks:
@@ -1780,21 +1738,10 @@ def _compute_return_reachable_vars(
     )
 
     # Find return statements via tree-sitter pattern matching.
-    returns_by_line: dict[int, set[str]] = {}
     return_matches = _cached_find_pattern(
         None, "return $X", file_path, source, language,
     )
-    for match in return_matches:
-        match_line = match.line or 0
-        if not (func_start <= match_line <= func_end):
-            continue
-        idents: set[str] = set()
-        if match.captures:
-            for _cap_name, _cap_val in match.captures.items():
-                if _cap_val:
-                    idents |= _extract_identifiers(_cap_val)
-        if idents:
-            returns_by_line.setdefault(match_line, set()).update(idents)
+    returns_by_line = _return_identifiers_by_line(return_matches, func_start, func_end)
 
     reachable: set[str] = set()
     for line_idx in range(func_end, func_start - 1, -1):

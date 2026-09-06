@@ -1482,14 +1482,16 @@ class FactGraph:
             "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
 
-            # A reachable self/cls call keeps same-named private methods live.
-            # Exact method_call facts avoid suffix collisions. Name-level
-            # matching is intentionally conservative for inherited methods,
-            # whose defining class may differ from the caller class.
+            # Without receiver types, any reachable member call may target a
+            # same-named private method, including calls through local aliases.
+            # Exact member names avoid suffix collisions.
             "live_private_method_name[method_name] := "
-            "*method_call[fp, fq, receiver, method_name, bid, _], "
-            "*reachable_block[fp, fq, bid], "
-            'receiver in ["self", "cls"]'
+            "*method_call[fp, fq, _, method_name, bid, _], "
+            "*reachable_block[fp, fq, bid]"
+            f"{excl_clauses}\n"
+
+            "live_private_method_name[method_name] := "
+            '*method_call[fp, "<module>", _, method_name, _, _]'
             f"{excl_clauses}\n"
 
             "live_ref[target_qn] := "
@@ -3443,31 +3445,6 @@ def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
 # ---------------------------------------------------------------------------
 
 import re as _re
-from bisect import bisect_right as _bisect_right
-
-
-def _offset_to_line(
-    content: str, offset: int, _newline_cache: dict[tuple[int, int], list[int]] = {}
-) -> int:
-    """Return 1-based line number for a character *offset* in *content*.
-
-    Uses a cached newline-position index keyed by ``(hash(content),
-    len(content))`` so that repeated calls on the same string are O(log n)
-    instead of O(n). Content identity is used (not ``id(content)``, whose value
-    can be reused for a different string after garbage collection).
-    """
-    key = (hash(content), len(content))
-    positions = _newline_cache.get(key)
-    if positions is None:
-        positions = [i for i, ch in enumerate(content) if ch == "\n"]
-        _newline_cache[key] = positions
-        # Keep cache bounded — evict oldest if too large.
-        if len(_newline_cache) > 64:
-            oldest = next(iter(_newline_cache))
-            del _newline_cache[oldest]
-    return _bisect_right(positions, offset) + 1
-
-
 def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact]:
     """Extract imports from TypeScript/JavaScript source using tree-sitter.
 
@@ -3610,71 +3587,6 @@ def _bfs_reachable_blocks(
                 if nb not in visited:
                     stack.append(nb)
     return reachable_rows
-
-
-def _build_cfg_facts(
-    cfgs: list[Any],
-    sym_facts: list[SymbolFact],
-    rel_path: str,
-    module_name: str,
-) -> tuple[
-    list[CfgBlockFact],
-    list[CfgEdgeFact],
-    list[SourceLocFact],
-    list[tuple[str, int, int, int, bool]],  # block_ranges
-]:
-    """Build CFG block/edge/source-loc facts from a list of PyCfg objects.
-
-    Returns ``(cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges)``
-    where *block_ranges* is sorted for ``_find_containing_block`` lookups.
-    """
-    block_ranges: list[tuple[str, int, int, int, bool]] = []
-    cfg_block_facts: list[CfgBlockFact] = []
-    cfg_edge_facts: list[CfgEdgeFact] = []
-
-    for cfg in cfgs:
-        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
-
-        for block in cfg.get_blocks():
-            bid = block["id"]
-            cfg_block_facts.append(CfgBlockFact(
-                file_path=rel_path,
-                func_qn=func_qn,
-                block_id=bid,
-                is_entry=(bid == cfg.entry),
-                is_exit=(bid == cfg.exit),
-            ))
-            has_content = bool(
-                block.get("statements")
-                or block.get("defs")
-                or block.get("uses")
-            )
-            block_ranges.append((func_qn, bid, block["start_line"] + 1, block["end_line"] + 1, has_content))
-
-        for edge in cfg.get_edges():
-            cfg_edge_facts.append(CfgEdgeFact(
-                file_path=rel_path,
-                func_qn=func_qn,
-                from_block=edge["from"],
-                to_block=edge["to"],
-                edge_kind=edge["kind"],
-                from_line=0,
-                to_line=0,
-            ))
-
-    block_loc_facts: list[SourceLocFact] = []
-    for func_qn_br, bid_br, start_line_br, end_line_br, has_content_br in block_ranges:
-        if start_line_br > 0 and has_content_br:
-            block_loc_facts.append(SourceLocFact(
-                file_path=rel_path,
-                loc_kind="block",
-                loc_id=f"{func_qn_br}:{bid_br}",
-                line=start_line_br,
-                end_line=end_line_br,
-            ))
-
-    block_ranges.sort(key=lambda x: (x[2], -(x[3] - x[2])))
-    return cfg_block_facts, cfg_edge_facts, block_loc_facts, block_ranges
 
 
 def build_def_use_facts(

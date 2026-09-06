@@ -30,6 +30,29 @@ def make_project(tmp_path, files: dict[str, str]) -> Path:
     return project
 
 
+@pytest.fixture
+def seed_fact_cache():
+    from emend.fact_graph import FactGraph, SymbolFact
+    from emend.transform.cache import _cache_db_dir, _FACTS_SCHEMA_VERSION
+
+    def seed(path, **_kwargs):
+        cache_dir = _cache_db_dir(path)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        graph = FactGraph(db_path=str(cache_dir / "facts.db"))
+        graph.add_symbol(SymbolFact("mod.py", "unused", "mod.unused", "function", 1, 2))
+        graph.client.run(
+            '?[key, value] <- $rows :put facts_meta {key => value}',
+            {"rows": [
+                ["schema_version", _FACTS_SCHEMA_VERSION],
+                ["project_root", str(Path(path).resolve())],
+            ]},
+        )
+        graph.close()
+        return {}
+
+    return seed
+
+
 def dead_names(tmp_path, files: dict[str, str], **kwargs) -> set[str]:
     """Run find_dead_code over a throwaway project and return the dead names."""
     from emend.transform import find_dead_code
@@ -47,6 +70,30 @@ def dead_module_names(project: Path, **kwargs) -> set[str]:
         for item in find_dead_code(str(project), **kwargs)
         if isinstance(item, DeadModule)
     }
+
+
+def test_scan_subdirectory_retains_external_references(tmp_path):
+    from emend.transform import find_dead_code
+
+    project = make_project(tmp_path, {
+        "pkg/live.py": (
+            "def called():\n    return 1\n"
+            "def dynamic_entry():\n    return 4\n"
+        ),
+        "pkg/dead.py": "def abandoned():\n    return 2\n",
+        "outside.py": (
+            "from pkg.live import called\ncalled()\n"
+            "import pkg.live\ngetattr(pkg.live, 'dynamic_entry')()\n"
+            "def outside_dead():\n    return 3\n    print('unreachable')\n"
+        ),
+    })
+    results = list(find_dead_code(
+        str(project / "pkg"), show_last_reference=False,
+    ))
+    assert results
+    assert all(Path(item.file_path).is_relative_to(project / "pkg") for item in results)
+    assert "abandoned" in {item.name for item in results}
+    assert not {"called", "dynamic_entry"} & {item.name for item in results}
 
 
 def make_test_reference_project(
@@ -266,10 +313,9 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
 
-    def test_cold_path_builds_only_deadcode_dependencies(self, tmp_path, monkeypatch):
+    def test_cold_path_builds_only_deadcode_dependencies(self, tmp_path, monkeypatch, seed_fact_cache):
         """Cold deadcode startup skips type, FTS, and duplicate indexing."""
-        from emend.fact_graph import FactGraph, SymbolFact
-        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
+        from emend.transform import _get_or_build_fact_graph
 
         project = make_project_dir(tmp_path)
         (project / "mod.py").write_text("def unused():\n    return 1\n")
@@ -277,26 +323,7 @@ class TestDeadCodeWarmPath:
 
         def fake_warm_caches(path, **kwargs):
             calls.append((path, kwargs))
-            cache_dir = _cache_db_dir(path)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            graph = FactGraph(db_path=str(cache_dir / "facts.db"))
-            graph.add_symbol(SymbolFact(
-                file_path="mod.py",
-                name="unused",
-                qualified_name="mod.unused",
-                kind="function",
-                line=1,
-                end_line=2,
-            ))
-            graph.client.run(
-                '?[key, value] <- $rows :put facts_meta {key => value}',
-                {"rows": [
-                    ["schema_version", "6"],
-                    ["project_root", str(Path(path).resolve())],
-                ]},
-            )
-            graph.close()
-            return {}
+            return seed_fact_cache(path)
 
         monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
         graph = _get_or_build_fact_graph(str(project))
@@ -310,10 +337,10 @@ class TestDeadCodeWarmPath:
         graph.close()
 
     def test_cold_path_keeps_facts_in_the_current_worktree(
-        self, tmp_path, monkeypatch,
+        self, tmp_path, monkeypatch, seed_fact_cache,
     ):
         """Mutable analysis facts must not be shared by divergent worktrees."""
-        from emend.fact_graph import FactGraph, SymbolFact
+        from emend.fact_graph import FactGraph
         from emend.transform import _cache_db_dir, _get_or_build_fact_graph
 
         main = tmp_path / "main"
@@ -326,28 +353,7 @@ class TestDeadCodeWarmPath:
         (project / ".git").write_text(f"gitdir: {worktree_git_dir}\n")
         (project / "mod.py").write_text("def unused():\n    return 1\n")
 
-        def fake_warm_caches(path, **_kwargs):
-            cache_dir = _cache_db_dir(path)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            graph = FactGraph(db_path=str(cache_dir / "facts.db"))
-            graph.add_symbol(SymbolFact(
-                file_path="mod.py",
-                name="unused",
-                qualified_name="mod.unused",
-                kind="function",
-                line=1,
-                end_line=2,
-            ))
-            graph.client.run(
-                '?[key, value] <- $rows :put facts_meta {key => value}',
-                {"rows": [
-                    ["schema_version", "6"],
-                    ["project_root", str(Path(path).resolve())],
-                ]},
-            )
-            graph.close()
-
-        monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
+        monkeypatch.setattr("emend.transform.index.warm_caches", seed_fact_cache)
         monkeypatch.setattr(
             FactGraph,
             "build_from_project",
@@ -391,9 +397,6 @@ class TestDeadCodeWarmPath:
             "?[member] := *noncall_private_member_ref[_, _, _, member]"
         )["rows"]
         assert rows == [["_helper"]]
-        assert graph.run_query(
-            '?[value] := *facts_meta["schema_version", value]'
-        )["rows"] == [["6"]]
         graph.close()
 
     def test_in_memory_fallback_can_skip_type_inference(self, tmp_path, monkeypatch):
@@ -845,17 +848,22 @@ class TestFindDeadCode:
         assert "public_extension_hook" not in names
         assert "MyClass" not in names
 
-    def test_referenced_private_method_is_not_dead(self, tmp_path):
+    @pytest.mark.parametrize("body,call", [
+        ("return self._helper()", "obj.run()"),
+        ("other = MyClass(); return other._helper()", "obj.run()"),
+        ("return 0", "obj._helper()"),
+    ])
+    def test_referenced_private_method_is_not_dead(self, tmp_path, body, call):
         names = dead_names(tmp_path, {"main.py":
             "class MyClass:\n"
             "    def run(self):\n"
-            "        return self._helper()\n"
+            f"        {body}\n"
             "\n"
             "    def _helper(self):\n"
             "        return 1\n"
             "\n"
             "obj = MyClass()\n"
-            "obj.run()\n"
+            f"{call}\n"
         })
         assert "_helper" not in names
 

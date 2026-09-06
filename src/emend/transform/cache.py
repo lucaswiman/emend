@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Parse/index cache version remains shared with ``index.py``.  FactGraph has
 # its own marker because its Cozo relation shape can change independently.
 _SCHEMA_VERSION = "5"
-_FACTS_SCHEMA_VERSION = "6"
+_FACTS_SCHEMA_VERSION = "7"
 
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
@@ -658,29 +658,48 @@ def _extract_file_facts(
                 if sf.name in exported_names:
                     result["exported_qns"].append([rel_path, sf.qualified_name])
 
+    imports = _extract_imports(rel_path, content)
+    relative_bindings: dict[str, str] = {}
+    if ext == "py":
+        from importlib.util import resolve_name
+
+        package = module_name if Path(abs_path).stem == "__init__" else module_name.rpartition(".")[0]
+        for imp in imports:
+            if imp.imported_module.startswith(".") and imp.imported_name:
+                try:
+                    resolved = resolve_name(imp.imported_module, package)
+                except (ImportError, ValueError):
+                    continue  # Invalid relative import; do not invent a target.
+                relative_bindings[f"{imp.imported_module}.{imp.imported_name}"] = f"{resolved}.{imp.imported_name}"
+
+    def reference_qn(qn: str) -> str:
+        # Resolve relative bindings before separator normalization erases their
+        # package context. Structured imports also disambiguate `from . import`.
+        if qn.startswith("."):
+            for relative, absolute in relative_bindings.items():
+                if qn == relative or qn.startswith(relative + "."):
+                    qn = absolute + qn[len(relative):]
+                    break
+        return _normalize_qn(qn)
+
     # -- Extract references (pre-computed or via Rust scope resolver)
     file_refs: list[tuple] = []
-    if precomputed_refs is not None:
-        for qn_str, line, col, kind in precomputed_refs:
-            qn_str = _normalize_qn(qn_str)
-            kind = _map_ref_kind(kind)
-            file_refs.append((qn_str, line, col, kind))
-            result["fact_ref"].append([qn_str, rel_path, line, col, kind])
-    else:
+    if precomputed_refs is None:
         try:
             raw_refs = scope_resolver.references_in_file(abs_path)
         except Exception:
             logger.debug("reference extraction failed for %s", rel_path, exc_info=True)
             raw_refs = []
-        for qn_str, line, col, _offset, _end_offset, kind, _ann in raw_refs:
-            qn_str = _normalize_qn(qn_str)
-            kind = _map_ref_kind(kind)
-            file_refs.append((qn_str, line, col, kind))
-            result["fact_ref"].append([qn_str, rel_path, line, col, kind])
+        precomputed_refs = [(qn, line, col, kind) for qn, line, col, _, _, kind, _ in raw_refs]
+    for qn_str, line, col, kind in precomputed_refs:
+        qn_str = reference_qn(qn_str)
+        kind = _map_ref_kind(kind)
+        file_refs.append((qn_str, line, col, kind))
+        result["fact_ref"].append([qn_str, rel_path, line, col, kind])
 
     # -- Extract imports (all languages)
     # Detailed imports via _extract_imports (dispatches by language for TS/Rust).
-    for imp in _extract_imports(rel_path, content):
+    for imp in imports:
         result["imports"].append([
             imp.importing_file, imp.imported_module,
             imp.imported_name or "", imp.line,

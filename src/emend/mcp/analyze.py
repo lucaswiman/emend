@@ -365,24 +365,8 @@ def trace_analysis(
         result = run_interprocedural_trace(
             files, trace_config, label_filter=label,
         )
-        violations = result.violations
-        violation_data = []
-        for v in violations:
-            entry: dict = {
-                "file": v.file_path, "line": v.line, "col": v.col,
-                "label": v.label, "sink_pattern": v.sink_pattern, "message": v.message,
-            }
-            if v.engine:
-                entry["engine"] = v.engine
-            if trace:
-                entry["trace"] = [
-                    {"file": s.file_path, "line": s.line, "col": s.col,
-                     "description": s.description, "variable": s.variable}
-                    for s in v.trace
-                ]
-            violation_data.append(entry)
         data = {
-            "violations": violation_data,
+            "violations": [v.to_dict(show_trace=trace) for v in result.violations],
             "summaries_count": len(result.summaries),
             "iterations": result.iterations,
         }
